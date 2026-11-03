@@ -3,8 +3,25 @@
 // form was filled (sniper-cli turning intercept on, an agent's scope edit) was
 // put back by a save of something else.
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
-const { loadFunctions } = require("./frontend-test-helpers.cjs");
+const vm = require("node:vm");
+const { appSource, loadFunctions } = require("./frontend-test-helpers.cjs");
+
+const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
+for (const [id, expected] of [
+  ["oastPayloadText", { id: "oastPayloadText", class: "oast-payload-input", type: "text",
+    placeholder: "Generate or paste a domain", spellcheck: "false", "aria-label": "OAST payload" }],
+  ["proxySettingOastToken", { id: "proxySettingOastToken", type: "password", autocomplete: "off", spellcheck: "false",
+    placeholder: "Server authentication token (optional)", "aria-label": "OAST token" }],
+]) test(`${id} retains its explicit name, input policy and empty default`, () => {
+  const matches = [...html.matchAll(new RegExp(`<input\\b([^>]*\\bid="${id}"[^>]*)/>`, "g"))];
+  assert.equal(matches.length, 1);
+  const attrs = Object.fromEntries([...matches[0][1].matchAll(/([^\s=]+)(?:="([^"]*)")?/g)]
+    .map(([, name, value]) => [name, value ?? ""]));
+  assert.deepEqual(attrs, expected);
+});
 
 function fixture() {
   const elements = new Map();
@@ -12,7 +29,8 @@ function fixture() {
     if (!elements.has(id)) {
       let value = "";
       elements.set(id, {
-        id, checked: false, textContent: "", placeholder: "", disabled: false, style: {},
+        id, checked: false, textContent: "", placeholder: "", disabled: false, style: {}, handlers: new Map(),
+        addEventListener(type, handler) { this.handlers.set(type, handler); },
         classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
         // A form field keeps its value as text, as the DOM does.
         get value() { return value; },
@@ -56,6 +74,87 @@ function fixture() {
   });
   return { c, state, element, document, posts };
 }
+
+// Only initialized local token editing and an explicitly invoked, stubbed
+// runtime save. No startup request, service or real credential is permitted.
+function tokenFixture(configured = true) {
+  const f = fixture();
+  f.state.runtime.oast_token = configured ? "********" : "";
+  f.state.oastTokenClearPending = false;
+  f.c.fetch = async (url, init) => {
+    assert.equal(url, "/api/runtime"); assert.equal(init.method, "POST");
+    const body = JSON.parse(init.body); f.posts.push({ url, body });
+    const reply = { ...f.state.runtime, ...body };
+    if (reply.oast_token) reply.oast_token = "********";
+    return { ok: true, json: async () => reply };
+  };
+  f.c.renderProxySettings();
+  const start = appSource.indexOf("  if (els.proxySettingOastClearToken) {", appSource.indexOf("  // OAST\n"));
+  const end = appSource.indexOf("  if (els.oastGenerateButton) {", start);
+  assert.ok(start > 0 && end > start);
+  vm.runInContext(appSource.slice(start, end), f.c);
+  f.token = f.element("proxySettingOastToken");
+  f.input = value => { f.document.activeElement = f.token; f.token.value = value; f.token.handlers.get("input")(); };
+  f.clear = () => f.element("proxySettingOastClearToken").handlers.get("click")();
+  return f;
+}
+
+for (const configured of [false, true]) test(`OAST token ${configured ? "configured" : "empty"} display stays blank without any request`, () => {
+  const f = tokenFixture(configured);
+  assert.equal(f.token.value, "");
+  assert.equal(f.token.placeholder, configured ? "Token configured; leave blank to keep it" : "Optional token");
+  assert.equal(f.element("proxySettingOastClearToken").disabled, !configured);
+  assert.equal(f.posts.length, 0);
+});
+
+test("OAST token edit and focused redraw preserve the draft without saving until explicit action", async () => {
+  const f = tokenFixture(); f.input("  SYNTHETIC-NOT-A-TOKEN  ");
+  f.token.selectionStart = 2; f.token.selectionEnd = 8;
+  f.c.renderOastSettingsControls({ hydrateValues: true });
+  assert.equal(f.element("proxySettingOastToken"), f.token);
+  assert.equal(f.token.value, "  SYNTHETIC-NOT-A-TOKEN  ");
+  assert.equal(f.token.selectionStart, 2); assert.equal(f.token.selectionEnd, 8);
+  assert.equal(f.state.oastTokenClearPending, false); assert.equal(f.posts.length, 0);
+  await f.c.saveProxySettings();
+  assert.equal(f.posts.length, 1); assert.equal(f.posts[0].body.oast_token, "SYNTHETIC-NOT-A-TOKEN");
+  assert.deepEqual(Object.keys(f.posts[0].body).sort(), ["expected_active_session_id", "oast_token", "session_id"]);
+  assert.equal(f.token.value, ""); assert.equal(f.state.runtime.oast_token, "********");
+});
+
+test("OAST token Clear is local until explicit save and then sends only the existing empty-token intent", async () => {
+  const f = tokenFixture(); f.input("SYNTHETIC-NOT-A-TOKEN"); f.clear();
+  assert.equal(f.token.value, ""); assert.equal(f.state.oastTokenClearPending, true); assert.equal(f.posts.length, 0);
+  await f.c.saveProxySettings();
+  assert.equal(f.posts.length, 1); assert.equal(f.posts[0].body.oast_token, "");
+  assert.equal(f.state.oastTokenClearPending, false); assert.equal(f.token.value, "");
+});
+
+test("new OAST token input cancels pending clear without saving or exposing a stored value", async () => {
+  const f = tokenFixture(); f.clear(); f.input("SYNTHETIC-NOT-A-TOKEN");
+  assert.equal(f.state.oastTokenClearPending, false); assert.equal(f.token.value, "SYNTHETIC-NOT-A-TOKEN");
+  assert.equal(f.posts.length, 0);
+  await f.c.saveProxySettings();
+  assert.equal(f.posts.length, 1); assert.equal(f.posts[0].body.oast_token, "SYNTHETIC-NOT-A-TOKEN");
+  assert.equal(f.token.value, "");
+});
+
+for (const value of ["", "********"]) test(`OAST token ${value ? "redaction marker" : "blank entry"} does not overwrite the configured token`, async () => {
+  const f = tokenFixture(); f.input(value);
+  assert.equal(f.posts.length, 0);
+  await f.c.saveProxySettings();
+  assert.equal(f.posts.length, 1); assert.equal(Object.hasOwn(f.posts[0].body, "oast_token"), false);
+  assert.equal(f.state.runtime.oast_token, "********");
+});
+
+test("OAST provider display keeps its existing token-field visibility without sending anything", () => {
+  const f = tokenFixture();
+  for (const provider of ["boast", "interactsh", "custom"]) {
+    f.element("proxySettingOastProvider").value = provider;
+    f.c.renderOastSettingsControls();
+    assert.equal(f.element("oastTokenField").style.display, provider === "boast" ? "none" : "");
+  }
+  assert.equal(f.posts.length, 0);
+});
 
 test("saving Settings sends the fields changed in the form, not settings changed elsewhere", async () => {
   const f = fixture();

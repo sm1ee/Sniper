@@ -129,7 +129,32 @@ test("the wrapping toolbar retains one ordered copy of every existing control", 
     assert.match(markup, new RegExp(`<button class="scope-pill[^"]*" id="${id}" type="button" aria-pressed="(true|false)"`));
   }
   assert.doesNotMatch(markup, /type="checkbox"/);
-  assert.doesNotMatch(markup, /\bhidden\b|\bdisabled\b|\btabindex=/);
+  for (const [control] of markup.matchAll(/<(?:button|input|select)\b[^>]*>/g)) {
+    assert.doesNotMatch(control, /\bhidden\b|\bdisabled\b|\btabindex=/);
+  }
+});
+
+test("severity filtering has a stable purpose label without changing its options", () => {
+  const control = html.match(/<select\b([^>]*\bid="findingsFilterSeverity"[^>]*)>([\s\S]*?)<\/select>/);
+  assert.ok(control);
+  assert.match(control[1], /\baria-label="Filter findings by severity"/);
+  assert.doesNotMatch(control[1], /\baria-labelledby=/);
+  assert.deepEqual([...control[2].matchAll(/<option value="([^"]*)">([^<]+)<\/option>/g)].map(([, value, text]) => [value, text]), [
+    ["", "All severities"], ["critical", "Critical"], ["high", "High+"],
+    ["medium", "Medium+"], ["low", "Low+"], ["info", "Info+"],
+  ]);
+});
+
+for (const [tag, id, name] of [
+  ["select", "findingsFilterCategory", "Filter findings by category"],
+  ["input", "findingsFilterSearch", "Search findings"],
+  ["button", "findingsSettingsButton", "Detection Rules"],
+]) test(`${id} has a stable purpose label independent of its value or icon`, () => {
+  const control = html.match(new RegExp(`<${tag}\\b([^>]*\\bid="${id}"[^>]*)>`));
+  assert.ok(control);
+  assert.match(control[1], new RegExp(`\\baria-label="${name}"`));
+  assert.doesNotMatch(control[1], /\baria-labelledby=/);
+  if (id === "findingsSettingsButton") assert.match(control[1], /\btitle="Detection Rules"/);
 });
 
 test("existing filter controls keep their selection and debounce through repeated edits", () => {

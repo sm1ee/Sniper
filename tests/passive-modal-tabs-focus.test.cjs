@@ -61,7 +61,7 @@ function tabFixture() {
   for (const name of [
     "colorTagFilter", "filterBar", "trafficRegion", "historyWorkbenchResizer", "lowerWorkbench",
     "interceptPanel", "websocketPanel", "matchReplacePanel", "findingsPanel", "oastPanel",
-    "proxySettingsPanel", "proxySubPlaceholder", "closeDisplaySettingsButton", "openDisplaySettingsButton",
+    "proxySettingsPanel", "closeDisplaySettingsButton", "openDisplaySettingsButton",
   ]) els[name] = node();
   els.displaySettingsModal = node({}, "hidden");
   els.displaySettingsModal.querySelectorAll = selector => {
@@ -283,7 +283,9 @@ function indicatorFixture() {
 }
 
 function assertIndicatorPosition(indicator, active) {
-  for (const [style, offset] of [["left", "offsetLeft"], ["top", "offsetTop"], ["width", "offsetWidth"], ["height", "offsetHeight"]]) {
+  // Moved by transform, so sliding to the next tab does not re-run layout.
+  assert.equal(indicator.style.transform, `translate(${active.offsetLeft}px, ${active.offsetTop}px)`);
+  for (const [style, offset] of [["width", "offsetWidth"], ["height", "offsetHeight"]]) {
     assert.equal(indicator.style[style], `${active[offset]}px`);
   }
 }

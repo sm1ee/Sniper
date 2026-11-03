@@ -156,7 +156,7 @@ for (const selection of ['empty B', 'no sequence']) test(`stale cleanup leaves R
 for (const sessionId of ['session-a', 'session-b']) test(`old completion cannot settle a newer run after reset into ${sessionId}`, async () => {
   const f = fixture(); await f.start(); f.resetSequence(sessionId); await f.select('b'); await f.start();
   const editor = f.editor(); editor.focus(); const renders = f.renders(); await f.settle(0);
-  assert.equal(f.state.sequenceRunning, true); assert.equal(f.button.disabled, true); assert.equal(f.button.textContent, 'Running...');
+  assert.equal(f.state.sequenceRunning, true); assert.equal(f.button.disabled, true); assert.equal(f.button.textContent, 'Running…');
   assert.equal(f.renders(), renders); assert.equal(f.editor(), editor); assert.equal(f.document.activeElement, editor);
   assert.equal(f.state.sequenceRunResult, null); await f.settle(1); assert.equal(f.state.sequenceRunning, false);
 });

@@ -203,7 +203,7 @@ for (const failure of ["network", "HTTP", "JSON", "shape"]) {
     if (failure === "shape") f.requests[1].resolve(response(null));
     await tick();
     assert.equal(f.errors.length, 1);
-    assert.equal(f.els.dashboardCurrentSessionName.textContent, f.a.name);
+    assert.equal(f.els.dashboardCurrentSessionPath.textContent, f.a.storage_path);
     assert.equal(f.state.selectedSessionId, f.b.id, "Folder binding must not revert activation selection");
     f.open(); f.assertTarget(2, f.a); f.succeed(2, f.a); await tick();
     const reload = f.context.loadSessions();

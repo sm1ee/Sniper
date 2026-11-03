@@ -131,7 +131,7 @@ for (const action of ['reuse', 'view']) for (const outcome of ['success', 'failu
     const fresh = f.begin(action, 'saved-newer'), generation = f.workflow.readGeneration;
     await f.finish(old, outcome);
     assert.equal(f.workflow.readBusy, true); assert.equal(f.workflow.readGeneration, generation);
-    assert.equal(f.workflow.notice, 'Loading saved run...'); assert.equal(f.confirmations.length, 0);
+    assert.equal(f.workflow.notice, 'Loading saved run…'); assert.equal(f.confirmations.length, 0);
     assert.equal(f.state.fuzzerAttackRecordId, 'shown-a');
     await f.finish(fresh); assert.equal(f.workflow.readBusy, false);
     assert.equal(f.state.fuzzerPayloadsText, 'external newer payload');
@@ -157,7 +157,7 @@ for (const action of ['reuse', 'view']) test(`retiring ${action} keeps shown res
   assert.equal(f.state.fuzzerRunningAttackId, null); assert.equal(f.state.fuzzerPayloadsText, 'external newer payload');
 });
 
-for (const notice of ['Loading retained runs...', 'Other retained-list status']) {
+for (const notice of ['Loading retained runs…', 'Other retained-list status']) {
   test(`retirement preserves unrelated notice: ${notice}`, async () => {
     const f = fixture(), job = f.begin(); f.workflow.notice = notice;
     const remote = f.remote(); edits.payloads(remote.fuzzer); await f.adopt(remote); await f.finish(job);
@@ -182,10 +182,10 @@ for (const kind of ['status', 'same run', 'different run', 'legacy run']) {
 
 test('a foreign session cannot retire another workflow counter, busy flag or notice', () => {
   const f = fixture(), fields = f.fields(); fields.fuzzerPayloadsText = 'foreign draft';
-  f.workflow.readBusy = true; f.workflow.readGeneration = 8; f.workflow.notice = 'Loading saved run...';
+  f.workflow.readBusy = true; f.workflow.readGeneration = 8; f.workflow.notice = 'Loading saved run…';
   f.c.applyFuzzerWorkspace(fields, 'session-b', { keepShownRun: true });
   assert.equal(f.workflow.readGeneration, 8); assert.equal(f.workflow.readBusy, true);
-  assert.equal(f.workflow.notice, 'Loading saved run...');
+  assert.equal(f.workflow.notice, 'Loading saved run…');
 });
 
 test('a stale workflow matching the supplied session is not the active session owner', () => {

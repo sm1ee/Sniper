@@ -1,0 +1,6 @@
+{
+    "rules": {
+        "locale-aware-case": "off",
+        "no-naive-plural": "off"
+    }
+}

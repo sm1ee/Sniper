@@ -2,7 +2,7 @@
 
 The `scanner` commands manage the passive checks on captured response body
 previews and on request and response headers. They send no traffic. A change
-applies to traffic processed afterwards and keeps existing findings; **Rescan**
+applies to traffic processed afterwards and keeps existing findings. **Rescan**
 in Findings applies the current rules to retained history and replaces the
 session's findings.
 
@@ -22,8 +22,8 @@ sniper-cli scanner custom delete --id example-header --yes
 ```
 
 Every write needs `--yes`. `--dry-run` validates the JSON offline, so it cannot
-check whether an ID exists. Use `--session-id` to read or edit an inactive
-session without switching to it.
+check whether an ID exists. `--session-id` reads or edits an inactive session
+without switching to it.
 
 ## Rules
 
@@ -55,8 +55,8 @@ session without switching to it.
 `custom update` takes a non-empty partial rule without `id`: omitted fields
 stay, `false` disables, and `""` clears optional text. Unknown fields, nulls,
 blank IDs, names or patterns, and empty patches are rejected. `get`, `update`
-and `delete` match the exact ID, and `create` rejects a duplicate ID. Custom
-rule order and unrelated settings are kept. Stored patterns and text can hold
+and `delete` match the exact ID, and `create` rejects a duplicate ID. Writes
+keep custom rule order and unrelated settings. Stored patterns and text can hold
 sensitive values, so review `list` and `get` output before you share it.
 
 ## `call` operations
@@ -64,7 +64,7 @@ sensitive values, so review `list` and `get` output before you share it.
 The operations are `scanner.config.get`, `scanner.config.set_enabled`,
 `scanner.builtin.set_enabled`, and `scanner.custom.list`, `.get`, `.create`,
 `.update`, `.delete`. `create` takes a nested `rule`, and `update` takes `id`
-and a nested `patch`; either can take `file` or `stdin: true` instead, but not
+and a nested `patch`. Either can take `file` or `stdin: true` instead, but not
 both. The outer `--input` also takes `@file` or `-` for stdin; do not combine
 `--input -` with `stdin: true`.
 
@@ -87,11 +87,11 @@ A write reads the selected config and its `config_token`, changes only the
 requested part, and saves it with one compare-and-swap. A stale config or a
 changed active session returns 409, and a missing precondition returns 428.
 Neither is retried, so read the config again before you retry. A write returns
-`session_id`, `config_token`, `changed` and, where it applies, `id`; a request
+`session_id`, `config_token`, `changed` and, where it applies, `id`. A request
 that changes nothing returns `changed: false` without saving.
 
 ## API
 
 `POST /api/scanner-config` needs complete `enabled`, `rules` and `custom_rules`
-fields plus `expected_config_token` from the session's latest GET, and returns
+fields plus `expected_config_token` from the session's latest GET. It returns
 `200` with the saved config.

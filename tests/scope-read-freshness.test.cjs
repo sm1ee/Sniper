@@ -9,7 +9,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 const runtime = (fresh = false, scope = 'same.example.com') => ({
-  scope_patterns: [scope], excluded_scope_patterns: [], intercept_enabled: fresh,
+  scope_patterns: [scope], excluded_scope_patterns: [], intercept_enabled: fresh, http_capture_enabled: true,
 });
 const paths = label => [{ host: `${label}.example.com`, schemes: ['https'], request_count: 0,
   in_scope: false, paths: [{ path: `/${label}`, methods: ['GET'], captured: false,

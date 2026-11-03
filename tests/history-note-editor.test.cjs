@@ -93,7 +93,7 @@ function fixture({ joinAnnotations = false } = {}) {
     "updateAnnotations", "flushPendingAnnotations", "currentHistoryNoteEditWindow", "syncHistoryNoteEditWindow",
     "flushTransactionDeltas", "applyLiveSummaryUpdate", "canMergeRecentTransactions",
     "retainFilteredHistoryNote", "releaseDetachedHistoryNoteEdits", "renderHistory", "getHistoryRowHeight", "renderHistoryVirtual",
-    "renderHistoryCell", "escapeHtml", "isSessionEmpty", "historyEmptyMessage",
+    "renderHistoryCell", "escapeHtml", "isSessionEmpty", "historyEmptyMessage", "describeHttpFilters",
     "rebuildHistoryItemIndex", "getHistoryItemIndex", "resortLoadedHistoryItemsForCurrentSort",
     "visibleHistoryNoteCount", "compareHistorySequence",
     "createDefaultFilterSettings", "summaryMatchesActiveHistoryFilters", "summaryMatchesStatusFilter",
@@ -132,7 +132,9 @@ function fixture({ joinAnnotations = false } = {}) {
     invalidateVisibleEntriesCache() {},
     getVisibleEntries: () => state.items.map((entry, index) => ({ item: entry, index })),
     countHiddenConnectItems: () => 0, isKnownCount: (value) => typeof value === "number",
-    humanizeSortKey: (key) => key, renderSortHeaders() {},
+    SERVICE_MAP_FILTER_MIME_LABELS: { html: "HTML", script: "script", json: "JSON", css: "CSS", image: "images", websocket: "WebSocket", other: "other types" },
+    SERVICE_MAP_FILTER_STATUS_LABELS: { success: "2xx", redirect: "3xx", clientError: "4xx", serverError: "5xx", other: "other status" },
+    renderSortHeaders() {},
     measuredHistoryRowHeight: 30, HISTORY_ROW_HEIGHT: 30, HISTORY_BUFFER_ROWS: 5,
     HTTP_HISTORY_SCROLL_PREFETCH_ROWS: 20, scheduleHistoryBackfill() {}, measuredRowPitch: () => 30,
     adjustHistoryPagingAfterLocalRemoval(count) { state.historyPaging.filteredTotal -= count; },
@@ -441,7 +443,7 @@ test("a real candidate autosave acknowledgement keeps the composing editor conne
   assert.equal(f.state._itemsVersion, 1);
   assert.equal(f.state.historyPaging.annotationMutationGeneration, 1);
   assert.equal(f.state._historyEntries[0].item, f.item);
-  assert.match(f.context.els.historyMeta.textContent, /1 loaded item visible/);
+  assert.match(f.context.els.historyMeta.textContent, /^1 request( ·|$)/);
   input.dispatch("compositionend");
   runTimers(f);
   assert.equal(annotationRequests(f).length, 1, "ending the same candidate must not duplicate the save");
@@ -555,6 +557,7 @@ test("an unrelated record acknowledgement preserves the open note while updating
   const f = fixture({ joinAnnotations: true });
   const other = { id: "other-fixture-record", sequence: 2, has_user_note: true, note_preview: "Other note" };
   f.state.items.push(other);
+  Object.assign(f.state.historyPaging, { total: 2, filteredTotal: 2 });
   f.context.rebuildHistoryItemIndex();
   const input = await openSavedNote(f);
   input.dispatch("compositionstart");
@@ -565,7 +568,7 @@ test("an unrelated record acknowledgement preserves the open note while updating
   assert.equal(f.cell.isConnected, true);
   assert.equal(input.value, "아직");
   assert.equal(f.historyWrites.length, 0);
-  assert.match(f.context.els.historyMeta.textContent, /2 loaded items visible/);
+  assert.match(f.context.els.historyMeta.textContent, /^2 requests( ·|$)/);
   input.dispatch("compositionend");
   input.dispatch("keydown", "Escape");
   assert.equal(f.historyWrites.length, 1);
@@ -587,7 +590,7 @@ test("an acknowledgement can remove a filtered row without interrupting its edit
   assert.equal(f.state.historyPaging.filteredTotal, 0);
   assert.equal(f.state.historyPaging.total, 1);
   assert.equal(f.state._historyEntries.length, 0);
-  assert.match(f.context.els.historyMeta.textContent, /0 loaded items visible.*notes only/);
+  assert.match(f.context.els.historyMeta.textContent, /^0 requests · .*notes only/);
   assert.equal(f.historyWrites.length, 0, "even an empty-list acknowledgement must defer tbody replacement");
   assert.equal(f.cell.isConnected, true);
   input.dispatch("compositionend");
@@ -628,7 +631,7 @@ for (const composing of [false, true]) {
       assert.equal(f.state.selectedRecord, null);
       assert.equal(f.state._itemById.get(f.item.id), f.state.items[0]);
       assert.equal(f.state._itemIndexById.get(f.item.id), 0);
-      assert.match(f.context.els.historyMeta.textContent, /1 loaded item visible/);
+      assert.match(f.context.els.historyMeta.textContent, /^1 request( ·|$)/);
       assert.equal(f.cell.querySelector(), input);
       assert.equal(f.historyWrites.length, 0);
       if (composing) { input.dispatch("compositionend"); runTimers(f); }
@@ -1123,6 +1126,7 @@ test("acknowledgement sorting updates the model before the deferred table is rep
   const f = fixture({ joinAnnotations: true });
   const other = { id: "other-fixture-record", sequence: 2, has_user_note: true, note_preview: "Other note" };
   f.state.items.push(other);
+  Object.assign(f.state.historyPaging, { total: 2, filteredTotal: 2 });
   f.state.sortKey = "notes";
   f.state.sortDirection = "desc";
   f.context.rebuildHistoryItemIndex();
@@ -1134,7 +1138,8 @@ test("acknowledgement sorting updates the model before the deferred table is rep
   assert.deepEqual(Array.from(f.state.items, (entry) => entry.id), [other.id, f.item.id]);
   assert.equal(f.state._itemIndexById.get(f.item.id), 1);
   assert.equal(f.state._historyEntries[0].item, other);
-  assert.match(f.context.els.historyMeta.textContent, /sort: notes desc/);
+  // The sort shows as the column's arrow, not in the summary.
+  assert.match(f.context.els.historyMeta.textContent, /^2 requests( ·|$)/);
   assert.equal(f.historyWrites.length, 0);
   input.dispatch("blur");
   assert.equal(f.historyWrites.length, 1);

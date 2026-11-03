@@ -85,7 +85,7 @@ for (const outcome of ['success', 'http-error', 'network-error']) test(`Fuzzer l
   const f = setup();
   const job = f.context.showFuzzerResultDetail('synthetic');
   const loadingNames = ['Req', 'Res'].map(side => f.detailView(side).view.contentDOM.getAttribute('aria-label'));
-  assert.equal(f.detailView('Req').getContent(), 'Loading transaction...');
+  assert.equal(f.detailView('Req').getContent(), 'Loading transaction…');
   assert.equal(f.detailView('Res').getContent(), '');
   assert.equal(f.pending.length, 1);
   if (outcome === 'success') f.pending[0].resolve({ ok: true, json: async () => record('synthetic') });

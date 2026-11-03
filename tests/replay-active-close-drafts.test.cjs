@@ -220,6 +220,8 @@ test('partially typed visible text is retained verbatim and invalidates its old 
 });
 
 function renameClosePointerdown(f) {
+  f.document.addEventListener = () => {};
+  f.document.removeEventListener = () => {};
   const render = f.context.renderReplayTabs, listeners = {};
   for (const name of ['renderReplayTabs', 'commitReplayTabRename']) {
     const source = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, 'm'))[0];
@@ -230,7 +232,7 @@ function renameClosePointerdown(f) {
   const tabElement = { dataset: { replayTabId: f.a.id },
     addEventListener(type, listener) { listeners[type] = listener; },
     querySelector(selector) { return selector === '.replay-tab-name-input' ? nameInput : button; } };
-  f.els.replayTabStrip = { querySelectorAll: () => [tabElement], querySelector: () => nameInput };
+  f.els.replayTabStrip = { querySelectorAll: () => [tabElement], querySelector: () => nameInput, classList: { toggle() {} } };
   Object.assign(f.context, {
     replayTabAutoLabel: tab => tab.customLabel, replayTabLabel: tab => tab.customLabel,
     replayTabTooltipLabel: (_, label) => label, escapeHtml: value => value,

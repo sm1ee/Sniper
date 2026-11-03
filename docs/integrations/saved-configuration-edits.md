@@ -3,7 +3,7 @@
 These commands edit saved intercept rules and Replay tab labels. They send no
 traffic, forward no held requests and leave the runtime intercept switch alone.
 They need `--yes`, and `--dry-run` validates offline. `--session-id` edits a
-saved session without activating it; without it, the write targets the active
+saved session without activating it. Without it, the write targets the active
 session and fails if that changes.
 
 ## Intercept rules
@@ -21,7 +21,7 @@ and keeps the rest:
 
 - `scope`: `request`, `response` or `both`
 - `host_pattern`, `path_pattern`: an empty string clears
-- `method_filter`: replaces the list (`--method`, repeated); `[]` clears it, as
+- `method_filter`: replaces the list (`--method`, repeated). `[]` clears it, as
   does `clear_methods: true` (`--clear-methods`), which cannot be combined with
   `method_filter`
 - `enabled`: sets the value; it never toggles
@@ -30,10 +30,10 @@ and keeps the rest:
 `enabled`. Nulls, unknown fields and empty patches fail.
 
 Both send `PATCH /api/intercept-rules/<uuid>` with only the supplied fields and
-the session in the query; the API has no `clear_methods`. The server merges the
+the session in the query. The API has no `clear_methods`. The server merges the
 patch under a session lock and persists it before answering, so concurrent
-patches to different fields both survive. A missing ID returns 404 and nothing
-is created. The response is the full updated rule.
+patches to different fields both survive. A missing ID returns 404 and creates
+nothing. The response is the full updated rule.
 
 ## Replay tab labels
 

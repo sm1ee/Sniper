@@ -47,11 +47,28 @@ function stringifyValue(value) {
   return String(value);
 }
 
-function safeUriTransform(transform, input) {
+// Typed results are opt-in: legacy transforms still return their original strings.
+function decoderCalculateResult(element, input, password) {
   try {
-    return transform(input);
+    if (typeof element.calculateResult === "function") {
+      var result = element.calculateResult(input, password);
+      return { value: stringifyValue(result.value), success: result.success };
+    }
+    return { value: stringifyValue(element.calculate(input, password)) };
   } catch (err) {
-    return "Parse error";
+    return { value: "Error: " + (err && err.message ? err.message : "Calculation failed"), success: false };
+  }
+}
+
+function safeUriTransform(transform, input) {
+  return safeUriTransformResult(transform, input).value;
+}
+
+function safeUriTransformResult(transform, input) {
+  try {
+    return { value: transform(input), success: true };
+  } catch (err) {
+    return { value: "Parse error", success: false };
   }
 }
 
@@ -334,11 +351,14 @@ var hasher = {
       tab : tabs.cipher,
       title : "AES-256 decrypt",
       calculate : function (input, password) {
+        return hasher.elements.ci7.calculateResult(input, password).value;
+      },
+      calculateResult : function (input, password) {
         try {
           var words = CryptoJS.AES.decrypt(input, password);
-          return CryptoJS.enc.Utf8.stringify(words);
+          return { value: CryptoJS.enc.Utf8.stringify(words), success: true };
         } catch (err) {
-          return "";
+          return { value: "", success: false };
         }
       }
     },
@@ -347,11 +367,14 @@ var hasher = {
       tab : tabs.cipher,
       title : "DES decrypt",
       calculate : function (input, password) {
+        return hasher.elements.ci8.calculateResult(input, password).value;
+      },
+      calculateResult : function (input, password) {
         try {
           var words = CryptoJS.DES.decrypt(input, password);
-          return CryptoJS.enc.Utf8.stringify(words);
+          return { value: CryptoJS.enc.Utf8.stringify(words), success: true };
         } catch (err) {
-          return "";
+          return { value: "", success: false };
         }
       }
     },
@@ -360,11 +383,14 @@ var hasher = {
       tab : tabs.cipher,
       title : "TripleDES decrypt",
       calculate : function (input, password) {
+        return hasher.elements.ci9.calculateResult(input, password).value;
+      },
+      calculateResult : function (input, password) {
         try {
           var words = CryptoJS.TripleDES.decrypt(input, password);
-          return CryptoJS.enc.Utf8.stringify(words);
+          return { value: CryptoJS.enc.Utf8.stringify(words), success: true };
         } catch (err) {
-          return "";
+          return { value: "", success: false };
         }
       }
     },
@@ -373,11 +399,14 @@ var hasher = {
       tab : tabs.cipher,
       title : "Rabbit decrypt",
       calculate : function (input, password) {
+        return hasher.elements.ci10.calculateResult(input, password).value;
+      },
+      calculateResult : function (input, password) {
         try {
           var words = CryptoJS.Rabbit.decrypt(input, password);
-          return CryptoJS.enc.Utf8.stringify(words);
+          return { value: CryptoJS.enc.Utf8.stringify(words), success: true };
         } catch (err) {
-          return "";
+          return { value: "", success: false };
         }
       }
     },
@@ -386,11 +415,14 @@ var hasher = {
       tab : tabs.cipher,
       title : "RC4 decrypt",
       calculate : function (input, password) {
+        return hasher.elements.ci11.calculateResult(input, password).value;
+      },
+      calculateResult : function (input, password) {
         try {
           var words = CryptoJS.RC4.decrypt(input, password);
-          return CryptoJS.enc.Utf8.stringify(words);
+          return { value: CryptoJS.enc.Utf8.stringify(words), success: true };
         } catch (err) {
-          return "";
+          return { value: "", success: false };
         }
       }
     },
@@ -399,11 +431,14 @@ var hasher = {
       tab : tabs.cipher,
       title : "RC4Drop decrypt",
       calculate : function (input, password) {
+        return hasher.elements.ci12.calculateResult(input, password).value;
+      },
+      calculateResult : function (input, password) {
         try {
           var words = CryptoJS.RC4Drop.decrypt(input, password);
-          return CryptoJS.enc.Utf8.stringify(words);
+          return { value: CryptoJS.enc.Utf8.stringify(words), success: true };
         } catch (err) {
-          return "";
+          return { value: "", success: false };
         }
       }
     },
@@ -719,16 +754,18 @@ var hasher = {
       tab : tabs.string,
       title: "Hex to ASCII",
       calculate: function (input) {
+        return hasher.elements.s2.calculateResult(input).value;
+      },
+      calculateResult: function (input) {
         if (input.length % 2 !== 0 || /[^0-9a-f]/i.test(input)) {
-          return "NaN";
+          return { value: "NaN", success: false };
         }
         try {
           var words = CryptoJS.enc.Hex.parse(input);
-          return CryptoJS.enc.Latin1.stringify(words);
+          return { value: CryptoJS.enc.Latin1.stringify(words), success: true };
         } catch (err) {
-          return "Parse error";
+          return { value: "Parse error", success: false };
         }
-        return "";
       }
     },
     s3 : {
@@ -750,16 +787,18 @@ var hasher = {
       tab : tabs.string,
       title: "Hex to UTF-8",
       calculate: function (input) {
+        return hasher.elements.s4.calculateResult(input).value;
+      },
+      calculateResult: function (input) {
         if (input.length % 2 !== 0 || /[^0-9a-f]/i.test(input)) {
-          return "NaN";
+          return { value: "NaN", success: false };
         }
         try {
           var words = CryptoJS.enc.Hex.parse(input);
-          return CryptoJS.enc.Utf8.stringify(words);
+          return { value: CryptoJS.enc.Utf8.stringify(words), success: true };
         } catch (err) {
-          return "Parse error";
+          return { value: "Parse error", success: false };
         }
-        return "";
       }
     },
     s5 : {
@@ -781,16 +820,18 @@ var hasher = {
       tab : tabs.string,
       title: "Hex to UTF-16",
       calculate: function (input) {
+        return hasher.elements.s6.calculateResult(input).value;
+      },
+      calculateResult: function (input) {
         if (input.length % 4 !== 0 || /[^0-9a-f]/i.test(input)) {
-          return "NaN";
+          return { value: "NaN", success: false };
         }
         try {
           var words = CryptoJS.enc.Hex.parse(input);
-          return CryptoJS.enc.Utf16.stringify(words);
+          return { value: CryptoJS.enc.Utf16.stringify(words), success: true };
         } catch (err) {
-          return "Parse error";
+          return { value: "Parse error", success: false };
         }
-        return "";
       }
     },
 
@@ -814,12 +855,15 @@ var hasher = {
       tab : tabs.encode,
       title : "Base64 decode",
       calculate : function (input) {
+        return hasher.elements.e2.calculateResult(input).value;
+      },
+      calculateResult : function (input) {
         try {
           var words = parseDecoderBase64(input);
-          if (words === null) return "Invalid Base64 input";
-          return CryptoJS.enc.Utf8.stringify(words);
+          if (words === null) return { value: "Invalid Base64 input", success: false };
+          return { value: CryptoJS.enc.Utf8.stringify(words), success: true };
         } catch (err) {
-          return "";
+          return { value: "", success: false };
         }
       }
     },
@@ -829,12 +873,15 @@ var hasher = {
       title : "Base64 decode to Hex",
       ruler: 2,
       calculate : function (input) {
+        return hasher.elements.e3.calculateResult(input).value;
+      },
+      calculateResult : function (input) {
         try {
           var words = parseDecoderBase64(input);
-          if (words === null) return "Invalid Base64 input";
-          return CryptoJS.enc.Hex.stringify(words);
+          if (words === null) return { value: "Invalid Base64 input", success: false };
+          return { value: CryptoJS.enc.Hex.stringify(words), success: true };
         } catch (err) {
-          return "Parse error";
+          return { value: "Parse error", success: false };
         }
       }
     },
@@ -844,6 +891,9 @@ var hasher = {
       title : "encodeURI()",
       calculate : function (input) {
         return encodeURI(input);
+      },
+      calculateResult : function (input) {
+        return { value: encodeURI(input), success: true };
       }
     },
     e5: {
@@ -852,6 +902,9 @@ var hasher = {
       title : "encodeURIComponent()",
       calculate : function (input) {
         return encodeURIComponent(input);
+      },
+      calculateResult : function (input) {
+        return { value: encodeURIComponent(input), success: true };
       }
     },
     e6: {
@@ -860,6 +913,9 @@ var hasher = {
       title : "decodeURI()",
       calculate : function (input) {
         return safeUriTransform(decodeURI, input);
+      },
+      calculateResult : function (input) {
+        return safeUriTransformResult(decodeURI, input);
       }
     },
     e7: {
@@ -868,6 +924,9 @@ var hasher = {
       title : "decodeURIComponent()",
       calculate : function (input) {
         return safeUriTransform(decodeURIComponent, input);
+      },
+      calculateResult : function (input) {
+        return safeUriTransformResult(decodeURIComponent, input);
       }
     },
     e8: {
@@ -885,6 +944,9 @@ var hasher = {
         }          
 
         return escapeHtml(input);
+      },
+      calculateResult : function (input) {
+        return { value: hasher.elements.e8.calculate(input), success: true };
       }
     },
     e9: {
@@ -901,6 +963,9 @@ var hasher = {
         }          
 
         return unescapeHtml(input);
+      },
+      calculateResult : function (input) {
+        return { value: hasher.elements.e9.calculate(input), success: true };
       }
     },
     // 유니코드 변환
@@ -918,6 +983,9 @@ var hasher = {
       title: "convertFromUnicode()",
       calculate: function (input) {
         return convertFromUnicode(input);
+      },
+      calculateResult : function (input) {
+        return { value: hasher.elements.e11.calculate(input), success: true };
       }
     },
     e12: {
@@ -927,6 +995,9 @@ var hasher = {
       calculate : function (input) {
         var renc = new Rot13();
         return renc.encode(input);
+      },
+      calculateResult : function (input) {
+        return { value: hasher.elements.e12.calculate(input), success: true };
       }
     },
     morse1: {
@@ -1052,10 +1123,13 @@ var hasher = {
       tab : tabs.encode,
       title : "Base32 Decode",
       calculate : function (input) {
+        return hasher.elements.e_base32_decode.calculateResult(input).value;
+      },
+      calculateResult : function (input) {
         try {
-          return base32Decode(input);
+          return { value: base32Decode(input), success: true };
         } catch (err) {
-          return "Invalid Base32 input";
+          return { value: "Invalid Base32 input", success: false };
         }
       }
     },
@@ -1074,10 +1148,13 @@ var hasher = {
       tab : tabs.encode,
       title : "Base45 Decode",
       calculate : function (input) {
+        return hasher.elements.e_base45_decode.calculateResult(input).value;
+      },
+      calculateResult : function (input) {
          try {
-          return base45Decode(input);
+          return { value: base45Decode(input), success: true };
         } catch (err) {
-          return "Invalid Base45 input";
+          return { value: "Invalid Base45 input", success: false };
         }
       }
     },
@@ -1101,11 +1178,14 @@ var hasher = {
       tab : tabs.encode,
       title : "Base58 Decode",
       calculate : function (input) {
+        return hasher.elements.e_base58_decode.calculateResult(input).value;
+      },
+      calculateResult : function (input) {
         try {
           const decodedBytes = base58Decode(input);
-          return bytesToUtf8String(decodedBytes);
+          return { value: bytesToUtf8String(decodedBytes), success: true };
         } catch (err) {
-          return "Invalid Base58 input";
+          return { value: "Invalid Base58 input", success: false };
         }
       }
     }
@@ -1171,16 +1251,12 @@ var hasher = {
       this.elements[i].rows = 0;
 
       if (this.elements[i].tab == this.tab) {
-        var value = "";
-
-        try {
-          value = this.elements[i].calculate(input, password);
-        } catch (err) {
-          value = "Error: " + (err && err.message ? err.message : "Calculation failed");
-        }
-
-        value = stringifyValue(value);
-        $("#"+this.elements[i].id).val(value);
+        var result = decoderCalculateResult(this.elements[i], input, password);
+        var value = result.value;
+        var output = $("#"+this.elements[i].id);
+        output.val(value);
+        // Status belongs to this exact rendered value, never to speculative tab checks.
+        if (output[0]) output[0].decoderResult = { value: output[0].value, success: result.success };
 
         var res = value.match(/(\n\r|\r\n|\n|\r)/g);
         var rows = 1;

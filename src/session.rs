@@ -223,7 +223,8 @@ impl TrafficOverview {
                 overview.marked_requests += 1;
             }
             if record.method != "CONNECT" && !record.host.is_empty() {
-                *hosts.entry(record.host.as_str()).or_default() += 1;
+                let host = crate::store::host_without_default_port(&record.host, &record.scheme);
+                *hosts.entry(host).or_default() += 1;
             }
         }
         let mut ranked: Vec<_> = hosts.into_iter().collect();
@@ -13171,6 +13172,38 @@ mod tests {
             DateTime::<Utc>::from_timestamp(1_800_000_009, 0)
         );
         assert_eq!(overview.marked_requests, 2);
+    }
+
+    // HTTPS captured through CONNECT keeps the tunnel's "host:443" while Replay
+    // and scans store the bare host, so one origin was counted, and listed, twice.
+    #[test]
+    fn traffic_overview_counts_a_host_once_with_or_without_its_default_port() {
+        let mut records = vec![
+            overview_record("GET", "api.example.com:443", "/", 1),
+            overview_record("GET", "api.example.com", "/", 2),
+            overview_record("GET", "api.example.com:443", "/", 3),
+            overview_record("GET", "api.example.com:8443", "/", 4),
+            overview_record("GET", "[2001:db8::1]:443", "/", 5),
+            overview_record("GET", "plain.example.com:443", "/", 6),
+        ];
+        records[5].scheme = "http".into();
+
+        let overview = super::TrafficOverview::from_records(&records);
+
+        let hosts: Vec<_> = overview
+            .top_hosts
+            .iter()
+            .map(|host| (host.host.as_str(), host.requests))
+            .collect();
+        assert_eq!(
+            hosts,
+            [
+                ("api.example.com", 3),
+                ("[2001:db8::1]", 1),
+                ("api.example.com:8443", 1),
+                ("plain.example.com:443", 1)
+            ]
+        );
     }
 
     #[test]

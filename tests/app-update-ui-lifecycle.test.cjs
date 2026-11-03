@@ -9,6 +9,34 @@ const { appSource, loadFunctions } = require("./frontend-test-helpers.cjs");
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
 const RELEASE_TITLE = "Update to v9.9.9";
 
+test("the update button uses the browser launcher's control height in every state", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const sizing = css.match(/#openUpdateButton\s*\{([^}]+)\}/)?.[1];
+  assert.ok(sizing);
+  assert.match(sizing, /\bheight:\s*max\(var\(--control-h\), calc\(var\(--font-xs\) \* 1\.45 \+ 10px\)\);/);
+  assert.match(sizing, /min-height:\s*var\(--control-h\);/);
+  assert.match(sizing, /padding:\s*0 11px;/);
+  assert.match(sizing, /font-size:\s*var\(--font-xs\);/);
+  assert.match(css, /\.browser-launch-main,\s*\.browser-launch-caret\s*\{[^}]*min-height:\s*var\(--control-h\);/);
+  assert.equal((css.match(/#openUpdateButton\s*\{/g) || []).length, 1);
+  // The shared utility controls, including other toolbar actions, keep their
+  // original sizing. Only the header updater opts into the compact height.
+  assert.match(css, /\.metric-pill,\s*\.utility-button,\s*\.status-pill\s*\{[^}]*min-height:\s*36px;/);
+});
+
+test("the update ring fits inside the smallest shared control height", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const ring = css.match(/\.update-ring\s*\{([^}]+)\}/)?.[1];
+  assert.match(ring, /width:\s*18px;/);
+  assert.match(ring, /height:\s*18px;/);
+  assert.match(css, /--control-h:\s*max\(22px,/);
+  assert.ok(18 + 2 < 22, "ring plus borders fits without increasing control height");
+});
+
 function element() {
   const classes = new Set();
   const attributes = new Map();
@@ -194,7 +222,7 @@ for (const percent of [null, 42]) {
     const f = fixture();
     const first = await f.start();
     if (percent !== null) {
-      first.stream.event({ step: "Downloading update...", percent });
+      first.stream.event({ step: "Downloading update…", percent });
       await nextTurn();
     }
     assert.equal(f.button.getAttribute("aria-label"), percent === null
@@ -205,7 +233,7 @@ for (const percent of [null, 42]) {
       "The visible failure text must not be overridden by stale progress");
     const retry = await f.start();
     assert.equal(f.button.getAttribute("aria-label"), "Updating");
-    retry.stream.event({ step: "Downloading update...", percent: 17 });
+    retry.stream.event({ step: "Downloading update…", percent: 17 });
     await nextTurn();
     assert.equal(f.button.getAttribute("aria-label"), "Updating, 17 percent");
     await f.fail(retry);
@@ -257,14 +285,14 @@ test("normal progress and Restarting retain the pending-restart presentation", a
   const f = fixture();
   const attempt = await f.start();
   assertUpdating(f);
-  attempt.stream.event({ step: "Downloading update...", percent: 42 });
+  attempt.stream.event({ step: "Downloading update…", percent: 42 });
   await nextTurn();
   assert.equal(f.button.title, "42%");
   assert.equal(f.button.querySelector(".update-ring-arc").style.strokeDasharray, "42 100");
   attempt.stream.event({ step: "Synthetic diagnostic detail" });
   await nextTurn();
   assert.equal(f.button.title, "42%");
-  attempt.stream.event({ step: "Restarting..." });
+  attempt.stream.event({ step: "Restarting…" });
   attempt.stream.end();
   await attempt.task;
   assertUpdating(f);
@@ -341,7 +369,7 @@ test("connection loss before Restarting reports failure", async () => {
 test("connection loss after Restarting retains pending-restart presentation", async () => {
   const f = fixture();
   const attempt = await f.start();
-  attempt.stream.event({ step: "Restarting..." });
+  attempt.stream.event({ step: "Restarting…" });
   await nextTurn();
   attempt.stream.error();
   await attempt.task;
@@ -352,7 +380,7 @@ test("connection loss after Restarting retains pending-restart presentation", as
 test("fragmented progress and malformed frames preserve existing stream handling", async () => {
   const f = fixture();
   const attempt = await f.start();
-  attempt.stream.raw('data: not-json\n\ndata: {"step":"Downloading update...","percent":');
+  attempt.stream.raw('data: not-json\n\ndata: {"step":"Downloading update…","percent":');
   attempt.stream.raw("25}\n\n");
   await nextTurn();
   assert.equal(f.button.title, "25%");
@@ -366,9 +394,9 @@ test("a failed attempt stops consuming late progress while an explicit retry run
   await f.fail(first, "First synthetic failure");
   const previousReadCount = first.stream.readCount();
   const second = await f.start();
-  second.stream.event({ step: "Downloading update...", percent: 17 });
+  second.stream.event({ step: "Downloading update…", percent: 17 });
   await nextTurn();
-  first.stream.event({ step: "Downloading update...", percent: 99 });
+  first.stream.event({ step: "Downloading update…", percent: 99 });
   await nextTurn();
   assert.equal(first.stream.readCount(), previousReadCount);
   assert.equal(f.button.title, "17%");
@@ -381,7 +409,7 @@ test("a tool-state change leaves shared top-bar progress intact", async () => {
   const f = fixture();
   const attempt = await f.start();
   f.context.setActiveTool("replay", { persist: false });
-  attempt.stream.event({ step: "Downloading update...", percent: 51 });
+  attempt.stream.event({ step: "Downloading update…", percent: 51 });
   await nextTurn();
   assert.equal(f.state.activeTool, "replay");
   assert.equal(f.button.title, "51%");
@@ -396,7 +424,7 @@ test("a superseded failure callback cannot clear an active retry", async () => {
   await f.fail(await f.start(), "First synthetic failure");
   const oldTimer = f.timerHistory[0];
   const second = await f.start();
-  second.stream.event({ step: "Downloading update...", percent: 17 });
+  second.stream.event({ step: "Downloading update…", percent: 17 });
   await nextTurn();
   // Even a callback already queued before cancellation must respect ownership.
   oldTimer.callback();

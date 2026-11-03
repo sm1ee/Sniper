@@ -48,7 +48,7 @@ function fixture(kind) {
   const save = options => kind === 'scope' ? context.saveTargetScope({ skipReload: true, ...options }) : context.saveMatchReplaceRules(options);
   const flush = () => kind === 'scope' ? context.flushTargetScopeDraft() : context.flushMatchReplaceDraft();
   const success = (index, body) => requests[index].resolve({ ok: true, json: async () => body ?? (kind === 'scope'
-    ? { scope_patterns: ['example.com'], excluded_scope_patterns: [] } : [{ ...rule }]) });
+    ? { scope_patterns: ['example.com'], excluded_scope_patterns: [], http_capture_enabled: true } : [{ ...rule }]) });
   return { context, state, els, requests, toasts, renders, rule, edit, draft, dirty, save, flush, success };
 }
 for (const kind of ['scope', 'rules']) {
@@ -243,7 +243,7 @@ for (const kind of ['scope', 'rules']) for (const changed of [false, true]) {
 for (const changed of [false, true]) test(`scope: ordinary loader ${changed ? 'ignores a prior generation' : 'retains its existing manual read behavior'}`, async () => {
   const f = fixture('scope'); f.state.targetScopeDirty = false;
   const reading = f.context.loadTargetSiteMap(true); if (changed) f.context.workspaceStateGeneration++;
-  const before = f.state.runtime; f.success(0, { scope_patterns: ['fresh.example.com'], excluded_scope_patterns: [] }); f.success(1, []);
+  const before = f.state.runtime; f.success(0, { scope_patterns: ['fresh.example.com'], excluded_scope_patterns: [], http_capture_enabled: true }); f.success(1, []);
   await reading;
   if (changed) { assert.equal(f.state.runtime, before); assert.equal(f.state.targetScopeDraft, 'example.com'); }
   else assert.equal(f.state.targetScopeDraft, 'fresh.example.com');

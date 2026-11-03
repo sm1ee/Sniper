@@ -2,8 +2,8 @@
 
 The `saved.v1.*` operations read and change saved HTTP records and session
 names. They never send requests or change capture or runtime settings. Other
-commands get no receipts, and their output and the `2026-06-22` call envelope
-are unchanged.
+commands get no receipts; their output and the `2026-06-22` call envelope are
+unchanged.
 
 | Operation | Purpose |
 | --- | --- |
@@ -71,7 +71,7 @@ The result holds `contract_version`, `receipt` and `replayed`.
 - `unknown`: the outcome cannot be established
 
 `ok:true` and exit status 0 only mean a receipt came back. Check
-`receipt.outcome` before reporting success; the CLI adds a `warnings` entry for
+`receipt.outcome` before reporting success. The CLI adds a `warnings` entry for
 `unknown`, `not_applied` or a missing receipt.
 
 ## Receipts and lost responses
@@ -98,13 +98,13 @@ before acting, and never repeat an uncertain mutation under a new operation ID.
 
 Inputs reject unknown members, explicit nulls for optional fields, malformed
 UUIDs, invalid limits and incompatible combinations. Schemas use JSON Schema
-2020-12; `x-sniper-*` annotations mark extra checks, such as integer form and
+2020-12. `x-sniper-*` annotations mark extra checks, such as integer form and
 session names (trimmed, nonblank, at most 256 UTF-8 bytes, no control
 characters). Bad input fails before any API call with `INVALID_INPUT`, exit
 status 2 and `outcome: "not_applied"`.
 
 The error envelope has `error.code`, `message`, `hint`, `retryable`, `details`
-and `schema_version:"saved.v1"`; `details` carries `outcome`, `operation_id` and
+and `schema_version:"saved.v1"`. `details` carries `outcome`, `operation_id` and
 `session_id` when known. Every v1 error has `retryable:false`. The CLI never
 retries or follows redirects (`REDIRECT_REFUSED`), and returns
 `INVALID_RESPONSE` for a response that does not match its request. After a

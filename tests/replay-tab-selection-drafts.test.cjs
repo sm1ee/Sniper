@@ -41,6 +41,7 @@ function setup() {
   let rows = [], markup = "";
   const strip = f.els.replayTabStrip = {
     scrollLeft: 0,
+    classList: { toggle() {} },
     querySelectorAll: selector => selector === '.replay-tab' ? rows : [],
     querySelector: selector => {
       if (selector.includes('data-replay-tab-id')) {
@@ -101,6 +102,7 @@ function setup() {
     tab: f.a, sessionId: f.context.currentSessionId(), generation: f.context.workspaceStateGeneration,
   };
   f.document.addEventListener = (type, callback) => { if (type === 'keydown') f.keyHandler = callback; };
+  f.document.removeEventListener = () => {};
   bindListener(f, '  document.addEventListener("keydown", (event) => {');
   f.context.renderReplayTabs();
   const event = target => ({

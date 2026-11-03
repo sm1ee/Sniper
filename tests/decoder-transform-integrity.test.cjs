@@ -143,3 +143,120 @@ test("repeated UI updates replace invalid digests and keep the input unchanged",
     assert.equal(values.get(output), String(elements[element].calculate("abc")));
   }
 });
+
+// Status describes computation/UTF-8 conversion, not authentication or key validity.
+// All ciphertexts below come from bundled CryptoJS and a public dummy passphrase.
+const cipherRows = [
+  ["ci7", "AES"], ["ci8", "DES"], ["ci9", "TripleDES"],
+  ["ci10", "Rabbit"], ["ci11", "RC4"], ["ci12", "RC4Drop"],
+];
+const cipherDummyPassword = "public-dummy-cipher-status-fixture";
+function cipherFixture() {
+  const nodes = new Map();
+  const context = vm.createContext({ document: {}, autoScroll() {}, ipCalc: function () {},
+    $(selector) {
+      if (!nodes.has(selector)) nodes.set(selector, { value: "" });
+      const node = nodes.get(selector);
+      return { 0: node,
+        val(value) { if (!arguments.length) return node.value; node.value = String(value); return this; },
+        hide() { return this; }, removeClass() { return this; }, attr() { return this; },
+        text() { return this; },
+        html() {
+          if (selector === "#output") for (const element of Object.values(context.hasher.elements)) nodes.delete(`#${element.id}`);
+          return this;
+        },
+        append(html) {
+          const id = html.match(/<textarea id="([^"]+)"/)[1];
+          nodes.set(`#${id}`, { value: "" });
+          return this;
+        },
+      };
+    },
+  });
+  for (const file of ["lib/cryptojs/rollups/aes.js", "lib/cryptojs/rollups/tripledes.js",
+    "lib/cryptojs/rollups/rabbit.js", "lib/cryptojs/rollups/rc4.js", "hasher.js"]) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, "../web/decoder", file), "utf8"), context,
+      { filename: `web/decoder/${file}` });
+  }
+  const { loadFunctions } = require("./frontend-test-helpers.cjs");
+  const display = loadFunctions(["decoderOutputShows"]);
+  return { context, nodes, display };
+}
+
+for (const [id, algorithm] of cipherRows) {
+  test(`${algorithm} decrypt preserves error-like plaintext with typed computation status`, () => {
+    const { context: c, display } = cipherFixture();
+    const element = c.hasher.elements[id];
+    for (const plaintext of ["Error report", "NaN", "Parse error", "Out of range", "Invalid input",
+      "hello 한글 😀", "", "\0", " \t\n"]) {
+      const ciphertext = c.CryptoJS[algorithm].encrypt(plaintext, cipherDummyPassword).toString();
+      assert.equal(element.calculate(ciphertext, cipherDummyPassword), plaintext);
+      const result = c.decoderCalculateResult(element, ciphertext, cipherDummyPassword);
+      assert.equal(result.value, plaintext);
+      assert.equal(result.success, true);
+      assert.equal(display.decoderOutputShows(result.value, result), plaintext.length > 0);
+    }
+  });
+
+  test(`${algorithm} decrypt retains empty legacy output for thrown decrypt and UTF-8 failures`, () => {
+    const { context: c, display } = cipherFixture();
+    const element = c.hasher.elements[id];
+    const ciphertext = c.CryptoJS[algorithm].encrypt("Error report", cipherDummyPassword).toString();
+    for (const [owner, method] of [[c.CryptoJS[algorithm], "decrypt"], [c.CryptoJS.enc.Utf8, "stringify"]]) {
+      const original = owner[method];
+      try {
+        owner[method] = () => { throw new Error("synthetic conversion failure"); };
+        assert.equal(element.calculate(ciphertext, cipherDummyPassword), "");
+        const result = c.decoderCalculateResult(element, ciphertext, cipherDummyPassword);
+        assert.equal(result.value, "");
+        assert.equal(result.success, false);
+        assert.equal(display.decoderOutputShows(result.value, result), false);
+      } finally { owner[method] = original; }
+    }
+  });
+
+  test(`${algorithm} repaint and output rebuild replace typed status without stale results`, () => {
+    const { context: c, nodes, display } = cipherFixture();
+    const element = c.hasher.elements[id];
+    // Isolate this row; encryption randomness and other algorithms are irrelevant to rendering.
+    c.hasher.elements = { [id]: element };
+    c.hasher.tab = c.tabs.cipher;
+    c.hasher.render();
+    c.$("#input-password").val(cipherDummyPassword);
+    const output = `#${element.id}`;
+    const paint = (plaintext, password = cipherDummyPassword) => {
+      const ciphertext = c.CryptoJS[algorithm].encrypt(plaintext, password).toString();
+      c.$("#input-password").val(password);
+      c.$("#input-value").val(ciphertext);
+      c.hasher.update();
+      const node = nodes.get(output);
+      assert.equal(node.value, plaintext);
+      assert.equal(node.decoderResult.success, true);
+      assert.equal(display.decoderOutputShows(node.value, node.decoderResult), plaintext.length > 0);
+      assert.equal(c.$("#input-value").val(), ciphertext);
+      assert.equal(c.$("#input-password").val(), password);
+      assert.equal(Object.hasOwn(element, "decoderResult"), false);
+      return node;
+    };
+    paint("Error report");
+    const decrypt = c.CryptoJS[algorithm].decrypt;
+    try {
+      c.CryptoJS[algorithm].decrypt = () => { throw new Error("synthetic decrypt failure"); };
+      c.hasher.update();
+      assert.equal(nodes.get(output).value, "");
+      assert.equal(nodes.get(output).decoderResult.success, false);
+    } finally { c.CryptoJS[algorithm].decrypt = decrypt; }
+    paint("");
+    paint("NaN", "another-public-dummy-passphrase");
+    c.$("#input-value").val("");
+    c.$("#input-password").val("");
+    c.hasher.update();
+    assert.equal(nodes.get(output).value, "");
+    assert.equal(display.decoderOutputShows(nodes.get(output).value, nodes.get(output).decoderResult), false);
+    const old = paint("NaN");
+    c.hasher.render();
+    assert.notEqual(nodes.get(output), old);
+    assert.equal(nodes.get(output).decoderResult, undefined);
+    paint("Error report");
+  });
+}

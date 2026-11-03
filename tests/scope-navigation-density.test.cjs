@@ -77,6 +77,7 @@ test('every tab strip uses one medium tab size and marks the active tab with a t
   }
   const indicator = css.match(/\n\.tab-indicator \{([^}]+)\}/)?.[1] || '';
   assert.match(indicator, /background: transparent;/);
+  assert.doesNotMatch(indicator, /transition:[^;]*\b(?:left|top)\b/);
   // The Pretty / Raw / Hex views of a message pane are tabs like any other.
   const tabs = (state) => ['main-tab', 'sub-tab', 'view-tab', 'replay-view-tab']
     .map((name) => `\\.${name}${state}`).join(',\\n');

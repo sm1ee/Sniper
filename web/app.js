@@ -447,6 +447,7 @@ const state = {
   sessions: [],
   activeSession: null,
   selectedSessionId: null,
+  sessionRename: null,
   dashboardStorageSessionId: null,
   sessionSortKey: "created_at",
   sessionSortDir: "desc",
@@ -644,7 +645,6 @@ const els = {
   reconShell: document.getElementById("reconShell"),
   templatesShell: document.getElementById("templatesShell"),
   dashboardShell: document.getElementById("dashboardShell"),
-  dashboardCurrentSessionName: document.getElementById("dashboardCurrentSessionName"),
   dashboardCurrentSessionPath: document.getElementById("dashboardCurrentSessionPath"),
   dashboardCurrentSessionStorage: document.getElementById("dashboardCurrentSessionStorage"),
   dashboardTiles: document.getElementById("dashboardTiles"),
@@ -695,10 +695,6 @@ const els = {
   requestColumn: document.getElementById("requestColumn"),
   responseColumn: document.getElementById("responseColumn"),
   inspectorColumn: document.querySelector(".inspector-column"),
-  proxySubPlaceholder: document.getElementById("proxySubPlaceholder"),
-  proxySubPath: document.getElementById("proxySubPath"),
-  proxySubTitle: document.getElementById("proxySubTitle"),
-  proxySubDescription: document.getElementById("proxySubDescription"),
   interceptPanel: document.getElementById("interceptPanel"),
   websocketPanel: document.getElementById("websocketPanel"),
   matchReplacePanel: document.getElementById("matchReplacePanel"),
@@ -858,7 +854,6 @@ const els = {
   interceptQueueShell: document.getElementById("interceptQueueShell"),
   interceptQueueSelectionStatus: document.getElementById("interceptQueueSelectionStatus"),
   interceptTableBody: document.getElementById("interceptTableBody"),
-  interceptDetailPath: document.getElementById("interceptDetailPath"),
   interceptDetailTitle: document.getElementById("interceptDetailTitle"),
   interceptDetailRetryButton: document.getElementById("interceptDetailRetryButton"),
   interceptDetailStatus: document.getElementById("interceptDetailStatus"),
@@ -946,7 +941,6 @@ const els = {
   eventLogTableBody: document.getElementById("eventLogTableBody"),
   clearEventLogButton: document.getElementById("clearEventLogButton"),
   matchReplaceTableBody: document.getElementById("matchReplaceTableBody"),
-  matchReplaceEditorPath: document.getElementById("matchReplaceEditorPath"),
   matchReplaceEditorTitle: document.getElementById("matchReplaceEditorTitle"),
   matchReplaceEditorHeader: document.getElementById("matchReplaceEditorHeader"),
   matchReplaceForm: document.getElementById("matchReplaceForm"),
@@ -1682,17 +1676,38 @@ function bindEvents() {
     const toggle = e.currentTarget;
     const sessionId = currentSessionId();
     const next = !state.runtime?.http_capture_enabled;
+    let receivedCaptureResponse = false;
+    let readingCaptureResponse = false;
+    let acceptedReadVersion = 0;
     try {
       const response = await postRuntimeSettings(sessionWritePath("/api/runtime", sessionId), { http_capture_enabled: next });
+      receivedCaptureResponse = true;
       await requireOkResponse(response, "Failed to change capture.");
+      acceptedReadVersion = state._runtimeReadAcceptedVersion || 0;
+      readingCaptureResponse = true;
       const runtime = await response.json();
+      if (typeof runtime?.http_capture_enabled !== "boolean") throw new Error("Runtime response did not include a valid capture state.");
+      readingCaptureResponse = false;
       if (sessionId !== currentSessionId()) return;
       if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
       state.runtime = runtime;
-      syncHttpCapturePill();
+      syncHttpCapturePill({ confirmed: true });
     } catch (error) {
       if (sessionId !== currentSessionId()) return;
       console.error(error);
+      if (!receivedCaptureResponse || readingCaptureResponse) {
+        // Only a read accepted after successful headers can settle a body
+        // failure. A read during a response-less POST may predate its mutation.
+        if (receivedCaptureResponse && state._runtimeReadAcceptedSessionId === sessionId
+          && (state._runtimeReadAcceptedVersion || 0) > acceptedReadVersion) {
+          syncHttpCapturePill({ confirmed: true });
+          return;
+        }
+        (state.httpCaptureUnconfirmedSessions ||= new Set()).add(sessionId);
+        syncHttpCapturePill();
+        showToast("Capture may have changed, but its current state could not be confirmed.", "error", 7000);
+        return;
+      }
       showToast(error?.message || "Failed to change capture.", "error");
     }
   });
@@ -1928,6 +1943,11 @@ function bindEvents() {
       showToast(error?.message || "Failed to open session folder.", "error");
     });
   });
+  // On the table body, which outlives the rows each render replaces.
+  els.dashboardSessionsBody.addEventListener("dblclick", (event) => {
+    const id = event.target.closest?.(".session-select-button")?.closest("tr[data-id]")?.dataset.id;
+    if (id) startSessionRename(id);
+  });
 
   // Session table sort headers
   // One header listener handles both native button clicks and cell padding.
@@ -1952,8 +1972,11 @@ function bindEvents() {
   });
 
   els.closeInspectorButton?.addEventListener("click", () => {
+    const ownsFocus = els.closeInspectorButton.closest(".inspector-main")?.contains(document.activeElement);
+    const returnFocus = railTabs.find((tab) => tab.dataset.inspectorTab === state.activeInspectorTab);
     state.inspectorCollapsed = true;
     renderInspectorPanels();
+    if (ownsFocus) focusPaneCloseTarget(returnFocus);
   });
 
   onClickWithProgress(document.getElementById("addInterceptRuleButton"), () =>
@@ -1963,25 +1986,39 @@ function bindEvents() {
     if (deleteBtn) { deleteInterceptRule(deleteBtn.dataset.ruleDelete).catch(handleInterceptRuleError); return; }
     const saveBtn = event.target.closest("[data-rule-save]");
     if (saveBtn) { saveInterceptRuleFromRow(saveBtn.dataset.ruleSave).catch(handleInterceptRuleError); return; }
+    const editBtn = event.target.closest("[data-rule-edit]");
+    if (editBtn) { editInterceptRule(editBtn.dataset.ruleEdit, { focusScope: true }); return; }
     const row = event.target.closest("[data-rule-id]");
-    if (row && !event.target.closest("input") && !event.target.closest("button")) { editInterceptRule(row.dataset.ruleId); }
+    if (!row || row.querySelector('[data-field="scope"]')) return;
+    if (event.target.closest("input, button, select, textarea, label, a")) return;
+    editInterceptRule(row.dataset.ruleId);
   });
   document.getElementById("interceptRulesList").addEventListener("change", (event) => {
     const toggle = event.target.closest("[data-rule-toggle]");
     if (toggle) { toggleInterceptRuleEnabled(toggle.dataset.ruleToggle, toggle.checked).catch(handleInterceptRuleError); }
   });
   document.getElementById("interceptRulesList").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      const row = event.target.closest("[data-rule-id]");
-      if (row) { saveInterceptRuleFromRow(row.dataset.ruleId).catch(handleInterceptRuleError); }
-    }
+    if (event.key !== "Enter" || event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229
+      || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    const input = event.target;
+    if (input.tagName !== "INPUT" || input.type !== "text"
+      || !["method_filter", "host_pattern", "path_pattern"].includes(input.dataset.field)) return;
+    const row = input.closest("[data-rule-id]");
+    if (!row || row.querySelector(`[data-field="${input.dataset.field}"]`) !== input) return;
+    event.preventDefault();
+    saveInterceptRuleFromRow(row.dataset.ruleId).catch(handleInterceptRuleError);
   });
   if (els.refreshWebsocketsButton) {
     els.refreshWebsocketsButton.addEventListener("click", () => {
       loadWebsocketsPageRefresh(true).catch((error) => console.error(error));
     });
   }
-  els.frameDetailClose.addEventListener("click", hideFrameDetail);
+  els.frameDetailClose.addEventListener("click", () => {
+    const ownsFocus = els.frameDetailPanel.contains(document.activeElement);
+    const returnFocus = document.getElementById("websocketFramesColumn");
+    hideFrameDetail();
+    if (ownsFocus) focusPaneCloseTarget(returnFocus);
+  });
   initFrameDetailResizer();
   document.querySelectorAll(".ws-sort").forEach((btn) => {
     btn.addEventListener("click", () => toggleWebsocketSort(btn.dataset.wsSortKey));
@@ -2248,7 +2285,7 @@ function bindEvents() {
       console.error("Fuzzer start error:", error);
     });
   });
-  els.resetFuzzerButton.addEventListener("click", resetFuzzer);
+  els.resetFuzzerButton.addEventListener("click", confirmFuzzerReset);
   els.fuzzerRetryWorkspaceButton?.addEventListener("click", retryFuzzerWorkspaceLoad);
   els.stopFuzzerButton?.addEventListener("click", () => {
     stopFuzzerAttack().catch((error) => console.error("Fuzzer stop error:", error));
@@ -2271,7 +2308,7 @@ function bindEvents() {
     }
   });
 
-  // Fuzzer results keyboard navigation (↑↓)
+  // Fuzzer results keyboard navigation (↑↓) and selected-row activation (Enter)
   if (fuzzerResultsShell) {
     fuzzerResultsShell.setAttribute("tabindex", "0");
     let fuzzerScrollRaf = 0;
@@ -2283,6 +2320,19 @@ function bindEvents() {
       });
     });
     fuzzerResultsShell.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        if (e.repeat || e.defaultPrevented || e.isComposing
+          || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey
+          || getActiveModalAction() || e.target !== fuzzerResultsShell
+          || document.activeElement !== fuzzerResultsShell || isEditableTarget(e.target)) return;
+        const results = visibleFuzzerResults();
+        const selectedIndex = fuzzerSelectedResultIndex(results);
+        if (selectedIndex < 0 || selectedIndex >= results.length) return;
+        e.preventDefault();
+        // Pointer reactivation already retries a selected row's failed detail.
+        selectFuzzerResultIndex(selectedIndex, { scroll: true });
+        return;
+      }
       const step = e.isComposing ? 0 : tableArrowStep(e);
       if (!step) return;
       e.preventDefault();
@@ -2458,7 +2508,11 @@ function bindEvents() {
   if (els.oastCopyPayloadButton) {
     els.oastCopyPayloadButton.addEventListener("click", () => {
       const text = els.oastPayloadText?.value;
-      if (text) { copyTextToClipboard(text); showToast("Copied OAST payload"); }
+      if (text) {
+        copyTextToClipboard(text)
+          .then(() => showToast("Copied OAST payload"))
+          .catch(() => showToast("Failed to copy OAST payload", "error"));
+      }
     });
   }
   if (els.oastTableBody) {
@@ -3121,8 +3175,8 @@ async function _applySettings(response, { isCurrent = () => true } = {}) {
   els.specialHostHttps.textContent = certificate.special_host_https;
   els.dataDir.textContent = state.settings.data_dir;
   els.certificateNote.innerHTML = `
-    Download the local root certificate here, or visit <code>${escapeHtml(certificate.special_host_https)}</code>
-    from a proxied client. Trust the CA before expecting clean HTTPS flows.
+    Trust this CA to read HTTPS traffic. A proxied client can download it from
+    <code>${escapeHtml(certificate.special_host_https)}</code>.
   `;
 
   renderInterceptStatus();
@@ -3202,11 +3256,11 @@ window.__sniperCheckForUpdates = checkForUpdatesNow;
 // for logs, such as where the installer's log file is; those are ignored here, so an
 // internal detail cannot end up in the top bar.
 const UPDATE_STEPS = new Set([
-  "Checking for updates...",
-  "Downloading update...",
-  "Installing update...",
-  "Verifying signature...",
-  "Restarting...",
+  "Checking for updates…",
+  "Downloading update…",
+  "Installing update…",
+  "Verifying signature…",
+  "Restarting…",
 ]);
 
 // A bare ring: its arc grows with the download, and spins for the steps with
@@ -3324,7 +3378,7 @@ async function performSelfUpdate() {
         if (!dataText) continue;
         try {
           const data = JSON.parse(dataText);
-          if (data.step === "Restarting...") restarting = true;
+          if (data.step === "Restarting…") restarting = true;
           if (!handleProgress(data)) return;
         } catch (_error) {
           // Ignore malformed progress frames.
@@ -3590,7 +3644,7 @@ function applyFuzzerWorkspace(fields, sessionId, { keepShownRun = false } = {}) 
       // Retire the picker read/confirmation, not the shown run or its polling.
       workflow.readGeneration += 1;
       workflow.readBusy = false;
-      if (workflow.notice === "Loading saved run..."
+      if (workflow.notice === "Loading saved run…"
         || workflow.notice === "Reuse requires confirmation. Original source and transport overrides are not retained.") {
         workflow.notice = "";
       }
@@ -3603,7 +3657,7 @@ function applyFuzzerWorkspace(fields, sessionId, { keepShownRun = false } = {}) 
   if (legacyAttackRecord) {
     scheduleWorkspaceStateSave();
   } else if (fuzzerAttackRecordId) {
-    state.fuzzerNotice = state.fuzzerNotice || "Loading saved fuzzer run...";
+    state.fuzzerNotice = state.fuzzerNotice || "Loading saved fuzzer run…";
     hydrateFuzzerAttackRecordById(fuzzerAttackRecordId, sessionId);
   }
 }
@@ -5626,7 +5680,7 @@ function renderReplayClearedState() {
   if (els.replayRequestCM) {
     updateCodePaneCM("replayReq", els.replayRequestCM, "", {
       mode: "http", readOnly: false,
-      placeholder: "Loading session...",
+      placeholder: "Loading session…",
       onChange: syncReplayRequestTextFromEditor,
     });
   } else {
@@ -5637,10 +5691,10 @@ function renderReplayClearedState() {
   if (els.replayPortInput) els.replayPortInput.value = "";
   if (els.replaySchemeSelect) els.replaySchemeSelect.value = "https";
   setReplayTargetInputValidity({ hostError: "", portError: "" });
-  if (els.replayResponseMeta) els.replayResponseMeta.textContent = "Loading session...";
-  renderReplayResponseView("Loading session...");
+  if (els.replayResponseMeta) els.replayResponseMeta.textContent = "Loading session…";
+  renderReplayResponseView("Loading session…");
   updateReplaySearchPane("request", "");
-  updateReplaySearchPane("response", "Loading session...");
+  updateReplaySearchPane("response", "Loading session…");
   if (els.replayBackButton) els.replayBackButton.disabled = true;
   if (els.replayForwardButton) els.replayForwardButton.disabled = true;
   if (els.replayFollowRedirectButton) els.replayFollowRedirectButton.classList.add("hidden");
@@ -5967,9 +6021,12 @@ async function loadRuntimeSettings() {
     // Both runtime readers share this watermark. A newer pending/failed read
     // does not invalidate useful data; only a newer accepted result does.
     if (!ownsRead() || readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
+    if (typeof runtime?.http_capture_enabled !== "boolean") throw new Error("Runtime response did not include a valid capture state.");
     if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
     state._runtimeReadAcceptedVersion = readVersion;
+    state._runtimeReadAcceptedSessionId = sessionId;
     state.runtime = runtime;
+    if (state.httpCaptureUnconfirmedSessions?.has(sessionId)) syncHttpCapturePill({ confirmed: true });
     if (typeof templatesController !== "undefined") templatesController?.scopeChanged?.();
     renderInterceptStatus();
     renderProxySettings();
@@ -6447,7 +6504,7 @@ async function selectHistoryTransaction(id, options = {}) {
     renderEmptyDetail();
     return null;
   }
-  scheduleHistoryDetailLoading(state.selectedId, "Loading selected transaction...", {
+  scheduleHistoryDetailLoading(state.selectedId, "Loading selected transaction…", {
     immediate: !hadRenderedDetail,
   });
   if (options.scroll) {
@@ -6711,24 +6768,25 @@ function renderInterceptRules() {
   if (!container) return;
   const rules = state.interceptRules || [];
   if (!rules.length) {
-    container.innerHTML = `<div class="intercept-rules-empty">No rules: every in-scope request and response is intercepted. Add a rule to narrow it to one direction, or to specific hosts, paths or methods.</div>`;
+    container.innerHTML = `<div class="intercept-rules-empty">No rules, so both requests and responses are held.</div>`;
     return;
   }
-  container.innerHTML = rules.map((rule) => {
+  container.innerHTML = rules.map((rule, index) => {
     const methods = rule.method_filter?.length ? rule.method_filter.join(", ") : "Any";
     const host = rule.host_pattern || "*";
     const path = rule.path_pattern || "*";
     const scope = rule.scope || "request";
-    const scopeLabel = scope === "both" ? "Req+Res" : scope === "response" ? "Res" : "Req";
+    const scopeLabel = scope === "both" ? "Both" : scope === "response" ? "Response" : "Request";
     return `<div class="intercept-rule-row${rule.enabled ? "" : " disabled"}" data-rule-id="${rule.id}">
       <label class="intercept-rule-toggle" title="Enable/disable">
-        <input type="checkbox" ${rule.enabled ? "checked" : ""} data-rule-toggle="${rule.id}" />
+        <input type="checkbox" ${rule.enabled ? "checked" : ""} data-rule-toggle="${rule.id}" aria-label="Enable intercept rule ${index + 1}" />
       </label>
       <span class="intercept-rule-scope">${escapeHtml(scopeLabel)}</span>
       <span class="intercept-rule-methods">${escapeHtml(methods)}</span>
       <span class="intercept-rule-host">${escapeHtml(host)}</span>
       <span class="intercept-rule-path">${escapeHtml(path)}</span>
-      <button class="intercept-rule-delete" data-rule-delete="${rule.id}" title="Delete rule">&times;</button>
+      <button class="secondary-action" type="button" data-rule-edit="${rule.id}" aria-label="Edit intercept rule ${index + 1}">Edit</button>
+      <button class="intercept-rule-delete" type="button" data-rule-delete="${rule.id}" aria-label="Delete intercept rule ${index + 1}" title="Delete rule">&times;</button>
     </div>`;
   }).join("");
 }
@@ -6756,26 +6814,28 @@ async function addInterceptRule() {
   editInterceptRule(rule.id);
 }
 
-function editInterceptRule(ruleId) {
+function editInterceptRule(ruleId, { focusScope = false } = {}) {
   const rule = (state.interceptRules || []).find((r) => r.id === ruleId);
   if (!rule) return;
   const container = document.getElementById("interceptRulesList");
   const row = container.querySelector(`[data-rule-id="${ruleId}"]`);
   if (!row) return;
   const scope = rule.scope || "request";
+  const context = `intercept rule ${state.interceptRules.indexOf(rule) + 1}`;
   row.innerHTML = `
-    <label class="intercept-rule-toggle"><input type="checkbox" ${rule.enabled ? "checked" : ""} data-rule-toggle="${rule.id}" /></label>
-    <select class="intercept-rule-input intercept-rule-scope-select" data-field="scope">
+    <label class="intercept-rule-toggle"><input type="checkbox" ${rule.enabled ? "checked" : ""} data-rule-toggle="${rule.id}" aria-label="Enable ${context}" /></label>
+    <select class="intercept-rule-input intercept-rule-scope-select" data-field="scope" aria-label="Direction for ${context}">
       <option value="request"${scope === "request" ? " selected" : ""}>Request</option>
       <option value="response"${scope === "response" ? " selected" : ""}>Response</option>
       <option value="both"${scope === "both" ? " selected" : ""}>Both</option>
     </select>
-    <input class="intercept-rule-input" data-field="method_filter" placeholder="Methods (e.g. GET,POST)" value="${escapeHtml((rule.method_filter || []).join(", "))}" />
-    <input class="intercept-rule-input" data-field="host_pattern" placeholder="Host (e.g. *.example.com)" value="${escapeHtml(rule.host_pattern || "")}" />
-    <input class="intercept-rule-input" data-field="path_pattern" placeholder="Path contains (e.g. /api/)" value="${escapeHtml(rule.path_pattern || "")}" />
-    <button class="intercept-rule-save" data-rule-save="${rule.id}">&#10003;</button>
-    <button class="intercept-rule-delete" data-rule-delete="${rule.id}">&times;</button>
+    <input class="intercept-rule-input" type="text" data-field="method_filter" aria-label="Methods for ${context}" placeholder="GET, POST" value="${escapeHtml((rule.method_filter || []).join(", "))}" />
+    <input class="intercept-rule-input" type="text" data-field="host_pattern" aria-label="Host pattern for ${context}" placeholder="*.example.com" value="${escapeHtml(rule.host_pattern || "")}" />
+    <input class="intercept-rule-input" type="text" data-field="path_pattern" aria-label="Path contains for ${context}" placeholder="/api/" value="${escapeHtml(rule.path_pattern || "")}" />
+    <button class="intercept-rule-save" type="button" data-rule-save="${rule.id}" aria-label="Save ${context}">&#10003;</button>
+    <button class="intercept-rule-delete" type="button" data-rule-delete="${rule.id}" aria-label="Delete ${context}">&times;</button>
   `;
+  if (focusScope) row.querySelector('[data-field="scope"]')?.focus();
 }
 
 async function saveInterceptRuleFromRow(ruleId) {
@@ -8307,9 +8367,12 @@ async function loadTargetSiteMap(forceScopeSync = false, saveContext = null) {
     // Reject the whole compound result: old paths carry old scope badges.
     // This is a successful no-op, not a failed acknowledged scope save.
     if (readVersion < (state._runtimeReadAcceptedVersion || 0)) return;
+    if (typeof runtime?.http_capture_enabled !== "boolean") throw new Error("Runtime response did not include a valid capture state.");
     if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, runtime);
     state._runtimeReadAcceptedVersion = readVersion;
+    state._runtimeReadAcceptedSessionId = sessionId;
     state.runtime = runtime;
+    if (state.httpCaptureUnconfirmedSessions?.has(sessionId)) syncHttpCapturePill({ confirmed: true });
     if (siteMap) state.targetSiteMap = siteMap;
     if (typeof targetServiceMapController !== "undefined" && state.activeTool === "map") {
       targetServiceMapController?.refresh();
@@ -9701,7 +9764,10 @@ function syncDecoderToolMeta() {
 
 // The decoder library's words for a transform that does not apply: nothing,
 // NaN, and its parse, range and input errors.
-function decoderOutputShows(value) {
+function decoderOutputShows(value, result) {
+  if (result && typeof result.success === "boolean" && result.value === value) {
+    return result.success && String(value ?? "").length > 0;
+  }
   return !/^(?:|NaN|Parse error|Out of range|Invalid\b.*|Error\b.*)$/s.test(String(value ?? ""));
 }
 
@@ -9718,7 +9784,10 @@ function markIdleDecoderTabs() {
   for (const element of judged ? Object.values(window.hasher.elements) : []) {
     if (shown.has(element.tab)) continue;
     try {
-      if (decoderOutputShows(element.calculate(input, password))) shown.add(element.tab);
+      const result = typeof window.decoderCalculateResult === "function"
+        ? window.decoderCalculateResult(element, input, password)
+        : { value: element.calculate(input, password) };
+      if (decoderOutputShows(result.value, result)) shown.add(element.tab);
     } catch {
       // A transform that throws has nothing to show.
     }
@@ -9776,7 +9845,8 @@ function markEmptyDecoderOutputs() {
   if (!output) return;
   let shown = 0;
   for (const element of output.querySelectorAll(".element")) {
-    const empty = !decoderOutputShows(element.querySelector("textarea")?.value);
+    const textarea = element.querySelector("textarea");
+    const empty = !decoderOutputShows(textarea?.value, textarea?.decoderResult);
     element.classList.toggle("hidden", empty);
     if (!empty) shown += 1;
   }
@@ -9880,6 +9950,9 @@ function renderDashboard() {
     .find((name) => focusedControl?.classList?.contains(name));
   const restoreListFocus = focusedClass && els.dashboardSessionsBody.contains?.(focusedControl);
   const focusedSessionId = restoreListFocus ? focusedRow?.dataset.id : null;
+  // A redraw replaces the rename field too; keep the caret where it was.
+  const renameSelection = focusedControl?.classList?.contains("session-name-input")
+    ? [focusedControl.selectionStart, focusedControl.selectionEnd] : null;
   // Ensure selectedSessionId defaults to active session
   const activeSession = state.sessions.find((session) => session.active)
     || state.sessions.find((session) => session.id === state.activeSession?.id) || null;
@@ -9893,7 +9966,6 @@ function renderDashboard() {
   // Activation changes selection before its reload finishes. Keep folder opens
   // bound to the path still on screen if that reload is delayed or fails.
   state.dashboardStorageSessionId = current?.id || null;
-  els.dashboardCurrentSessionName.textContent = current?.name || "No active session";
   els.dashboardCurrentSessionPath.textContent = current?.storage_path || "";
   // The header names where the selected session is kept; with none there is
   // nothing to name. Its counts are the row's own.
@@ -9993,11 +10065,15 @@ function renderDashboard() {
     });
   }
 
+  // The field being replaced is no longer the editor: its blur must not save.
+  sessionRenameInput = null;
   els.dashboardSessionsBody.innerHTML = sortedSessions.length
     ? sortedSessions
         .map((session) => `
           <tr class="${["history-row", session.id === state.selectedSessionId && "selected", session.active && "session-active"].filter(Boolean).join(" ")}" data-id="${session.id}">
-            <td><button class="session-name session-select-button" type="button" title="${escapeHtml(session.name)}" aria-pressed="${session.id === state.selectedSessionId}" aria-label="Select session ${escapeHtml(session.name)}">${escapeHtml(session.name)}</button>${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
+            <td>${state.sessionRename?.id === session.id
+              ? `<input class="session-name-input" type="text" value="${escapeHtml(state.sessionRename.draft)}" aria-label="Rename session ${escapeHtml(session.name)}" spellcheck="false" autocomplete="off" />`
+              : `<button class="session-name session-select-button" type="button" title="${escapeHtml(session.name)}" aria-pressed="${session.id === state.selectedSessionId}" aria-label="Select session ${escapeHtml(session.name)}">${escapeHtml(session.name)}</button>`}${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
             <td><div class="session-size"><span class="session-size-bar"><span style="width:${Math.max(2, Math.round((Number(session.storage_bytes) || 0) / largest * 100))}%"></span></span>${formatSize(session.storage_bytes)}</div></td>
             <td>${formatCappedCount(session.request_count)}</td>
             <td>${formatCappedCount(session.websocket_count, retainedEntriesCap())}</td>
@@ -10023,11 +10099,14 @@ function renderDashboard() {
   Array.from(els.dashboardSessionsBody.querySelectorAll("tr[data-id]")).forEach((row) => {
     row.addEventListener("click", () => {
       const { id } = row.dataset;
-      if (!id) return;
+      // Clicking the selected row redraws nothing, so its second click is
+      // still on the name a double-click renames.
+      if (!id || id === state.selectedSessionId) return;
       state.selectedSessionId = id;
       renderDashboard();
     });
   });
+  if (state.sessionRename) wireSessionRenameInput(renameSelection);
 
   // Activate button = switch session
   Array.from(els.dashboardSessionsBody.querySelectorAll(".session-open-button")).forEach((btn) => {
@@ -10072,6 +10151,99 @@ function renderDashboard() {
   }
 }
 
+// ── Session rename ──
+// Double-click a session's name, or Rename in its menu, to edit it in place.
+// Enter or leaving the field saves, Escape cancels, as Replay tab names do.
+let sessionRenameInput = null;
+
+function startSessionRename(id) {
+  const session = state.sessions.find((entry) => entry.id === id);
+  if (!session) return;
+  state.sessionRename = { id, draft: session.name, pending: false, focus: true };
+  renderDashboard();
+}
+
+function cancelSessionRename({ refocus = false } = {}) {
+  const edit = state.sessionRename;
+  if (!edit) return;
+  state.sessionRename = null;
+  renderDashboard();
+  if (refocus) focusSessionNameButton(edit.id);
+}
+
+async function commitSessionRename({ refocus = false } = {}) {
+  const edit = state.sessionRename;
+  if (!edit || edit.pending) return;
+  const session = state.sessions.find((entry) => entry.id === edit.id);
+  const name = edit.draft.trim();
+  if (!session || !name || name === session.name) {
+    cancelSessionRename({ refocus });
+    return;
+  }
+  edit.pending = true;
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(edit.id)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    await requireOkResponse(response, "Failed to rename session.");
+  } catch (error) {
+    edit.pending = false;
+    showToast(error?.message || "Failed to rename session.", "error");
+    // The field stays with what was typed, to fix and save again.
+    if (state.sessionRename === edit && refocus) {
+      edit.focus = true;
+      renderDashboard();
+    }
+    return;
+  }
+  session.name = name;
+  if (state.sessionRename === edit) state.sessionRename = null;
+  renderDashboard();
+  if (refocus) focusSessionNameButton(edit.id);
+  // The name also shows outside this list, for the session in use.
+  loadSessions().catch((error) => console.error(error));
+}
+
+function wireSessionRenameInput(selection) {
+  const input = els.dashboardSessionsBody.querySelector?.(".session-name-input");
+  const edit = state.sessionRename;
+  if (!input || !edit) return;
+  sessionRenameInput = input;
+  // A click in the field would select the row and redraw the table under it.
+  for (const type of ["click", "dblclick"]) input.addEventListener(type, (event) => event.stopPropagation());
+  input.addEventListener("input", () => { edit.draft = input.value; });
+  input.addEventListener("keydown", (event) => {
+    // Enter during IME composition picks a candidate; it does not save.
+    if (event.isComposing) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitSessionRename({ refocus: true });
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      cancelSessionRename({ refocus: true });
+    }
+  });
+  input.addEventListener("blur", () => {
+    if (sessionRenameInput === input && state.sessionRename === edit) commitSessionRename();
+  });
+  if (edit.focus) {
+    edit.focus = false;
+    input.focus();
+    input.select();
+  } else if (selection) {
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(selection[0], selection[1]);
+  }
+}
+
+function focusSessionNameButton(id) {
+  Array.from(els.dashboardSessionsBody.querySelectorAll("tr[data-id]"))
+    .find((row) => row.dataset.id === id)
+    ?.querySelector(".session-select-button")?.focus({ preventScroll: true });
+}
+
 // ── Session context menu ──
 let sessionContextMenuEl = null;
 
@@ -10083,6 +10255,7 @@ function showSessionContextMenu(event, sessionId) {
   const menu = document.createElement("div");
   menu.className = "context-menu session-context-menu";
   menu.innerHTML = `
+    <button class="context-menu-item" data-action="rename">Rename session</button>
     <button class="context-menu-item" data-action="folder">Open session folder</button>
     ${session.active ? "" : `<button class="context-menu-item danger" data-action="delete">Delete session</button>`}
   `;
@@ -10101,7 +10274,9 @@ function showSessionContextMenu(event, sessionId) {
     const btn = e.target.closest("[data-action]");
     if (!btn) return;
     const action = btn.dataset.action;
-    if (action === "folder") {
+    if (action === "rename") {
+      startSessionRename(sessionId);
+    } else if (action === "folder") {
       revealSessionFolder(sessionId).catch((error) => {
         console.error(error);
         showToast(error?.message || "Failed to open session folder.", "error");
@@ -10499,12 +10674,12 @@ function renderFindingDetailLoading() {
     els.findingsDetailSeverity.textContent = "";
   }
   if (els.findingsDetailCategory) els.findingsDetailCategory.textContent = "";
-  if (els.findingsDetailTitle) els.findingsDetailTitle.textContent = "Loading finding...";
+  if (els.findingsDetailTitle) els.findingsDetailTitle.textContent = "Loading finding…";
   if (els.findingsDetailDesc) els.findingsDetailDesc.textContent = "";
   if (els.findingsReqCM) {
-    updateCodePaneCM("findingsReq", els.findingsReqCM, "Loading finding detail...", { mode: "http" });
+    updateCodePaneCM("findingsReq", els.findingsReqCM, "Loading finding detail…", { mode: "http" });
   } else if (els.findingsReqView) {
-    els.findingsReqView.innerHTML = '<span class="code-line code-line-empty">Loading finding detail...</span>';
+    els.findingsReqView.innerHTML = '<span class="code-line code-line-empty">Loading finding detail…</span>';
     if (els.findingsReqLines) els.findingsReqLines.textContent = "";
   }
   if (els.findingsResCM) {
@@ -10862,11 +11037,14 @@ function renderFindingsVirtual() {
     for (let i = startIdx; i < endIdx; i++) {
       const f = entries[i];
       const selected = f.id === selectedFindingId ? " selected" : "";
+      // A finding carries no scheme. Its ":443" is the CONNECT authority of an
+      // HTTPS capture, which Replay and scans store without, so leave it out as
+      // History does; any other port stays.
       rows.push(`<tr class="history-row${selected}" data-finding-id="${f.id}" data-record-id="${f.record_id}">
         <td class="findings-col-severity"><span class="severity-badge ${severityClass(f.severity)}">${severityLabel(f.severity)}</span></td>
         <td class="findings-col-category">${escapeHtml(f.category)}</td>
         <td class="findings-col-title">${escapeHtml(f.title)}</td>
-        <td class="findings-col-host">${escapeHtml(f.host)}</td>
+        <td class="findings-col-host">${escapeHtml(displayHost(f.host, "https"))}</td>
         <td class="findings-col-path">${escapeHtml(f.path)}</td>
         <td class="findings-col-time">${escapeHtml(formatTimestamp(f.found_at))}</td>
       </tr>`);
@@ -11248,7 +11426,7 @@ function jumpToTransaction(recordId) {
   // Called from other tools too (Templates' scan results), so the main panel
   // switches as well, not only Capture's tabs.
   renderToolPanels();
-  scheduleHistoryDetailLoading(recordId, "Loading selected transaction...", {
+  scheduleHistoryDetailLoading(recordId, "Loading selected transaction…", {
     immediate: !hadRenderedDetail,
   });
   loadTransactionDetail(recordId, { isCurrent }).then(async (record) => {
@@ -11905,18 +12083,31 @@ async function loadOastCallbacks() {
     }
     const el = document.getElementById("oastStatusText");
     if (el) {
-      if (status.registered) {
-        el.textContent = `${status.provider} · Registered (${status.payload_domain || status.correlation_id || ""})`;
-        el.className = "oast-status-text registered";
-      } else if (status.provider && status.provider !== "custom") {
-        el.textContent = `${status.provider} · Not registered`;
-        el.className = "oast-status-text not-registered";
-      } else {
-        el.textContent = status.provider || "Not configured";
-        el.className = "oast-status-text not-registered";
-      }
+      const line = oastStatusLine(status, state.runtime);
+      el.textContent = line.text;
+      el.className = `oast-status-text ${line.registered ? "registered" : "not-registered"}`;
     }
   } catch (_) { /* ignore status fetch errors */ }
+}
+
+// The line under Callbacks: off, missing its server, registered, or the
+// custom server it polls. Provider names are the Settings select's.
+function oastStatusLine(status, runtime) {
+  if (!runtime?.oast_enabled) return { text: "Off", registered: false };
+  const provider = { interactsh: "Interactsh", boast: "BOAST", custom: "Custom" }[status?.provider] || "Custom";
+  if (status.registered) {
+    return { text: `${provider} · Registered (${status.payload_domain || status.correlation_id || ""})`, registered: true };
+  }
+  const server = String(runtime.oast_server_url || "").trim();
+  if (!server) return { text: `${provider} · No server URL`, registered: false };
+  if (provider !== "Custom") return { text: `${provider} · Not registered`, registered: false };
+  let host = server;
+  try {
+    host = new URL(server).host || server;
+  } catch (_error) {
+    // Shown as typed; Settings reports a URL it cannot use.
+  }
+  return { text: `${provider} · ${host}`, registered: false };
 }
 
 function renderOastCallbacks() {
@@ -11931,7 +12122,7 @@ function renderOastCallbacks() {
           <td>${escapeHtml(cb.correlation_id)}</td>
         </tr>`;
       }).join("")
-    : '<tr class="empty-row"><td colspan="4">No OAST callbacks received yet. Generate a payload and use it in your tests.</td></tr>';
+    : '<tr class="empty-row"><td colspan="4">No callbacks yet.</td></tr>';
 }
 
 function updateOastBadge() {
@@ -11942,12 +12133,12 @@ function updateOastBadge() {
 }
 
 function clearOastDetail() {
-  if (els.oastDetailView) els.oastDetailView.textContent = "Select an OAST callback to view details.";
-  if (els.oastDetailTitle) els.oastDetailTitle.textContent = "Select a callback";
+  if (els.oastDetailView) els.oastDetailView.textContent = "";
+  if (els.oastDetailTitle) els.oastDetailTitle.textContent = "No callback selected";
 }
 
 function renderOastDetailLoading() {
-  if (els.oastDetailView) els.oastDetailView.textContent = "Loading selected OAST callback...";
+  if (els.oastDetailView) els.oastDetailView.textContent = "Loading selected OAST callback…";
   if (els.oastDetailTitle) els.oastDetailTitle.textContent = "Loading callback";
 }
 
@@ -12393,7 +12584,6 @@ function renderProxyPanels() {
   const showFindings = state.activeProxyTab === "findings";
   const showOast = state.activeProxyTab === "oast";
   const showProxySettings = state.activeProxyTab === "proxy-settings";
-  const showPlaceholder = !showHistory && !showIntercept && !showWebsockets && !showMatchReplace && !showFindings && !showOast && !showProxySettings;
 
   els.proxyShell?.classList.toggle("findings-active", showFindings);
   els.colorTagFilter.classList.toggle("hidden", !showHistory);
@@ -12405,19 +12595,12 @@ function renderProxyPanels() {
   els.websocketPanel.classList.toggle("hidden", !showWebsockets);
   els.matchReplacePanel.classList.toggle("hidden", !showMatchReplace);
   els.findingsPanel.classList.toggle("hidden", !showFindings);
-  if (els.oastPanel) els.oastPanel.classList.toggle("hidden", state.activeProxyTab !== "oast");
+  if (els.oastPanel) els.oastPanel.classList.toggle("hidden", !showOast);
   els.proxySettingsPanel.classList.toggle("hidden", !showProxySettings);
-  els.proxySubPlaceholder.classList.toggle("hidden", !showPlaceholder);
 
   if (showWebsockets) applySavedWebsocketPaneWidth();
   if (showMatchReplace) renderMatchReplaceRules();
   if (showFindings || (showHistory && state.httpShowFindings)) loadFindings();
-  if (!showPlaceholder) return;
-
-  const label = humanizeProxyTab(state.activeProxyTab);
-  els.proxySubPath.textContent = `Proxy / ${label}`;
-  els.proxySubTitle.textContent = `${label} is planned next`;
-  els.proxySubDescription.textContent = `${label} will plug into the same capture store and message workbench.`;
 }
 
 // Set by a rail-tab click so the next render scrolls to that section once.
@@ -12468,9 +12651,7 @@ function renderInspectorPanels() {
 }
 
 function renderInterceptStatus() {
-  const enabled = Boolean(state.runtime?.intercept_enabled);
-  els.interceptStatus.textContent = enabled ? "On" : "Off";
-  els.interceptStatus.classList.toggle("online", enabled);
+  els.interceptStatus.setAttribute("aria-checked", String(Boolean(state.runtime?.intercept_enabled)));
 }
 
 // The UI listener is normally loopback-only. When it is not, say so wherever the
@@ -12504,30 +12685,18 @@ function renderHistory(options = {}) {
   const visibleEntries = getVisibleEntries();
   const hiddenConnectCount = countHiddenConnectItems();
   const paging = state.historyPaging || createHistoryPagingState();
-  const hiddenConnectExact = isKnownCount(paging.hiddenConnectTotal);
-  const summary = [];
-  const totalCount = visibleEntries.length;
-  summary.push(`${totalCount} loaded item${totalCount === 1 ? "" : "s"} visible`);
-  if (hiddenConnectCount) summary.push(`${hiddenConnectCount}${hiddenConnectExact || paging.fullyLoaded ? "" : " loaded"} CONNECT tunnel${hiddenConnectCount === 1 ? "" : "s"} hidden`);
-  if (isKnownCount(paging.filteredTotal)) {
-    summary.push(`${state.items.length}/${paging.filteredTotal} server-matched summaries loaded`);
-  }
-  if (paging.total && (!isKnownCount(paging.filteredTotal) || paging.total !== paging.filteredTotal)) {
-    summary.push(`${paging.total} retained`);
-  }
-  if (!paging.fullyLoaded) {
-    summary.push(paging.loading ? "loading older history" : "scroll for older history");
-  }
-  if (state.query) summary.push(`search: "${state.query}"`);
-  if (state.method) summary.push(`method: ${state.method}`);
-  if (state.filterSettings.inScopeOnly) summary.push("scope only");
-  if (state.filterSettings.hideWithoutResponses) summary.push("responses only");
-  if (state.filterSettings.onlyParameterized) summary.push("query parameters only");
-  if (state.filterSettings.onlyNotes) summary.push("notes only");
-  if (state.filterSettings.searchTerm) summary.push(`advanced: ${state.filterSettings.searchTerm}`);
-  if (state.filterSettings.colorTags?.size) summary.push(`color: ${[...state.filterSettings.colorTags].join(", ")}`);
-  summary.push(`sort: ${humanizeSortKey(state.sortKey)} ${state.sortDirection}`);
-  els.historyMeta.textContent = `Filter settings: ${summary.join(" | ")}`;
+  // How many requests match, then what the filter dialog hides. Search, method,
+  // In scope and the colour dots show their own state beside it, the sort its
+  // arrow; CONNECT tunnels are never listed here.
+  const exact = isKnownCount(paging.filteredTotal);
+  const count = exact ? paging.filteredTotal : visibleEntries.length;
+  const more = !exact && !paging.fullyLoaded;
+  const summary = [
+    more && !count ? "Loading requests…" : `${count.toLocaleString()}${more ? "+" : ""} request${count === 1 && !more ? "" : "s"}`,
+    ...describeHttpFilters(state.filterSettings),
+  ].join(" · ");
+  els.historyMeta.textContent = summary;
+  els.historyMeta.title = summary;
   renderSortHeaders();
 
   // Store entries for virtual scroll
@@ -13215,7 +13384,7 @@ function cancelHistoryDetailLoading() {
   }
 }
 
-function scheduleHistoryDetailLoading(id, message = "Loading selected transaction...", options = {}) {
+function scheduleHistoryDetailLoading(id, message = "Loading selected transaction…", options = {}) {
   cancelHistoryDetailLoading();
   if (!id) return;
   const renderIfCurrent = () => {
@@ -13314,7 +13483,7 @@ function renderEmptyDetail(errorMessage = "") {
   renderMessagePanes();
 }
 
-function renderLoadingDetail(message = "Loading selected transaction...") {
+function renderLoadingDetail(message = "Loading selected transaction…") {
   state.selectedRecord = null;
   state.loadingDetailId = state.selectedId;
   state.historyDetailError = "";
@@ -13472,7 +13641,7 @@ function renderMessagePanes() {
     : record;
   const requestText = requestRecord
     ? buildMessagePresentation("request", requestRecord)
-    : (state.historyDetailError || (detailLoading ? "Loading selected transaction..." : "Select a transaction from HTTP."));
+    : (state.historyDetailError || (detailLoading ? "Loading selected transaction…" : "Select a transaction from HTTP."));
   const responseText = responseRecord
     ? buildMessagePresentation("response", responseRecord)
     : (state.historyDetailError || (detailLoading ? "Loading response details." : "No response selected."));
@@ -14037,7 +14206,7 @@ function updateInterceptDetailFeedback(queue) {
   const error = Boolean(read?.error && (!read.pending || !read.showPending));
   const loading = Boolean(id && !record && !error);
   const message = loading ? `Loading selected ${queue} details.`
-    : error ? `Could not ${record ? "refresh" : "load"} ${queue} details. Retry to try again.` : "";
+    : error ? `Could not ${record ? "refresh" : "load"} ${queue} details.` : "";
   // Both queues refresh independently; only the visible owner may announce or
   // expose Retry. Keep its button during a retry so focus is not hidden mid-read.
   if (state.interceptQueueTab === queue) {
@@ -14225,7 +14394,7 @@ function renderIntercepts() {
           return `
             <tr class="history-row ${selected}" data-id="${item.id}">
               <td class="iq-col-method">${escapeHtml(item.method)}</td>
-              <td class="iq-col-host text-truncate">${escapeHtml(item.host)}</td>
+              <td class="iq-col-host text-truncate">${escapeHtml(displayHost(item.host, item.scheme))}</td>
               <td class="iq-col-path text-truncate">${escapeHtml(item.path || "/")}</td>
               <td class="iq-col-time">${escapeHtml(formatTimestamp(item.started_at))}</td>
             </tr>
@@ -14234,7 +14403,7 @@ function renderIntercepts() {
         .join("")
     : `
         <tr class="empty-row">
-          <td colspan="4">Intercept queue is empty.</td>
+          <td colspan="4">No held requests.</td>
         </tr>
       `;
 
@@ -14259,23 +14428,20 @@ function renderIntercepts() {
     state.interceptEditorSeedId = null;
     if (state.interceptQueueTab === "request") {
       const selected = filteredIntercepts.find((item) => item.id === state.selectedInterceptId);
-      els.interceptDetailPath.textContent = selected ? `${selected.method} ${selected.host}${selected.path || "/"}` : "Intercept";
       els.interceptDetailTitle.textContent = selected
         ? (feedback.error ? "Could not load request" : "Loading request…") : "No request selected";
-      els.interceptMeta.textContent = feedback.message || (state.runtime?.intercept_enabled
-        ? "Intercept is on. New requests will queue here."
-        : "Intercept is off. Toggle it on to pause requests before forwarding.");
+      els.interceptMeta.textContent = feedback.message;
     }
     if (els.interceptRequestCM) {
       setInterceptPaneContent("interceptReq", els.interceptRequestCM, "", {
         mode: "http", readOnly: false,
         placeholder: feedback.loading ? "Loading selected request details…"
-          : feedback.error ? "Could not load request details. Use Retry detail." : "Intercepted request will appear here...",
+          : feedback.error ? "Could not load request details. Use Retry detail." : "",
       });
     } else {
       els.interceptRequestEditor.value = "";
       els.interceptRequestEditor.placeholder = feedback.loading ? "Loading selected request details…"
-        : feedback.error ? "Could not load request details. Use Retry detail." : "Intercepted request will appear here...";
+        : feedback.error ? "Could not load request details. Use Retry detail." : "";
       renderInterceptRequestHighlight("");
     }
     els.forwardInterceptButton.disabled = true;
@@ -14284,13 +14450,13 @@ function renderIntercepts() {
   }
 
   if (state.interceptQueueTab === "request") {
-    els.interceptDetailPath.textContent = `${state.selectedInterceptRecord.request.scheme.toUpperCase()} / ${state.selectedInterceptRecord.peer_addr}`;
-    els.interceptDetailTitle.textContent = `${state.selectedInterceptRecord.request.method} ${state.selectedInterceptRecord.request.host}`;
+    const { request, peer_addr: client, is_websocket: websocket } = state.selectedInterceptRecord;
+    els.interceptDetailTitle.textContent = `${request.method} ${request.scheme}://${displayHost(request.host, request.scheme)}${request.path || "/"}`;
     els.interceptMeta.textContent = feedback.message || [
-      state.selectedInterceptRecord.is_websocket ? "WebSocket upgrade" : "HTTP request",
-      `queued at ${formatTimestamp(state.selectedInterceptRecord.started_at)}`,
-      state.selectedInterceptRecord.request.preview_truncated ? "captured request body is preview-truncated" : "body captured in memory",
-    ].join(" · ");
+      `Client ${client}`,
+      websocket && "WebSocket upgrade",
+      request.preview_truncated && "Captured preview is truncated",
+    ].filter(Boolean).join(" · ");
   }
   // Polling refreshes the held record, but the editor owns its draft until the
   // selection changes. Losing focus (including to search) must not re-seed it.
@@ -14323,13 +14489,10 @@ function renderWebsocketSessionTable(sortedEntries = getSortedWebsocketEntries()
   }
   els.websocketMeta.textContent = buildWebsocketFilterSummary(
     sortedEntries.length,
-    windowed.renderedEntries.length,
     state.websocketSessions.length,
-    state.websocketPaging?.total ?? state.websocketSessions.length,
     state.websocketPaging?.filteredTotal ?? null,
     Boolean(state.websocketPaging?.hasMore),
     Boolean(state.websocketPaging?.capReached),
-    state.websocketQuery,
   );
 
   updateWebsocketSortIndicators();
@@ -14341,10 +14504,10 @@ function renderWebsocketSessionTable(sortedEntries = getSortedWebsocketEntries()
             state.websocketListError
               ? `WebSocket history filter error: ${state.websocketListError}`
               : (state.websocketPaging?.loading
-                ? "Loading WebSocket sessions..."
+                ? "Loading WebSocket sessions…"
                 : (state.websocketSessions.length || websocketFilterIsActive()
               ? (websocketFilterIsActive() && state.websocketPaging?.hasMore
-                ? "Loading more matching WebSocket sessions..."
+                ? "Loading more matching WebSocket sessions…"
                 : (websocketFilterIsActive() && state.websocketPaging?.capReached
                   ? "WebSocket history cap reached for this filter."
                   : "No WebSocket sessions match the current filter."))
@@ -14427,7 +14590,7 @@ function renderWebsocketSessions(options = {}) {
     }
     const noSessionMsg = state.selectedWebsocketDetailError
       || (detailLoading
-        ? "Loading selected WebSocket session..."
+        ? "Loading selected WebSocket session…"
         : (state.websocketSessions.length && !sortedEntries.length
           ? "No WebSocket session matches the current filter."
           : "Select a WebSocket session."));
@@ -14443,10 +14606,10 @@ function renderWebsocketSessions(options = {}) {
         state.selectedWebsocketDetailError
           ? "Select the session again or wait for the next refresh."
           : (detailLoading
-            ? "Loading captured frames..."
+            ? "Loading captured frames…"
             : (state.websocketSessions.length && !sortedEntries.length
               ? "Clear or adjust the filter to inspect captured frames."
-              : "Frame capture will appear here after a WebSocket handshake completes."))
+              : "No frames."))
         }</td>
       </tr>
     `;
@@ -14554,7 +14717,7 @@ function renderWebsocketFrameTable(options = {}) {
             <td colspan="5">
               Showing ${frames.length} loaded frame${frames.length === 1 ? "" : "s"} (${olderFrameNotice}).
               ${canLoadOlderFrames
-                ? `<button type="button" class="link-button${olderFramesLoading ? " disabled" : ""}" data-ws-load-older-frames ${olderFramesLoading ? "disabled" : ""}>${olderFramesLoading ? "Loading..." : "Load older frames"}</button>`
+                ? `<button type="button" class="link-button${olderFramesLoading ? " disabled" : ""}" data-ws-load-older-frames ${olderFramesLoading ? "disabled" : ""}>${olderFramesLoading ? "Loading…" : "Load older frames"}</button>`
                 : ""}
             </td>
           </tr>`
@@ -14625,28 +14788,15 @@ function selectWebsocketFrameRow(row) {
   return true;
 }
 
-function buildWebsocketFilterSummary(visibleCount, renderedCount, loadedCount, totalCount, filteredCount, hasMore, capReached, query) {
-  const visibleLabel = renderedCount < visibleCount
-    ? `${renderedCount}/${visibleCount} session${visibleCount === 1 ? "" : "s"} shown`
-    : `${visibleCount} session${visibleCount === 1 ? "" : "s"} visible`;
-  const parts = [visibleLabel];
-  const filters = [];
-  if (state.websocketInScopeOnly) filters.push("in scope");
-  if (state.websocketLiveOnly) filters.push("live only");
-  if (query) filters.push(query);
-  if (filters.length) parts.push(`filter: ${filters.join(", ")}`);
-  if (isKnownCount(filteredCount)) {
-    parts.push((hasMore || capReached)
-      ? `${loadedCount}/${filteredCount} matching sessions loaded${capReached ? " (cap reached)" : ""}`
-      : `${filteredCount} matching of ${totalCount || filteredCount} total`);
-  } else if (totalCount) {
-    parts.push((hasMore || capReached)
-      ? `${loadedCount}/${totalCount} sessions loaded${capReached ? " (cap reached)" : ""}`
-      : `${totalCount} retained`);
-  } else {
-    parts.push("No sessions captured yet");
-  }
-  return parts.join(" · ");
+// How many sessions match, as History counts requests. The search box, In
+// scope and Live only show their own state beside it.
+function buildWebsocketFilterSummary(visibleCount, loadedCount, filteredCount, hasMore, capReached) {
+  const exact = isKnownCount(filteredCount);
+  const count = exact ? filteredCount : visibleCount;
+  const more = !exact && (hasMore || capReached);
+  const label = `${count.toLocaleString()}${more ? "+" : ""} session${count === 1 && !more ? "" : "s"}`;
+  // The list stops loading at a cap; past it, say how many it holds.
+  return capReached ? `${label} · first ${loadedCount.toLocaleString()} listed` : label;
 }
 
 function centeredWindow(items, selectedPosition, maxItems) {
@@ -15515,11 +15665,10 @@ function renderOastSettingsControls(options = {}) {
     els.proxySettingOastClearToken.textContent = state.oastTokenClearPending ? "Clearing" : "Clear";
   }
   if (els.proxySettingOastTokenHint) {
+    // The placeholder already says whether a token is saved and that it is optional.
     els.proxySettingOastTokenHint.textContent = state.oastTokenClearPending
       ? "Token will be cleared when settings are saved."
-      : tokenConfigured
-        ? "Leave blank to keep the saved token, or clear it explicitly."
-        : "Enter a token only if your OAST server requires one.";
+      : "";
   }
   if (hydrateValues && oastInterval && document.activeElement !== oastInterval) {
     oastInterval.value = state.runtime.oast_polling_interval_secs || 5;
@@ -15532,9 +15681,9 @@ function renderOastSettingsControls(options = {}) {
   }
   if (oastUrlHint) {
     const hints = {
-      interactsh: "Interactsh server. Sniper auto-registers with RSA encryption and polls for callbacks.",
-      boast: "BOAST server. Sniper polls the /events endpoint for callbacks.",
-      custom: "Custom OAST server. Sniper polls {url}/poll for JSON callbacks.",
+      interactsh: "Sniper registers with it and polls for callbacks.",
+      boast: "Sniper polls its /events endpoint for callbacks.",
+      custom: "Sniper polls {url}/poll for JSON callbacks.",
     };
     oastUrlHint.textContent = hints[prov] || hints.custom;
   }
@@ -15566,7 +15715,7 @@ function renderReplay(options = {}) {
     if (els.replayRequestCM) {
       updateCodePaneCM("replayReq", els.replayRequestCM, "", {
         mode: "http", readOnly: false,
-        placeholder: "Paste or type an HTTP request here...",
+        placeholder: "Paste or type an HTTP request here…",
         onChange: syncReplayRequestTextFromEditor,
       });
     } else {
@@ -15785,7 +15934,7 @@ function replayRequestEditorText(draft) {
   const text = draft || "";
   if (state.replayMessageViews.request !== "pretty") return text;
   const normalized = text.replace(/\r\n/g, "\n");
-  const pretty = prettyFormat(normalized, {});
+  const pretty = prettyFormat(normalized, {}, { jsonLines: false });
   return pretty === normalized ? text : pretty;
 }
 
@@ -16220,13 +16369,14 @@ function renderMatchReplaceRules() {
   const selected = getSelectedMatchReplaceRule();
   els.matchReplaceTableBody.innerHTML = state.matchReplaceRules.length
     ? state.matchReplaceRules
-        .map((rule) => {
+        .map((rule, index) => {
           const active = rule.id === state.selectedMatchReplaceRuleId ? "selected" : "";
+          const controlContext = escapeHtml(`rule ${index + 1}: ${rule.scope} / ${rule.target}`);
           return `
             <tr class="history-row ${active}" data-id="${rule.id}">
-              <td><label class="mini-toggle"><input type="checkbox" data-rule-toggle="${rule.id}" ${matchReplaceRuleActivity(rule) ? "checked" : ""} /><span class="mini-toggle-track"></span></label></td>
+              <td><label class="mini-toggle"><input type="checkbox" aria-label="Enable ${controlContext}" data-rule-toggle="${rule.id}" ${matchReplaceRuleActivity(rule) ? "checked" : ""} /><span class="mini-toggle-track"></span></label></td>
               <td>${escapeHtml(rule.scope)}</td>
-              <td>${escapeHtml(rule.target)}</td>
+              <td><button type="button" class="match-replace-edit-rule" aria-label="Edit ${controlContext}">${escapeHtml(rule.target)}</button></td>
               <td class="text-truncate" title="${escapeHtml(rule.search || "")}">${escapeHtml(rule.search || "—")}</td>
               <td class="text-truncate" title="${escapeHtml(matchReplaceRuleActions(rule))}">${escapeHtml(matchReplaceRuleActions(rule))}</td>
               <td>${rule.regex ? "✓" : ""}</td>
@@ -16244,6 +16394,7 @@ function renderMatchReplaceRules() {
   Array.from(els.matchReplaceTableBody.querySelectorAll(".history-row")).forEach((row) => {
     row.addEventListener("click", (event) => {
       if (event.target.closest(".mini-toggle")) return;
+      const editButton = event.target.closest(".match-replace-edit-rule");
       // A new rule left empty goes away rather than waiting to be saved blank.
       const untouched = untouchedNewMatchReplaceRule();
       if (untouched && untouched.id !== row.dataset.id) {
@@ -16251,6 +16402,8 @@ function renderMatchReplaceRules() {
       }
       state.selectedMatchReplaceRuleId = row.dataset.id;
       renderMatchReplaceRules();
+      // The table button is replaced by rendering; continue in the stable editor.
+      if (editButton) els.matchReplaceSearch.focus();
     });
   });
 
@@ -16286,7 +16439,6 @@ function renderMatchReplaceRules() {
   updateMatchReplaceSaveState();
   if (!selected) return;
 
-  els.matchReplaceEditorPath.textContent = `${selected.scope} / ${selected.target}`;
   els.matchReplaceEditorTitle.textContent = matchReplaceRuleTitle(selected);
   els.matchReplaceScope.value = selected.scope;
   els.matchReplaceTarget.value = selected.target;
@@ -16954,8 +17106,11 @@ async function refreshFuzzerSavedRuns() {
   const generation = ++workflow.listGeneration;
   const ownsRead = fuzzerSavedReadOwner(workflow, generation, "listGeneration");
   workflow.listBusy = true;
-  const loadingNotice = "Loading retained runs...";
-  workflow.notice = loadingNotice;
+  const loadingNotice = "Loading retained runs…";
+  // Refresh may update the picker while View/Reuse is pending, but must not
+  // hide that read's progress or its eventual failure/confirmation notice.
+  const preserveReadNotice = workflow.readBusy;
+  if (!preserveReadNotice) workflow.notice = loadingNotice;
   renderFuzzerResultsWorkflow();
   try {
     const response = await fetch(sessionQueryPath("/api/fuzzer/attacks", workflow.sessionId));
@@ -16964,20 +17119,25 @@ async function refreshFuzzerSavedRuns() {
     const runs = await response.json();
     if (!ownsRead()) return;
     workflow.runs = jsonArray(runs).filter((run) => typeof run?.id === "string" && run.id);
-    if (!workflow.runs.some((run) => run.id === workflow.selectedRunId)) {
+    const selectionUnavailable = !workflow.runs.some((run) => run.id === workflow.selectedRunId);
+    const selectionRemoved = !!workflow.selectedRunId && selectionUnavailable;
+    if (selectionUnavailable) {
       workflow.selectedRunId = "";
       workflow.readGeneration += 1;
       workflow.readBusy = false;
     }
-    workflow.notice = workflow.runs.length
-      ? `${workflow.runs.length} retained run${workflow.runs.length === 1 ? "" : "s"}. View keeps the current draft; Reuse asks before replacing it.`
-      : "No retained fuzzer runs are available in this session.";
+    if (!preserveReadNotice || selectionUnavailable) {
+      workflow.notice = workflow.runs.length
+        ? preserveReadNotice && selectionRemoved ? "The selected run is no longer listed. Choose another retained run."
+          : `${workflow.runs.length} retained run${workflow.runs.length === 1 ? "" : "s"}. View keeps the current draft; Reuse asks before replacing it.`
+        : "No retained fuzzer runs are available in this session.";
+    }
   } catch (error) {
-    if (ownsRead()) workflow.notice = error?.message || "Failed to list saved fuzzer runs.";
+    if (ownsRead() && !preserveReadNotice) workflow.notice = error?.message || "Failed to list saved fuzzer runs.";
   } finally {
     if (workflow === state.fuzzerResultsWorkflow && workflow.listGeneration === generation) {
       workflow.listBusy = false;
-      if (workflow.notice === loadingNotice) workflow.notice = "";
+      if (!preserveReadNotice && workflow.notice === loadingNotice) workflow.notice = "";
       renderFuzzerResultsWorkflow();
     }
   }
@@ -17023,7 +17183,7 @@ async function readFuzzerSavedRun(action) {
   const ownsRead = fuzzerSavedReadOwner(workflow, generation, "readGeneration");
   const ownsSelection = () => workspaceLoaded && ownsRead() && workflow.selectedRunId === recordId;
   workflow.readBusy = true;
-  const loadingNotice = "Loading saved run...";
+  const loadingNotice = "Loading saved run…";
   workflow.notice = loadingNotice;
   renderFuzzerResultsWorkflow();
   try {
@@ -17150,7 +17310,10 @@ function renderFuzzerResultsVirtual() {
     const validation = fuzzerResultFilterValidation();
     renderEmptyFuzzerResults(!validation.valid ? `Fix the result filters. ${validation.message}`
       : jsonArray(state.fuzzerAttackRecord?.results).length
-        ? "No results match these filters." : "No fuzzer results are available for this run.", results);
+        ? "No results match these filters."
+        : !state.fuzzerAttackRecord
+          ? state.fuzzerNotice || "Results appear here after running."
+          : "No fuzzer results are available for this run.", results);
     return;
   }
   const shell = fuzzerResultsShell();
@@ -17346,7 +17509,7 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
     }
     if (response.status === 404) {
       clearFuzzerAttackRecord();
-      if (!state.fuzzerNotice || state.fuzzerNotice === "Loading saved fuzzer run...") {
+      if (!state.fuzzerNotice || state.fuzzerNotice === "Loading saved fuzzer run…") {
         state.fuzzerNotice = "Saved fuzzer run is no longer available.";
       }
       scheduleWorkspaceStateSave();
@@ -17365,7 +17528,7 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
     if (!attackRecord) {
       return;
     }
-    if (state.fuzzerNotice === "Loading saved fuzzer run...") {
+    if (state.fuzzerNotice === "Loading saved fuzzer run…") {
       state.fuzzerNotice = "";
     }
     await followRestoredFuzzerAttack(attackRecord, expectedSessionId, ownsLoad);
@@ -17375,7 +17538,7 @@ async function hydrateFuzzerAttackRecordById(recordId, sessionId) {
       return;
     }
     console.error(error);
-    if (!state.fuzzerNotice || state.fuzzerNotice === "Loading saved fuzzer run...") {
+    if (!state.fuzzerNotice || state.fuzzerNotice === "Loading saved fuzzer run…") {
       state.fuzzerNotice = error?.message || "Failed to load saved fuzzer run.";
     }
     renderFuzzer();
@@ -17426,7 +17589,7 @@ async function showFuzzerResultDetail(transactionId, selectionKey = `tx:${transa
   if (detailResizer) detailResizer.classList.remove("hidden");
   state._fuzzerDetailRecord = null;
   if (els.fuzzerDetailResponseMeta) els.fuzzerDetailResponseMeta.textContent = "";
-  updateCodePaneCM("fuzzerDetailReq", els.fuzzerDetailReqCM, "Loading transaction...", { mode: "http" });
+  updateCodePaneCM("fuzzerDetailReq", els.fuzzerDetailReqCM, "Loading transaction…", { mode: "http" });
   clearFuzzerResponsePane();
 
   try {
@@ -18000,8 +18163,9 @@ function renderFuzzerTransport(raw = fuzzerRequestTextForAction(), template = un
   select.disabled = transport.disabled;
   const help = fuzzerSetupNode("fuzzerTransportHelp");
   if (help) {
-    help.textContent = transport.help;
-    help.classList.toggle("hidden", !transport.help);
+    const message = workspaceLoaded && !raw.trim() ? "" : transport.help;
+    help.textContent = message;
+    help.classList.toggle("hidden", !message);
   }
 }
 
@@ -18049,10 +18213,10 @@ function renderFuzzerSetup() {
   const raw = fuzzerRequestTextForAction();
   // Source encoding still applies when the edited body cannot be parsed.
   const bodyEncodingHelp = workspaceLoaded && state.fuzzerBaseRequest?.body_encoding === "base64"
-    ? "Body format: base64. Select a header or query value, then Add §." : "";
+    ? "Base64 body · header and query positions only" : "";
   const requestHelp = fuzzerSetupNode("fuzzerRequestHelp");
   if (requestHelp) requestHelp.textContent = bodyEncodingHelp
-    ? `Raw HTTP request · ${bodyEncodingHelp}` : "Raw HTTP request · select a value, then Add §";
+    ? bodyEncodingHelp : "";
   const select = fuzzerSetupNode("fuzzerCandidateSelect");
   let candidates = [];
   let template = null;
@@ -18126,8 +18290,8 @@ function renderFuzzerSetup() {
     return;
   }
   if (!model) {
-    summary.textContent = raw.trim() ? `${fuzzerPayloadCount(state.fuzzerPayloadsText || "")} payloads` : "No request selected.";
-    notice.textContent = raw.trim() ? error : "Paste a raw HTTP request, or send one from History / Replay.";
+    summary.textContent = raw.trim() ? `${fuzzerPayloadCount(state.fuzzerPayloadsText || "")} payloads` : "";
+    notice.textContent = raw.trim() ? error : "";
     notice.classList?.toggle("fuzzer-notice-error", !!raw.trim() && !!error);
     if (previewNotes) previewNotes.textContent = bodyEncodingHelp;
     if (samples) samples.textContent = "Add a valid request and payloads to preview.";
@@ -18746,6 +18910,49 @@ function initFuzzerResizers() {
       detailPanel.style.flex = "";
     });
   }
+}
+
+function confirmFuzzerReset() {
+  if (!workspaceLoaded || state.fuzzerRunning || state.fuzzerRunningAttackId) return false;
+  const requestText = fuzzerRequestTextForAction();
+  const resetText = state.fuzzerBaseRequest ? buildEditableRawRequest(state.fuzzerBaseRequest) : "";
+  const savedRequestText = state.fuzzerRequestText;
+  const savedPayloadsText = state.fuzzerPayloadsText;
+  const currentPayloadsText = () => String(els.fuzzerPayloadsEditor?.value ?? state.fuzzerPayloadsText ?? "");
+  const payloadsText = currentPayloadsText();
+  const hasResults = state.fuzzerAttackRecord || state.fuzzerAttackRecordId
+    || state._selectedFuzzerResultKey || state._fuzzerDetailRecord;
+  if (requestText === resetText && !payloadsText && !savedPayloadsText && !hasResults) return resetFuzzer();
+
+  const sessionId = currentSessionId();
+  const workspaceGeneration = workspaceStateGeneration;
+  const draftVersion = state.fuzzerDraftVersion || 0;
+  const runToken = state.fuzzerRunToken || 0;
+  const resultGeneration = _fuzzerAttackLoadGeneration;
+  const detailGeneration = _fuzzerDetailGeneration;
+  const selectedResult = state._selectedFuzzerResultKey;
+  const workflow = fuzzerResultsWorkflowState();
+  // Accepted external drafts can change back to identical text without moving
+  // the local draft/run counters. Their existing read owner still retires them.
+  const readGeneration = workflow.readGeneration;
+  showConfirmDialog(
+    "Reset the request template, clear the payload list, and hide the current results?\n\nConnection overrides, run options, and saved runs will be kept.",
+    () => {
+      if (!workspaceLoaded || state.fuzzerRunning || state.fuzzerRunningAttackId
+        || currentSessionId() !== sessionId || workspaceStateGeneration !== workspaceGeneration
+        || (state.fuzzerDraftVersion || 0) !== draftVersion || (state.fuzzerRunToken || 0) !== runToken
+        || _fuzzerAttackLoadGeneration !== resultGeneration || _fuzzerDetailGeneration !== detailGeneration
+        || state._selectedFuzzerResultKey !== selectedResult
+        || state.fuzzerResultsWorkflow !== workflow || workflow.readGeneration !== readGeneration
+        || fuzzerRequestTextForAction() !== requestText || currentPayloadsText() !== payloadsText
+        || state.fuzzerRequestText !== savedRequestText || state.fuzzerPayloadsText !== savedPayloadsText) {
+        showToast("Reset canceled because the Fuzzer draft, results, or workspace changed. Review them and try again.", "info");
+        return false;
+      }
+      return resetFuzzer();
+    },
+    { title: "Reset Fuzzer draft?", confirmLabel: "Reset draft" },
+  );
 }
 
 function resetFuzzer() {
@@ -19654,7 +19861,7 @@ async function runCurrentSequence() {
 
     const runBtn = document.getElementById("runSequenceButton");
     runBtn.disabled = true;
-    runBtn.textContent = "Running...";
+    runBtn.textContent = "Running…";
 
     const response = await fetch(`/api/sequences/${runSequenceId}/run`, {
       method: "POST",
@@ -19714,7 +19921,7 @@ function syncSequenceRunButton() {
   const editing = state.editingSequence;
   const sequenceRunning = Boolean(state.sequenceRunning);
   runBtn.disabled = sequenceRunning || !editing || !editing.steps?.length;
-  runBtn.textContent = sequenceRunning ? "Running..." : "Run";
+  runBtn.textContent = sequenceRunning ? "Running…" : "Run";
 }
 
 function renderSequenceList() {
@@ -20757,7 +20964,7 @@ function renderResponseIntercepts() {
             <tr class="history-row ${selected}" data-id="${item.id}">
               <td class="iq-col-status">${escapeHtml(String(item.status))}</td>
               <td class="iq-col-method">${escapeHtml(item.method)}</td>
-              <td class="iq-col-host text-truncate">${escapeHtml(item.host)}</td>
+              <td class="iq-col-host text-truncate">${escapeHtml(displayHost(item.host, item.scheme))}</td>
               <td class="iq-col-path text-truncate">${escapeHtml(item.path || "/")}</td>
               <td class="iq-col-time">${escapeHtml(formatTimestamp(item.started_at))}</td>
             </tr>
@@ -20766,7 +20973,7 @@ function renderResponseIntercepts() {
         .join("")
     : `
         <tr class="empty-row">
-          <td colspan="5">Response intercept queue is empty.</td>
+          <td colspan="5">No held responses.</td>
         </tr>
       `;
 
@@ -20783,22 +20990,19 @@ function renderResponseIntercepts() {
       setInterceptPaneContent("interceptRes", els.interceptResponseCM, "", {
         mode: "http", readOnly: false,
         placeholder: feedback.loading ? "Loading selected response details…"
-          : feedback.error ? "Could not load response details. Use Retry detail." : "Intercepted response will appear here...",
+          : feedback.error ? "Could not load response details. Use Retry detail." : "",
       });
     } else {
       els.interceptResponseEditor.value = "";
       els.interceptResponseEditor.placeholder = feedback.loading ? "Loading selected response details…"
-        : feedback.error ? "Could not load response details. Use Retry detail." : "Intercepted response will appear here...";
+        : feedback.error ? "Could not load response details. Use Retry detail." : "";
       renderInterceptResponseHighlight("");
     }
     if (state.interceptQueueTab === "response") {
       const selected = filteredResponseIntercepts.find((item) => item.id === state.selectedResponseInterceptId);
-      els.interceptDetailPath.textContent = selected ? `${selected.status} / ${selected.method} ${selected.host}${selected.path || "/"}` : "Response Intercept";
       els.interceptDetailTitle.textContent = selected
         ? (feedback.error ? "Could not load response" : "Loading response…") : "No response selected";
-      els.interceptMeta.textContent = feedback.message || (state.runtime?.intercept_enabled
-        ? "Intercept is on. Matched responses will queue here."
-        : "Intercept is off. Toggle it on to pause responses before forwarding.");
+      els.interceptMeta.textContent = feedback.message;
     }
     els.forwardResponseInterceptButton.disabled = true;
     els.dropResponseInterceptButton.disabled = true;
@@ -20807,8 +21011,7 @@ function renderResponseIntercepts() {
 
   const rec = state.selectedResponseInterceptRecord;
   if (state.interceptQueueTab === "response") {
-    els.interceptDetailPath.textContent = `${rec.scheme.toUpperCase()} / ${rec.method} ${rec.host}${rec.path}`;
-    els.interceptDetailTitle.textContent = `${rec.status} Response`;
+    els.interceptDetailTitle.textContent = `${rec.status} · ${rec.method} ${rec.scheme}://${displayHost(rec.host, rec.scheme)}${rec.path || "/"}`;
     // As with requests, preserve this record's draft and search state on polls.
     if (els.interceptResponseCM) {
       if (state.responseInterceptEditorSeedId !== rec.id) {
@@ -20826,7 +21029,7 @@ function renderResponseIntercepts() {
       }
       renderInterceptResponseHighlight(els.interceptResponseEditor.value);
     }
-    els.interceptMeta.textContent = feedback.message || `Response queued at ${formatTimestamp(rec.started_at)}`;
+    els.interceptMeta.textContent = feedback.message;
   }
   els.forwardResponseInterceptButton.disabled = false;
   els.dropResponseInterceptButton.disabled = false;
@@ -20913,8 +21116,8 @@ async function dropSelectedResponseIntercept() {
 function updateInterceptQueueBadges() {
   const reqCount = state.intercepts.length;
   const resCount = state.responseIntercepts.length;
-  els.interceptQueueTabRequest.textContent = reqCount > 0 ? `Request Queue (${reqCount})` : "Request Queue";
-  els.interceptQueueTabResponse.textContent = resCount > 0 ? `Response Queue (${resCount})` : "Response Queue";
+  els.interceptQueueTabRequest.textContent = reqCount > 0 ? `Requests (${reqCount})` : "Requests";
+  els.interceptQueueTabResponse.textContent = resCount > 0 ? `Responses (${resCount})` : "Responses";
 }
 
 /** Key of the intercept CM pane that is currently visible. */
@@ -21556,7 +21759,7 @@ async function followRedirect() {
   tab.requestBytes = null;
   tab.requestOriginalBytes = null;
   tab.responseRecord = null;
-  tab.notice = "Following redirect...";
+  tab.notice = "Following redirect…";
   if (state.replayMessageViews.request === "hex") {
     renderReplayViewContent("request");
   } else if (getCMView("replayReq")) {
@@ -22063,9 +22266,11 @@ function wireReplayTabDragReorder(tabElement, id) {
 }
 
 function renderReplayTabs(options = {}) {
-  const preserveScrollLeft = options.keepScroll
-    ? Array.from(els.replayTabStrip.querySelectorAll(".replay-tab-list"), (row) => row.scrollLeft)
-    : null;
+  // innerHTML below brings every row back at its start. Revealing the active
+  // tab from there pushes one that was already in view to the far edge, so each
+  // row goes back where the operator left it first.
+  const rowScroll = Array.from(els.replayTabStrip.querySelectorAll(".replay-tab-list"),
+    (row) => ({ left: row.scrollLeft, top: row.scrollTop }));
   const focused = document.activeElement;
   const focusedTabId = els.replayTabStrip.contains?.(focused)
     ? focused?.closest?.(".replay-tab")?.dataset.replayTabId : null;
@@ -22088,6 +22293,7 @@ function renderReplayTabs(options = {}) {
     return;
   }
 
+  els.replayTabStrip._cancelReplayRenameFocus?.();
   const tabMarkup = (tab) => {
     const isActive = tab.id === state.activeReplayTabId;
     const active = isActive ? "active" : "";
@@ -22120,6 +22326,10 @@ function renderReplayTabs(options = {}) {
   els.replayTabStrip.innerHTML =
     `<div class="replay-tab-list replay-tab-list-pinned" data-replay-tab-row="pinned" aria-label="Pinned tabs">${pinnedTabs.map(tabMarkup).join("")}</div>`
     + `<div class="replay-tab-list" data-replay-tab-row="tabs">${otherTabs.map(tabMarkup).join("")}</div>`;
+  // With every tab pinned there is no tab row to start a second line, so the
+  // pinned tabs share theirs with + and the gear. Set here rather than with
+  // :has(), so the layout holds while a drag moves a tab between the rows.
+  els.replayTabStrip.classList.toggle("all-pinned", pinnedTabs.length > 0 && !otherTabs.length);
 
   Array.from(els.replayTabStrip.querySelectorAll(".replay-tab")).forEach((tabElement) => {
     const id = tabElement.dataset.replayTabId;
@@ -22211,11 +22421,27 @@ function renderReplayTabs(options = {}) {
       nameInput.addEventListener("blur", () => {
         if (ownsRename()) commitReplayTabRename(id, nameInput.value);
       });
+      const initialFocus = document.activeElement;
+      let focusPending = true;
+      const retireFocus = () => {
+        focusPending = false;
+        document.removeEventListener("focusin", onFocusIn, true);
+        if (els.replayTabStrip._cancelReplayRenameFocus === retireFocus) els.replayTabStrip._cancelReplayRenameFocus = null;
+      };
+      // A modal can return focus to this same editor before the frame runs.
+      // Retire on the intervening move, not just a different final element.
+      const onFocusIn = (event) => { if (event.target !== initialFocus) retireFocus(); };
+      els.replayTabStrip._cancelReplayRenameFocus = retireFocus;
+      document.addEventListener("focusin", onFocusIn, true);
       requestAnimationFrame(() => {
-        if (ownsRename()) {
-          nameInput.focus();
-          nameInput.select();
-        }
+        if (!focusPending) return;
+        retireFocus();
+        if (!ownsRename() || state.activeTool !== "replay" || getActiveModalAction()
+          || document.activeElement === nameInput || document.activeElement !== initialFocus
+          || !nameInput.isConnected || nameInput.disabled || nameInput.tabIndex < 0
+          || !nameInput.getClientRects().length || window.getComputedStyle(nameInput).visibility === "hidden") return;
+        nameInput.focus();
+        nameInput.select();
       });
     }
     tabElement.querySelector(".replay-tab-button")?.addEventListener("click", () => {
@@ -22239,17 +22465,14 @@ function renderReplayTabs(options = {}) {
     });
   });
 
+  els.replayTabStrip.querySelectorAll(".replay-tab-list").forEach((row, index) => {
+    row.scrollLeft = rowScroll[index]?.left || 0;
+    row.scrollTop = rowScroll[index]?.top || 0;
+  });
   // Reordering is the one re-render the operator did not ask to be scrolled by:
   // the tab they dragged is usually not the active one, so jumping to the active
-  // tab throws the strip somewhere they were not looking. Put the scroll back
-  // where innerHTML dropped it instead.
-  if (preserveScrollLeft) {
-    els.replayTabStrip.querySelectorAll(".replay-tab-list").forEach((row, index) => {
-      row.scrollLeft = preserveScrollLeft[index] || 0;
-    });
-  } else {
-    scrollActiveReplayTabIntoView();
-  }
+  // tab throws the strip somewhere they were not looking.
+  if (!options.keepScroll) scrollActiveReplayTabIntoView();
 
   // Rebuilding the strip detaches its focused button. Keep keyboard actions on
   // their logical control, without taking focus from an editor or newer dialog.
@@ -22907,7 +23130,24 @@ function validateManualRepeaterTargetInput(host, port) {
       }
     } else if (/[/?#]/.test(rawHost)) {
       hostError = "Target host must not include path, query, or fragment.";
-    } else if (rawHost.includes(":") && !isLikelyIpv6Literal(rawHost)) {
+    } else if (/[\[\]]/.test(rawHost) || isLikelyIpv6Literal(rawHost)) {
+      const invalidIpMessage = "Target host is not a valid IPv6 address. Use IPv4 without brackets.";
+      const closingBracket = rawHost.indexOf("]");
+      const bracketed = rawHost.startsWith("[") && closingBracket >= 0;
+      const address = bracketed ? rawHost.slice(0, closingBracket + 1) : `[${rawHost}]`;
+      try {
+        // Check runnable IP-literal syntax without normalizing the user's draft.
+        // Raw IPv6's final numeric segment is an address, not a separate port.
+        new URL(`http://${address}`);
+        if (bracketed && closingBracket !== rawHost.length - 1) {
+          hostError = rawHost[closingBracket + 1] === ":"
+            ? "Target host must not include a port; use the Port field."
+            : invalidIpMessage;
+        }
+      } catch (_error) {
+        hostError = invalidIpMessage;
+      }
+    } else if (rawHost.includes(":")) {
       hostError = "Target host must not include a port; use the Port field.";
     }
   }
@@ -23610,8 +23850,8 @@ function wireTabIndicator(strip) {
     // from wherever the indicator happened to be.
     if (!placed) indicator.style.transition = "none";
     indicator.style.opacity = "1";
-    indicator.style.left = `${active.offsetLeft}px`;
-    indicator.style.top = `${active.offsetTop}px`;
+    // A transform slides without re-running layout on every frame.
+    indicator.style.transform = `translate(${active.offsetLeft}px, ${active.offsetTop}px)`;
     indicator.style.width = `${active.offsetWidth}px`;
     indicator.style.height = `${active.offsetHeight}px`;
     if (!placed) {
@@ -23755,11 +23995,11 @@ function renderCliPathUi() {
   const button = document.getElementById("installCliPathButton");
   if (button) {
     button.disabled = busy || !cliPathCanInstall();
-    button.textContent = cliPathState.action === "install" ? "Adding to PATH..." : "Add sniper-cli to PATH";
+    button.textContent = cliPathState.action === "install" ? "Adding to PATH…" : "Add sniper-cli to PATH";
   }
   const refresh = document.getElementById("refreshCliPathButton");
   if (refresh) refresh.disabled = busy;
-  const message = cliPathState.message || cliPathState.status?.message || "Checking command-line availability...";
+  const message = cliPathState.message || cliPathState.status?.message || "Checking command-line availability…";
   for (const id of ["installCliPathStatus", "cliPathBannerStatus"]) {
     const element = document.getElementById(id);
     if (!element) continue;
@@ -23799,7 +24039,7 @@ function loadCliPathStatus({ allowPrompt = false } = {}) {
   const controller = new AbortController();
   cliPathState.readController = controller;
   cliPathState.loading = true;
-  cliPathState.message = "Checking command-line availability...";
+  cliPathState.message = "Checking command-line availability…";
   cliPathState.error = false;
   renderCliPathUi();
   const current = () => !cliPathState.disposed && requestId === cliPathState.readId;
@@ -23844,7 +24084,7 @@ async function installCliPath() {
   // A decision suppresses another prompt even if the response is lost. The
   // server persists the same decision before attempting any PATH changes.
   cliPathState.decided = true;
-  cliPathState.message = "Adding bundled sniper-cli to PATH...";
+  cliPathState.message = "Adding bundled sniper-cli to PATH…";
   cliPathState.error = false;
   if (cliPathState.banner !== "hidden") cliPathState.banner = "working";
   renderCliPathUi();
@@ -23892,7 +24132,7 @@ async function deferCliPath() {
   cliPathState.action = "defer";
   cliPathState.decided = true;
   cliPathState.banner = "working";
-  cliPathState.message = "Saving your choice...";
+  cliPathState.message = "Saving your choice…";
   cliPathState.error = false;
   renderCliPathUi();
   const current = () => !cliPathState.disposed && requestId === cliPathState.actionId;
@@ -23961,8 +24201,6 @@ function openFilterModal(target) {
   const forMap = state.filterModalTarget === "serviceMap";
   const title = document.getElementById?.("filterModalTitle");
   if (title) title.textContent = forMap ? "Service Map filter" : "Filter settings";
-  const kicker = els.filterModal.querySelector?.(".modal-header .placeholder-kicker");
-  if (kicker) kicker.textContent = forMap ? "Scope" : "HTTP";
   // The map keeps scope on its own In scope only toggle.
   els.filterInScopeOnly?.closest?.("label")?.classList.toggle("hidden", forMap);
   filterSettingsReturnFocus = document.activeElement;
@@ -23984,6 +24222,18 @@ function closeFilterModal() {
 
 function isModalVisible(modal) {
   return Boolean(modal) && !modal.classList.contains("hidden");
+}
+
+// Explicit pane dismissal may return to a programmatic-only region without
+// adding a Tab stop or changing the focus policy of background pane cleanup.
+function focusPaneCloseTarget(target) {
+  if (target?.isConnected && !target.disabled
+    && (target.tabIndex >= 0 || target.getAttribute("tabindex") === "-1")
+    && target.getClientRects().length && window.getComputedStyle(target).visibility !== "hidden") {
+    target.focus({ preventScroll: true });
+  } else {
+    restoreModalFocus(null);
+  }
 }
 
 function restoreModalFocus(previous, fallback = document.querySelector(".main-tab.active")) {
@@ -24327,7 +24577,7 @@ function renderHistoryCell(colKey, item, entry) {
       return `<td class="history-index-cell" title="${value}">${value}</td>`;
     }
     case "host":
-      return `<td class="cell-host">${escapeHtml(item.host)}</td>`;
+      return `<td class="cell-host">${escapeHtml(displayHost(item.host, item.scheme))}</td>`;
     case "method":
       return `<td><span class="method-pill ${methodTone(item.method)}">${escapeHtml(item.method)}</span></td>`;
     case "path":
@@ -25094,13 +25344,21 @@ function syncHttpInScopePill() {
 
 // Paused is the state worth announcing: an empty history with capture off looks
 // exactly like an empty history with nothing happening.
-function syncHttpCapturePill() {
+function syncHttpCapturePill({ confirmed = false } = {}) {
+  // Only explicit Capture success or an ownership-accepted runtime GET clears
+  // this local warning. Other settings/workspace refreshes are conservative.
+  if (confirmed) state.httpCaptureUnconfirmedSessions?.delete(currentSessionId());
   const pill = document.getElementById("httpCaptureToggle");
   if (!pill) return;
+  const unconfirmed = state.httpCaptureUnconfirmedSessions?.has(currentSessionId()) || false;
   const capturing = state.runtime?.http_capture_enabled !== false;
-  pill.classList.toggle("active", capturing);
-  pill.classList.toggle("paused", !capturing);
-  pill.textContent = capturing ? "Capturing" : "Paused";
+  pill.classList.toggle("active", capturing && !unconfirmed);
+  pill.classList.toggle("paused", !capturing && !unconfirmed);
+  pill.textContent = unconfirmed ? "Capture unconfirmed" : capturing ? "Capturing" : "Paused";
+  if (unconfirmed) {
+    pill.title = `Capture state is unconfirmed. Last confirmed: ${capturing ? "Capturing" : "Paused"}. Click to request capture ${capturing ? "off" : "on"}. Traffic still passes through.`;
+    return;
+  }
   pill.title = capturing
     ? "Recording proxied traffic. Click to pause; traffic still passes through."
     : "Not recording. Traffic still passes through. Click to resume.";
@@ -25234,21 +25492,29 @@ function serviceMapFilterQuery(filters = sanitizeHttpFilterSettings(state.servic
   return query;
 }
 
-// What the Service Map filter hides, for the map toolbar.
-function serviceMapFilterSummary() {
-  const filters = sanitizeHttpFilterSettings(state.serviceMapFilterSettings);
+// What the filter dialog History and the Service Map share hides, in the same
+// words for both.
+function describeHttpFilters(filters) {
   const parts = [];
-  const extensions = filters.hiddenExtensions.split(",").map((value) => value.trim()).filter(Boolean);
+  const extensions = String(filters.hiddenExtensions || "").split(",").map((value) => value.trim()).filter(Boolean);
   if (extensions.length) parts.push(`hiding ${extensions.slice(0, 3).join(", ")}${extensions.length > 3 ? ` +${extensions.length - 3}` : ""}`);
-  const mimeOff = Object.entries(SERVICE_MAP_FILTER_MIME_LABELS).filter(([key]) => (key === "websocket" ? filters.mime.websocket === false : !filters.mime[key])).map(([, label]) => label);
+  const mimeOff = Object.entries(SERVICE_MAP_FILTER_MIME_LABELS).filter(([key]) => filters.mime?.[key] === false).map(([, label]) => label);
   if (mimeOff.length) parts.push(`no ${mimeOff.join(", ")}`);
-  const statusOff = Object.entries(SERVICE_MAP_FILTER_STATUS_LABELS).filter(([key]) => !filters.status[key]).map(([, label]) => label);
+  const statusOff = Object.entries(SERVICE_MAP_FILTER_STATUS_LABELS).filter(([key]) => filters.status?.[key] === false).map(([, label]) => label);
   if (statusOff.length) parts.push(`no ${statusOff.join(", ")}`);
   if (filters.hideWithoutResponses) parts.push("responses only");
   if (filters.onlyParameterized) parts.push("query parameters only");
   if (filters.onlyNotes) parts.push("notes only");
   if (filters.port) parts.push(`port ${filters.port}`);
   if (filters.searchTerm) parts.push(`${filters.negativeSearch ? "without" : "with"} "${filters.searchTerm}"`);
+  return parts;
+}
+
+// What the Service Map filter hides, for the map toolbar.
+function serviceMapFilterSummary() {
+  const filters = sanitizeHttpFilterSettings(state.serviceMapFilterSettings);
+  const parts = describeHttpFilters(filters);
+  const extensions = filters.hiddenExtensions.split(",").map((value) => value.trim()).filter(Boolean);
   const text = parts.length ? parts.join(" · ") : "showing every row";
   return { text, detail: `Service Map filter: ${text}${extensions.length > 3 ? ` (extensions ${extensions.join(", ")})` : ""}` };
 }
@@ -25805,7 +26071,9 @@ function prettyJsonText(text) {
   return parts.join("");
 }
 
-function prettyFormat(text, message) {
+// `jsonLines: false` is for an editor whose text is sent: spreading a JSON line
+// over several would change a line-delimited stream.
+function prettyFormat(text, message, { jsonLines = true } = {}) {
   if (!message || message.body_encoding === "base64") {
     return text;
   }
@@ -25819,26 +26087,42 @@ function prettyFormat(text, message) {
   const head = text.slice(0, boundary);
   const body = text.slice(boundary + divider.length);
   const contentType = (message.content_type || "").toLowerCase();
-
-  if (contentType.includes("json")) {
+  // Server-sent events, as streamed API replies send them, carry JSON after
+  // "data:" on their own lines.
+  const events = contentType.includes("text/event-stream");
+  // Detect JSON even when Content-Type does not say json.
+  const startsLikeJson = /^\s*[[{]/.test(body);
+  if (!contentType.includes("json") && !startsLikeJson && !events) {
+    return text;
+  }
+  if (!events) {
     try {
       return `${head}${divider}${prettyJsonText(body)}`;
     } catch (_error) {
-      return text;
+      // Not one JSON document.
     }
   }
+  if (!jsonLines || !(startsLikeJson || events) || !body.includes("\n")) {
+    return text;
+  }
 
-  // Fallback: try to detect JSON even if Content-Type doesn't say json
-  const trimmed = body.trimStart();
-  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+  // NDJSON, JSON Lines, a Sentry envelope or an Elasticsearch bulk body: one
+  // JSON document per line, each formatted on its own. A line that is not JSON,
+  // such as an envelope's attachment or an event's "[DONE]", stays as it is.
+  let documents = 0;
+  const lines = body.split("\n").map((line) => {
+    const field = events ? (/^data: ?/.exec(line)?.[0] ?? "") : "";
+    const value = line.slice(field.length);
+    if ((events && !field) || !/^\s*[[{]/.test(value)) return line;
     try {
-      return `${head}${divider}${prettyJsonText(body)}`;
+      const pretty = prettyJsonText(value);
+      documents += 1;
+      return field + pretty;
     } catch (_error) {
-      // not valid JSON, return as-is
+      return line;
     }
-  }
-
-  return text;
+  });
+  return documents > (events ? 0 : 1) ? `${head}${divider}${lines.join("\n")}` : text;
 }
 
 function compactFormat(text) {
@@ -28166,6 +28450,15 @@ function extractHostPort(host) {
   return (value.match(/:/g) || []).length === 1 ? value.split(":")[1] : "";
 }
 
+// A host to show in a table: HTTPS captured through CONNECT keeps the
+// tunnel's "host:443", and the scheme's own port tells nothing the scheme
+// does not. Filters, sorting and copies keep the host as captured.
+function displayHost(host, scheme) {
+  const value = String(host || "").trim();
+  const port = extractHostPort(value);
+  return port && port === defaultSummaryPortForScheme(scheme) ? value.slice(0, -(port.length + 1)) : value;
+}
+
 /** Pre-compute per-item display values and lookup indexes used by the history table. */
 function precomputeItemIndexes() {
   let connectCount = 0;
@@ -28244,26 +28537,6 @@ function countHiddenConnectItems() {
   return state.items.filter((item) => item.method === "CONNECT").length;
 }
 
-function humanizeProxyTab(value) {
-  return value
-    .split("-")
-    .map((segment) => titleCase(segment))
-    .join(" ");
-}
-
-function humanizeSortKey(key) {
-  switch (key) {
-    case "index":
-      return "#";
-    case "started_at":
-      return "time";
-    case "path":
-      return "url";
-    default:
-      return key.replaceAll("_", " ");
-  }
-}
-
 function defaultSortDirection(key) {
   return ["index", "started_at", "status", "length", "notes", "tls", "edited"].includes(key) ? "desc" : "asc";
 }
@@ -28336,11 +28609,6 @@ function formatSize(bytes) {
     index += 1;
   }
   return `${size.toFixed(size >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
-}
-
-function titleCase(value) {
-  const text = String(value || "");
-  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function escapeHtml(value) {
@@ -29505,10 +29773,10 @@ function renderWsSetupQueue() {
     const sentClass = item.sent ? "sent" : "";
     const checked = item.autoSend ? "checked" : "";
     return `<div class="ws-setup-row ${sentClass}" data-idx="${i}">
-      <input type="checkbox" class="ws-setup-check" data-idx="${i}" ${checked} />
+      <input type="checkbox" class="ws-setup-check" data-idx="${i}" aria-label="Auto-send setup message ${i + 1}" ${checked} />
       <span class="ws-setup-index">#${i + 1}</span>
       <span class="ws-setup-label" title="${escapeHtml(item.label)}">${escapeHtml(item.label)}</span>
-      <button class="ws-setup-send" data-idx="${i}" title="Send this message">▶</button>
+      <button class="ws-setup-send" data-idx="${i}" aria-label="Send setup message ${i + 1}" title="Send this message">▶</button>
       ${item.sent ? '<span class="ws-setup-sent-badge">✓</span>' : ""}
     </div>`;
   }).join("");
@@ -29599,7 +29867,7 @@ function renderWsStatus() {
   const status = tab.wsStatus;
   els.wsStatusIndicator.className = `ws-status-dot ${status}`;
   let statusText = status === "connected" ? "Connected"
-    : status === "connecting" ? "Connecting..."
+    : status === "connecting" ? "Connecting…"
     : status === "error" ? `Error: ${tab.wsError || "unknown"}`
     : "Disconnected";
   if (status === "connected" && tab.wsFramesTruncated) {
@@ -30240,8 +30508,8 @@ function renderCompareModal() {
   const targetSequence = compareTargetRecord.sequence ?? targetItem?.sequence ?? targetItem?.index ?? "?";
   const baseLabel = `#${baseSequence} ${compareBaseRecord.method} ${compareBaseRecord.host}${compareBaseRecord.path}`;
   const targetLabel = `#${targetSequence} ${compareTargetRecord.method} ${compareTargetRecord.host}${compareTargetRecord.path}`;
-  document.getElementById("compareKicker").textContent = `${baseLabel}  vs  ${targetLabel}`;
-  document.getElementById("compareTitle").textContent = compareActiveTab === "request" ? "Request Diff" : "Response Diff";
+  // The Request and Response tabs say which side is compared.
+  document.getElementById("compareTitle").textContent = `${baseLabel}  vs  ${targetLabel}`;
   document.querySelectorAll("[data-compare-tab]").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.compareTab === compareActiveTab);
   });
@@ -30644,7 +30912,7 @@ async function beginNoteEdit(cell, transactionId) {
   input.type = "text";
   input.className = "note-inline-input";
   input.value = current;
-  input.placeholder = "Add a note...";
+  input.placeholder = "Add a note…";
   cell.innerHTML = "";
   cell.appendChild(input);
   input.focus();
@@ -31277,7 +31545,7 @@ function sendWsFrameToReplay(frameIdx) {
   }
   const frame = frames.find((candidate) => candidate.index === requestedIndex);
   if (!frame) {
-    showToast("That WebSocket frame is no longer loaded. Refreshing frames...", "error");
+    showToast("That WebSocket frame is no longer loaded. Refreshing frames…", "error");
     state.selectedFrameIdx = null;
     hideFrameDetail();
     if (session.id) {
@@ -31868,7 +32136,7 @@ function copyReplayUrl(tab = getActiveReplayTab()) {
   const match = text.match(/^[A-Z]+\s+(\S+)/i);
   const path = match ? match[1] : "/";
   const url = buildUrlFromTarget(scheme, host, port, path);
-  copyTextToClipboard(url).then(() => showToast("Copied URL")).catch(() => {});
+  copyTextToClipboard(url).then(() => showToast("Copied URL")).catch(() => showToast("Failed to copy", "error"));
 }
 
 function parseCurlCommand(text) {
@@ -32507,7 +32775,7 @@ function initReplayContextMenu() {
         const format = action.replace("copy-as-", "");
         const text = replayRequestToFormat(format, tab);
         if (text) {
-          copyTextToClipboard(text).then(() => showToast(`Copied as ${format}`)).catch(() => {});
+          copyTextToClipboard(text).then(() => showToast(`Copied as ${format}`)).catch(() => showToast("Failed to copy", "error"));
         }
       } else if (action === "import-curl") {
         openCurlImportModal();

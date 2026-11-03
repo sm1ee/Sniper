@@ -6,6 +6,7 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 const { editorFixture, source } = require("./replay-editor-fixture.cjs");
+const { appSource } = require("./frontend-test-helpers.cjs");
 
 const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
 function elementFromHtml(id) {
@@ -114,7 +115,7 @@ test("Capture names remain distinct for no selection, loading and detail-error m
     assert.equal(f.name("request"), "Captured request");
     assert.equal(f.name("response"), "Captured response");
     assert.equal(f.captureView("request").getContent(), status === "empty" ? "Select a transaction from HTTP."
-      : status === "loading" ? "Loading selected transaction..." : "Synthetic detail error");
+      : status === "loading" ? "Loading selected transaction…" : "Synthetic detail error");
     assert.equal(f.captureView("response").getContent(), status === "empty" ? "No response selected."
       : status === "loading" ? "Loading response details." : "Synthetic detail error");
   }
@@ -128,10 +129,95 @@ test("Capture search labels stay unchanged and editor metadata does not spread t
   }
   const labels = {
     requestViewCM: "Captured request", responseViewCM: "Captured response",
+    websocketHandshakeCM: "Captured WebSocket handshake",
     replayRequestCM: "Replay request", replayResponseCM: "Replay response",
     fuzzerDetailReqCM: "Fuzzer result request", fuzzerDetailResCM: "Fuzzer result response",
   };
   for (const match of html.matchAll(/<div id="([^"]+)" class="cm-container"[^>]*>/g)) {
     assert.equal(elementFromHtml(match[1]).getAttribute("data-editor-label"), labels[match[1]] ?? null, match[1]);
   }
+});
+
+function handshakeSetup() {
+  const f = setup();
+  const controls = {};
+  for (const id of ["wsHandshakeReqBtn", "wsHandshakeResBtn"]) {
+    const classes = new Set(id === "wsHandshakeReqBtn" ? ["active"] : []);
+    controls[id] = {
+      listeners: {},
+      classList: { add: name => classes.add(name), remove: name => classes.delete(name), contains: name => classes.has(name) },
+      addEventListener(type, callback) { this.listeners[type] = callback; },
+    };
+  }
+  f.els.websocketHandshakeCM = elementFromHtml("websocketHandshakeCM");
+  f.els.websocketFramesBody = { innerHTML: "" };
+  Object.assign(f.state, { selectedWebsocketId: null, selectedWebsocketRecord: null, websocketSessions: [] });
+  Object.assign(f.context, {
+    getSortedWebsocketEntries: () => f.state.websocketSessions,
+    renderWebsocketSessionTable() {}, renderWebsocketFrameTable() {}, hideFrameDetail() {},
+    cancelWebsocketDetailLoading() {}, updateWsHandshakeLineNumbers() {}, updateWsHandshakeSearch() {},
+    fetch() { assert.fail("Naming a captured handshake must not request data"); },
+    connectWsReplay() { assert.fail("Captured handshake naming must not connect"); },
+    sendWsReplayMessage() { assert.fail("Captured handshake naming must not send"); },
+  });
+  f.document.getElementById = id => controls[id] || null;
+  for (const name of ["renderWebsocketSessions", "buildRawWebsocketRequest", "buildRawWebsocketResponse", "countLines", "buildLineNumbers"])
+    vm.runInContext(source(name), f.context);
+  const start = appSource.indexOf("  // WS Handshake Request/Response tab toggle\n");
+  const end = appSource.indexOf("  // WS pane swap button", start);
+  assert.ok(start >= 0 && end > start);
+  vm.runInContext(appSource.slice(start, end), f.context);
+  f.handshakeView = () => f.context.getCMView("wsHandshake");
+  f.renderHandshake = () => f.context.renderWebsocketSessions();
+  f.selectHandshake = side => controls[side === "request" ? "wsHandshakeReqBtn" : "wsHandshakeResBtn"].listeners.click();
+  return f;
+}
+
+function assertNamedHandshake(f) {
+  const view = f.handshakeView();
+  assert.equal(view.view.contentDOM.getAttribute("aria-label"), "Captured WebSocket handshake");
+  assert.equal(view._options.readOnly, true);
+  assert.equal(view.view.state.readOnly, true);
+  assert.equal(f.requests.length, 0);
+}
+
+test("empty captured WebSocket handshake uses the existing editor name hook", () => {
+  const container = elementFromHtml("websocketHandshakeCM");
+  assert.equal(container.getAttribute("data-editor-label"), "Captured WebSocket handshake");
+  assert.equal(container.getAttribute("role"), null, "textbox semantics stay on the CodeMirror content");
+  const f = handshakeSetup(); f.renderHandshake();
+  assert.equal(f.handshakeView().getContent(), "Select a WebSocket session.");
+  assertNamedHandshake(f);
+});
+
+test("captured WebSocket Request and Response bindings retain name, read-only state and record bytes", () => {
+  const f = handshakeSetup();
+  const record = { id: "synthetic-handshake", path: "/synthetic", status: 101,
+    request: { headers: [{ name: "x-synthetic", value: "request fixture" }] },
+    response: { headers: [{ name: "x-synthetic", value: "response fixture" }] } };
+  Object.assign(f.state, { selectedWebsocketId: record.id, selectedWebsocketRecord: record, websocketSessions: [record] });
+  const before = JSON.stringify(record);
+  f.renderHandshake();
+  const original = f.handshakeView();
+  for (const side of ["request", "response", "request"]) {
+    f.selectHandshake(side);
+    assert.equal(f.handshakeView(), original);
+    assert.match(f.handshakeView().getContent(), new RegExp(`${side} fixture`));
+    assertNamedHandshake(f);
+    f.renderHandshake();
+    assert.match(f.handshakeView().getContent(), new RegExp(`${side} fixture`));
+    assertNamedHandshake(f);
+  }
+  assert.equal(JSON.stringify(record), before);
+});
+
+test("recreated captured WebSocket handshake editor retains its accessible name", () => {
+  const f = handshakeSetup(); f.renderHandshake();
+  const original = f.handshakeView();
+  f.els.websocketHandshakeCM = elementFromHtml("websocketHandshakeCM");
+  f.renderHandshake();
+  assert.notEqual(f.handshakeView(), original);
+  assert.equal(original.view.destroyed, true);
+  assert.equal(f.handshakeView().getContent(), "Select a WebSocket session.");
+  assertNamedHandshake(f);
 });

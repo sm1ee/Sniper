@@ -62,7 +62,7 @@ function fixture(mode, cm = true) {
   };
   const els = {};
   for (const name of [
-    "interceptTableBody", "responseInterceptTableBody", "interceptDetailPath", "interceptDetailTitle", "interceptMeta",
+    "interceptTableBody", "responseInterceptTableBody", "interceptDetailTitle", "interceptMeta",
     "interceptDetailRetryButton", "interceptDetailStatus",
     "forwardInterceptButton", "dropInterceptButton", "forwardResponseInterceptButton", "dropResponseInterceptButton",
     "interceptRequestEditor", "interceptResponseEditor", "interceptQueueTabRequest", "interceptQueueTabResponse",
@@ -72,7 +72,7 @@ function fixture(mode, cm = true) {
   if (cm) { els.interceptRequestCM = node(); els.interceptResponseCM = node(); }
   const c = loadFunctions([
     "loadIntercepts", "loadInterceptDetail", "loadResponseIntercepts", "loadResponseInterceptDetail",
-    "renderIntercepts", "renderResponseIntercepts", "getVisibleRequestInterceptSummaries", "getVisibleResponseInterceptSummaries",
+    "renderIntercepts", "renderResponseIntercepts", "displayHost", "extractHostPort", "defaultSummaryPortForScheme", "getVisibleRequestInterceptSummaries", "getVisibleResponseInterceptSummaries",
     "getInterceptDraftRecovery", "captureInterceptDraftRecoveryOwners", "handleInterceptDraftReadFailure", "takeInterceptDraftRecovery",
     "selectInterceptQueueItem", "getInterceptDetailRead", "updateInterceptDetailFeedback", "retrySelectedInterceptDetail", "updateInterceptQueueSelectionStatus", "scrollSelectedInterceptRowIntoView",
     "reconcileRequestInterceptSelection", "reconcileResponseInterceptSelection", "refreshInterceptDetailsForCurrentSelection",
@@ -116,7 +116,7 @@ function fixture(mode, cm = true) {
   const click = id => els[config.table].rows.find(row => row.dataset.id === id).click();
   const respond = (index, value) => requests[index].resolve({ ok: true, json: async () => value });
   const content = () => cm ? views.get(config.key)?.text || "" : els[config.editor].value;
-  const labels = () => JSON.stringify([els.interceptDetailPath.textContent, els.interceptDetailTitle.textContent, els.interceptMeta.textContent]);
+  const labels = () => JSON.stringify([els.interceptDetailTitle.textContent, els.interceptMeta.textContent]);
   const reset = () => {
     const source = appSource.match(/^function resetSessionScopedUiState\([^]*?^\}/m)[0];
     const start = source.indexOf("  state.intercepts = [];");
@@ -130,6 +130,26 @@ function fixture(mode, cm = true) {
   const ready = async () => { show(); click("held-a"); respond(requests.length - 1, record("held-a")); await tick(); };
   return { c, state, config, els, views, requests, errors, actions, document, click, respond, content, labels, reset, show, ready,
     load: () => c[config.load](), detail: id => c[config.detail](id), raw: value => c[config.build](value[mode]) };
+}
+
+// HTTPS held through CONNECT carries the tunnel's "host:443". The queue row left
+// that port out, but the title above the editor spelled it in the URL.
+for (const mode of Object.keys(modes)) {
+  test(`${mode}: the title's URL leaves out the scheme's default port`, async () => {
+    const f = fixture(mode);
+    const held = (host) => {
+      const value = record("held-a");
+      value.host = value.request.host = host;
+      return value;
+    };
+    const title = async (host) => {
+      f.show([held(host)]); f.click("held-a"); f.respond(f.requests.length - 1, held(host)); await tick();
+      return f.els.interceptDetailTitle.textContent.replace(/^200 · /, "");
+    };
+    assert.equal(await title("example.com:443"), "GET https://example.com/held-a");
+    f.reset();
+    assert.equal(await title("example.com:8443"), "GET https://example.com:8443/held-a");
+  });
 }
 
 for (const mode of Object.keys(modes)) for (const cm of [true, false]) {
@@ -230,7 +250,7 @@ for (const mode of Object.keys(modes)) for (const cm of [true, false]) {
     assert.equal(f.state[f.config.record].is_websocket, undefined);
     assert.equal(f.state[f.config.record].request.preview_truncated, undefined);
     assert.equal(f.content(), draft);
-    assert.doesNotMatch(f.els.interceptMeta.textContent, /WebSocket|preview-truncated/);
+    assert.doesNotMatch(f.els.interceptMeta.textContent, /WebSocket|truncated/);
   });
 }
 
@@ -289,7 +309,7 @@ for (const mode of Object.keys(modes)) for (const cm of [true, false]) {
     if (failure === "JSON") f.requests[0].resolve({ ok: true, json: async () => { throw new Error("synthetic private JSON text"); } });
     await tick();
     assert.equal(f.els.interceptDetailTitle.textContent, `Could not load ${mode}`);
-    assert.equal(f.els.interceptMeta.textContent, `Could not load ${mode} details. Retry to try again.`);
+    assert.equal(f.els.interceptMeta.textContent, `Could not load ${mode} details.`);
     assert.doesNotMatch(f.labels(), /private/);
     for (const error of f.errors) assert.doesNotMatch(String(error), /private/, "reported detail errors never expose parser or transport text");
     const button = f.els.interceptDetailRetryButton;
@@ -359,7 +379,7 @@ for (const mode of Object.keys(modes)) for (const cm of [true, false]) {
     assert.equal(f.els[f.config.button].disabled, failure === "HTTP");
     assert.equal(f.els.interceptDetailRetryButton.disabled, false);
     assert.equal(f.els.interceptDetailRetryButton.classList.contains("hidden"), false);
-    assert.equal(f.els.interceptMeta.textContent, `Could not ${failure === "HTTP" ? "load" : "refresh"} ${mode} details. Retry to try again.`);
+    assert.equal(f.els.interceptMeta.textContent, `Could not ${failure === "HTTP" ? "load" : "refresh"} ${mode} details.`);
     const retry = f.c.retrySelectedInterceptDetail();
     assert.equal(f.requests.length, 3); f.respond(2, record("held-a")); await retry;
     assert.equal(f.content(), failure === "HTTP" ? f.raw(record("held-a")) : draft);

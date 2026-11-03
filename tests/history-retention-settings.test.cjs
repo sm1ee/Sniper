@@ -36,13 +36,13 @@ function fixture() {
 
 test('cleanup section is in Capture Settings with independent native labels and irreversible warning', () => {
   const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
-  const section = html.slice(html.indexOf('id="proxySettingsPanel"'), html.indexOf('id="proxySubPlaceholder"'));
+  const section = html.slice(html.indexOf('id="proxySettingsPanel"'), html.indexOf('id="replayShell"'));
   assert.match(section, /HTTP History automatic cleanup/);
-  assert.match(section, /<fieldset[^>]*aria-describedby="historyRetentionWarning historyRetentionProtection"/);
-  assert.match(section, /<legend>Saved HTTP History limit<\/legend>/);
-  assert.match(section, /permanently deletes the oldest unprotected entries above the total target/);
-  assert.match(section, /Original records referenced by durably saved HTTP tabs and in-progress stored records are protected/);
-  assert.match(section, /Unsaved tabs and note edits do not protect records/);
+  assert.match(section, /<fieldset[^>]*aria-labelledby="historyRetentionHeading" aria-describedby="historyRetentionWarning historyRetentionProtection"/);
+  assert.match(section, /deletes the oldest unprotected entries above the limit, now and as history grows/);
+  assert.match(section, /Deleted requests, responses and notes cannot be restored/);
+  assert.match(section, /Entries still being written, and originals that saved Replay tabs use, are kept, so the total can stay above the limit/);
+  assert.match(section, /Unsaved tabs and note edits do not keep an entry/);
   assert.match(section, /id="historyRetentionStatus" role="status" aria-live="polite"/);
   assert.match(section, /id="historyRetentionCustom"[^>]*aria-describedby="historyRetentionCustomHelp historyRetentionError"/);
   assert.match(section, /id="historyRetentionCancel" type="button"/);

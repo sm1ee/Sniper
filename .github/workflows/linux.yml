@@ -23,7 +23,7 @@ jobs:
       CARGO_TERM_COLOR: always
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install native build dependencies in disposable Debian container
         run: |
           test "$(. /etc/os-release && printf '%s:%s' "$ID" "$VERSION_ID")" = debian:13
@@ -91,7 +91,7 @@ jobs:
             --output-dir dist/linux-candidate
           (cd dist/linux-candidate && sha256sum -c ./*.sha256)
           echo "manifest_sha256=$(sha256sum dist/linux-candidate/build-manifest.json | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         id: upload_candidate
         with:
           name: sniper-debian13-x86_64-candidate
@@ -109,10 +109,10 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       EXPECTED_MANIFEST_SHA256: ${{ needs.debian13-x86_64.outputs.manifest_sha256 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           artifact-ids: ${{ needs.debian13-x86_64.outputs.candidate_artifact_id }}
           merge-multiple: true
@@ -150,7 +150,7 @@ jobs:
             2>&1 | tee "$evidence/docker-run.log"
       - name: Preserve runtime qualification evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: sniper-debian13-x86_64-runtime-evidence
           path: |
@@ -179,12 +179,12 @@ jobs:
       EXPECTED_MANIFEST_SHA256: ${{ needs.debian13-x86_64.outputs.manifest_sha256 }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           artifact-ids: ${{ needs.debian13-x86_64.outputs.candidate_artifact_id }}
           merge-multiple: true
           path: candidate
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: sniper-debian13-x86_64-runtime-evidence
           path: evidence

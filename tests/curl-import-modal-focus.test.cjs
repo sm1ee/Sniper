@@ -9,6 +9,33 @@ const vm = require('node:vm');
 const { appSource, loadFunctions } = require('./frontend-test-helpers.cjs');
 const indexSource = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
 
+test('cURL modal card is a named dialog with one unique visible heading link', () => {
+  const markup = indexSource.slice(indexSource.indexOf('<div class="modal-backdrop hidden" id="curlImportModal">'), indexSource.indexOf('<div class="context-menu hidden" id="replayContextMenu">'));
+  assert.match(markup, /^<div class="modal-backdrop hidden" id="curlImportModal">/);
+  const cards = [...markup.matchAll(/<div\b([^>]*\bclass="modal-card"[^>]*)>/g)];
+  assert.equal(cards.length, 1);
+  const attrs = Object.fromEntries([...cards[0][1].matchAll(/([\w:-]+)="([^"]*)"/g)].map(([, key, value]) => [key, value]));
+  assert.deepEqual(attrs, { class: 'modal-card', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'curlImportTitle' });
+  const titleId = attrs['aria-labelledby'];
+  assert.equal([...indexSource.matchAll(new RegExp(`\\bid="${titleId}"`, 'g'))].length, 1);
+  assert.match(markup, new RegExp(`<header class="modal-header">\\s*<h2 id="${titleId}">Import cURL<\\/h2>`));
+  assert.equal([...markup.matchAll(/\brole="(?:dialog|alertdialog)"/g)].length, 1);
+  assert.doesNotMatch(markup, /\b(?:tabindex|autofocus|aria-hidden)=/);
+});
+
+test('cURL command textarea has a stable name independent of its example placeholder', () => {
+  const matches = [...indexSource.matchAll(/<textarea\b([^>]*\bid="curlImportInput"[^>]*)>([^]*?)<\/textarea>/g)];
+  assert.equal(matches.length, 1);
+  const attrs = matches[0][1];
+  assert.match(attrs, /\baria-label="cURL command"/);
+  assert.match(attrs, /\bclass="curl-import-textarea"/);
+  assert.match(attrs, /\brows="10"/);
+  assert.match(attrs, /\bspellcheck="false"/);
+  assert.match(attrs, /\bplaceholder="Paste a cURL command here/);
+  assert.doesNotMatch(attrs, /\b(?:aria-labelledby|hidden|disabled|readonly|tabindex)\b/);
+  assert.equal(matches[0][2], '');
+});
+
 function fixture() {
   const nodes = new Map(), listeners = new Map(), actions = [];
   const document = { activeElement: null, readyState: 'loading' };
@@ -56,6 +83,7 @@ function fixture() {
   const mainTab = new Element('mainTab', 'BUTTON', document.body); mainTab.dataset.tool = 'fuzzer';
   const opener = new Element('replayRequestHighlight', 'PRE', document.body); opener.tabIndex = 0;
   const els = {};
+  els.replayEmptyImportCurlButton = new Element('replayEmptyImportCurlButton', 'BUTTON', document.body);
   for (const id of ['displaySettingsModal', 'filterModal', 'scannerSettingsBackdrop', 'compareModal', 'curlImportModal']) {
     els[id] = new Element(id, 'DIV', document.body); els[id].classList.add('hidden');
   }
@@ -90,6 +118,9 @@ function fixture() {
   }
   register('(function initCodeViewLineNav() {', '\n\n// ─── CodeMirror 6 Integration');
   register('  mainTabs.forEach((tab) => {', '\n\n  proxyTabs.forEach((tab) => {');
+  const emptyBinding = appSource.match(/^  els\.replayEmptyImportCurlButton\.addEventListener\("click", \(\) => openCurlImportModal\(\)\);$/m);
+  assert.ok(emptyBinding);
+  vm.runInContext(emptyBinding[0], context);
   register('  document.getElementById("closeCurlImportButton").addEventListener(', '\n\n  els.applyDisplaySettingsButton.addEventListener(');
   register('  document.addEventListener("keydown", (event) => {\n    const activeModalAction', '\n\n  document.addEventListener("copy",');
   for (const callback of listeners.get('DOMContentLoaded') || []) callback();
@@ -110,8 +141,21 @@ function fixture() {
     return event;
   }
   return { context, nodes, document, modal, mainTab, opener, state, actions, key,
+    emptyOpener: els.replayEmptyImportCurlButton,
     input: nodes.get('curlImportInput'), cancel: nodes.get('closeCurlImportButton'), apply: nodes.get('applyCurlImportButton') };
 }
+
+test('named cURL dialog preserves empty-Replay opener focus and Cancel without importing', () => {
+  const f = fixture(); f.emptyOpener.focus(); f.emptyOpener.click();
+  assert.equal(f.modal.classList.contains('hidden'), false);
+  assert.equal(f.document.activeElement, f.input);
+  assert.equal(f.context.curlImportReturnFocus, f.emptyOpener);
+  assert.equal(f.input.value, '');
+  f.cancel.click();
+  assert.equal(f.modal.classList.contains('hidden'), true);
+  assert.equal(f.document.activeElement, f.emptyOpener);
+  assert.deepEqual(f.actions, []);
+});
 
 for (const shiftKey of [false, true]) test(`cURL confines ${shiftKey ? 'Shift+Tab' : 'Tab'} instead of activating the workspace`, () => {
   const f = fixture(); f.context.openCurlImportModal();

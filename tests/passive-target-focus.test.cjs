@@ -423,6 +423,15 @@ test("Save shows only while the scope has unsaved edits", () => {
   assert.equal(f.els.saveTargetScopeButton.classList.contains("hidden"), false);
 });
 
+// Save appearing grew the header by about 9px and pushed the host lists down;
+// saving pulled them back up. Hidden, it keeps its place, and both Scope
+// headers keep the height they have with it.
+test("hiding Scope's Save moves nothing on the Scope screen", () => {
+  const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8");
+  assert.match(css, /#saveTargetScopeButton\.hidden \{[^}]*display: inline-block !important;[^}]*visibility: hidden;/);
+  assert.match(css, /\.target-shell \.panel-toolbar \{[^}]*min-height: 50px;/);
+});
+
 // Explicit user policy: show both scope classifications without changing matching.
 test("a host shows its current scope classification in both directions", () => {
   const f = targetFixture(["in.example.com", "out.example.com"]);

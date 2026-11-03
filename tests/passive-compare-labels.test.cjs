@@ -48,7 +48,7 @@ for (const tab of ["request", "response"]) {
     const f = fixture();
     f.c.compareActiveTab = tab;
     f.c.renderCompareModal();
-    assert.equal(f.nodes.get("compareKicker").textContent, "#1201 GET example.com/base  vs  #1302 GET example.com/target");
+    assert.equal(f.nodes.get("compareTitle").textContent, "#1201 GET example.com/base  vs  #1302 GET example.com/target");
   });
 }
 
@@ -56,7 +56,7 @@ test("comparison labels prefer actual compared record sequences over cached disp
   const f = fixture([{ id: "base", sequence: 2, index: 5 }, { id: "target", sequence: 3, index: 6 }]);
   f.c.compareBaseRecord.sequence = 0;
   f.c.renderCompareModal();
-  assert.equal(f.nodes.get("compareKicker").textContent, "#0 GET example.com/base  vs  #1302 GET example.com/target");
+  assert.equal(f.nodes.get("compareTitle").textContent, "#0 GET example.com/base  vs  #1302 GET example.com/target");
 });
 
 test("legacy compared records can use cached summary sequences or indexes", () => {
@@ -64,7 +64,7 @@ test("legacy compared records can use cached summary sequences or indexes", () =
   f.c.compareBaseRecord.sequence = undefined;
   f.c.compareTargetRecord.sequence = undefined;
   f.c.renderCompareModal();
-  assert.equal(f.nodes.get("compareKicker").textContent, "#8 GET example.com/base  vs  #9 GET example.com/target");
+  assert.equal(f.nodes.get("compareTitle").textContent, "#8 GET example.com/base  vs  #9 GET example.com/target");
 });
 
 test("comparison labels remain explicitly unknown if neither source has a number", () => {
@@ -72,5 +72,5 @@ test("comparison labels remain explicitly unknown if neither source has a number
   f.c.compareBaseRecord.sequence = undefined;
   f.c.compareTargetRecord.sequence = undefined;
   f.c.renderCompareModal();
-  assert.equal(f.nodes.get("compareKicker").textContent, "#? GET example.com/base  vs  #? GET example.com/target");
+  assert.equal(f.nodes.get("compareTitle").textContent, "#? GET example.com/base  vs  #? GET example.com/target");
 });

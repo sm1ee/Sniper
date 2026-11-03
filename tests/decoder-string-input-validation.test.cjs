@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
+const { loadFunctions } = require("./frontend-test-helpers.cjs");
 
 function fixture() {
   const values = new Map([["#input-value", ""], ["#input-password", ""]]);
@@ -100,5 +101,52 @@ test("repeated Strings updates replace malformed outputs and preserve the origin
       assert.equal(values.get("#" + elements[element].id), elements[element].calculate(input));
     }
     assert.equal(values.get("#input-value"), input);
+  }
+});
+
+
+test("reverse hex results distinguish literal failure words from genuine conversion failures", () => {
+  const { context, elements } = fixture();
+  const display = loadFunctions(["decoderOutputShows"]);
+  for (const text of ["NaN", "Parse error", "Out of range", "Invalid", "Invalid text", "Error", "Error report",
+    "Error\r\nreport", "Invalid\rtext", "", "\0", "café"]) {
+    for (const [key, encoding] of [["s2", "latin1"], ["s4", "utf8"], ["s6", "utf16le"]]) {
+      const bytes = Buffer.from(text, encoding);
+      const input = (key === "s6" ? bytes.swap16() : bytes).toString("hex");
+      const result = context.decoderCalculateResult(elements[key], input);
+      assert.equal(result.value, text);
+      assert.equal(result.success, true);
+      assert.equal(elements[key].calculate(input), text);
+      assert.equal(display.decoderOutputShows(text, result), text.length > 0);
+    }
+  }
+  for (const key of ["s2", "s4", "s6"]) {
+    for (const input of ["0", "gg", "0x61", "61 62", "0061\n", ...(key === "s6" ? ["61", "006100"] : [])]) {
+      const result = context.decoderCalculateResult(elements[key], input);
+      assert.equal(result.value, "NaN");
+      assert.equal(result.success, false);
+      assert.equal(display.decoderOutputShows(result.value, result), false);
+    }
+  }
+  for (const input of ["80", "ff", "c0af", "eda080", "eab0", "f4908080"]) {
+    const result = context.decoderCalculateResult(elements.s4, input);
+    assert.equal(result.value, "Parse error");
+    assert.equal(result.success, false);
+    assert.equal(display.decoderOutputShows(result.value, result), false);
+  }
+  for (const key of ["s1", "s3", "s5", "n5", "n6", "n7", "n8", "n9", "n10"]) {
+    assert.equal(elements[key].calculateResult, undefined, key + " remains legacy");
+  }
+  assert.equal(display.decoderOutputShows("NaN"), false, "numeric failure fallback stays unchanged");
+});
+
+test("reverse hex conversion exceptions retain their exact legacy failure text and typed failure", () => {
+  for (const [key, encoding] of [["s2", "Latin1"], ["s4", "Utf8"], ["s6", "Utf16"]]) {
+    const { context, elements } = fixture();
+    context.CryptoJS.enc[encoding].stringify = () => { throw new Error("synthetic conversion failure"); };
+    const result = context.decoderCalculateResult(elements[key], "0061");
+    assert.equal(result.value, "Parse error");
+    assert.equal(result.success, false);
+    assert.equal(elements[key].calculate("0061"), "Parse error");
   }
 });

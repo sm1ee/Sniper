@@ -33,7 +33,7 @@
             <span class="remote-ui-dot"></span>
             <span class="remote-ui-label">Exposed</span>
           </span>
-          <span class="utility-version" id="appVersionLabel" title="Current version">v...</span>
+          <span class="utility-version" id="appVersionLabel" title="Current version">v…</span>
           <button
             class="utility-button hidden"
             id="openUpdateButton"
@@ -70,7 +70,7 @@
             <header class="panel-toolbar">
               <div>
                 <h2>Sessions</h2>
-                <p class="dashboard-storage" id="dashboardCurrentSessionStorage"><span id="dashboardCurrentSessionName">Current session</span> is stored in <span class="dashboard-storage-path" id="dashboardCurrentSessionPath">Loading...</span> <button class="session-path-open-btn" id="dashboardOpenStorageBtn" type="button">Open</button></p>
+                <p class="dashboard-storage" id="dashboardCurrentSessionStorage"><span class="dashboard-storage-path" id="dashboardCurrentSessionPath">Loading…</span> <button class="session-path-open-btn" id="dashboardOpenStorageBtn" type="button">Open</button></p>
               </div>
               <div class="toolbar-actions">
                 <div class="dashboard-create hidden" id="dashboardCreateSessionForm">
@@ -128,9 +128,7 @@
           </nav>
 
           <section class="filter-bar" id="filterBar">
-            <button class="filter-summary" id="historyMeta" type="button">
-              Filter settings: showing captured traffic
-            </button>
+            <button class="filter-summary" id="historyMeta" type="button">Loading requests…</button>
 
             <label class="search-box" aria-label="Search history">
               <input id="searchInput" type="search" placeholder="Search" />
@@ -243,7 +241,7 @@
                       <strong id="detailTitle">Inspector</strong>
                       <div class="detail-tags" id="detailTags"></div>
                     </div>
-                    <button class="pane-close" id="closeInspectorButton" type="button">&times;</button>
+                    <button class="pane-close" id="closeInspectorButton" type="button" aria-label="Close inspector">&times;</button>
                   </header>
                   <div class="inspector-content" id="inspectorContent">
                     <section class="inspector-section">
@@ -289,18 +287,15 @@
             <div class="split-panel">
               <section class="panel-card intercept-left-panel">
                 <header class="panel-toolbar">
-                  <div>
-                    <p class="placeholder-kicker">Intercept</p>
-                    <h2>Held items</h2>
-                  </div>
+                  <h2 id="interceptTitle">Intercept</h2>
                   <div class="toolbar-actions">
                     <button class="scope-pill" id="interceptInScopeToggle" type="button" title="Only intercept in-scope hosts">In scope</button>
-                    <button class="toggle-pill" id="interceptStatus" type="button">Off</button>
+                    <button class="switch" id="interceptStatus" type="button" role="switch" aria-checked="false" aria-labelledby="interceptTitle"></button>
                   </div>
                 </header>
                 <nav class="intercept-queue-tabs">
-                  <button class="intercept-queue-tab active" data-queue="request" id="interceptQueueTabRequest">Request Queue</button>
-                  <button class="intercept-queue-tab" data-queue="response" id="interceptQueueTabResponse">Response Queue</button>
+                  <button class="intercept-queue-tab active" data-queue="request" id="interceptQueueTabRequest">Requests</button>
+                  <button class="intercept-queue-tab" data-queue="response" id="interceptQueueTabResponse">Responses</button>
                 </nav>
                 <p class="intercept-queue-accessibility" id="interceptQueueInstructions">Use Up and Down arrow keys to select a held item.</p>
                 <p class="intercept-queue-accessibility" id="interceptQueueSelectionStatus" role="status" aria-live="polite" aria-atomic="true">Request queue is empty.</p>
@@ -330,12 +325,9 @@
                   </table>
                 </div>
                 <header class="panel-toolbar intercept-rules-header">
-                  <div>
-                    <p class="placeholder-kicker">Conditions</p>
-                    <h2>Intercept Rules</h2>
-                  </div>
+                  <h2>Rules</h2>
                   <div class="toolbar-actions">
-                    <button class="secondary-action" id="addInterceptRuleButton" type="button">+ Rule</button>
+                    <button class="secondary-action" id="addInterceptRuleButton" type="button">Add rule</button>
                   </div>
                 </header>
                 <div class="intercept-rules-list" id="interceptRulesList"></div>
@@ -343,10 +335,7 @@
 
               <section class="panel-card" id="interceptDetailPanel">
                 <header class="panel-toolbar">
-                  <div>
-                    <p class="placeholder-kicker" id="interceptDetailPath">Intercept</p>
-                    <h2 id="interceptDetailTitle">No request selected</h2>
-                  </div>
+                  <h2 id="interceptDetailTitle">No request selected</h2>
                   <div class="toolbar-actions" id="interceptDetailActions">
                     <button class="secondary-action hidden" id="interceptDetailRetryButton" type="button" aria-describedby="interceptDetailStatus" aria-disabled="true" aria-busy="false">Retry detail</button>
                     <div class="toolbar-actions" id="interceptRequestActions">
@@ -371,7 +360,7 @@
                     <input id="interceptSearchInput" type="search" placeholder="Search" />
                   </label>
                   <span id="interceptSearchMeta">No highlights</span>
-                  <span id="interceptMeta">Intercept is empty.</span>
+                  <span id="interceptMeta"></span>
                 </footer>
               </section>
             </div>
@@ -385,7 +374,7 @@
                     Loading captured WebSocket sessions.
                   </div>
                   <label class="search-box" for="websocketSearchInput">
-                    <input id="websocketSearchInput" type="search" placeholder="Host, path, status" autocomplete="off" />
+                    <input id="websocketSearchInput" type="search" placeholder="Host, path, status" autocomplete="off" aria-label="Search captured WebSocket sessions" />
                   </label>
                   <div class="filter-actions">
                     <button class="scope-pill" id="wsInScopeOnly" type="button" title="Show only in-scope hosts">In scope</button>
@@ -413,7 +402,7 @@
               <section class="websocket-workbench" id="websocketWorkbench">
                 <section class="panel-card websocket-handshake-column" id="websocketHandshakeColumn">
                   <header class="panel-toolbar panel-toolbar-compact">
-                    <p class="placeholder-kicker">Handshake</p>
+                    <h2>Handshake</h2>
                     <div class="ws-handshake-tabs">
                       <button class="ws-tab active" id="wsHandshakeReqBtn" type="button">Request</button>
                       <button class="ws-tab" id="wsHandshakeResBtn" type="button">Response</button>
@@ -421,7 +410,7 @@
                     <button class="ws-swap-btn" id="wsSwapPanes" type="button" title="Swap panels">⇄</button>
                   </header>
                   <div class="editor-shell" style="flex:1;min-height:0">
-                    <div id="websocketHandshakeCM" class="cm-container"></div>
+                    <div id="websocketHandshakeCM" class="cm-container" data-editor-label="Captured WebSocket handshake"></div>
                   </div>
                   <footer class="pane-footer">
                     <label class="pane-search" aria-label="Search handshake">
@@ -432,9 +421,9 @@
                 </section>
                 <div class="pane-resizer" id="websocketSplitResizer" aria-hidden="true"></div>
 
-                <section class="panel-card websocket-frames-column" id="websocketFramesColumn">
+                <section class="panel-card websocket-frames-column" id="websocketFramesColumn" tabindex="-1" aria-label="WebSocket frames">
                   <header class="panel-toolbar panel-toolbar-compact">
-                    <p class="placeholder-kicker">Frames</p>
+                    <h2>Frames</h2>
                   </header>
                   <div class="history-table-shell">
                     <table class="mini-table frame-table">
@@ -454,7 +443,7 @@
                   <div class="frame-detail-panel hidden" id="frameDetailPanel">
                     <header class="frame-detail-header">
                       <div class="frame-detail-meta" id="frameDetailMeta"></div>
-                      <button class="frame-detail-close" id="frameDetailClose" type="button" title="Close">&times;</button>
+                      <button class="frame-detail-close" id="frameDetailClose" type="button" title="Close" aria-label="Close frame detail">&times;</button>
                     </header>
                     <pre class="simple-code-view frame-detail-body" id="frameDetailBody" tabindex="0"></pre>
                   </div>
@@ -467,26 +456,32 @@
             <div class="split-panel split-panel-tight">
               <section class="panel-card">
                 <header class="panel-toolbar">
-                  <div>
-                    <p class="placeholder-kicker">Proxy</p>
-                    <h2>Replace rules</h2>
-                  </div>
+                  <h2>Replace rules</h2>
                   <div class="toolbar-actions">
                     <button class="accent-action" id="addMatchReplaceRuleButton" type="button">Add</button>
                     <button class="danger-action" id="deleteMatchReplaceRuleButton" type="button" disabled>Delete</button>
                   </div>
                 </header>
                 <div class="history-table-shell">
-                  <table class="mini-table">
+                  <table class="mini-table match-replace-rules-table">
+                    <colgroup>
+                      <col class="match-replace-col-on" />
+                      <col class="match-replace-col-scope" />
+                      <col class="match-replace-col-target" />
+                      <col />
+                      <col />
+                      <col class="match-replace-col-flag" />
+                      <col class="match-replace-col-flag" />
+                    </colgroup>
                     <thead>
                       <tr>
-                        <th style="width:52px;padding-right:12px">On</th>
-                        <th style="width:70px">Scope</th>
-                        <th style="width:60px">Target</th>
+                        <th>On</th>
+                        <th>Scope</th>
+                        <th>Target</th>
                         <th>Search</th>
                         <th>Actions</th>
-                        <th style="width:28px">Re</th>
-                        <th style="width:28px">Cs</th>
+                        <th>Re</th>
+                        <th>Cs</th>
                       </tr>
                     </thead>
                     <tbody id="matchReplaceTableBody"></tbody>
@@ -496,10 +491,7 @@
 
               <section class="panel-card">
                 <header class="panel-toolbar hidden" id="matchReplaceEditorHeader">
-                  <div>
-                    <p class="placeholder-kicker" id="matchReplaceEditorPath">Rule</p>
-                    <h2 id="matchReplaceEditorTitle">New rule</h2>
-                  </div>
+                  <h2 id="matchReplaceEditorTitle">New rule</h2>
                   <div class="toolbar-actions">
                     <button class="primary-action" id="saveMatchReplaceRuleButton" type="button" disabled>Save</button>
                   </div>
@@ -523,10 +515,22 @@
                       <option value="body">Body</option>
                     </select>
                   </label>
-                  <label class="settings-field">
-                    <span>Search</span>
-                    <input id="matchReplaceSearch" type="text" placeholder="foo.example.com" />
-                  </label>
+                  <div class="match-replace-search-group">
+                    <label class="settings-field">
+                      <span>Search</span>
+                      <input id="matchReplaceSearch" type="text" placeholder="foo.example.com" />
+                    </label>
+                    <div class="match-replace-search-options">
+                      <label class="settings-toggle">
+                        <input id="matchReplaceRegex" type="checkbox" />
+                        <span>Regex</span>
+                      </label>
+                      <label class="settings-toggle">
+                        <input id="matchReplaceCaseSensitive" type="checkbox" />
+                        <span>Case sensitive</span>
+                      </label>
+                    </div>
+                  </div>
                   <div class="settings-field">
                     <label class="match-replace-replace-head"><span>Replace</span><span class="mini-toggle"><input id="matchReplaceReplaceEnabled" type="checkbox" role="switch" checked /><span class="mini-toggle-track"></span></span></label>
                     <input id="matchReplaceReplace" type="text" aria-label="Replacement" placeholder="bar.example.com" />
@@ -552,14 +556,6 @@
                       </label>
                     </div>
                   </details>
-                  <label class="settings-toggle">
-                    <input id="matchReplaceRegex" type="checkbox" />
-                    <span>Regex</span>
-                  </label>
-                  <label class="settings-toggle">
-                    <input id="matchReplaceCaseSensitive" type="checkbox" />
-                    <span>Case sensitive</span>
-                  </label>
                 </div>
               </section>
             </div>
@@ -569,7 +565,7 @@
             <div class="findings-toolbar">
               <!-- Filter controls -->
               <div class="findings-filter-bar">
-                <select id="findingsFilterSeverity" class="findings-filter-select">
+                <select id="findingsFilterSeverity" class="findings-filter-select" aria-label="Filter findings by severity">
                   <option value="">All severities</option>
                   <option value="critical">Critical</option>
                   <option value="high">High+</option>
@@ -577,7 +573,7 @@
                   <option value="low">Low+</option>
                   <option value="info">Info+</option>
                 </select>
-                <select id="findingsFilterCategory" class="findings-filter-select">
+                <select id="findingsFilterCategory" class="findings-filter-select" aria-label="Filter findings by category">
                   <option value="">All categories</option>
                   <option value="jwt">JWT</option>
                   <option value="header">Headers</option>
@@ -590,13 +586,17 @@
                   <option value="info">Information</option>
                   <option value="auth">Authentication</option>
                 </select>
-                <input id="findingsFilterSearch" class="findings-filter-input" type="text" placeholder="Search" />
+                <input id="findingsFilterSearch" class="findings-filter-input" type="text" placeholder="Search" aria-label="Search findings" />
               </div>
               <div class="findings-toolbar-actions">
                 <button class="scope-pill" id="findingsInScopeOnly" type="button" aria-pressed="false" title="Show only in-scope findings">In scope</button>
                 <button class="scope-pill active" id="findingsHistoryToggle" type="button" aria-pressed="true" title="Mark these requests in HTTP history: severity in Notes, a row tint, and the evidence">Mark in HTTP</button>
                 <button class="scope-pill scope-pill-run active" id="scannerQuickToggle" type="button" aria-pressed="true" title="Scanning new traffic. Click to stop; existing findings stay.">Passive Scan</button>
-                <button class="secondary-action" id="findingsSettingsButton" type="button" title="Detection Rules">&#9881;</button>
+                <button class="secondary-action" id="findingsSettingsButton" type="button" title="Detection Rules" aria-label="Detection Rules">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false">
+                    <path fill-rule="evenodd" d="M10.29 6.04 L10.61 4.12 L13.39 4.12 L13.71 6.04 L15.01 6.58 L16.59 5.45 L18.55 7.41 L17.42 8.99 L17.96 10.29 L19.88 10.61 L19.88 13.39 L17.96 13.71 L17.42 15.01 L18.55 16.59 L16.59 18.55 L15.01 17.42 L13.71 17.96 L13.39 19.88 L10.61 19.88 L10.29 17.96 L8.99 17.42 L7.41 18.55 L5.45 16.59 L6.58 15.01 L6.04 13.71 L4.12 13.39 L4.12 10.61 L6.04 10.29 L6.58 8.99 L5.45 7.41 L7.41 5.45 L8.99 6.58 Z M14.6 12 a2.6 2.6 0 1 0-5.2 0 a2.6 2.6 0 1 0 5.2 0 Z" />
+                  </svg>
+                </button>
                 <button class="secondary-action" id="findingsRescanButton" type="button" title="Scan the retained history again with the current rules">Rescan</button>
                 <button class="secondary-action" id="findingsClearButton" type="button">Clear</button>
               </div>
@@ -699,18 +699,18 @@
               <section class="panel-card panel-card-top">
                 <header class="panel-toolbar">
                   <div>
-                    <p class="placeholder-kicker">Out-of-Band — <span id="oastStatusText" class="oast-status-text">Not configured</span></p>
-                    <h2>OAST Callbacks</h2>
+                    <h2>Callbacks</h2>
+                    <p id="oastStatusText" class="oast-status-text">Not configured</p>
                   </div>
                   <div class="toolbar-actions">
-                    <button class="primary-action" id="oastGenerateButton" type="button">Generate Payload</button>
+                    <button class="primary-action" id="oastGenerateButton" type="button">Generate payload</button>
                     <button class="secondary-action" id="oastClearButton" type="button">Clear</button>
                   </div>
                 </header>
                 <div id="oastPayloadDisplay" class="oast-payload-display">
-                  <span class="oast-payload-label">Payload:</span>
-                  <input id="oastPayloadText" class="oast-payload-input" type="text" placeholder="Generate or paste your OAST subdomain here" spellcheck="false" />
-                  <button class="utility-button" id="oastCopyPayloadButton" type="button" title="Copy">📋</button>
+                  <span class="oast-payload-label">Payload</span>
+                  <input id="oastPayloadText" class="oast-payload-input" type="text" placeholder="Generate or paste a domain" spellcheck="false" aria-label="OAST payload" />
+                  <button class="utility-button" id="oastCopyPayloadButton" type="button" title="Copy" aria-label="Copy OAST payload">Copy</button>
                 </div>
                 <div class="history-table-shell">
                   <table class="mini-table" id="oastTable">
@@ -729,13 +729,10 @@
               <div class="stack-resizer" aria-hidden="true"></div>
               <section class="panel-card">
                 <header class="panel-toolbar">
-                  <div>
-                    <p class="placeholder-kicker">Detail</p>
-                    <h2 id="oastDetailTitle">Select a callback</h2>
-                  </div>
+                  <h2 id="oastDetailTitle">No callback selected</h2>
                 </header>
                 <div class="editor-panel">
-                  <pre class="simple-code-view" id="oastDetailView" tabindex="0">Select an OAST callback to view details.</pre>
+                  <pre class="simple-code-view" id="oastDetailView" tabindex="0"></pre>
                 </div>
               </section>
             </div>
@@ -747,9 +744,8 @@
                 <div><h2 id="upstreamPeerHeading">Upstream socket peer</h2><p>Current session: <strong id="upstreamPeerSession">Loading…</strong></p></div>
               </header>
               <div class="settings-form">
-                <label class="settings-toggle"><input id="upstreamPeerEnabled" type="checkbox" aria-describedby="upstreamPeerDisclosure upstreamPeerTiming" disabled /><span>Record upstream socket peer (default: Off)</span></label>
-                <p id="upstreamPeerDisclosure">Stores the observed upstream IP address and port with future captured HTTP(S) exchanges. This may be an internal or proxy address and may identify a proxy rather than the origin. Stored peers are included in session exports and full-record JSON. Turning this off does not remove previously stored peers.</p>
-                <p id="upstreamPeerTiming">Changes apply to new exchanges. Eligible exchanges already in flight may finish using the previous setting.</p>
+                <label class="settings-toggle"><input id="upstreamPeerEnabled" type="checkbox" aria-describedby="upstreamPeerDisclosure" disabled /><span>Record upstream socket peer</span></label>
+                <p id="upstreamPeerDisclosure">Saves the upstream IP address and port with new HTTP(S) exchanges. It can be an internal or proxy address rather than the origin. Saved peers go into session exports and full-record JSON, and stay when this is turned off.</p>
                 <p id="upstreamPeerError" class="upstream-peer-error" role="alert"></p>
                 <p id="upstreamPeerStatus" role="status" aria-live="polite">Loading saved setting…</p>
                 <div class="toolbar-actions"><button class="primary-action" id="upstreamPeerSave" type="button" disabled>Save</button><button class="secondary-action" id="upstreamPeerCancel" type="button" disabled>Cancel</button><button class="secondary-action hidden" id="upstreamPeerRefresh" type="button">Check status</button></div>
@@ -760,16 +756,15 @@
                 <div><h2 id="historyRetentionHeading">HTTP History automatic cleanup</h2><p>Current session: <strong id="historyRetentionSession">Loading…</strong></p></div>
               </header>
               <div class="settings-form">
-                <fieldset class="history-retention-fields" aria-describedby="historyRetentionWarning historyRetentionProtection">
-                  <legend>Saved HTTP History limit</legend>
-                  <label class="settings-toggle"><input id="historyRetentionEnabled" type="checkbox" disabled /><span>Enable automatic cleanup (default: Off)</span></label>
-                  <label class="settings-field" for="historyRetentionPreset"><span>Keep newest total entries</span>
+                <fieldset class="history-retention-fields" aria-labelledby="historyRetentionHeading" aria-describedby="historyRetentionWarning historyRetentionProtection">
+                  <label class="settings-toggle"><input id="historyRetentionEnabled" type="checkbox" disabled /><span>Enable automatic cleanup</span></label>
+                  <label class="settings-field" for="historyRetentionPreset"><span>Keep the newest</span>
                     <select id="historyRetentionPreset" disabled><option value="10000">10,000</option><option value="50000">50,000</option><option value="100000">100,000</option><option value="250000">250,000</option><option value="custom">Custom</option></select>
                   </label>
-                  <label class="settings-field hidden" id="historyRetentionCustomField" for="historyRetentionCustom"><span>Custom total entry limit</span><input id="historyRetentionCustom" type="text" inputmode="numeric" pattern="[0-9]+" aria-describedby="historyRetentionCustomHelp historyRetentionError" disabled /><small id="historyRetentionCustomHelp">Whole number from 1 to 4,294,967,295.</small></label>
+                  <label class="settings-field hidden" id="historyRetentionCustomField" for="historyRetentionCustom"><span>Custom limit</span><input id="historyRetentionCustom" type="text" inputmode="numeric" pattern="[0-9]+" aria-describedby="historyRetentionCustomHelp historyRetentionError" disabled /><small id="historyRetentionCustomHelp">Whole number from 1 to 4,294,967,295.</small></label>
                 </fieldset>
-                <p id="historyRetentionWarning" class="history-retention-warning">Saving an enabled policy permanently deletes the oldest unprotected entries above the total target, now and as history grows. Deleted requests, responses and notes cannot be restored. Turning cleanup off does not restore deleted entries.</p>
-                <p id="historyRetentionProtection">Original records referenced by durably saved HTTP tabs and in-progress stored records are protected. Protected entries count toward the total; if they exceed the target, the limit is soft. Unsaved tabs and note edits do not protect records.</p>
+                <p id="historyRetentionWarning" class="history-retention-warning">Saving with cleanup on deletes the oldest unprotected entries above the limit, now and as history grows. Deleted requests, responses and notes cannot be restored.</p>
+                <p id="historyRetentionProtection">Entries still being written, and originals that saved Replay tabs use, are kept, so the total can stay above the limit. Unsaved tabs and note edits do not keep an entry.</p>
                 <p id="historyRetentionError" class="history-retention-error" role="alert"></p>
                 <p id="historyRetentionStatus" role="status" aria-live="polite">Loading saved policy…</p>
                 <div class="toolbar-actions"><button class="primary-action" id="historyRetentionSave" type="button" disabled>Save cleanup policy</button><button class="secondary-action" id="historyRetentionCancel" type="button" disabled>Cancel</button><button class="secondary-action" id="historyRetentionRefresh" type="button">Check status</button></div>
@@ -778,10 +773,7 @@
             <div class="split-panel split-panel-tight">
               <section class="panel-card">
                 <header class="panel-toolbar">
-                  <div>
-                    <p class="placeholder-kicker">Runtime</p>
-                    <h2>Settings</h2>
-                  </div>
+                  <h2>Proxy</h2>
                   <div class="toolbar-actions">
                     <button class="secondary-action" id="reloadProxySettingsButton" type="button">Reload</button>
                     <button class="primary-action" id="saveProxySettingsButton" type="button">Save</button>
@@ -812,7 +804,7 @@
                   <label class="settings-field">
                     <span>Upstream proxy address</span>
                     <input id="proxyChainUrl" type="text" placeholder="http://127.0.0.1:8081 or socks5h://127.0.0.1:1080" autocomplete="off" spellcheck="false" />
-                    <small>Forward captured traffic and Replay through an HTTP or SOCKS5 proxy. SOCKS5 resolves destination names remotely. Connection failures do not fall back to a direct connection.</small>
+                    <small>HTTP or SOCKS5, for captured traffic and Replay. SOCKS5 resolves names on the proxy, and a failed connection never goes direct.</small>
                   </label>
                   <label class="settings-field">
                     <span>Proxy username (optional)</span>
@@ -821,23 +813,23 @@
                   <label class="settings-field">
                     <span>Proxy password</span>
                     <input id="proxyChainPassword" type="password" autocomplete="new-password" />
-                    <small>A masked value keeps the saved password. Empty the field to remove it. Credentials are stored with this session on disk.</small>
+                    <small>Saved with this session on disk. Empty the field to remove it.</small>
                   </label>
                   <label class="settings-field">
                     <span>Connect directly to</span>
                     <textarea id="proxyChainBypassHosts" rows="3" placeholder="localhost&#10;*.internal.example.com"></textarea>
-                    <small>Hosts listed here skip the proxy chain and are reached directly, for captured HTTP and HTTPS, WebSocket and Replay. Same patterns as scope.</small>
+                    <small>Reached without the proxy chain. Same patterns as Scope.</small>
                   </label>
                   <div class="settings-divider"></div>
                   <label class="settings-field">
                     <span>Scope patterns</span>
                     <textarea id="proxySettingScopePatterns" rows="6" placeholder="*.example.com&#10;api.example.com"></textarea>
-                    <small>Only in-scope hosts are intercepted when intercept is enabled. Leave empty to match all hosts.</small>
+                    <small>Empty puts every host in scope.</small>
                   </label>
                   <label class="settings-field">
                     <span>SSL passthrough hosts</span>
-                    <textarea id="proxySettingPassthroughHosts" rows="4" placeholder="*.pinned-app.com&#10;banking.example.com"></textarea>
-                    <small>Hosts listed here bypass TLS interception entirely. Use for certificate-pinned apps that reject the proxy CA. Wildcards supported.</small>
+                    <textarea id="proxySettingPassthroughHosts" rows="4" placeholder="*.pinned.example.com&#10;banking.example.com"></textarea>
+                    <small>Not decrypted. For apps that pin their certificate.</small>
                   </label>
                   <div class="settings-divider"></div>
                   <label class="settings-toggle">
@@ -855,12 +847,12 @@
                   <label class="settings-field">
                     <span>OAST server URL</span>
                     <input id="proxySettingOastServerUrl" type="text" placeholder="https://interact.sh" />
-                    <small id="oastServerUrlHint">Interactsh-compatible server. Sniper auto-registers and polls for callbacks.</small>
+                    <small id="oastServerUrlHint">Sniper registers with it and polls for callbacks.</small>
                   </label>
                   <div class="settings-field" id="oastTokenField">
                     <span>OAST token</span>
                     <div class="settings-inline-control">
-                      <input id="proxySettingOastToken" type="text" placeholder="Server authentication token (optional)" />
+                      <input id="proxySettingOastToken" type="password" autocomplete="off" spellcheck="false" placeholder="Server authentication token (optional)" aria-label="OAST token" />
                       <button class="secondary-action" id="proxySettingOastClearToken" type="button">Clear</button>
                     </div>
                     <small id="proxySettingOastTokenHint"></small>
@@ -873,7 +865,7 @@
                   <label class="settings-field">
                     <span>Proxy bind host</span>
                     <input id="proxySettingBindHost" type="text" list="proxyBindHostPresets" placeholder="127.0.0.1 or 0.0.0.0" required />
-                    <small>Common values: <code>127.0.0.1</code> for local-only, <code>0.0.0.0</code> to accept traffic from other devices.</small>
+                    <small><code>127.0.0.1</code>: this machine only. <code>0.0.0.0</code>: other devices too.</small>
                   </label>
                   <label class="settings-field">
                     <span>Proxy port</span>
@@ -890,43 +882,30 @@
 
               <section class="panel-card">
                 <header class="panel-toolbar">
-                  <div>
-                    <p class="placeholder-kicker">Workspace</p>
-                    <h2>Runtime details</h2>
-                  </div>
+                  <h2>Runtime details</h2>
                   <div class="toolbar-actions">
                     <button class="secondary-action" id="openCertFolderButton" type="button">Root CA</button>
                   </div>
                 </header>
                 <dl class="modal-list runtime-list">
                   <dt>Proxy listener</dt>
-                  <dd id="proxySettingsProxyAddr">Loading...</dd>
+                  <dd id="proxySettingsProxyAddr">Loading…</dd>
                   <dt>Next launch proxy</dt>
-                  <dd id="proxySettingsNextProxyAddr">Loading...</dd>
+                  <dd id="proxySettingsNextProxyAddr">Loading…</dd>
                   <dt>UI listener</dt>
-                  <dd id="proxySettingsUiAddr">Loading...</dd>
+                  <dd id="proxySettingsUiAddr">Loading…</dd>
                   <dt>Body preview cap</dt>
-                  <dd id="proxySettingsCaptureCap">Loading...</dd>
+                  <dd id="proxySettingsCaptureCap">Loading…</dd>
                   <dt>Bootstrap host</dt>
-                  <dd id="proxySettingsBootstrap">Loading...</dd>
+                  <dd id="proxySettingsBootstrap">Loading…</dd>
                   <dt>Data directory</dt>
-                  <dd id="proxySettingsDataDir">Loading...</dd>
+                  <dd id="proxySettingsDataDir">Loading…</dd>
                   <dt>Startup settings</dt>
-                  <dd id="proxySettingsStartupPath">Loading...</dd>
+                  <dd id="proxySettingsStartupPath">Loading…</dd>
                   <dt>Root CA</dt>
-                  <dd id="proxySettingsCertificateName">Loading...</dd>
+                  <dd id="proxySettingsCertificateName">Loading…</dd>
                 </dl>
               </section>
-            </div>
-          </section>
-
-          <section class="proxy-sub-placeholder hidden" id="proxySubPlaceholder">
-            <div class="placeholder-card">
-              <p class="placeholder-kicker" id="proxySubPath">Proxy</p>
-              <h2 id="proxySubTitle">HTTP is active</h2>
-              <p id="proxySubDescription">
-                This Proxy surface will be wired into the same transport and storage pipeline next.
-              </p>
             </div>
           </section>
         </section>
@@ -1043,11 +1022,11 @@
                     <option value="wss">WSS</option>
                     <option value="ws">WS</option>
                   </select>
-                  <input id="wsHostInput" class="compact-field-inline ws-host-field" type="text" placeholder="host" />
-                  <input id="wsPortInput" class="compact-field-inline ws-port-field" type="number" placeholder="443" />
+                  <input id="wsHostInput" class="compact-field-inline ws-host-field" type="text" placeholder="host" aria-label="WebSocket host" />
+                  <input id="wsPortInput" class="compact-field-inline ws-port-field" type="number" placeholder="443" aria-label="WebSocket port" />
                 </div>
                 <div class="ws-path-bar">
-                  <input id="wsPathInput" class="compact-field-inline ws-path-field" type="text" placeholder="/path" />
+                  <input id="wsPathInput" class="compact-field-inline ws-path-field" type="text" placeholder="/path" aria-label="WebSocket path" />
                 </div>
                 <div class="ws-action-bar">
                   <div class="ws-action-buttons">
@@ -1064,7 +1043,7 @@
                 <label id="wsMessageLabel" class="ws-editor-label">MESSAGE</label>
                 <div class="ws-message-highlight-shell">
                   <textarea id="wsMessageEditor" class="ws-message-editor-hidden" rows="6" spellcheck="false"></textarea>
-                  <pre id="wsMessageHighlight" class="ws-message-highlight" contenteditable="plaintext-only" role="textbox" aria-multiline="true" aria-labelledby="wsMessageLabel" spellcheck="false" data-placeholder="Type a message..."></pre>
+                  <pre id="wsMessageHighlight" class="ws-message-highlight" contenteditable="plaintext-only" role="textbox" aria-multiline="true" aria-labelledby="wsMessageLabel" spellcheck="false" data-placeholder="Type a message…"></pre>
                 </div>
                 <div class="ws-editor-actions">
                   <button class="primary-action ws-send-button" id="wsSendButton" type="button" disabled>Send</button>
@@ -1084,7 +1063,7 @@
               </div>
               <details class="ws-handshake-section">
                 <summary>Handshake headers</summary>
-                <textarea id="wsHandshakeHeaders" class="ws-handshake-editor" rows="4" placeholder="header-name: value" spellcheck="false"></textarea>
+                <textarea id="wsHandshakeHeaders" class="ws-handshake-editor" rows="4" placeholder="header-name: value" spellcheck="false" aria-label="WebSocket handshake headers"></textarea>
               </details>
             </div>
             <div class="pane-resizer" id="wsReplayPaneResizer" aria-hidden="true"></div>
@@ -1196,58 +1175,6 @@
         </section>
 
         <section class="fuzzer-shell hidden" id="fuzzerShell">
-          <header class="panel-toolbar replay-header fuzzer-workflow-header">
-            <div class="fuzzer-header-row">
-              <h2>Fuzzer</h2>
-              <label class="compact-field fuzzer-mode-field" for="fuzzerAttackType">
-                <span>Attack</span>
-                <select id="fuzzerAttackType">
-                  <option value="sniper" selected>Sniper · one at a time</option>
-                  <option value="battering_ram">Battering ram · all positions</option>
-                </select>
-              </label>
-              <div id="fuzzerPreflightSummary" class="fuzzer-preflight-summary" role="status" aria-live="polite">No request selected.</div>
-              <div class="toolbar-actions">
-                <button class="secondary-action" id="resetFuzzerButton" type="button">Reset</button>
-                <button class="secondary-action hidden" id="stopFuzzerButton" type="button" aria-describedby="fuzzerStopStatus">Stop</button>
-                <button class="primary-action" id="startFuzzerButton" type="button" aria-describedby="fuzzerPreflightSummary fuzzerTargetSummary fuzzerPreflightNotice">Start</button>
-              </div>
-            </div>
-            <section class="fuzzer-preflight" aria-label="Review before running">
-              <label class="compact-field fuzzer-transport-field" for="fuzzerTransportSelect">
-                <span>Transport</span>
-                <select id="fuzzerTransportSelect" aria-describedby="fuzzerTransportHelp fuzzerTargetSummary" disabled>
-                  <option value="https">HTTPS</option>
-                  <option value="http">HTTP</option>
-                </select>
-              </label>
-              <span id="fuzzerTargetSummary" class="fuzzer-target-summary"></span>
-              <p id="fuzzerTransportHelp" class="fuzzer-help fuzzer-transport-help hidden"></p>
-              <p id="fuzzerStopStatus" class="fuzzer-help fuzzer-notice-error hidden" role="status" aria-live="polite"></p>
-              <p id="fuzzerPreflightNotice" class="fuzzer-help" role="status" aria-live="polite"></p>
-              <details class="fuzzer-disclosure fuzzer-preview-disclosure hidden" id="fuzzerPreviewDisclosure">
-                <summary>Preview &amp; details</summary>
-                <div class="fuzzer-disclosure-body">
-                  <p class="fuzzer-help">A position is a value marked as <code>§value§</code> (or <code>$payload$</code>). Sniper puts each payload in one position at a time; Battering ram puts it in every position at once.</p>
-                  <p class="fuzzer-help" id="fuzzerPreviewNotes"></p>
-                  <div id="fuzzerPreviewSamples" class="fuzzer-preview-samples">Add a request and payloads to preview.</div>
-                </div>
-              </details>
-              <details class="fuzzer-disclosure fuzzer-control-disclosure fuzzer-options">
-                <summary>Options</summary>
-                <div class="fuzzer-disclosure-body">
-                  <div class="fuzzer-control-row fuzzer-attack-options">
-                    <label class="compact-field fuzzer-concurrency-field" for="fuzzerConcurrency">
-                      <span>Concurrent requests</span>
-                      <input id="fuzzerConcurrency" type="number" min="1" max="16" step="1" value="4" />
-                    </label>
-                    <label class="fuzzer-check" for="fuzzerUrlEncode"><input id="fuzzerUrlEncode" type="checkbox" checked /> URL-encode in the URL</label>
-                  </div>
-                </div>
-              </details>
-            </section>
-          </header>
-
           <section class="fuzzer-layout">
             <div class="fuzzer-top-row">
               <section class="panel-card fuzzer-template-card">
@@ -1261,7 +1188,18 @@
                     <button class="secondary-action" id="fuzzerUndoMarkerButton" type="button" title="Undo the last Add, Remove or Clear markers action" disabled>Undo</button>
                   </div>
                 </header>
-                <p class="fuzzer-input-label" id="fuzzerRequestHelp">Raw HTTP request · select a value, then Add §</p>
+                <div class="fuzzer-request-target">
+                  <label class="compact-field fuzzer-transport-field" for="fuzzerTransportSelect">
+                    <span>Transport</span>
+                    <select id="fuzzerTransportSelect" aria-describedby="fuzzerTransportHelp fuzzerTargetSummary" disabled>
+                      <option value="https">HTTPS</option>
+                      <option value="http">HTTP</option>
+                    </select>
+                  </label>
+                  <span id="fuzzerTargetSummary" class="fuzzer-target-summary"></span>
+                  <p id="fuzzerTransportHelp" class="fuzzer-help fuzzer-transport-help hidden"></p>
+                </div>
+                <p class="fuzzer-input-label" id="fuzzerRequestHelp"></p>
                 <details class="fuzzer-disclosure fuzzer-control-disclosure fuzzer-value-tools hidden" id="fuzzerValueRow">
                   <summary>Choose a value</summary>
                   <div class="fuzzer-disclosure-body">
@@ -1283,20 +1221,19 @@
                 <header class="panel-toolbar">
                   <h2><label for="fuzzerPayloadsEditor">Payloads</label></h2>
                   <span class="fuzzer-count" id="fuzzerPayloadCount">0 payloads</span>
+                  <label class="compact-field fuzzer-import-mode" for="fuzzerPayloadImportMode">
+                    <span>List action</span>
+                    <select id="fuzzerPayloadImportMode">
+                      <option value="append" selected>Append</option>
+                      <option value="replace">Replace</option>
+                    </select>
+                  </label>
+                </header>
+                <div class="fuzzer-payload-input-bar">
                   <div class="toolbar-actions">
                     <input id="fuzzerPayloadFile" type="file" accept=".txt,text/plain" hidden aria-label="Payload text file" />
                     <button class="secondary-action" id="fuzzerImportPayloadButton" type="button" aria-controls="fuzzerPayloadFile" aria-describedby="fuzzerPayloadImportStatus">Import file</button>
                   </div>
-                </header>
-                <div class="fuzzer-payload-input-bar">
-                  <span class="fuzzer-input-label">One per line</span>
-                  <label class="compact-field fuzzer-import-mode" for="fuzzerPayloadImportMode">
-                    <span title="Applies to imported files, presets and generated ranges">On import</span>
-                    <select id="fuzzerPayloadImportMode">
-                      <option value="append" selected>Append to list</option>
-                      <option value="replace">Replace list</option>
-                    </select>
-                  </label>
                 </div>
                 <p id="fuzzerPayloadImportStatus" class="fuzzer-import-status hidden" role="status" aria-live="polite"></p>
                 <details class="fuzzer-disclosure fuzzer-control-disclosure fuzzer-payload-tools" id="fuzzerPayloadTools">
@@ -1321,14 +1258,55 @@
                       </div>
                       <button class="secondary-action" id="fuzzerGenerateRangeButton" type="button">Generate range</button>
                     </fieldset>
-                    <p class="fuzzer-help" id="fuzzerPayloadHelp">One payload per line. Spaces are preserved. Blank lines are empty payloads; a final line break is ignored.</p>
                   </div>
                 </details>
                 <div class="editor-panel">
-                  <textarea id="fuzzerPayloadsEditor" class="request-editor" spellcheck="false" placeholder="Paste payloads, one per line" aria-describedby="fuzzerPayloadHelp"></textarea>
+                  <textarea id="fuzzerPayloadsEditor" class="request-editor" spellcheck="false" placeholder="One replacement value per line" aria-describedby="fuzzerPayloadHelp"></textarea>
                 </div>
+                <p class="fuzzer-help fuzzer-editor-help" id="fuzzerPayloadHelp">Spaces kept · blank lines = empty payloads · final newline ignored</p>
               </section>
             </div>
+            <header class="panel-toolbar replay-header fuzzer-workflow-header">
+              <div class="fuzzer-header-row">
+                <h2>Run</h2>
+                <label class="compact-field fuzzer-mode-field" for="fuzzerAttackType">
+                  <span>Attack</span>
+                  <select id="fuzzerAttackType">
+                    <option value="sniper" selected>Sniper · one at a time</option>
+                    <option value="battering_ram">Battering ram · all positions</option>
+                  </select>
+                </label>
+                <div id="fuzzerPreflightSummary" class="fuzzer-preflight-summary" role="status" aria-live="polite">No request selected.</div>
+                <div class="toolbar-actions">
+                  <button class="secondary-action" id="resetFuzzerButton" type="button">Reset</button>
+                  <button class="secondary-action hidden" id="stopFuzzerButton" type="button" aria-describedby="fuzzerStopStatus">Stop</button>
+                  <button class="primary-action" id="startFuzzerButton" type="button" aria-describedby="fuzzerPreflightSummary fuzzerTargetSummary fuzzerPreflightNotice">Start</button>
+                </div>
+              </div>
+              <section class="fuzzer-preflight" aria-label="Review before running">
+                <p id="fuzzerStopStatus" class="fuzzer-help fuzzer-notice-error hidden" role="status" aria-live="polite"></p>
+                <p id="fuzzerPreflightNotice" class="fuzzer-help" role="status" aria-live="polite"></p>
+                <details class="fuzzer-disclosure fuzzer-preview-disclosure hidden" id="fuzzerPreviewDisclosure">
+                  <summary>Preview requests</summary>
+                  <div class="fuzzer-disclosure-body">
+                    <p class="fuzzer-help" id="fuzzerPreviewNotes"></p>
+                    <div id="fuzzerPreviewSamples" class="fuzzer-preview-samples">Add a request and payloads to preview.</div>
+                  </div>
+                </details>
+                <details class="fuzzer-disclosure fuzzer-control-disclosure fuzzer-options">
+                  <summary>Options</summary>
+                  <div class="fuzzer-disclosure-body">
+                    <div class="fuzzer-control-row fuzzer-attack-options">
+                      <label class="compact-field fuzzer-concurrency-field" for="fuzzerConcurrency">
+                        <span>Concurrent requests</span>
+                        <input id="fuzzerConcurrency" type="number" min="1" max="16" step="1" value="4" />
+                      </label>
+                      <label class="fuzzer-check" for="fuzzerUrlEncode"><input id="fuzzerUrlEncode" type="checkbox" checked /> URL-encode in the URL</label>
+                    </div>
+                  </div>
+                </details>
+              </section>
+            </header>
             <!-- Horizontal resizer between top row and results -->
             <div class="fuzzer-row-resizer" id="fuzzerRowResizer"></div>
             <!-- Bottom: Run results + detail -->
@@ -1346,7 +1324,7 @@
               </header>
               <div class="fuzzer-result-tools">
                 <details class="fuzzer-disclosure fuzzer-result-filters">
-                  <summary id="fuzzerResultFilterSummary">Filter and sort results <span id="fuzzerResultFilterBadge" class="fuzzer-filter-badge hidden"></span></summary>
+                  <summary id="fuzzerResultFilterSummary">Filters <span id="fuzzerResultFilterBadge" class="fuzzer-filter-badge hidden"></span></summary>
                   <div class="fuzzer-disclosure-body">
                     <div class="fuzzer-filter-grid">
                       <label class="compact-field" for="fuzzerResultStatus">
@@ -1385,7 +1363,7 @@
                   </div>
                 </details>
                 <details class="fuzzer-disclosure fuzzer-saved-runs">
-                  <summary>View or reuse a saved run</summary>
+                  <summary>Saved runs</summary>
                   <div class="fuzzer-disclosure-body">
                     <div class="fuzzer-control-row">
                       <label class="compact-field fuzzer-field-grow" for="fuzzerSavedRunSelect"><span>Saved run</span><select id="fuzzerSavedRunSelect"><option value="">Choose a saved run</option></select></label>
@@ -1393,16 +1371,16 @@
                       <button class="secondary-action" id="fuzzerViewRunButton" type="button" disabled>View results</button>
                       <button class="secondary-action" id="fuzzerReuseRunButton" type="button" disabled>Reuse setup</button>
                     </div>
-                    <p class="fuzzer-help">View results keeps your current draft. Reuse setup asks before replacing it; the original target or source request may be unavailable.</p>
                     <p class="fuzzer-help" id="fuzzerSavedRunNotice" role="status" aria-live="polite"></p>
                   </div>
                 </details>
               </div>
               <div class="fuzzer-result-status" id="fuzzerResultStatusRow">
                 <p class="fuzzer-help fuzzer-filter-count" id="fuzzerResultFilterCount" role="status" aria-live="polite">No results to filter.</p>
+                <span class="fuzzer-help" id="fuzzerResultKeyboardHelp">↑/↓ select · Enter reopens selected details.</span>
                 <button class="secondary-action hidden" id="fuzzerClearResultFiltersButton" type="button">Clear filters</button>
               </div>
-              <div class="history-table-shell" style="flex:1;min-height:0;overflow:auto">
+              <div class="history-table-shell" style="flex:1;min-height:0;overflow:auto" aria-describedby="fuzzerResultKeyboardHelp" title="↑/↓ select · Enter reopens selected details.">
                 <table class="mini-table fuzzer-results-table">
                   <thead id="fuzzerResultsHead">
                     <tr>
@@ -1624,37 +1602,42 @@
         <section class="recon-shell hidden" id="reconShell" aria-labelledby="reconTitle">
           <section class="panel-card recon-setup">
             <header class="panel-toolbar">
-              <div><p class="placeholder-kicker">Endpoint discovery</p><h2 id="reconTitle">Recon</h2></div>
+              <h2 id="reconTitle">Discover endpoints</h2>
               <button class="secondary-action" id="reconRefresh" type="button">Refresh</button>
             </header>
             <form id="reconForm" class="recon-form">
               <label class="recon-field recon-target-field" for="reconTarget">Target URL
                 <input id="reconTarget" type="url" placeholder="https://example.com/" required autocomplete="off" spellcheck="false" />
               </label>
-              <label class="recon-check"><input id="reconSubdomains" type="checkbox" /> Include subdomains on the same port</label>
-              <p class="recon-help" id="reconScope">Discovery stays on the URL's scheme, host and port.</p>
+              <label class="recon-check"><input id="reconSubdomains" type="checkbox" /> Include subdomains · same port</label>
               <fieldset class="recon-sources">
                 <legend>Sources</legend>
-                <label class="recon-check"><input id="reconCrawler" type="checkbox" checked /> Static HTML / JavaScript crawler</label>
-                <label class="recon-check"><input id="reconUrlscan" type="checkbox" /> urlscan.io historical search</label>
-                <label class="recon-check"><input id="reconWayback" type="checkbox" /> Wayback Machine history</label>
-                <label class="recon-check"><input id="reconUrlscanSubmit" type="checkbox" /> Submit a new urlscan.io browser scan</label>
+                <div class="recon-source-group" role="group" aria-label="Crawl">
+                  <span class="recon-source-label">Crawl</span>
+                  <label class="recon-check" title="GET requests only, without a browser or forms"><input id="reconCrawler" type="checkbox" checked /> HTML / JavaScript</label>
+                </div>
+                <div class="recon-source-group" role="group" aria-label="Historical URLs">
+                  <span class="recon-source-label">History</span>
+                  <label class="recon-check"><input id="reconUrlscan" type="checkbox" /> urlscan.io</label>
+                  <label class="recon-check"><input id="reconWayback" type="checkbox" /> Wayback Machine</label>
+                </div>
+                <div class="recon-source-group" role="group" aria-label="New browser scan">
+                  <span class="recon-source-label">New scan</span>
+                  <label class="recon-check"><input id="reconUrlscanSubmit" type="checkbox" /> urlscan.io browser</label>
+                </div>
               </fieldset>
-              <p class="recon-help">The crawler only sends GET requests: no browser, no forms. Historical and candidate endpoints may not be live. Only test targets you are authorized to access.</p>
-              <label class="recon-check recon-history-consent hidden" id="reconHistoryConsentRow"><input id="reconHistoryConsent" type="checkbox" /><span id="reconHistoryConsentText">Allow sending the target domain to the selected history services.</span></label>
+              <label class="recon-check recon-history-consent hidden" id="reconHistoryConsentRow"><input id="reconHistoryConsent" type="checkbox" /><span id="reconHistoryConsentText">Send the target domain to the selected history services</span></label>
               <div id="reconScanOptions" class="recon-scan-options hidden">
-                <label class="recon-field" for="reconScanVisibility">New scan visibility<select id="reconScanVisibility"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select></label>
-                <p class="recon-help">urlscan.io gets the full URL, so drop the query and fragment first, and its browser may load third-party resources. Public results are visible to everyone; unlisted ones are not private.</p>
-                <label class="recon-check"><input id="reconScanConsent" type="checkbox" /><span id="reconScanConsentText">Allow a new urlscan.io scan of this URL with the selected visibility.</span></label>
+                <label class="recon-field" for="reconScanVisibility">Visibility<select id="reconScanVisibility"><option value="private">Private</option><option value="unlisted">Unlisted · not private</option><option value="public">Public · searchable</option></select></label>
+                <label class="recon-check"><input id="reconScanConsent" type="checkbox" /><span id="reconScanConsentText">Let urlscan.io open this URL in its own browser</span></label>
               </div>
               <details class="recon-limits">
-                <summary>Optional discovery budgets</summary>
-                <p class="recon-help">0 means no limit. Stop ends a job early.</p>
+                <summary>Limits</summary>
                 <div class="recon-limit-fields">
-                  <label class="recon-field" for="reconMaxRequests">Crawler requests<input id="reconMaxRequests" type="number" min="0" step="1" value="0" /></label>
-                  <label class="recon-field" for="reconMaxDepth">Crawl depth<input id="reconMaxDepth" type="number" min="0" step="1" value="0" /></label>
-                  <label class="recon-field" for="reconMaxEndpoints">Endpoints<input id="reconMaxEndpoints" type="number" min="0" step="1" value="0" /></label>
-                  <label class="recon-field" for="reconMaxPages">History pages per source<input id="reconMaxPages" type="number" min="0" step="1" value="0" /></label>
+                  <label class="recon-field" for="reconMaxRequests">Crawler requests<input id="reconMaxRequests" type="number" min="0" step="1" placeholder="No limit" /></label>
+                  <label class="recon-field" for="reconMaxDepth">Crawl depth<input id="reconMaxDepth" type="number" min="0" step="1" placeholder="No limit" /></label>
+                  <label class="recon-field" for="reconMaxEndpoints">Endpoints<input id="reconMaxEndpoints" type="number" min="0" step="1" placeholder="No limit" /></label>
+                  <label class="recon-field" for="reconMaxPages">History pages per source<input id="reconMaxPages" type="number" min="0" step="1" placeholder="No limit" /></label>
                 </div>
               </details>
               <button class="primary-action recon-start" id="reconStart" type="submit" disabled>Start discovery</button>
@@ -1663,11 +1646,11 @@
           </section>
           <section class="panel-card recon-jobs-panel" aria-labelledby="reconJobsTitle">
             <header class="panel-toolbar"><h2 id="reconJobsTitle">Jobs</h2><span id="reconJobsMeta" class="recon-help"></span></header>
-            <div id="reconJobs" class="recon-jobs"><p class="recon-empty">No discovery jobs in this session.</p></div>
+            <div id="reconJobs" class="recon-jobs"><p class="recon-empty">No jobs yet.</p></div>
           </section>
           <section class="panel-card recon-inventory" aria-labelledby="reconInventoryTitle">
             <header class="panel-toolbar recon-inventory-toolbar">
-              <div><h2 id="reconInventoryTitle">Endpoint inventory</h2><p id="reconInventoryMeta" class="recon-help" role="status" aria-live="polite">Open Recon to load this session.</p></div>
+              <div><h2 id="reconInventoryTitle">Endpoint inventory</h2><p id="reconInventoryMeta" class="recon-help" role="status" aria-live="polite">0 endpoints</p></div>
               <div class="recon-search-controls">
                 <label class="recon-sr-only" for="reconSearch">Search endpoints and evidence</label>
                 <input id="reconSearch" type="search" placeholder="Search URL, method, source or evidence" autocomplete="off" />
@@ -1685,7 +1668,7 @@
                 </table>
               </div>
               <div class="pane-resizer list-detail-resizer" role="separator" aria-orientation="vertical" aria-label="Resize the list and its details" tabindex="0" title="Drag to resize; double-click to reset"></div>
-              <aside class="recon-detail" id="reconDetail" aria-labelledby="reconDetailTitle"><h3 id="reconDetailTitle">Endpoint details</h3><p class="recon-help">Select an endpoint to inspect its raw URLs and provenance.</p></aside>
+              <aside class="recon-detail" id="reconDetail" aria-labelledby="reconDetailTitle"><h3 id="reconDetailTitle">Endpoint details</h3><p class="recon-help">Select an endpoint.</p></aside>
             </div>
             <footer class="recon-pagination">
               <span id="reconPageMeta">0 endpoints</span>
@@ -1694,60 +1677,8 @@
           </section>
         </section>
 
-        <section class="templates-shell hidden" id="templatesShell" aria-labelledby="templatesTitle">
+        <section class="templates-shell hidden" id="templatesShell" aria-label="Active Scan">
           <div class="templates-side">
-          <section class="panel-card templates-library" aria-labelledby="templatesTitle">
-            <header class="panel-toolbar">
-              <h2 id="templatesTitle">Templates</h2>
-              <div class="toolbar-actions">
-                <button class="secondary-action hidden" id="templatesCheck" type="button">Check for updates</button>
-                <details class="more-menu" id="templatesMore">
-                  <summary class="secondary-action" aria-label="More">⋯</summary>
-                  <div class="context-menu more-menu-list" role="menu">
-                    <button class="context-menu-item" id="templatesSwitch" type="button" role="menuitem">Download main (unreleased)</button>
-                    <button class="context-menu-item" id="templatesImportMenu" type="button" role="menuitem">Import archive…</button>
-                  </div>
-                </details>
-              </div>
-            </header>
-            <div class="recon-form">
-              <div class="templates-version" id="templatesVersion"><strong>Loading…</strong></div>
-              <div class="templates-update hidden" id="templatesUpdate">
-                <span id="templatesUpdateLabel">Update daily</span>
-                <span class="recon-help" id="templatesUpdateNote"></span>
-                <button class="switch" id="templatesAutoUpdate" type="button" role="switch" aria-checked="false" aria-labelledby="templatesUpdateLabel"></button>
-              </div>
-              <p class="recon-help" id="templatesStatus"></p>
-              <p class="recon-notice hidden" id="templatesProgress" role="status"></p>
-              <progress class="templates-progress hidden" id="templatesProgressBar" aria-labelledby="templatesProgress"></progress>
-              <div class="templates-actions">
-                <button class="primary-action hidden" id="templatesDownload" type="button">Download</button>
-                <button class="secondary-action hidden" id="templatesImport" type="button" title="Import a release .tar.gz">Import…</button>
-                <input class="hidden" id="templatesImportFile" type="file" accept=".gz,.tgz,application/gzip" />
-              </div>
-              <p class="recon-notice recon-warning hidden" id="templatesScopeNote">Scope is empty, so the templates turned on check nothing.</p>
-              <p class="recon-notice hidden" id="templatesNotice" role="status"></p>
-            </div>
-          </section>
-          <section class="panel-card templates-auto" aria-labelledby="templatesAutoTitle">
-            <header class="panel-toolbar">
-              <h2 id="templatesAutoTitle" title="Sends the Scan templates turned on in the list to each new host the proxy captures in Scope or listed here, once a host. Only for hosts you may test.">Auto scan</h2>
-              <div class="toolbar-actions"><button class="switch" id="templatesAutoToggle" type="button" role="switch" aria-checked="false" aria-label="Auto scan" disabled></button></div>
-            </header>
-            <div class="recon-form">
-              <p class="recon-help" id="templatesAutoSummary">Loading…</p>
-              <details class="recon-limits templates-options" id="templatesAutoOptions">
-                <summary>Options</summary>
-                <div class="templates-auto-fields">
-                  <label class="recon-field" for="templatesAutoHosts">Extra hosts
-                    <textarea id="templatesAutoHosts" rows="1" placeholder="*.example.com" autocomplete="off" spellcheck="false"></textarea>
-                  </label>
-                  <label class="recon-field" for="templatesAutoRate">Requests/s<input id="templatesAutoRate" type="number" min="1" max="50" value="10" /></label>
-                </div>
-              </details>
-              <p class="recon-notice hidden" id="templatesAutoNotice" role="status" aria-live="polite"></p>
-            </div>
-          </section>
           <section class="panel-card templates-scan" aria-labelledby="templatesScanTitle">
             <header class="panel-toolbar">
               <h2 id="templatesScanTitle">Manual scan</h2>
@@ -1786,13 +1717,65 @@
                   <label class="recon-field" for="templatesScanMaxRequests">Max requests<input id="templatesScanMaxRequests" type="number" min="1" max="50000" value="10000" /></label>
                 </div>
                 <label class="recon-check"><input id="templatesScanMatchReplace" type="checkbox" /> Apply Match &amp; Replace</label>
-                <label class="recon-check"><input id="templatesScanKeepAll" type="checkbox" checked /> Keep every request in HTTP history</label>
+                <label class="recon-check"><input id="templatesScanKeepAll" type="checkbox" checked /> Save all requests to HTTP history</label>
               </details>
               <p class="recon-help" id="templatesScanPlan" aria-live="polite"></p>
-              <div class="templates-actions"><button class="primary-action" id="templatesScanStart" type="button" disabled>Start scan</button></div>
+              <div class="templates-actions templates-run-actions"><button class="primary-action" id="templatesScanStart" type="button" disabled>Start scan</button></div>
               <p class="recon-notice hidden" id="templatesScanNotice" role="status" aria-live="polite"></p>
             </div>
             <div class="recon-jobs" id="templatesScanJobs"></div>
+          </section>
+          <section class="panel-card templates-library" aria-labelledby="templatesTitle">
+            <header class="panel-toolbar">
+              <h2 id="templatesTitle">Template library</h2>
+              <div class="toolbar-actions">
+                <button class="secondary-action hidden" id="templatesCheck" type="button">Check for updates</button>
+                <details class="more-menu" id="templatesMore">
+                  <summary class="secondary-action" aria-label="More">⋯</summary>
+                  <div class="context-menu more-menu-list" role="menu">
+                    <button class="context-menu-item" id="templatesSwitch" type="button" role="menuitem">Download main (unreleased)</button>
+                    <button class="context-menu-item" id="templatesImportMenu" type="button" role="menuitem">Import archive…</button>
+                  </div>
+                </details>
+              </div>
+            </header>
+            <div class="recon-form">
+              <div class="templates-version" id="templatesVersion"><strong>Loading…</strong></div>
+              <div class="templates-update hidden" id="templatesUpdate">
+                <span id="templatesUpdateLabel">Update daily</span>
+                <span class="recon-help" id="templatesUpdateNote"></span>
+                <button class="switch" id="templatesAutoUpdate" type="button" role="switch" aria-checked="false" aria-labelledby="templatesUpdateLabel"></button>
+              </div>
+              <p class="recon-help" id="templatesStatus"></p>
+              <p class="recon-notice hidden" id="templatesProgress" role="status"></p>
+              <progress class="templates-progress hidden" id="templatesProgressBar" aria-labelledby="templatesProgress"></progress>
+              <div class="templates-actions">
+                <button class="primary-action hidden" id="templatesDownload" type="button">Download</button>
+                <button class="secondary-action hidden" id="templatesImport" type="button" title="Import a release .tar.gz">Import…</button>
+                <input class="hidden" id="templatesImportFile" type="file" accept=".gz,.tgz,application/gzip" />
+              </div>
+              <p class="recon-notice recon-warning hidden" id="templatesScopeNote">Scope empty · Passive checks inactive</p>
+              <p class="recon-notice hidden" id="templatesNotice" role="status"></p>
+            </div>
+          </section>
+          <section class="panel-card templates-auto" aria-labelledby="templatesAutoTitle">
+            <header class="panel-toolbar">
+              <h2 id="templatesAutoTitle" title="Sends the Scan templates turned on in the list once to each new host in Scope or listed here">Auto scan</h2>
+              <div class="toolbar-actions"><button class="switch" id="templatesAutoToggle" type="button" role="switch" aria-checked="false" aria-label="Auto scan" disabled></button></div>
+            </header>
+            <div class="recon-form">
+              <p class="recon-help" id="templatesAutoSummary">Loading…</p>
+              <details class="recon-limits templates-options" id="templatesAutoOptions">
+                <summary>Options</summary>
+                <div class="templates-auto-fields">
+                  <label class="recon-field" for="templatesAutoHosts">Extra hosts
+                    <textarea id="templatesAutoHosts" rows="1" placeholder="*.example.com" autocomplete="off" spellcheck="false"></textarea>
+                  </label>
+                  <label class="recon-field" for="templatesAutoRate">Requests/s<input id="templatesAutoRate" type="number" min="1" max="50" value="10" /></label>
+                </div>
+              </details>
+              <p class="recon-notice hidden" id="templatesAutoNotice" role="status" aria-live="polite"></p>
+            </div>
           </section>
           </div>
           <section class="panel-card recon-inventory templates-list">
@@ -1855,10 +1838,7 @@
         <section class="logger-shell hidden" id="loggerShell">
           <section class="panel-card">
             <header class="panel-toolbar">
-              <div>
-                <p class="placeholder-kicker">Event log</p>
-                <h2>Runtime events</h2>
-              </div>
+              <h2>Event log</h2>
               <div class="toolbar-actions">
                 <button class="secondary-action" id="clearEventLogButton" type="button">Clear</button>
               </div>
@@ -1900,10 +1880,7 @@
     <div class="modal-backdrop hidden" id="filterModal">
       <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="filterModalTitle">
         <header class="modal-header">
-          <div>
-            <p class="placeholder-kicker">HTTP</p>
-            <h2 id="filterModalTitle">Filter settings</h2>
-          </div>
+          <h2 id="filterModalTitle">Filter settings</h2>
           <button class="modal-close" id="closeFilterModalButton" type="button">Close</button>
         </header>
 
@@ -1971,10 +1948,7 @@
     <div class="modal-backdrop hidden" id="displaySettingsModal">
       <div class="modal-card modal-card-wide" role="dialog" aria-modal="true" aria-labelledby="displaySettingsTitle">
         <header class="modal-header">
-          <div>
-            <p class="placeholder-kicker">Application</p>
-            <h2 id="displaySettingsTitle">Settings</h2>
-          </div>
+          <h2 id="displaySettingsTitle">Settings</h2>
           <button class="modal-close" id="closeDisplaySettingsButton" type="button">Close</button>
         </header>
 
@@ -1991,9 +1965,9 @@
               <h3>Runtime</h3>
               <dl class="modal-list modal-list-compact">
                 <dt>Proxy listener</dt>
-                <dd id="proxyAddr">Loading...</dd>
+                <dd id="proxyAddr">Loading…</dd>
                 <dt>UI listener</dt>
-                <dd id="uiAddr">Loading...</dd>
+                <dd id="uiAddr">Loading…</dd>
                 <dt>Status</dt>
                 <dd><span class="status-pill settings-status online" id="liveStatus">Proxy live</span></dd>
                 <dt>Bootstrap host</dt>
@@ -2010,7 +1984,7 @@
                 <button class="secondary-action" id="installCliPathButton" type="button" disabled>Add sniper-cli to PATH</button>
                 <button class="secondary-action" id="refreshCliPathButton" type="button">Refresh status</button>
               </div>
-              <p class="modal-copy settings-inline-status" id="installCliPathStatus" role="status" aria-live="polite" aria-atomic="true">Checking command-line availability...</p>
+              <p class="modal-copy settings-inline-status" id="installCliPathStatus" role="status" aria-live="polite" aria-atomic="true">Checking command-line availability…</p>
             </section>
 <section class="filter-group filter-group-wide">
               <div class="filter-group-header">
@@ -2019,20 +1993,20 @@
                 </div>
               </div>
               <p class="modal-copy" id="certificateNote">
-                Download the local root certificate and trust it before using HTTPS interception.
+                Trust this CA to read HTTPS traffic.
               </p>
 
               <dl class="modal-list">
                 <dt>Common name</dt>
-                <dd id="certificateName">Loading...</dd>
+                <dd id="certificateName">Loading…</dd>
                 <dt>Valid until</dt>
-                <dd id="certificateExpiry">Loading...</dd>
+                <dd id="certificateExpiry">Loading…</dd>
                 <dt>PEM file</dt>
-                <dd id="certificatePemPath">Loading...</dd>
+                <dd id="certificatePemPath">Loading…</dd>
                 <dt>DER file</dt>
-                <dd id="certificateDerPath">Loading...</dd>
+                <dd id="certificateDerPath">Loading…</dd>
                 <dt>Data directory</dt>
-                <dd id="dataDir">Loading...</dd>
+                <dd id="dataDir">Loading…</dd>
                 <dt>HTTPS bootstrap</dt>
                 <dd id="specialHostHttps">https://sniper</dd>
               </dl>
@@ -2140,10 +2114,7 @@
     <div class="modal-backdrop hidden" id="compareModal">
       <div class="modal-card modal-card-wide">
         <header class="modal-header">
-          <div>
-            <p class="placeholder-kicker" id="compareKicker">Compare</p>
-            <h2 id="compareTitle">Request Diff</h2>
-          </div>
+          <h2 id="compareTitle">Compare</h2>
           <div class="compare-tabs">
             <button class="sub-tab active" data-compare-tab="request" type="button">Request</button>
             <button class="sub-tab" data-compare-tab="response" type="button">Response</button>
@@ -2161,12 +2132,12 @@
     <div class="modal-backdrop hidden" id="serviceMapApiDocs"></div>
 
     <div class="modal-backdrop hidden" id="curlImportModal">
-      <div class="modal-card">
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="curlImportTitle">
         <header class="modal-header">
-          <h2>Import cURL</h2>
+          <h2 id="curlImportTitle">Import cURL</h2>
         </header>
         <div class="modal-body">
-          <textarea id="curlImportInput" class="curl-import-textarea" rows="10" spellcheck="false" placeholder="Paste a cURL command here...&#10;&#10;curl -X POST https://api.example.com/login \&#10;  -H 'Content-Type: application/json' \&#10;  -d '{&quot;user&quot;:&quot;admin&quot;}'"></textarea>
+          <textarea id="curlImportInput" class="curl-import-textarea" rows="10" spellcheck="false" placeholder="Paste a cURL command here...&#10;&#10;curl -X POST https://api.example.com/login \&#10;  -H 'Content-Type: application/json' \&#10;  -d '{&quot;user&quot;:&quot;admin&quot;}'" aria-label="cURL command"></textarea>
         </div>
         <footer class="modal-footer">
           <button class="secondary-action" id="closeCurlImportButton" type="button">Cancel</button>

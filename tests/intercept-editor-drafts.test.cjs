@@ -62,7 +62,7 @@ function fixture(mode, cm) {
   };
   const els = {};
   for (const name of [
-    "interceptTableBody", "responseInterceptTableBody", "interceptDetailPath", "interceptDetailTitle", "interceptMeta",
+    "interceptTableBody", "responseInterceptTableBody", "interceptDetailTitle", "interceptMeta",
     "forwardInterceptButton", "dropInterceptButton", "forwardResponseInterceptButton", "dropResponseInterceptButton",
     "interceptRequestEditor", "interceptResponseEditor", "interceptQueueTabRequest", "interceptQueueTabResponse",
     "interceptRequestTable", "responseInterceptTable", "interceptRequestEditorPanel", "interceptResponseEditorPanel",
@@ -78,7 +78,7 @@ function fixture(mode, cm) {
   const document = { activeElement: null, getElementById: () => null };
   const context = loadFunctions([
     "loadIntercepts", "loadInterceptDetail", "loadResponseIntercepts", "loadResponseInterceptDetail",
-    "renderIntercepts", "renderResponseIntercepts", "getVisibleRequestInterceptSummaries", "getVisibleResponseInterceptSummaries",
+    "renderIntercepts", "renderResponseIntercepts", "displayHost", "extractHostPort", "defaultSummaryPortForScheme", "getVisibleRequestInterceptSummaries", "getVisibleResponseInterceptSummaries",
     "getInterceptDraftRecovery", "captureInterceptDraftRecoveryOwners", "handleInterceptDraftReadFailure", "takeInterceptDraftRecovery",
     "selectInterceptQueueItem", "getInterceptDetailRead", "updateInterceptDetailFeedback", "retrySelectedInterceptDetail", "updateInterceptQueueSelectionStatus", "scrollSelectedInterceptRowIntoView",
     "reconcileRequestInterceptSelection", "reconcileResponseInterceptSelection", "refreshInterceptDetailsForCurrentSelection",

@@ -30,11 +30,14 @@ function fixture() {
 }
 test('card is independent, default Off, disclosed and absent from the compact Scope strip', () => {
   const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
-  const start = html.indexOf('id="proxySettingsPanel"'), end = html.indexOf('id="proxySubPlaceholder"');
+  const start = html.indexOf('id="proxySettingsPanel"'), end = html.indexOf('id="replayShell"');
   const section = html.slice(start, end);
-  assert.match(section, /Upstream socket peer/); assert.match(section, /Record upstream socket peer \(default: Off\)/);
-  assert.match(section, /internal or proxy address/); assert.match(section, /session exports and full-record JSON/);
-  assert.match(section, /does not remove previously stored peers/); assert.match(section, /already in flight/);
+  // Off by default is checked below; the disclosure keeps what is stored, that
+  // it may not be the origin, where it goes, and that turning it off keeps it.
+  assert.match(section, /Upstream socket peer/); assert.match(section, /<span>Record upstream socket peer<\/span>/);
+  assert.match(section, /upstream IP address and port with new HTTP\(S\) exchanges/);
+  assert.match(section, /internal or proxy address rather than the origin/); assert.match(section, /session exports and full-record JSON/);
+  assert.match(section, /stay when this is turned off/);
   assert.match(section, /id="upstreamPeerStatus" role="status" aria-live="polite"/);
   assert.match(section, /id="upstreamPeerRefresh" type="button">Check status/);
   const saveRuntime = appSource.match(/^async function saveProxySettings\([^]*?^\}/m)[0];

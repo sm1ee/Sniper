@@ -156,7 +156,7 @@ for (const transition of ["close", "session reset"]) {
 for (const transaction of ["available", "non-OK", "fetch rejection", "JSON rejection"]) {
   test(`actual row click keeps ordinary detail with ${transaction} transaction`, async () => {
     const f = fixture(), reading = f.click();
-    assert.equal(f.els.findingsDetailTitle.textContent, "Loading finding...");
+    assert.equal(f.els.findingsDetailTitle.textContent, "Loading finding…");
     assert.equal(f.els.findingsDetailJump.disabled, true);
     assert.equal(f.els.findingsDetailJump.dataset.recordId, undefined);
     f.requests[0].resolve(f.response(f.finding("ordinary"))); await tick();
@@ -223,7 +223,7 @@ for (const revisit of [false, true]) {
       const f = fixture(), old = await pauseRead(f, "finding JSON");
       f.click(revisit ? "a" : "b");
       const before = f.snapshot(), count = f.requests.length;
-      assert.equal(before.title, "Loading finding...");
+      assert.equal(before.title, "Loading finding…");
       assert.equal(before.disabled, true);
       await old.settle(outcome);
       assert.deepEqual(f.snapshot(), before); assert.equal(f.requests.length, count);

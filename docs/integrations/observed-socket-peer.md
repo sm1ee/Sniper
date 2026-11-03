@@ -9,12 +9,12 @@ builds no IP map.
 ## What is recorded
 
 Each observation holds the remote address the HTTP client reports when the
-response headers arrive, before local edits, and the route of the attempt that
-succeeded: `direct`, `http_proxy`, `socks_proxy` or `unknown`. If the client
-reports no address, it records `remote_addr_unavailable`. HTTP error responses
-count; connection failures, local responses, Replay, WebSocket, CONNECT and
-rendered-resource fetches do not. Eligibility is fixed when a request is first
-sent, so switching the option affects only requests sent afterwards.
+response headers arrive, before local edits. It also holds the route of the
+attempt that succeeded: `direct`, `http_proxy`, `socks_proxy` or `unknown`. If
+the client reports no address, it records `remote_addr_unavailable`. HTTP error
+responses count; connection failures, local responses, Replay, WebSocket,
+CONNECT and rendered-resource fetches do not. Eligibility is fixed when a
+request is first sent, so switching the option affects only later requests.
 
 A peer can be a proxy, CDN or other intermediary. It does not show who owns the
 origin or what sits behind it.
@@ -22,8 +22,8 @@ origin or what sits behind it.
 ## Turning it on
 
 The **Upstream socket peer** card in Capture Settings has a switch with explicit
-Save and Cancel. It shows the saved switch and `effective_enabled` separately:
-capture stays Off while HTTP capture is paused, the configuration is invalid or
+Save and Cancel. It shows the saved switch and `effective_enabled` separately.
+Capture stays Off while HTTP capture is paused, the configuration is invalid or
 persistence is uncertain. A successful save clears the persistence-uncertain
 block. After an uncertain save, read the settings for the same session before
 saving again.
@@ -36,7 +36,7 @@ sniper-cli call capture.http.upstream_peer.set --input '{"session_id":"00000000-
 ```
 
 The canonical operations are `capture.http.upstream_peer.get` and
-`capture.http.upstream_peer.set`. Both need the current active session UUID;
+`capture.http.upstream_peer.set`. Both need the current active session UUID.
 `set` takes only that and a JSON boolean `enabled`, and needs `--yes`. A run
 reads the settings once and sends at most one POST. It never switches sessions,
 follows redirects, retries or reads back.
@@ -57,7 +57,7 @@ The response contains:
 - `changed`: POST only; whether the saved switch changed
 
 A change increments the revision; a no-op keeps it. A missing or stale token, an
-inactive session or an active-session conflict never writes, and an inactive
+inactive session or an active-session conflict blocks the write. An inactive
 session is never loaded or activated.
 
 ## Reading one observation
@@ -79,7 +79,7 @@ validates, the response has a `socket_peer` envelope:
 
 An observation also has `source: "http_response_remote_addr"`, `observed_at`
 and `route`, and is at most 512 bytes. `not_recorded` covers old rows,
-ineligible rows and dropped data alike; it does not mean a direct route or a
+ineligible rows and dropped data alike. It does not mean a direct route or a
 failed connection. Stale, edited, deleted or cross-session evidence returns the
 ordinary unavailable response.
 
@@ -92,15 +92,15 @@ sniper-cli scope service-map socket-peer-matches --session-id <active-session-uu
 `target.service_map.socket_peer_matches.get` lists other rows in the active
 session with the same recorded direct peer: source, route, address family, IP
 and port. The API is `GET /api/target/service-map/socket-peer-matches` with the
-same `session_id` and `evidence_id`. Proxy and unknown routes never match, and IPv4 never matches
-IPv4-mapped IPv6. Results show up to 100 origins with three samples each, within
-256 KiB, from a default 10,000-row window (50,000 maximum). Scope rules too
-complex for the fixed work budget return unavailable with `scope_work_limit`;
-use a smaller window or simpler rules. See the
+same `session_id` and `evidence_id`. Proxy and unknown routes never match, and
+IPv4 never matches IPv4-mapped IPv6. Results show up to 100 origins with three
+samples each, within 256 KiB, from a default 10,000-row window (50,000
+maximum). Scope rules too complex for the fixed work budget return unavailable
+with `scope_work_limit`; use a smaller window or simpler rules. See the
 [full matching, limits and count contract](service-map.md#explicit-recorded-socket-peer-matches).
 
 ## Retention and sharing
 
 Observations are saved in session files, exports and full-record JSON. Treat
 them as sensitive infrastructure data before sharing those files. Turning the
-switch Off stops new recording but erases nothing, and there is no backfill.
+switch Off stops new recording but erases nothing. There is no backfill.

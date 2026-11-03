@@ -5,53 +5,52 @@ Sniper runs the community templates of
 (MIT license) with its own engine, which implements a subset of the template
 language. It does not need the `nuclei` program. In **Scan ▸ Active Scan**,
 download the latest release or main's newest commit, or import a release
-archive, then use templates in two ways:
+archive. Templates then run in two ways:
 
-- **Passive**: turned-on templates check captured traffic and never send a
+- Passive: turned-on templates check captured traffic and never send a
   request.
-- **Manual scan**: on demand, Sniper sends the templates you pick to the
-  targets you name, and keeps what matched. The **Auto scan** does the same
-  for each new host the proxy captures.
+- Manual scan: Sniper sends the templates you pick to the targets you name and
+  keeps what matched. The **Auto scan** does the same for each new host the
+  proxy captures.
 
 ## Passive templates
 
 Two kinds of template can run passively:
 
-- **Global matchers** (`global-matchers: true`): matchers meant for every HTTP
-  response, such as WAF detection or secret patterns.
-- **Captured GET**: one `GET {{BaseURL}}` request with no headers, body,
-  payloads or random values. Its matchers judge each captured GET response as if
-  the template had sent that request.
+- Global matchers (`global-matchers: true`), meant for every HTTP response,
+  such as WAF detection or secret patterns.
+- Captured GET: one `GET {{BaseURL}}` request with no headers, body, payloads
+  or random values. Its matchers judge each captured GET response as if the
+  template had sent that request.
 
 A turned-on template checks a captured response only when the session's
-**Passive Scan** is on, the response's host matches a Scope include pattern,
-and the response is not an image, font, audio or video. With no Scope include
+**Passive Scan** is on and the response's host matches a Scope include
+pattern. Templates skip images, fonts, audio and video. With no Scope include
 patterns, templates check nothing.
 
-Findings appear in **Capture ▸ Findings** under the category `nuclei`, with rule
-id `nuclei-passive:<template-id>`, or `nuclei-passive:<template-id>:<matcher>`
-for a named matcher. Extracted values are the evidence. Turning templates on or
-off affects later traffic; **Rescan** in Findings applies the change to the
-retained history.
+Findings appear in **Capture ▸ Findings** under the category `nuclei`, with
+rule id `nuclei-passive:<template-id>`, or
+`nuclei-passive:<template-id>:<matcher>` for a named matcher. Extracted values
+are the evidence. Turning templates on or off affects later traffic.
+**Rescan** in Findings applies the change to the retained history.
 
-Rescan also covers two gaps: rows recovered from the journal after a crash,
-which get only the built-in findings, and responses that skipped templates
-under load. At most four template evaluations run at once; a response beyond
-that skips them rather than slow capture, and the library status counts it as
+Rescan also covers rows recovered from the journal after a crash, which get
+only the built-in findings, and responses that skipped templates under load.
+At most four template evaluations run at once. A response beyond that skips
+them rather than slow capture, and the library status counts it as
 `passive_skipped_under_load`.
 
 ## Manual scan
 
-A manual scan sends, by default, the templates turned on in the list's On
-column; it can take the list's search results or the selected template
-instead. Tick On for several at once with **Turn on all**, which appears once
-the list is narrowed, or with Shift-click for a range. Its results open in
-place of the list: one row a request, and a row opens what was sent and what
-came back.
+By default a manual scan sends the templates turned on in the list's On
+column. It can take the list's search results or the selected template
+instead. To tick On for several at once, use **Turn on all** (shown once the
+list is narrowed) or Shift-click a range. Results replace the list, one row
+per request; a row opens what was sent and what came back.
 
 ### What it sends
 
-A template can be sent when each of its HTTP request blocks is made of:
+A template can be sent when each of its HTTP request blocks uses only:
 
 - a method other than `CONNECT`, and paths that start with `{{BaseURL}}` or
   `{{RootURL}}`, or raw requests;
@@ -60,36 +59,36 @@ A template can be sent when each of its HTTP request blocks is made of:
 - `redirects`, `host-redirects`, `max-redirects`, `stop-at-first-match` and
   `disable-cookie`.
 
-The target sets the scheme, host and port; a template only adds a path, and a
+The target sets the scheme, host and port. A template only adds a path, and a
 `Host` header may only be `{{Hostname}}`. Paths are sent as written, `%2e%2e`
-and `..;` included; only characters a request line cannot hold are
+and `..;` included. Only characters a request line cannot hold are
 percent-encoded. Each request carries
 `User-Agent: Mozilla/5.0 (compatible; Sniper/<version>)`, `Accept: */*` and
 `Accept-Language: en` unless the template sets its own.
 
 Raw requests are read as Nuclei reads them. The request line's path is joined
-to the target's path the way Nuclei joins it, and an absolute URL there keeps
-only its path and query. `@timeout:` replaces the 15-second limit for that
-request, up to five minutes; a request with `@Host:`, `@tls-sni:` or `@once` is
-not sent. Request text and bodies written with bare line feeds are sent with
-CRLF, as Nuclei sends them.
+to the target's path the same way, and an absolute URL there keeps only its
+path and query. `@timeout:` replaces the 15-second limit for that request, up
+to five minutes. A request with `@Host:`, `@tls-sni:` or `@once` is not sent.
+Request text and bodies written with bare line feeds are sent with CRLF, as in
+Nuclei.
 
 A template's requests to one target run as one session, as in Nuclei:
 
 - Request blocks run in the order written, and each judges its own answers.
-  `stop-at-first-match` ends only its own block. A block without matchers or
-  extractors only prepares the next, as a login does; a template where no
-  block has any is not sent. A match that only `internal: true` matchers made
-  is not reported, as in Nuclei: such a block is a precondition.
+  `stop-at-first-match` ends only its own block.
+- A block without matchers or extractors only prepares the next, as a login
+  does. A template where no block has any is not sent.
+- As in Nuclei, a match made only by `internal: true` matchers is not
+  reported: such a block is a precondition.
 - A `flow` that joins block calls with `&&`, `||` and parentheses
   (`http(1) && http(2)`, `http("login")`) decides which blocks run. A call is
-  true when its block matched, reported or not, or, for a block without
-  matchers, when it extracted something. Blocks the flow does not reach are
-  not sent. Any other flow is a script, and its template is not sent.
-- A cookie a response sets goes with the later requests to the same host,
-  unless their block sets `disable-cookie: true`.
-- A named `internal` extractor's first value fills the later requests that use
-  its name (`{{csrf}}`), in its own block and the blocks after it. A template
+  true when its block matched (reported or not) or, for a block without
+  matchers, extracted something. Blocks the flow does not reach are not sent.
+- A cookie a response sets goes with later requests to the same host, unless
+  their block sets `disable-cookie: true`.
+- A named `internal` extractor's first value fills later requests that use its
+  name (`{{csrf}}`), in its own block and the blocks after it. A template
   variable of the same name keeps its own value.
 - Matchers and extractors can read earlier answers of their block by request
   number: `status_code_1`, `body_2`, `part: header_1`.
@@ -97,32 +96,32 @@ A template's requests to one target run as one session, as in Nuclei:
 `{{7*7}}` and other markers that name no variable or function are sent as
 written.
 
-Payloads run as Nuclei runs them: every request of the template is sent once
-per value of a single set, per index across sets with `attack: pitchfork`, or
-per combination with `attack: clusterbomb`. A set is a list, the lines of a
-string, or a file of the release such as `helpers/wordlists/users.txt`, read
-line by line; the library keeps the release's `helpers/` text files for this.
-A template that would send more than 10,000 requests to one target is listed,
+Payloads run as in Nuclei. Every request of the template is sent once per
+value of a single set, per index across sets with `attack: pitchfork`, or per
+combination with `attack: clusterbomb`. A set is a list, the lines of a
+string, or a release file such as `helpers/wordlists/users.txt`, read line by
+line. The library keeps the release's `helpers/` text files for this. A
+template that would send more than 10,000 requests to one target is listed,
 not sent.
 
 ### Out-of-band callbacks
 
 A template that sends `{{interactsh-url}}` matches when the target calls that
-URL back, as a blind SSRF, injection or XXE does. The URLs come from the
-session's Interactsh server, set up in **Capture ▸ OAST**:
+URL back, as in a blind SSRF, injection or XXE. The URLs come from the
+session's Interactsh server, set up in **Capture ▸ OAST**.
 
-- Each `{{interactsh-url}}` in a request is a URL of its own, so a callback
+- Each `{{interactsh-url}}` in a request is a separate URL, so a callback
   names the request that caused it. `{{interactsh-server}}` is the server's
   domain.
-- When a callback comes, the answer to its request is judged again with it:
+- When a callback comes, the answer to its request is judged again with
   `interactsh_protocol` (`http`, `dns`, …), `interactsh_request` (lower case
   for DNS, as in Nuclei) and `interactsh_ip`. Sniper does not keep the
   server's reply, so `interactsh_response` is empty.
-- An answer waits up to 60 seconds for its callback, and the scan waits two
-  polls of the server after its last request. While the scan's session is not
-  the active one, the scan polls the server itself.
-- Without a registered Interactsh server, the BOAST and Custom providers
-  included, OAST templates are left out: the preview counts them as
+- An answer waits up to 60 seconds for its callback. After its last request,
+  the scan waits two polls of the server. While its session is not active,
+  the scan polls the server itself.
+- Without a registered Interactsh server, OAST templates are left out (the
+  BOAST and Custom providers do not count). The preview counts them as
   `oast_unavailable` and the scan warns.
 - The matched exchange and its finding name the callback's protocol and
   address.
@@ -133,36 +132,35 @@ session's Interactsh server, set up in **Capture ▸ OAST**:
   application lives under (`https://app.example.com/shop`), without
   credentials, query or fragment. A scan takes at most 20 targets.
   `{{BaseURL}}` keeps the path; `{{RootURL}}` leaves it out.
-- Scope does not limit a manual scan: you named its targets, as you do in
-  Replay and Recon. Scope bounds only the auto scan, which picks its hosts
-  itself.
-- Sniper's own proxy and UI listeners and its `sniper` page are never
-  targets, by address or by a name that resolves to this machine.
+- Scope limits only the auto scan, which picks its own hosts. A manual scan
+  goes to the targets you name, as Replay and Recon do.
+- No scan, manual or auto, targets Sniper's own proxy and UI listeners or its
+  `sniper` page, by address or by a name that resolves to this machine.
 - Redirects are followed only when the template asks (`redirects` or
-  `host-redirects`), for at most ten hops, and only while each hop goes to one
-  of the scan's targets (for the auto scan, a host in Scope or on its list)
-  and away from Sniper. When a hop would leave, its redirect is the
-  response judged, and the job counts it as `redirects_not_followed`. Hops
-  follow Go's HTTP client, as in Nuclei; `Authorization` and `Cookie` headers
-  stay with their host.
+  `host-redirects`), for at most ten hops. Each hop must go to one of the
+  scan's targets (for the auto scan, a host in Scope or on its list) and away
+  from Sniper. When a hop would leave, its redirect is the response judged,
+  and the job counts it as `redirects_not_followed`. Hops follow Go's HTTP
+  client, as in Nuclei. `Authorization` and `Cookie` headers stay with their
+  host.
 - With **Apply Match & Replace rules** on (off by default), the session's
   request rules apply. A request that a rule would send to another scheme or
   host is not sent and counts as `blocked`.
 
 ### What it leaves out
 
-Templates tagged `intrusive`, `default-login`, `bruteforce`, `token-spray`,
-`credential-stuffing`, `fuzz`, `fuzzing`, `dast` or `osint`, and templates that
-send `PUT`, `DELETE` or `PATCH` (`method:put`, `method:delete`,
-`method:patch`), are left out unless you allow each risk by name. Templates
-tagged `dos` are never sent.
+A scan leaves out templates tagged `intrusive`, `default-login`, `bruteforce`,
+`token-spray`, `credential-stuffing`, `fuzz`, `fuzzing`, `dast` or `osint`,
+and templates that send `PUT`, `DELETE` or `PATCH` (`method:put`,
+`method:delete`, `method:patch`). To include them, allow each risk by name.
+Templates tagged `dos` are never sent.
 
 ### Pace, limits and stopping
 
 - A preview counts the templates and the requests they send before any
-  redirect, lists refused targets with the reason, and lists what each risk
-  left out. It sends nothing to a target. The app shows it under the form as
-  you edit it; the CLI has `templates scan preview`.
+  redirect. It lists refused targets with the reason and what each risk left
+  out, and sends nothing to a target. The app shows it under the form as you
+  edit; the CLI has `templates scan preview`.
 - Starting needs an explicit acknowledgment: **Start scan** in the app,
   `"acknowledged": true` in the API, `--yes` in the CLI.
 - Rate: 1 to 50 requests a second across the scan, default 10. Concurrency: 1
@@ -173,60 +171,59 @@ tagged `dos` are never sent.
   start.
 - A target that fails 20 requests in a row is dropped for the rest of the scan.
 - One scan runs at a time per session, and it keeps running when you switch
-  sessions. **Stop** drops the requests in flight. Quitting or updating Sniper,
-  or deleting the session, stops the scan; a scan that was running during a
-  crash is listed as `interrupted`.
+  sessions. **Stop** drops the requests in flight. Quitting or updating
+  Sniper, or deleting the session, stops the scan. A scan that was running
+  during a crash is listed as `interrupted`.
 
 ### What it keeps
 
-- HTTP history keeps every exchange of a manual scan, as it keeps Fuzzer's,
-  each noted `Sent by Active Scan.` with the template and scan id. Options ▸
-  **Keep every request in HTTP history** off (`"history": "matched"`,
+- HTTP history keeps every exchange of a manual scan, as it does Fuzzer's.
+  Each is noted `Sent by Active Scan.` with the template and scan id. Turning
+  off Options ▸ **Keep every request in HTTP history** (`"history": "matched"`,
   `--history matched`) keeps only the matched ones, as the auto scan always
-  does. The scan's request log shows the latest 200 requests with method,
-  URL, status, time and error, and the record each one is in.
+  does.
+- The scan's request log shows the latest 200 requests with method, URL,
+  status, time, error and the record each one is in.
 - Findings appear under the category `nuclei` with rule id
   `nuclei:<template-id>` or `nuclei:<template-id>:<matcher>`, once per
   template, matcher and endpoint. **Rescan** keeps them.
 - The session keeps at most ten scans, each with up to 1,000 results, its
-  counts and its warnings. Auto scan jobs give way first.
-- Progress is saved about every 750 ms, even when nothing matches. After a crash
-  an interrupted scan keeps what was saved and does not resume sending.
+  counts and its warnings. Auto scan jobs are dropped first.
+- Progress is saved about every 750 ms, even when nothing matches. After a
+  crash, an interrupted scan keeps what was saved and does not resume sending.
 
 ### Auto scan
 
-The auto scan sends templates without a target list: each new origin the
-proxy captures gets the templates turned on for it, once. Burp's live audit
-does the same with proxied traffic. Turn it on in **Scan ▸ Active Scan ▸
-Auto scan**, after turning templates on in the list's On column.
+The auto scan needs no target list. Each new origin the proxy captures gets
+the templates turned on for it, once, as Burp's live audit does with proxied
+traffic. Turn templates on in the list's On column, then turn on
+**Scan ▸ Active Scan ▸ Auto scan**.
 
 - **On** means *use automatically*. A template that can judge captured
-  traffic checks it, as a passive template. One that must send its own
+  traffic checks it as a passive template does. One that must send its own
   requests goes out with the auto scan.
 - An origin is sent to when it is in a non-empty Scope or on the auto scan's
-  own host list (patterns as Scope takes them), and never when Scope excludes
-  it or it is Sniper itself. Its `{{BaseURL}}` is the origin.
-  A change to Scope or the host list applies to the next request, even one
-  already waiting for its turn.
-- One host goes at a time, at the auto scan's pace, as a scan of its own
-  marked Auto. Templates with risk tags are left out, and those that need
-  Interactsh are left out where the session has none. A scan you start comes
-  first: the auto job stops and its host waits its turn again. Stopping an auto
+  own host list (patterns as Scope takes them), unless Scope excludes it. Its
+  `{{BaseURL}}` is the origin. A change to Scope or the host list applies to
+  the next request, even one already queued.
+- One host goes at a time, at the auto scan's pace, as a separate scan marked
+  Auto. Templates with risk tags are left out. A scan you start comes first:
+  the auto job stops and its host goes back in the queue. Stopping an auto
   job skips its host.
-- Only traffic the proxy captures counts, not replays or the scans' own
-  requests, and only from when the auto scan is on. Hosts it sent to are
-  remembered (the latest 2,000), so a host is sent to once.
-- Turning it off stops its job and drops the hosts waiting. The setting, the
+- Only traffic the proxy captures while the auto scan is on counts, not
+  replays or the scans' own requests. Sniper remembers the latest 2,000 hosts
+  it sent to, so a host is sent to once.
+- Turning it off stops its job and drops the queued hosts. The setting, the
   host list and the hosts sent to survive a restart.
 
 ## What never runs
 
-Sniper lists every template but never runs the `code`, `javascript`,
-`headless`, `network`, `dns`, `file`, `ssl`, `websocket` or `whois` protocols,
-a `flow` that does more than call blocks, self-contained templates,
-workflows, or anything else outside the supported subset. A template either compiles completely or is listed as
-unsupported with a reason, such as `protocol:dns`, `req:payload_file` or
-`extractor:xpath`.
+Sniper lists every template but runs only the supported subset. These never
+run: the `code`, `javascript`, `headless`, `network`, `dns`, `file`, `ssl`,
+`websocket` and `whois` protocols, a `flow` that does more than call blocks,
+self-contained templates and workflows. A template either compiles completely
+or is listed as unsupported with a reason, such as `protocol:dns`,
+`req:payload_file` or `extractor:xpath`.
 
 Not supported yet: fuzzing aggression levels in `payloads`, `iterate-all`, a
 request that reads an earlier answer (`{{body_1}}` in a path), a matcher that
@@ -236,35 +233,35 @@ is left for whoever runs it (`username: '{{username}}'`) is not sent.
 
 ## Supported subset
 
-- Matchers: `word`, `regex`, `status`, `size`, `binary` and `dsl`, with `part`,
-  `condition`, `negative`, `internal`, `name`, `case-insensitive`,
+- Matchers: `word`, `regex`, `status`, `size`, `binary` and `dsl`, with
+  `part`, `condition`, `negative`, `internal`, `name`, `case-insensitive`,
   `encoding: hex`, `match-all` and `matchers-condition`. A scan's matchers can
   also read the request (`part: request`) and the values it was built with.
 - Extractors: `regex` (with `group`), `kval` (response headers and cookies),
   `dsl` and `json`. They run before the matchers, which can use a named
   extractor's first value.
-- A `json` extractor's queries are the part of jq templates use: paths
+- A `json` extractor's queries support the part of jq templates use: paths
   (`.a.b`, `."a-b"`, `.[0]`, `.[-1]`, `.[]`, `?`), `|`, `,`, `//`, `and`,
   `or`, comparisons, `+`, `-`, `select`, `contains`, `has`, `first`,
   `tostring`, `length`, `keys`, `not` and `empty`. A query using anything
   else lists its template as unsupported.
 - The expression language and the helper functions community templates use,
-  including `compare_versions`. Expressions follow govaluate's typing, versions
-  go-version's rules, and regular expressions Go's: `\d`, `\w`, `\s` and `\b`
-  are ASCII. As in Nuclei, every helper also answers to its name without
-  underscores (`trimprefix`).
+  including `compare_versions`. Expressions follow govaluate's typing,
+  versions go-version's rules, and regular expressions Go's: `\d`, `\w`, `\s`
+  and `\b` are ASCII. As in Nuclei, every helper also answers to its name
+  without underscores (`trimprefix`).
 - A hash or an encoding of `body` (`md5`, `mmh3(base64_py(body))` for
   favicons, `base64`, `len`) reads the bytes the server sent, not their text.
-- `generate_jwt` signs HS256 tokens, without the fourth argument (a lifetime);
-  `date_time` writes the `%Y`, `%M`, `%D`, `%H`, `%m` and `%s` fields, not a Go
-  layout. `generate_java_gadget` is not supported.
-- `header` holds the status line and Go-canonical header names, and header
-  values are available by lower snake name (`content_type`). Matchers see the
+- `generate_jwt` signs HS256 tokens, without the fourth argument (a
+  lifetime). `date_time` writes the `%Y`, `%M`, `%D`, `%H`, `%m` and `%s`
+  fields, not a Go layout. `generate_java_gadget` is not supported.
+- `header` holds the status line and Go-canonical header names. Header values
+  are also available by lower snake name (`content_type`). Matchers see the
   response the server sent, even when a Match & Replace rule rewrote it.
 - `{{Hostname}}` includes the port only when the URL names one; `{{Host}}` is
   the bare host.
 
-A passive matcher reads at most 2 MiB of a body, a scan's at most 10 MiB. When a
+A passive matcher reads at most 2 MiB of a body, a scan's at most 10 MiB. If a
 body was truncated, a template whose result the missing bytes could change (a
 negated body matcher, a size, an expression that reads the body) skips that
 response.
@@ -274,8 +271,7 @@ can be sent by a manual or auto scan, 446 of them out-of-band.
 
 ## The library
 
-The library is shared by every session and stored under
-`<data dir>/templates/`.
+Every session shares one library, stored under `<data dir>/templates/`.
 
 ### Download
 
@@ -286,29 +282,29 @@ HTTPS. If the archive does not match the release's published SHA-256, nothing
 is installed. A download needs an explicit acknowledgment: **Download** in the
 app, `"acknowledged": true` in the API, `--yes` in the CLI.
 
-Templates reach the repository's `main` branch weeks before a release. To take
-them, choose **Download main (unreleased)** or **Switch to main** in the ⋯ menu
-(`"channel": "main"`, `--main`): Sniper asks the branch API for main's newest
-commit and fetches that commit's `.tar.gz`. Main publishes no checksum, so the
-library records the commit and refuses an archive that names another.
+Templates reach the repository's `main` branch weeks before a release. To get
+them, choose **Download main (unreleased)** or **Switch to main** in the ⋯
+menu (`"channel": "main"`, `--main`). Sniper asks the branch API for main's
+newest commit and fetches that commit's `.tar.gz`. Main publishes no checksum,
+so the library records the commit and refuses an archive that names another.
 
-Once templates are installed, **Download** is gone until there is something to
-download: **Check for updates** asks GitHub, about main's newest commit while
-main is installed, and **Update** appears when there is a newer one.
+Once templates are installed, **Download** is hidden. **Check for updates**
+asks GitHub for the newest release, or main's newest commit while main is
+installed, and **Update** appears when there is a newer one.
 
 ### Daily update
 
 A library downloaded from GitHub updates itself once a day. A minute after
-launch, then every hour, Sniper looks whether a day has passed since it last
-asked GitHub or installed the library. If so, it asks for the newest release,
-or main's newest commit while main is installed, and installs it as a download
-would. Templates turned on stay on;
-new ones stay off. A running scan keeps the templates it started with.
+launch and then hourly, Sniper checks whether a day has passed since it last
+asked GitHub or installed the library. If so, it installs the newest release
+(or main's newest commit while main is installed) as a download would.
+Templates turned on stay on; new ones stay off. A running scan keeps the
+templates it started with.
 
 A failed check keeps the installed library. The card shows **Last check
 failed**, the status carries `check_error`, and the check runs again the next
 day. An imported archive is never updated. To stop the daily update, turn off
-**Update daily** in the card, or run
+**Update daily** in the card or run
 `templates library auto-update --enabled false`.
 
 ### Import
@@ -316,15 +312,15 @@ day. An imported archive is never updated. To stop the daily update, turn off
 Where GitHub is unreachable, import a release `.tar.gz` of at most 64 MiB. An
 imported archive is not checksum-verified, and the library says so. Limits:
 512 MiB unpacked, 100,000 entries, 30,000 templates and 2 MiB per template.
-Only regular `*.yaml` files outside dot-directories are read; when a template
+Only regular `*.yaml` files outside dot-directories are read. When a template
 id repeats, the first file wins.
 
 ## API
 
 | Method and path | Purpose |
 | --- | --- |
-| `GET /api/templates/library` | Status: installed release, counts (`passive_supported`, `active_supported`), passive templates on, the daily update (`auto_update`, and `checked_at` and `check_error` from its last check), and any download or import in progress (`state`: `loading`, `idle`, `downloading`, `importing`, `failed`). |
-| `POST /api/templates/library/check` | Ask GitHub for the newest tag, or main's newest commit while main is installed; returns `channel` (`release` or `main`), `latest` (for main, a commit and its date `latest_at`), `current`, `update_available`. |
+| `GET /api/templates/library` | Status: installed release, counts (`passive_supported`, `active_supported`), passive templates on, the daily update (`auto_update`, plus `checked_at` and `check_error` from its last check), and any download or import in progress (`state`: `loading`, `idle`, `downloading`, `importing`, `failed`). |
+| `POST /api/templates/library/check` | Asks GitHub for the newest tag, or main's newest commit while main is installed. Returns `channel` (`release` or `main`), `latest` (for main, a commit and its date `latest_at`), `current`, `update_available`. |
 | `POST /api/templates/library/download` | Body `{"acknowledged": true}`, plus `"channel": "main"` for main's newest commit. Starts a download; 202, or 409 while busy. |
 | `POST /api/templates/library/import` | Body: the `.tar.gz` (`application/gzip`). Starts an import; 202, or 409 while busy. |
 | `POST /api/templates/library/auto-update` | Body `{"enabled": bool}`. Turns the daily update on or off; returns the status. |
@@ -336,7 +332,7 @@ id repeats, the first file wins.
 | `GET /api/templates/scans/:id?session_id=` | One scan with its results (each naming the matched history record) and its latest requests. |
 | `POST /api/templates/scans/:id/stop` | Body `{"session_id"}`. Stops the running scan. |
 | `GET /api/templates/auto?session_id=` | The auto scan: `enabled`, `hosts`, `rate`, `concurrency`, `templates` turned on for it, hosts `scanned` and `queued`. |
-| `POST /api/templates/auto` | Body `session_id`, `enabled`, and optionally `hosts`, `rate`, `concurrency`; turning it on needs `"acknowledged": true`. Turning it off stops its job and drops the hosts waiting. |
+| `POST /api/templates/auto` | Body `session_id`, `enabled`, and optionally `hosts`, `rate`, `concurrency`. Turning it on needs `"acknowledged": true`. |
 | `POST /api/templates/auto/templates` | Body as `/api/templates/passive`. Templates that cannot judge captured traffic but can be sent are turned on or off for the auto scan; others are ignored and counted. |
 
 ## CLI
@@ -368,7 +364,7 @@ sniper-cli templates auto set --enabled false --yes
 ```
 
 `download` and `import` wait until the release is installed and print the final
-status. `passive set-enabled` takes exactly one of ids, a filter or `--all`; a
-scan takes exactly one of ids, a filter or `--on`, and `--allow-risk` once per risk.
-`scan start` returns when the scan starts; `scan get` follows it. The scan
-commands use the active session unless `--session-id` names another.
+status. `passive set-enabled` takes exactly one of ids, a filter or `--all`. A
+scan takes exactly one of ids, a filter or `--on`, and `--allow-risk` once per
+risk. `scan start` returns when the scan starts; `scan get` follows it. The
+scan commands use the active session unless `--session-id` names another.

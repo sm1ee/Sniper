@@ -33,6 +33,7 @@ function fixture(options = {}) {
   })) };
   const c = loadFunctions([
     "measuredRowPitch", "getFindingsRowHeight", "renderFindingsVirtual", "scrollFindingsToId", "findingsArrowNav", "updateFindingsSelection",
+    "displayHost", "extractHostPort", "defaultSummaryPortForScheme",
     "escapeHtml", "severityClass", "severityLabel",
   ], {
     ...constants, measuredFindingsRowHeight: rowHeight, state, els: { findingsBody: body }, selectedFindingId: `saved-${options.selectedIndex ?? 0}`,

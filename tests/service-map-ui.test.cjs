@@ -355,7 +355,7 @@ for (const tool of ['target', 'map']) test(`${tool} loader only requests legacy 
     state, currentSessionId: () => 'session-one', workspaceStateGeneration: 0,
     els: { targetScopeEditor: { value: '' }, targetScopeExcludeEditor: { value: '' } },
     sessionQueryPath: (path, id) => `${path}?session_id=${id}`,
-    fetch: async url => { requests.push(url); return response(url.startsWith('/api/runtime') ? {} : []); },
+    fetch: async url => { requests.push(url); return response(url.startsWith('/api/runtime') ? { http_capture_enabled: true } : []); },
     requireOkResponse: async () => {}, jsonArray: value => value, syncTargetScopeDraft() {}, renderInterceptStatus() {}, renderProxySettings() {}, renderTarget() {},
   });
   await ctx.loadTargetSiteMap();
@@ -3201,6 +3201,9 @@ test('API docs read the selected origin and lay out its OpenAPI document, escape
   read.resolve(response(apiDocument)); await new Promise(resolve => setImmediate(resolve));
   const html = f.els.apiDocs.innerHTML;
   assert.match(html, /<h2 id="serviceMapApiDocsTitle"[^>]*>https:\/\/api\.example\.com<\/h2>/);
+  // The origin is the title; what the dialog is goes to its accessible name.
+  assert.match(html, /role="dialog" aria-modal="true" aria-label="API docs for https:\/\/api\.example\.com"/);
+  assert.doesNotMatch(html, /placeholder-kicker/);
   assert.match(html, /Observed by Sniper in 3 captured requests/);
   assert.match(html, /<code>bearer_jwt<\/code><\/td><td>HTTP bearer \(JWT\)/);
   assert.match(html, /Operations · 2/);

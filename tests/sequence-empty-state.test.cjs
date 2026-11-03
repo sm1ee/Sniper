@@ -126,7 +126,7 @@ test("nonempty drafts retain escaped request and extraction markup with unchange
   f.c.renderSequencePanel();
   assert.equal(f.el("sequenceStepsContainer").innerHTML, markup);
   assert.equal(f.el("runSequenceButton").disabled, true);
-  assert.equal(f.el("runSequenceButton").textContent, "Running...");
+  assert.equal(f.el("runSequenceButton").textContent, "Running…");
   assert.equal(JSON.stringify(f.state.editingSequence), before);
   assert.equal(f.state.sequenceDirty, false);
   assert.equal(f.state.sequenceDraftVersion, 0);

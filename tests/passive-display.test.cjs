@@ -102,6 +102,39 @@ test('invalid JSON stays intact in Pretty', () => {
   const text = 'HTTP/1.1 200\n\n{"part":';
   assert.equal(c.prettyFormat(text, message('{"part":')), text);
 });
+// A Sentry envelope, NDJSON or an Elasticsearch bulk body: one JSON document
+// per line, which used to show unformatted because the whole is not one JSON.
+test('Pretty formats a body of JSON lines one line at a time', () => {
+  const body = '{"event_id":"e1","sdk":{"name":"sentry.javascript"}}\n{"type":"event"}\n'
+    + '{"exception":{"values":[{"type":"Error","value":"failed"}]},"id":9007199254740993}\nattachment text\n';
+  assert.equal(c.prettyFormat('POST /api/1/envelope/ HTTP/1.1\n\n' + body, message('', { content_type: 'text/plain;charset=UTF-8' })),
+    'POST /api/1/envelope/ HTTP/1.1\n\n' + [
+      '{\n  "event_id": "e1",\n  "sdk": {\n    "name": "sentry.javascript"\n  }\n}',
+      '{\n  "type": "event"\n}',
+      '{\n  "exception": {\n    "values": [\n      {\n        "type": "Error",\n        "value": "failed"\n      }\n    ]\n  },\n  "id": 9007199254740993\n}',
+      'attachment text', '',
+    ].join('\n'));
+});
+test('Pretty leaves a body with one JSON line among text, or a broken document, as it is', () => {
+  for (const body of ['{"a":1}\nplain text', '{\n  "a": [1,\n  {"b": 2}', '{"a":1}\n{"b":']) {
+    const text = 'HTTP/1.1 200\n\n' + body;
+    assert.equal(c.prettyFormat(text, message('', { content_type: 'text/plain' })), text, body);
+  }
+});
+// Streamed API replies: each event's JSON follows "data:". Other fields and
+// data that is not JSON, such as "[DONE]", stay as they are.
+test('Pretty formats the JSON in server-sent events and leaves the other fields', () => {
+  const body = 'event: message\ndata: {"id":1,"delta":{"text":"Hi"}}\n\n: keep-alive\nid: 2\ndata:{"id":2}\n\ndata: [DONE]\n\n';
+  assert.equal(c.prettyFormat('HTTP/1.1 200 OK\n\n' + body, message('', { content_type: 'text/event-stream; charset=utf-8' })),
+    'HTTP/1.1 200 OK\n\nevent: message\ndata: {\n  "id": 1,\n  "delta": {\n    "text": "Hi"\n  }\n}\n\n'
+    + ': keep-alive\nid: 2\ndata:{\n  "id": 2\n}\n\ndata: [DONE]\n\n');
+  const plain = 'HTTP/1.1 200 OK\n\ndata: {"id":1}\n\n';
+  assert.equal(c.prettyFormat(plain, message('', { content_type: 'text/plain' })), plain, 'only an event stream reads "data:"');
+});
+test('Pretty can keep JSON lines unformatted for an editor whose text is sent', () => {
+  const text = 'POST / HTTP/1.1\n\n{"a":1}\n{"b":2}';
+  assert.equal(c.prettyFormat(text, message('', { content_type: 'application/x-ndjson' }), { jsonLines: false }), text);
+});
 test('ordinary Unicode JSON formats correctly', () => {
   const body = '{"text":"café 文 😀","ok":true,"n":42}';
   const text = c.prettyFormat('HTTP/1.1 200\n\n' + body, message(body));

@@ -18,15 +18,19 @@ test("the default request is scoped, unbudgeted and does not submit a browser sc
   for (const field of ["max_requests", "max_depth", "max_endpoints", "max_pages"]) assert.equal(body[field], 0);
 });
 
-test("discovery budget inputs default to zero without maximum attributes", () => {
+test("discovery budget inputs start empty, meaning no limit, without maximum attributes", () => {
   const markup = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/index.html"), "utf8");
   for (const id of ["reconMaxRequests", "reconMaxDepth", "reconMaxEndpoints", "reconMaxPages"]) {
     const input = markup.match(new RegExp(`<input[^>]*id="${id}"[^>]*>`))?.[0];
     assert.ok(input, id);
     assert.match(input, /min="0"/);
-    assert.match(input, /value="0"/);
+    assert.match(input, /placeholder="No limit"/);
+    assert.doesNotMatch(input, /\bvalue=/);
     assert.doesNotMatch(input, /\bmax=/);
   }
+  // An empty field is sent as 0, which the server reads as no limit.
+  const body = recon.buildJobRequest(values({ maxRequests: "", maxDepth: "", maxEndpoints: "", maxPages: "" }), "session-a");
+  assert.deepEqual([body.max_requests, body.max_depth, body.max_endpoints, body.max_pages], [0, 0, 0, 0]);
 });
 
 test("targets require an explicit HTTP(S) URL and reject embedded credentials", () => {
@@ -368,7 +372,9 @@ for (const type of ["start", "stop"]) {
           else pending.fail();
           await settled();
           assert.equal(f.calls.filter(call => call.method === "POST").length, 1);
-          assert.match(f.node("ActionStatus").textContent, succeeded ? type === "start" ? /Discovery started/ : /Stop requested/ : /Refresh jobs to confirm/);
+          // A started job shows itself in Jobs; only a stop or a failure needs a line.
+          if (succeeded && type === "start") assert.equal(f.node("ActionStatus").textContent, "");
+          else assert.match(f.node("ActionStatus").textContent, succeeded ? /Stop requested/ : /Refresh jobs to confirm/);
           if (completion === "hidden") {
             assert.equal(f.calls.length, callsBefore, "hidden mutation completion must not launch a GET");
             assert.equal(f.timers.size, 0);
@@ -940,7 +946,7 @@ for (const filter of ["Search", "Kind"]) {
     f.node(filter).value = filter === "Search" ? "no-synthetic-match" : "live";
     f.node(filter).emit(filter === "Search" ? "input" : "change");
     assert.equal(f.node("PageMeta").textContent, "0 matching endpoints");
-    assert.match(f.node("Endpoints").textContent, /No endpoints match these filters/);
+    assert.match(f.node("Endpoints").textContent, /No matching endpoints\./);
     assertSelectedEndpoint(f, selected, false);
     f.node(filter).value = "";
     f.node(filter).emit(filter === "Search" ? "input" : "change");
@@ -1526,4 +1532,30 @@ for (const first of ["accepted", "invalid target"]) test(`Recon controller to ac
   assert.equal(capturedOwner(),false,'accepted navigation retires its source without rolling back the append');
   f.node('Detail').emit('click',{target:action});assert.equal(w.state.replayTabs.length,2);assert.equal(saves.length,1);assert.equal(uiSaves.length,1);
   assert.equal(f.calls.length,reads);assert.equal(w.requests.length,0);f.controller.dispose();
+});
+
+test('scan layout lists every source under one Sources group without weakening consent', () => {
+  const html = require('node:fs').readFileSync(require('node:path').join(__dirname, '../web/index.html'), 'utf8');
+  const form = html.slice(html.indexOf('<form id="reconForm"'), html.indexOf('</form>', html.indexOf('<form id="reconForm"')));
+  // One group, one row per kind of source: the layout says what each one is.
+  assert.equal((form.match(/<fieldset/g) || []).length, 1);
+  assert.match(form, /<legend>Sources<\/legend>[\s\S]*aria-label="Crawl"[\s\S]*id="reconCrawler"[\s\S]*aria-label="Historical URLs"[\s\S]*id="reconUrlscan"[\s\S]*id="reconWayback"[\s\S]*aria-label="New browser scan"[\s\S]*id="reconUrlscanSubmit"/);
+  for (const id of ['reconHistoryConsent', 'reconScanConsent', 'reconScanVisibility']) assert.equal((form.match(new RegExp(`id="${id}"`, 'g')) || []).length, 1);
+  // Who can see a new scan is in the choice itself, not a paragraph beside it.
+  assert.match(form, /<option value="unlisted">Unlisted · not private<\/option>/);
+  assert.match(form, /<option value="public">Public · searchable<\/option>/);
+  for (const id of ['reconMaxRequests', 'reconMaxDepth', 'reconMaxEndpoints', 'reconMaxPages']) {
+    assert.match(form, new RegExp(`id="${id}"[^>]*placeholder="No limit"`), id);
+  }
+  // Nothing restates a control or disclaims.
+  for (const gone of ['Authorized targets only', 'Discovery stays on', 'urlscan.io gets the full URL', '0 = unlimited', 'id="reconScope"']) {
+    assert.ok(!form.includes(gone), gone);
+  }
+});
+
+test('scan layout keeps runtime empty states concise while leaving errors available', () => {
+  const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '../web/recon.js'), 'utf8');
+  for (const copy of ['No jobs yet.', 'Select an endpoint.', 'No endpoints yet.', 'No matching endpoints.']) assert.ok(source.includes(copy), copy);
+  assert.ok(!source.includes('Choose a target and start discovery.'));
+  assert.match(source, /showNotice\(els.ActionStatus, actionMessage, actionError\)/);
 });

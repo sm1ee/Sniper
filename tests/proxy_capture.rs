@@ -897,9 +897,16 @@ async fn proxy_rejects_connect_userinfo_authority() {
 
 #[tokio::test]
 async fn passthrough_connect_returns_bad_gateway_when_upstream_dial_fails() {
-    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let closed_addr = closed.local_addr().unwrap();
-    drop(closed);
+    // A free port below every OS's ephemeral range (Linux 32768-60999, macOS
+    // and Windows 49152-65535), so a dial to it is refused at once. A port
+    // from a dropped `bind(0)` listener sat inside that range, and a test
+    // running alongside could bind it before the dial, which then succeeded
+    // (Debian CI, 2026-10-23). A bound socket that never listens is no
+    // substitute: macOS drops the SYN and the dial waits for a timeout.
+    let closed_addr = (20_000..30_000)
+        .map(|port| std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+        .find(|addr| std::net::TcpListener::bind(addr).is_ok())
+        .expect("a free port below the ephemeral range");
 
     let config = AppConfig {
         proxy_addr: "127.0.0.1:0".parse().unwrap(),

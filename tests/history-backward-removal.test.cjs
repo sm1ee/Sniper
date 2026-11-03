@@ -29,12 +29,13 @@ function fixture(sortKey = 'host', sortDirection = 'asc', rowCount = 9, pageSize
     'updateHistoryPagingCursor', 'loadMoreTransactions', 'loadNewerTransactions',
     'mergeHistoryItems', 'trimHistoryCache', 'reconcileHistorySelectionAfterTrim',
     'rebuildHistoryItemIndex', 'getHistoryItem', 'renderHistory',
-    'countHiddenConnectItems', 'humanizeSortKey', 'isSessionEmpty', 'emptySessionMessage', 'historyEmptyMessage',
+    'countHiddenConnectItems', 'describeHttpFilters', 'isSessionEmpty', 'emptySessionMessage', 'historyEmptyMessage',
     'flushPendingAnnotations',
     'currentHistoryNoteEditWindow', 'syncHistoryNoteEditWindow', 'retainFilteredHistoryNote',
     'releaseHistoryNoteEdit', 'releaseDetachedHistoryNoteEdits', 'inheritPendingHistoryNoteEdit', 'getHistoryItemIndex', 'summaryMatchesActiveHistoryFilters', 'applyPendingAnnotationsToItems',
   ], {
     state, els, HTTP_HISTORY_MAX_LOADED_ITEMS: pageSize,
+    SERVICE_MAP_FILTER_MIME_LABELS: {}, SERVICE_MAP_FILTER_STATUS_LABELS: {},
     createHistoryQueryState: () => ({}), historyQuerySignature: () => 'fixture-query',
     isCurrentHistoryQuerySignature: () => true,
     async fetchTransactionPage(options) {

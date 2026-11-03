@@ -165,7 +165,8 @@ function findingsFixture(options = {}) {
     id: `saved-${i}`, record_id: `record-${i}`, severity: "info", category: "saved",
     title: "Saved fixture", host: "example.com", path: "/saved", found_at: "",
   })) };
-  const functions = ["renderFindingsVirtual", "scrollFindingsToId", "findingsArrowNav", "updateFindingsSelection", "escapeHtml", "severityClass", "severityLabel"];
+  const functions = ["renderFindingsVirtual", "scrollFindingsToId", "findingsArrowNav", "updateFindingsSelection", "escapeHtml", "severityClass", "severityLabel",
+    "displayHost", "extractHostPort", "defaultSummaryPortForScheme"];
   if (appSource.includes("function getFindingsRowHeight(")) functions.push("measuredRowPitch", "getFindingsRowHeight");
   const c = loadFunctions(functions, {
     ...constants, state, els: { findingsBody: dom.body },

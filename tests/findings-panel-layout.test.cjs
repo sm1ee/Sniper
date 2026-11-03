@@ -23,15 +23,13 @@ function tabFixture() {
   const els = Object.fromEntries([
     "proxyShell", "colorTagFilter", "filterBar", "trafficRegion", "historyWorkbenchResizer",
     "lowerWorkbench", "interceptPanel", "websocketPanel", "matchReplacePanel", "findingsPanel",
-    "oastPanel", "proxySettingsPanel", "proxySubPlaceholder", "proxySubPath",
-    "proxySubTitle", "proxySubDescription",
+    "oastPanel", "proxySettingsPanel",
   ].map(key => [key, element()]));
   let loads = 0;
   const state = { activeProxyTab: "findings" };
   const context = loadFunctions(["renderProxyPanels"], {
     els, state, proxyTabs: [], sanitizeActiveProxyTab: value => value,
     loadFindings() { loads++; }, applySavedWebsocketPaneWidth() {}, renderMatchReplaceRules() {},
-    humanizeProxyTab: value => value,
   });
   return { els, state, render: () => context.renderProxyPanels(), get loads() { return loads; } };
 }
@@ -141,10 +139,11 @@ test("split limits and chosen detail height survive repeated drags", () => {
 });
 
 test("a long URL in a toolbar kicker cannot push the card's buttons out of view", () => {
-  // Held responses show their URL above Drop and Forward. A path with nothing
-  // to break at used to widen the card's grid track past the card itself.
+  // A held item's title is its URL, beside Drop and Forward, and Compare's
+  // title is two. A path with nothing to break at used to widen the card's
+  // grid track past the card.
   assert.match(css, /\.panel-card \{[^}]*grid-template-columns: minmax\(0, 1fr\);/);
-  assert.match(css, /\.panel-toolbar \.placeholder-kicker \{[^}]*overflow-wrap: anywhere;/);
+  assert.match(css, /#interceptDetailTitle,\s*#compareTitle \{[^}]*overflow-wrap: anywhere;/);
   // Squeezed by a long URL, Drop and Forward used to stack.
   assert.match(css, /#interceptRequestActions,\s*#responseInterceptActions \{[^}]*flex: none;/);
 });

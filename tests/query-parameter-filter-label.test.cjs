@@ -10,13 +10,15 @@ test('shared History/Map query filter explains URL-only matching accessibly', ()
   assert.match(html, /id="filterOnlyParameterized"[^>]*aria-describedby="filterOnlyParameterizedHelp"[^>]*\/><span>Show only requests with query parameters<\/span>/);
   assert.match(html, /<small id="filterOnlyParameterizedHelp">Matches a \? in the URL, including an empty query\. JSON, form and multipart body fields do not affect this filter\.<\/small>/);
   assert.equal((html.match(/id="filterOnlyParameterized"/g) || []).length, 1, 'History and Map keep one shared dialog');
-  assert.match(appSource, /state\.filterSettings\.onlyParameterized\) summary\.push\("query parameters only"\)/);
+  // History and the Map describe the shared dialog with one function.
+  assert.match(appSource, /filters\.onlyParameterized\) parts\.push\("query parameters only"\)/);
+  assert.match(appSource, /\.\.\.describeHttpFilters\(state\.filterSettings\)/);
   assert.doesNotMatch(html + appSource, /Show only parameterized requests|["']parameterized only["']/);
 });
 
 test('Map toolbar summary names query parameters without changing the saved flag', () => {
   const state = { serviceMapFilterSettings: { onlyParameterized: true } };
-  const context = loadFunctions(['createDefaultFilterSettings', 'serviceMapFilterSummary'], {
+  const context = loadFunctions(['createDefaultFilterSettings', 'serviceMapFilterSummary', 'describeHttpFilters'], {
     state, SERVICE_MAP_FILTER_MIME_LABELS: {}, SERVICE_MAP_FILTER_STATUS_LABELS: {},
     sanitizeHttpFilterSettings: value => ({ hiddenExtensions: '', mime: {}, status: {}, ...value }),
   });
@@ -54,7 +56,8 @@ test('CLI and public guides explain the unchanged URL-query flag', () => {
   const cli = fs.readFileSync(path.join(__dirname, '../src/bin/sniper-cli.rs'), 'utf8');
   assert.match(cli, /Keep only rows whose URL has a query string; body fields do not match\./);
   assert.match(cli, /Display filter: keep only rows whose URL has a query string; body fields do not match\. Null uses false\./);
-  for (const file of ['README.md', 'docs/integrations/service-map.md', 'packaging/skills/codex/sniper-operator/SKILL.md', 'packaging/skills/claude/sniper-operator/SKILL.md']) {
+  // The README points to the Service Map guide instead of explaining the flag.
+  for (const file of ['docs/integrations/service-map.md', 'packaging/skills/codex/sniper-operator/SKILL.md', 'packaging/skills/claude/sniper-operator/SKILL.md']) {
     const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
     assert.match(text, /JSON, form and multipart body fields do not\s+(?:affect|match)/, file);
   }

@@ -1,9 +1,8 @@
 # HTTP history retention
 
 Each session has one saved retention policy, shared by Capture → Settings →
-HTTP History and the CLI: keep the newest N rows, or Off. It is **Off by
-default**, including for older sessions, and only an explicit setting turns it
-on.
+HTTP History and the CLI: keep the newest N rows, or Off. It stays **Off** until
+you set it, including in older sessions.
 
 ```bash
 sniper-cli capture http retention get --session-id <session-uuid>
@@ -14,7 +13,7 @@ sniper-cli call capture.http.retention.set --input '{"max_entries":10000}' --dry
 ```
 
 N is 1–4294967295. In `call` input, pass either `max_entries` (an unsigned JSON
-integer) or `off: true`, and optionally `session_id`. Writes need `--yes`;
+integer) or `off: true`, and optionally `session_id`. Writes need `--yes`.
 `--dry-run` is offline and cannot predict how many rows would be deleted.
 
 ## What gets deleted
@@ -25,10 +24,10 @@ are protected, so the total can stay above N. Saving a tab later does not bring
 back a deleted original. If workspace durability is uncertain, nothing is
 deleted. Turning retention Off stops deletion but restores nothing.
 
-Disk space freed by a policy change is reclaimed promptly. At the target, each
-new row deletes an old one and that space is reclaimed at the next session
-rewrite (after 64 MiB of journal or deleted rows), so `disk_cleanup_pending` can
-stay true during capture.
+Space freed by a policy change is reclaimed promptly. At the target, each new
+row deletes an old one, and that space is reclaimed at the next session rewrite
+(after 64 MiB of journal or deleted rows). So `disk_cleanup_pending` can stay
+true during capture.
 
 ## Responses
 
@@ -48,8 +47,8 @@ changed, not a deletion count. A saved policy does not mean cleanup is done:
 An explicit session UUID works without activating that session. Without one, the
 CLI pins the active session and fails the write if it changes. Each write sends
 a fresh `config_token` in one compare-and-swap request. The CLI never retries,
-follows redirects or reads back; an uncertain write reports `retryable: false`
-and an unknown outcome, so run `capture http retention get` on the same session
+follows redirects or reads back. An uncertain write reports `retryable: false`
+and an unknown outcome; run `capture http retention get` on the same session
 before writing again.
 
 ## API

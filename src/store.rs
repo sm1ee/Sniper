@@ -5111,6 +5111,17 @@ fn default_port_for_scheme(scheme: &str) -> Option<&'static str> {
     }
 }
 
+/// The host as the History Host column shows it, without the port its scheme
+/// implies: HTTPS captured through CONNECT keeps the tunnel's "host:443" while
+/// Replay and scans store the bare host, and both are the same origin.
+pub(crate) fn host_without_default_port<'a>(host: &'a str, scheme: &str) -> &'a str {
+    let host = host.trim();
+    match (extract_host_port(host), default_port_for_scheme(scheme)) {
+        (Some(port), Some(default)) if port == default => &host[..host.len() - port.len() - 1],
+        _ => host,
+    }
+}
+
 fn matches_color_tags(color_tag: Option<&str>, color_tags: &[String]) -> bool {
     if color_tags.is_empty() {
         return true;

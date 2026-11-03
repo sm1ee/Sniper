@@ -35,7 +35,7 @@ function fixture() {
   els.liveStatus.classList.add('online'); els.findingsBody.querySelector = () => null;
   els.findingsDetailJump.dataset.recordId = record.id;
   for (const name of ['proxyShell', 'colorTagFilter', 'filterBar', 'trafficRegion', 'historyWorkbenchResizer',
-    'lowerWorkbench', 'interceptPanel', 'websocketPanel', 'matchReplacePanel', 'findingsPanel', 'proxySettingsPanel', 'proxySubPlaceholder']) els[name] = element();
+    'lowerWorkbench', 'interceptPanel', 'websocketPanel', 'matchReplacePanel', 'findingsPanel', 'proxySettingsPanel']) els[name] = element();
   const proxyTabs = ['findings', 'http-history'].map(element);
   const names = ['jumpToTransaction', 'loadTransactionDetail', 'ensureHistoryWindowContainsRecord', 'fetchTransactionPage',
     'sequenceCursorAfter', 'canUseSequenceCursorForHistoryPaging', 'clearHistoryBackfill', 'replaceHistoryItemsForGap',

@@ -163,7 +163,7 @@ test("a scan request names its targets, its selection and whether it only counts
   assert.equal(one.acknowledged, true);
   assert.equal(one.filter, undefined);
   // Its On box does not select a template; clicking its row does.
-  assert.throws(() => templates.scanRequest({ ...values, selection: "selected" }, {}, null, "s-1", true), /Click a template's row/);
+  assert.throws(() => templates.scanRequest({ ...values, selection: "selected" }, {}, null, "s-1", true), /Select a template row first/);
   assert.throws(() => templates.scanRequest(values, {}, null, null, true), /session/);
   assert.throws(() => templates.scanRequest({ ...values, rate: "51" }, {}, null, "s-1", true), /from 1 to 50/);
   for (const bad of ["", "app.example.com", "https://app.example.com/?q=1", "https://user:pw@app.example.com", "ftp://app.example.com"]) {
@@ -884,4 +884,19 @@ test("Recon and Active Scan are the Scan tab's own tabs", () => {
   assert.ok(scan.indexOf('id="reconShell"') > 0 && scan.indexOf('id="templatesShell"') > 0, "both open inside it");
   const app = fs.readFileSync(path.join(__dirname, "../web/app.js"), "utf8");
   assert.match(app, /scanShell: document\.getElementById\("scanShell"\)/);
+});
+
+test('scan layout places targets and execution before library maintenance and automation', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
+  const side = html.slice(html.indexOf('<div class="templates-side">'), html.indexOf('<section class="panel-card recon-inventory templates-list">'));
+  assert.ok(side.indexOf('id="templatesScanTitle"') < side.indexOf('id="templatesTitle"'));
+  assert.ok(side.indexOf('id="templatesScanStart"') < side.indexOf('id="templatesTitle"'));
+  assert.ok(side.indexOf('id="templatesTitle"') < side.indexOf('id="templatesAutoTitle"'));
+  assert.ok(side.indexOf('id="templatesScanTargets"') < side.indexOf('id="templatesScanSelection"'));
+  assert.ok(side.indexOf('id="templatesScanPlan"') < side.indexOf('id="templatesScanStart"'));
+  for (const id of ['templatesScanTargets', 'templatesScanSelection', 'templatesScanRisks', 'templatesScanStart', 'templatesAutoToggle', 'templatesDownload']) {
+    assert.equal((html.match(new RegExp(`id="${id}"`, 'g')) || []).length, 1, id);
+  }
+  assert.match(side, /id="templatesAutoToggle"[^>]*disabled/);
+  assert.match(side, /id="templatesScanStart"[^>]*disabled/);
 });

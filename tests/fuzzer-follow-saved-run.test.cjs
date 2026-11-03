@@ -7,7 +7,7 @@ const test = require("node:test");
 const { loadFunctions } = require("./frontend-test-helpers.cjs");
 
 test("a saved run still sending when it loads is followed to its end", async () => {
-  const state = { activeSession: { id: "session-a" }, fuzzerAttackRecordId: "run-a", fuzzerNotice: "Loading saved fuzzer run..." };
+  const state = { activeSession: { id: "session-a" }, fuzzerAttackRecordId: "run-a", fuzzerNotice: "Loading saved fuzzer run…" };
   const row = index => ({ index, payload: `p${index}`, status: 200 });
   const replies = [
     { id: "run-a", running: true, results: [row(0)] },

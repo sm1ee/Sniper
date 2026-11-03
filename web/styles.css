@@ -119,9 +119,7 @@ body {
   height: 100%;
   min-height: 100%;
   font-size: var(--ui-root-size);
-  background:
-    radial-gradient(circle at top left, var(--bg-glow), transparent 30%),
-    linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
+  background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
 }
@@ -845,9 +843,8 @@ code {
   padding: 6px 11px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0.02) 100%);
+  background: var(--panel-elevated);
   color: var(--text);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .metric-pill {
@@ -859,8 +856,7 @@ code {
 
 .metric-pill span,
 .search-box span,
-.select-box span,
-.placeholder-kicker {
+.select-box span {
   color: var(--text-dim);
   font-size: var(--font-2xs);
   letter-spacing: 0.08em;
@@ -884,6 +880,10 @@ code {
   font-size: var(--font-sm);
 }
 
+.metric-pill span {
+  color: var(--text-soft);
+}
+
 .metric-pill strong {
   color: var(--text);
   font-weight: 600;
@@ -895,12 +895,17 @@ code {
   text-decoration: none;
 }
 
-/* While updating, the button is disabled and holds the width it had; its content
-   becomes a ring. The percentage is drawn inside it, and the steps that cannot be
-   measured spin an arc instead. */
+/* Keep every update state aligned with the neighboring browser launcher. */
+#openUpdateButton {
+  height: max(var(--control-h), calc(var(--font-xs) * 1.45 + 10px));
+  min-height: var(--control-h);
+  padding: 0 11px;
+  font-size: var(--font-xs);
+}
+
+/* While updating, the button holds its idle width and becomes a ring. The
+   percentage stays in the tooltip; unmeasured steps spin an arc instead. */
 .utility-button.is-updating {
-  /* The ring is taller than the label it replaces; without this the button would
-     grow past its row and push the header down. */
   padding-block: 0;
   cursor: default;
 }
@@ -912,8 +917,8 @@ code {
 
 .update-ring {
   display: block;
-  width: 24px;
-  height: 24px;
+  width: 18px;
+  height: 18px;
 }
 
 .update-ring svg {
@@ -1117,10 +1122,22 @@ code {
 
 /* Session and Scope: a title and its actions, no bar beneath. */
 :is(.dashboard-shell, .target-shell) .panel-toolbar {
-  align-items: center;
   padding: 16px 18px 8px;
   border-bottom: 0;
   background: none;
+}
+
+/* Scope's Save shows only with unsaved edits. Appearing, it grew the header
+   and pushed the host lists down; saving pulled them back up. Hidden, it now
+   keeps its place, and both Scope headers keep the height a 26px button gives
+   them (16px and 8px of padding), so the Site map's header lines up. */
+#saveTargetScopeButton.hidden {
+  display: inline-block !important;
+  visibility: hidden;
+}
+
+.target-shell .panel-toolbar {
+  min-height: 50px;
 }
 
 :is(.dashboard-shell, .target-shell) .panel-toolbar h2 {
@@ -1573,6 +1590,11 @@ code {
   background: rgba(255, 255, 255, 0.04);
 }
 
+.tools-output-list .value:focus-within {
+  outline: 2px solid var(--point);
+  outline-offset: -2px;
+}
+
 .tools-output-list .value textarea {
   width: 100%;
   min-height: 0;
@@ -1974,37 +1996,11 @@ code {
 .compact-field select:focus,
 .settings-field input:focus,
 .settings-field textarea:focus,
-.settings-field select:focus {
+.settings-field select:focus,
+.session-table .session-name-input:focus {
   outline: none;
   border-color: var(--point-border);
   box-shadow: 0 0 0 1px var(--point-soft);
-}
-
-.toggle-pill {
-  min-width: 48px;
-  padding: 6px 14px;
-  border: 1px solid var(--danger);
-  border-radius: var(--radius-md);
-  background: rgba(200, 80, 80, 0.1);
-  color: var(--danger);
-  cursor: pointer;
-  font-size: var(--font-xs);
-  font-family: var(--sans);
-  font-weight: 600;
-  white-space: nowrap;
-  text-align: center;
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
-}
-
-.toggle-pill.online {
-  border-color: #50c878;
-  background: rgba(80, 200, 120, 0.12);
-  color: #50c878;
-}
-
-.toggle-pill:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
 }
 
 /* On or off, as a settings switch reads. The state is aria-checked, so what
@@ -2491,8 +2487,7 @@ code {
   display: none;
 }
 
-.proxy-panel,
-.proxy-sub-placeholder {
+.proxy-panel {
   grid-row: 2 / -1;
   grid-column: 1;
   min-height: 0;
@@ -3231,13 +3226,6 @@ body.pane-resizing-y {
   grid-template-columns: 0 46px;
 }
 
-.placeholder-screen,
-.proxy-sub-placeholder {
-  display: grid;
-  place-items: center;
-  background: var(--shell);
-}
-
 .proxy-panel {
   padding: 14px;
   background: var(--shell);
@@ -3333,9 +3321,6 @@ body.pane-resizing-y {
 .sequence-shell .panel-toolbar h2 {
   font-size: var(--font-md);
   line-height: 1.22;
-}
-.sequence-shell .panel-toolbar {
-  align-items: center;
 }
 .sequence-shell .inline-copy {
   display: flex;
@@ -3719,10 +3704,6 @@ body.pane-resizing-y {
   line-height: 1.22;
 }
 
-.fuzzer-shell .panel-toolbar {
-  align-items: center;
-}
-
 .fuzzer-shell .inline-copy {
   display: flex;
   align-items: center;
@@ -3764,7 +3745,7 @@ body.pane-resizing-y {
 }
 
 /* Keep setup helpers collapsed by default so the request and results stay central. */
-.fuzzer-shell > .fuzzer-workflow-header {
+.fuzzer-layout > .fuzzer-workflow-header {
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -4409,6 +4390,11 @@ body.pane-resizing-y {
   margin-right: 12px;
 }
 
+#websocketFramesColumn:focus-visible {
+  outline: 2px solid var(--point);
+  outline-offset: -2px;
+}
+
 .frame-detail-close {
   width: 22px;
   height: 22px;
@@ -4458,12 +4444,6 @@ body.pane-resizing-y {
 }
 .websocket-frames-column .mini-table tr.frame-selected td:last-child {
   box-shadow: inset -1px 0 0 var(--point-border);
-}
-
-.websocket-handshake-column .panel-toolbar h2 {
-  font-size: var(--font-md);
-  line-height: 1.28;
-  word-break: break-word;
 }
 
 .websocket-workbench .dual-code-panel,
@@ -4635,6 +4615,11 @@ body.pane-resizing-y {
   background: rgba(255, 255, 255, 0.02);
 }
 
+/* Titles are a line, not a kicker over a title; keep the controls level. */
+.panel-toolbar {
+  align-items: center;
+}
+
 .panel-toolbar h2,
 .replay-header h2,
 .filter-group h3 {
@@ -4677,9 +4662,10 @@ body.pane-resizing-y {
   color: var(--text-soft);
 }
 
-/* A kicker can hold a URL with nothing to break at; held responses show
-   theirs above Drop and Forward. Two lines are enough to place it. */
-.panel-toolbar .placeholder-kicker {
+/* A held item's title beside Drop and Forward, and Compare's title beside its
+   tabs, are URLs with nothing to break at. Two lines are enough to place them. */
+#interceptDetailTitle,
+#compareTitle {
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -4747,6 +4733,13 @@ body.pane-resizing-y {
 
 .replay-tab-list-pinned:empty {
   display: none;
+}
+
+/* Every tab is pinned (see renderReplayTabs): the pinned row keeps the line
+   with + and the gear, and the empty tab row beside it is where a dragged tab
+   goes to be unpinned. */
+.replay-tab-rows.all-pinned > .replay-tab-list-pinned {
+  flex: 0 1 auto;
 }
 
 /* While a tab is dragged the pinned row stays up as a drop target, even when
@@ -5015,12 +5008,6 @@ button.utility-button.replay-tab-add {
   border-radius: 6px;
 }
 
-.toolbar-actions .toggle-pill {
-  min-height: var(--control-h);
-  padding: 4px 14px;
-  font-size: var(--font-xs);
-}
-
 .mini-table {
   width: 100%;
   min-width: 640px;
@@ -5174,6 +5161,20 @@ button.utility-button.replay-tab-add {
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+/* Renaming: the name becomes a field of the same size in the same place. */
+.session-table .session-name-input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 2px 6px;
+  margin: -3px 0;
+  border: 1px solid var(--point-border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-code);
+  color: var(--text);
+  font: inherit;
 }
 
 .session-table :is(.session-select-button, .session-open-button, .session-delete-button):focus-visible {
@@ -5386,6 +5387,10 @@ button.utility-button.replay-tab-add {
   padding: 4px 12px;
   font-size: var(--font-xs);
   border-radius: var(--radius-md);
+}
+
+#findingsSettingsButton svg {
+  display: block;
 }
 
 /* Scanner settings modal */
@@ -6232,8 +6237,6 @@ button.utility-button.replay-tab-add {
 .settings-field span {
   color: var(--text-dim);
   font-size: var(--font-xs);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 /* :where keeps the old specificity, so :focus and per-panel rules still win. */
@@ -6267,6 +6270,10 @@ button.utility-button.replay-tab-add {
 .settings-field small {
   color: var(--text-soft);
   line-height: 1.5;
+}
+
+.settings-field small:empty {
+  display: none;
 }
 
 .select-box select,
@@ -6359,26 +6366,6 @@ button.utility-button.replay-tab-add {
   border-radius: 6px;
 }
 
-.placeholder-card {
-  width: min(620px, calc(100vw - 56px));
-  padding: 28px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, transparent 100%), var(--panel);
-  box-shadow: var(--shadow);
-}
-
-.placeholder-card h2 {
-  margin: 8px 0 12px;
-  font-size: var(--font-xl);
-}
-
-.placeholder-card p:last-child {
-  margin-bottom: 0;
-  color: var(--text-soft);
-  line-height: 1.65;
-}
-
 .status-bar {
   display: flex;
   align-items: center;
@@ -6421,7 +6408,7 @@ button.utility-button.replay-tab-add {
   max-height: calc(100svh - 40px);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-lg);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, transparent 100%), var(--panel);
+  background: var(--panel);
   box-shadow: var(--shadow);
   overflow: hidden;
 }
@@ -6453,7 +6440,7 @@ button.utility-button.replay-tab-add {
 
 .primary-action {
   border-color: var(--point-border);
-  background: linear-gradient(180deg, var(--point-border) 0%, var(--point-soft) 100%);
+  background: var(--point-soft);
   color: var(--text);
   font-weight: 700;
 }
@@ -6502,7 +6489,6 @@ button.utility-button.replay-tab-add {
 .secondary-action,
 .danger-action,
 .accent-action,
-.toggle-pill,
 .utility-button,
 .modal-close,
 .sub-tab,
@@ -6515,7 +6501,6 @@ button.utility-button.replay-tab-add {
 .secondary-action:active,
 .danger-action:active,
 .accent-action:active,
-.toggle-pill:active,
 .utility-button:active,
 .modal-close:active,
 .sub-tab:active,
@@ -6568,12 +6553,36 @@ button.utility-button.replay-tab-add {
   background: #50c878;
 }
 
+#matchReplaceTableBody .match-replace-edit-rule {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+#matchReplaceTableBody .match-replace-edit-rule:focus-visible,
+#matchReplaceTableBody .mini-toggle input:focus-visible + .mini-toggle-track {
+  outline: 2px solid var(--point);
+  outline-offset: 2px;
+}
+
 #matchReplacePanel .mini-table thead th {
   text-transform: none;
 }
 
-#matchReplacePanel .settings-field span {
-  text-transform: none;
+.match-replace-search-group {
+  display: grid;
+  gap: 8px;
+}
+
+.match-replace-search-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
 }
 
 .match-replace-replace-head {
@@ -6727,6 +6736,15 @@ button.utility-button.replay-tab-add {
   flex: 0 0 auto;
 }
 
+/* Add rule and each rule's Edit stay quiet until pointed at, as Scan's header
+   actions do. */
+.intercept-rules-header .secondary-action:not(:hover),
+.intercept-rule-row .secondary-action:not(:hover) {
+  border-color: transparent;
+  background: none;
+  color: var(--text-soft);
+}
+
 .intercept-rules-list {
   flex: 0 0 auto;
   max-height: 180px;
@@ -6753,7 +6771,10 @@ button.utility-button.replay-tab-add {
   background: var(--bg-elevated);
 }
 
-.intercept-rule-row.disabled {
+.intercept-rule-row.disabled > .intercept-rule-scope,
+.intercept-rule-row.disabled > .intercept-rule-methods,
+.intercept-rule-row.disabled > .intercept-rule-host,
+.intercept-rule-row.disabled > .intercept-rule-path {
   opacity: 0.45;
 }
 
@@ -6771,8 +6792,7 @@ button.utility-button.replay-tab-add {
   color: var(--accent);
   font-size: 0.7rem;
   font-weight: 600;
-  min-width: 32px;
-  text-transform: uppercase;
+  min-width: 56px;
 }
 .intercept-rule-scope-select {
   max-width: 80px;
@@ -6937,10 +6957,6 @@ button.utility-button.replay-tab-add {
   .replay-workbench {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 0.9fr) minmax(0, 1.1fr);
-  }
-
-  .websocket-filter-bar {
-    grid-template-columns: 1fr;
   }
 }
 
@@ -7307,11 +7323,6 @@ button.utility-button.replay-tab-add {
     grid-template-columns: 1fr;
   }
 
-  .placeholder-card {
-    width: min(100%, calc(100vw - 24px));
-    padding: 22px;
-  }
-
   .code-gutter {
     display: none;
   }
@@ -7341,8 +7352,6 @@ button.utility-button.replay-tab-add {
 .oast-payload-label {
   color: var(--text-dim);
   font-size: var(--font-xs);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   flex-shrink: 0;
 }
 
@@ -7351,6 +7360,8 @@ button.utility-button.replay-tab-add {
      band; here it has to sit level with the payload field. */
   min-height: var(--control-h);
   padding: 0 10px;
+  width: auto;
+  flex: 0 0 auto;
 }
 
 .oast-payload-input {
@@ -8410,8 +8421,7 @@ button.utility-button.replay-tab-add {
   height: 0;
   background: transparent;
   pointer-events: none;
-  transition: left 0.2s cubic-bezier(0.2, 0, 0, 1), top 0.2s cubic-bezier(0.2, 0, 0, 1),
-    width 0.2s cubic-bezier(0.2, 0, 0, 1);
+  transition: transform 0.2s cubic-bezier(0.2, 0, 0, 1), width 0.2s cubic-bezier(0.2, 0, 0, 1);
 }
 
 .tab-indicator::after {
@@ -8510,8 +8520,7 @@ button.utility-button.replay-tab-add {
 #proxySettingsPanel > .split-panel > .panel-card > .settings-form { overflow: visible; }
 .history-retention-card { flex: 0 0 auto; margin-bottom: 12px; }
 .history-retention-card p { margin: 0; line-height: 1.5; }
-.history-retention-fields { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(150px, 1fr); gap: 12px; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-md); }
-.history-retention-fields legend { padding: 0 6px; color: var(--text-dim); }
+.history-retention-fields { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(150px, 1fr); gap: 12px; margin: 0; padding: 0; border: 0; }
 .history-retention-fields .settings-toggle { grid-column: 1 / -1; }
 .history-retention-warning { color: var(--text); font-weight: 600; }
 .history-retention-error { color: var(--danger, #df596a); }
@@ -9031,6 +9040,18 @@ button.utility-button.replay-tab-add {
   .recon-inventory { flex: 0 0 650px; }
   .recon-pagination { flex-wrap: wrap; }
 }
+/* One row per kind of source, so the crawl and the third-party services read
+   apart without a sentence saying so. */
+.recon-sources { border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: 10px 0 0; margin: 0; }
+.recon-sources legend { padding: 0 7px 0 0; font-size: var(--font-xs); color: var(--text-dim); }
+.recon-source-group { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 7px 10px; }
+.recon-source-group + .recon-source-group { border-top: 1px solid var(--line); padding-top: 9px; }
+.recon-source-label { grid-row: 1 / span 2; font-size: var(--font-xs); color: var(--text-dim); }
+.recon-source-group .recon-check { grid-column: 2; }
+.recon-start { justify-self: stretch; }
+.recon-setup .panel-toolbar { padding: 10px 14px; }
+.recon-setup .recon-form { gap: 10px; }
+
 .recon-scan-options { display: grid; gap: 10px; padding: 10px; border: 1px solid var(--point-border); background: var(--point-soft); border-radius: 5px; }
 .recon-scan-options .recon-check { overflow-wrap: anywhere; }
 /* Recon and Active Scan share the Scan tab: its own tabs, then whichever is open. */
@@ -9065,7 +9086,7 @@ button.utility-button.replay-tab-add {
 }
 .templates-side .panel-card { flex: 0 0 auto; border: 0; border-radius: 0; background: none; overflow: visible; }
 .templates-side .panel-card + .panel-card { border-top: 1px solid var(--line); }
-.templates-side .panel-toolbar { padding: 14px 16px 0; border-bottom: 0; background: none; }
+.templates-side .panel-toolbar { padding: 10px 14px 0; border-bottom: 0; background: none; }
 .templates-side .panel-toolbar h2 { font-size: var(--font-md); }
 /* Its header actions stay quiet until pointed at. */
 .templates-side .panel-toolbar .secondary-action:not(:hover) { border-color: transparent; background: none; color: var(--text-soft); }
@@ -9081,8 +9102,11 @@ button.utility-button.replay-tab-add {
 /* The list's filters keep their own width beside the search box: sized to the
    column like the form's controls, the search box shrinks to nothing. */
 .templates-shell .recon-search-controls select { width: auto; min-width: 130px; }
-.templates-shell .panel-toolbar { align-items: center; }
-.templates-shell .recon-form { gap: 10px; padding: 8px 16px 16px; }
+.templates-shell .recon-form { gap: 10px; padding: 8px 14px 12px; }
+.templates-run-actions > button { width: 100%; }
+.templates-scan textarea { min-height: 5em; }
+.templates-scan #templatesScanPlan:empty { display: none; }
+.templates-library #templatesStatus:empty { display: none; }
 .templates-shell .recon-field { gap: 4px; color: var(--text-dim); font-size: var(--font-xs); }
 .templates-shell .recon-check { align-items: center; }
 .templates-shell .recon-check input { margin: 0; }
@@ -9187,7 +9211,9 @@ button.utility-button.replay-tab-add {
 .recon-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
 /* Inert, view-owned decoding previews share the active theme. The button stays
-   in the tab order without reserving a new toolbar row in every traffic pane. */
+   in the tab order without reserving a new toolbar row in every traffic pane.
+   It shows only when the keyboard reaches it: a pointer opens the preview by
+   hovering, and the button used to appear on every editor the pointer crossed. */
 .encoded-preview-trigger {
   position: absolute;
   right: 18px;
@@ -9201,10 +9227,14 @@ button.utility-button.replay-tab-add {
   font: 11px var(--sans);
   cursor: pointer;
   opacity: 0;
+  pointer-events: none;
 }
-.cm-editor:hover .encoded-preview-trigger,
-.cm-editor:focus-within .encoded-preview-trigger { opacity: 1; }
-.encoded-preview-trigger:focus-visible { outline: 2px solid var(--point); outline-offset: 2px; }
+.encoded-preview-trigger:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  outline: 2px solid var(--point);
+  outline-offset: 2px;
+}
 .encoded-preview-tooltip {
   position: fixed;
   z-index: 1200;
@@ -9383,7 +9413,7 @@ button.utility-button.replay-tab-add {
    Never let the detail pane consume the table's entire viewport. Inline drag
    sizes still win; a short window scrolls instead of hiding result rows. */
 .fuzzer-shell:not(.fuzzer-results-empty) .fuzzer-top-row {
-  height: 32%;
+  height: max(32%, 224px);
   min-height: 180px;
 }
 .fuzzer-shell:not(.fuzzer-results-empty) .fuzzer-results-card {
@@ -9401,4 +9431,61 @@ button.utility-button.replay-tab-add {
 .fuzzer-shell .fuzzer-results-card {
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+/* Request → replacement payloads → execution → results, in document order. */
+.fuzzer-layout > .fuzzer-workflow-header {
+  flex: 0 0 auto;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: none;
+}
+.fuzzer-request-target {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.fuzzer-request-target .fuzzer-target-summary { flex: 1 1 160px; }
+.fuzzer-request-target .fuzzer-transport-help { flex-basis: 100%; }
+.fuzzer-template-card > #fuzzerRequestHelp { padding-block: 4px; }
+.fuzzer-payload-input-bar { justify-content: space-between; padding-left: 10px; }
+.fuzzer-payload-input-bar > .toolbar-actions { margin-left: 0; }
+.fuzzer-shell.fuzzer-results-empty .fuzzer-results-card { margin-top: 0; }
+
+.fuzzer-template-card > #fuzzerRequestHelp:empty { display: none; }
+
+.fuzzer-shell { grid-template-rows: minmax(0, 1fr); }
+
+/* One list action governs file import, presets and ranges below this header. */
+.fuzzer-payloads-card > .panel-toolbar { flex-wrap: wrap; }
+.fuzzer-payloads-card > .panel-toolbar > .fuzzer-import-mode { flex: 0 0 auto; }
+
+/* Keep single-line rule controls compact without fixing their height. */
+#matchReplaceForm .settings-field > :is(input[type="text"], select) {
+  min-height: var(--control-h);
+  padding-block: 4px;
+}
+
+/* Reserve categorical text and its padding; only long content shares the remainder. */
+#matchReplacePanel .match-replace-rules-table {
+  min-width: calc(200px + 42ch);
+}
+#matchReplacePanel .match-replace-col-on { width: 56px; }
+#matchReplacePanel .match-replace-col-scope { width: calc(10ch + 24px); }
+#matchReplacePanel .match-replace-col-target { width: calc(13ch + 24px); }
+#matchReplacePanel .match-replace-col-flag { width: calc(2.5ch + 24px); }
+
+/* Work panes share one flat surface; nested sections retain their own cues. */
+#matchReplacePanel > .split-panel > .panel-card,
+#fuzzerShell .fuzzer-top-row > .fuzzer-template-card,
+#fuzzerShell .fuzzer-top-row > .fuzzer-payloads-card,
+#fuzzerShell > .fuzzer-layout > .fuzzer-results-card,
+#templatesShell > .templates-side,
+#templatesShell > .templates-list {
+  background: var(--panel);
+  border-radius: var(--radius-md);
 }

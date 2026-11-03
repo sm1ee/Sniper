@@ -16,7 +16,7 @@ function setup() {
   f.old = f.tab('saved-a'); f.seed([f.old]);
   f.reloads = []; f.errors = []; f.warnings = [];
   f.els.dashboardCreateSessionName = { value: 'New stored session' };
-  for (const key of ['dashboardCurrentSessionName', 'dashboardCurrentSessionStorage', 'dashboardCurrentSessionPath',
+  for (const key of ['dashboardCurrentSessionStorage', 'dashboardCurrentSessionPath',
     'dashboardSessionsBody', 'dashboardTiles', 'dashboardDetail']) f.els[key] = { querySelectorAll: () => [] };
   Object.assign(f.context, {
     sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0, resetFindingsUiState() {},
