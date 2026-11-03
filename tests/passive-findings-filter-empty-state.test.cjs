@@ -41,6 +41,7 @@ function fixture(data = [row("alpha", "Alpha saved entry"), row("beta", "Beta sa
     "renderFindingsVirtual", "getFindingsRowHeight", "measuredRowPitch", "severityClass", "severityLabel", "escapeHtml",
     "resetFindingsUiState", "clearFindingDetail", "updateFindingsSelection", "setFindingDetailActionsEnabled", "resetFindingsSearchUi",
     "updateFindingsBadge", "formatCappedCount", "retainedEntriesCap",
+    "displayHost", "extractHostPort", "defaultSummaryPortForScheme",
   ], { refreshHistoryFindings() {},
     state, els, findingsData: rows, selectedFindingId: null, findingsDetailGeneration: 0,
     findingsStateGeneration: 0, findingsLoadGeneration: 0, findingsBadgeCount: rows.length,
@@ -101,6 +102,20 @@ for (const query of ["does-not-match", "別の項目🔎"]) {
     assert.equal(f.tablePaints(), 1, "empty filtered results do not render table rows");
   });
 }
+
+// HTTPS captured through CONNECT keeps the tunnel's "host:443" while Replay
+// and scans store the bare host, so one origin showed both ways down the column.
+test("the Host column leaves out :443 as History does and keeps any other port", () => {
+  const at = (id, host) => ({ ...row(id, `${id} entry`), host });
+  const f = fixture([at("proxy", "api.example.com:443"), at("replay", "api.example.com"),
+    at("alt", "api.example.com:8443"), at("plain", "api.example.com:80"), at("v6", "[2001:db8::1]:443")]);
+  const hosts = Object.fromEntries(Array.from(f.body.innerHTML.matchAll(
+    /data-finding-id="(\w+)"[\s\S]*?<td class="findings-col-host">([^<]*)<\/td>/g), (m) => [m[1], m[2]]));
+  assert.deepEqual(hosts, {
+    proxy: "api.example.com", replay: "api.example.com", alt: "api.example.com:8443",
+    plain: "api.example.com:80", v6: "[2001:db8::1]",
+  });
+});
 
 test("clearing an applied unmatched search restores the saved Findings rows", () => {
   const f = fixture();

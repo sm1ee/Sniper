@@ -11037,11 +11037,14 @@ function renderFindingsVirtual() {
     for (let i = startIdx; i < endIdx; i++) {
       const f = entries[i];
       const selected = f.id === selectedFindingId ? " selected" : "";
+      // A finding carries no scheme. Its ":443" is the CONNECT authority of an
+      // HTTPS capture, which Replay and scans store without, so leave it out as
+      // History does; any other port stays.
       rows.push(`<tr class="history-row${selected}" data-finding-id="${f.id}" data-record-id="${f.record_id}">
         <td class="findings-col-severity"><span class="severity-badge ${severityClass(f.severity)}">${severityLabel(f.severity)}</span></td>
         <td class="findings-col-category">${escapeHtml(f.category)}</td>
         <td class="findings-col-title">${escapeHtml(f.title)}</td>
-        <td class="findings-col-host">${escapeHtml(f.host)}</td>
+        <td class="findings-col-host">${escapeHtml(displayHost(f.host, "https"))}</td>
         <td class="findings-col-path">${escapeHtml(f.path)}</td>
         <td class="findings-col-time">${escapeHtml(formatTimestamp(f.found_at))}</td>
       </tr>`);

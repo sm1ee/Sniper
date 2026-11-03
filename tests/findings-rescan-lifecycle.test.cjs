@@ -56,6 +56,7 @@ function fixture() {
     "onClickWithProgress", "withButtonProgress", "requireOkResponse", "readApiErrorMessage", "formatStructuredApiErrorMessage",
     "loadFindings", "fetchFindingsCount", "commitFindingsBadgeCount", "jsonArray", "resetFindingsUiState",
     "renderFindings", "getFilteredFindings", "updateCategoryFilter", "ensureFindingsCategoryOption", "renderFindingsVirtual",
+    "displayHost", "extractHostPort", "defaultSummaryPortForScheme",
     "getFindingsRowHeight", "measuredRowPitch", "severityClass", "severityLabel", "escapeHtml", "updateFindingsBadge",
     "retainedEntriesCap", "formatCappedCount", "clearFindingDetail", "updateFindingsSelection", "loadFindingDetail",
     "renderFindingDetailLoading", "setFindingDetailActionsEnabled", "showFindingDetail", "resetFindingsSearchUi",
