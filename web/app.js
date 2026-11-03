@@ -12084,20 +12084,31 @@ async function loadOastCallbacks() {
     }
     const el = document.getElementById("oastStatusText");
     if (el) {
-      // Providers arrive as lowercase ids ("custom", "interactsh").
-      const provider = titleCase(status.provider);
-      if (status.registered) {
-        el.textContent = `${provider} · Registered (${status.payload_domain || status.correlation_id || ""})`;
-        el.className = "oast-status-text registered";
-      } else if (status.provider && status.provider !== "custom") {
-        el.textContent = `${provider} · Not registered`;
-        el.className = "oast-status-text not-registered";
-      } else {
-        el.textContent = provider || "Not configured";
-        el.className = "oast-status-text not-registered";
-      }
+      const line = oastStatusLine(status, state.runtime);
+      el.textContent = line.text;
+      el.className = `oast-status-text ${line.registered ? "registered" : "not-registered"}`;
     }
   } catch (_) { /* ignore status fetch errors */ }
+}
+
+// The line under Callbacks: off, missing its server, registered, or the
+// custom server it polls. Provider names are the Settings select's.
+function oastStatusLine(status, runtime) {
+  if (!runtime?.oast_enabled) return { text: "Off", registered: false };
+  const provider = { interactsh: "Interactsh", boast: "BOAST", custom: "Custom" }[status?.provider] || "Custom";
+  if (status.registered) {
+    return { text: `${provider} · Registered (${status.payload_domain || status.correlation_id || ""})`, registered: true };
+  }
+  const server = String(runtime.oast_server_url || "").trim();
+  if (!server) return { text: `${provider} · No server URL`, registered: false };
+  if (provider !== "Custom") return { text: `${provider} · Not registered`, registered: false };
+  let host = server;
+  try {
+    host = new URL(server).host || server;
+  } catch (_error) {
+    // Shown as typed; Settings reports a URL it cannot use.
+  }
+  return { text: `${provider} · ${host}`, registered: false };
 }
 
 function renderOastCallbacks() {
