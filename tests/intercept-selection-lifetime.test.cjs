@@ -132,6 +132,26 @@ function fixture(mode, cm = true) {
     load: () => c[config.load](), detail: id => c[config.detail](id), raw: value => c[config.build](value[mode]) };
 }
 
+// HTTPS held through CONNECT carries the tunnel's "host:443". The queue row left
+// that port out, but the title above the editor spelled it in the URL.
+for (const mode of Object.keys(modes)) {
+  test(`${mode}: the title's URL leaves out the scheme's default port`, async () => {
+    const f = fixture(mode);
+    const held = (host) => {
+      const value = record("held-a");
+      value.host = value.request.host = host;
+      return value;
+    };
+    const title = async (host) => {
+      f.show([held(host)]); f.click("held-a"); f.respond(f.requests.length - 1, held(host)); await tick();
+      return f.els.interceptDetailTitle.textContent.replace(/^200 · /, "");
+    };
+    assert.equal(await title("example.com:443"), "GET https://example.com/held-a");
+    f.reset();
+    assert.equal(await title("example.com:8443"), "GET https://example.com:8443/held-a");
+  });
+}
+
 for (const mode of Object.keys(modes)) for (const cm of [true, false]) {
   const label = `${mode} ${cm ? "CodeMirror" : "fallback"}`;
   test(`${label}: older queue snapshots cannot resurrect a removed record`, async () => {

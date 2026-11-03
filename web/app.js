@@ -14451,7 +14451,7 @@ function renderIntercepts() {
 
   if (state.interceptQueueTab === "request") {
     const { request, peer_addr: client, is_websocket: websocket } = state.selectedInterceptRecord;
-    els.interceptDetailTitle.textContent = `${request.method} ${request.scheme}://${request.host}${request.path || "/"}`;
+    els.interceptDetailTitle.textContent = `${request.method} ${request.scheme}://${displayHost(request.host, request.scheme)}${request.path || "/"}`;
     els.interceptMeta.textContent = feedback.message || [
       `Client ${client}`,
       websocket && "WebSocket upgrade",
@@ -21011,7 +21011,7 @@ function renderResponseIntercepts() {
 
   const rec = state.selectedResponseInterceptRecord;
   if (state.interceptQueueTab === "response") {
-    els.interceptDetailTitle.textContent = `${rec.status} · ${rec.method} ${rec.scheme}://${rec.host}${rec.path || "/"}`;
+    els.interceptDetailTitle.textContent = `${rec.status} · ${rec.method} ${rec.scheme}://${displayHost(rec.host, rec.scheme)}${rec.path || "/"}`;
     // As with requests, preserve this record's draft and search state on polls.
     if (els.interceptResponseCM) {
       if (state.responseInterceptEditorSeedId !== rec.id) {
