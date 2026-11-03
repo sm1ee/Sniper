@@ -41,6 +41,7 @@ function setup() {
   let rows = [], markup = "";
   const strip = f.els.replayTabStrip = {
     scrollLeft: 0,
+    classList: { toggle() {} },
     querySelectorAll: selector => selector === '.replay-tab' ? rows : [],
     querySelector: selector => {
       if (selector.includes('data-replay-tab-id')) {

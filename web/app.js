@@ -22212,6 +22212,10 @@ function renderReplayTabs(options = {}) {
   els.replayTabStrip.innerHTML =
     `<div class="replay-tab-list replay-tab-list-pinned" data-replay-tab-row="pinned" aria-label="Pinned tabs">${pinnedTabs.map(tabMarkup).join("")}</div>`
     + `<div class="replay-tab-list" data-replay-tab-row="tabs">${otherTabs.map(tabMarkup).join("")}</div>`;
+  // With every tab pinned there is no tab row to start a second line, so the
+  // pinned tabs share theirs with + and the gear. Set here rather than with
+  // :has(), so the layout holds while a drag moves a tab between the rows.
+  els.replayTabStrip.classList.toggle("all-pinned", pinnedTabs.length > 0 && !otherTabs.length);
 
   Array.from(els.replayTabStrip.querySelectorAll(".replay-tab")).forEach((tabElement) => {
     const id = tabElement.dataset.replayTabId;

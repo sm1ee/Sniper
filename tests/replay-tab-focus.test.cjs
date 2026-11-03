@@ -34,6 +34,7 @@ function fixture() {
   }
   const strip = {
     scrollLeft: 0,
+    classList: { toggle() {} },
     contains: control => rows.some(row => row === control || Object.values(row.controls).includes(control)),
     querySelectorAll: () => rows,
     querySelector: selector => rows.find(row => selector.includes(`"${row.dataset.replayTabId}"`))?.controls['.replay-tab-name-input'] || null,

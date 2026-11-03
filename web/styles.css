@@ -4730,6 +4730,13 @@ body.pane-resizing-y {
   display: none;
 }
 
+/* Every tab is pinned (see renderReplayTabs): the pinned row keeps the line
+   with + and the gear, and the empty tab row beside it is where a dragged tab
+   goes to be unpinned. */
+.replay-tab-rows.all-pinned > .replay-tab-list-pinned {
+  flex: 0 1 auto;
+}
+
 /* While a tab is dragged the pinned row stays up as a drop target, even when
    the tab being dragged was the only one on it. */
 .replay-tab-rows.tab-dragging > .replay-tab-list-pinned {

@@ -112,7 +112,7 @@ test("pinned tabs render on their own row, which renders empty when nothing is p
   };
   const context = loadFunctions(["renderReplayTabs", "getReplayTabVisualOrder"], {
     state,
-    els: { replayTabStrip: { set innerHTML(value) { markup = value; }, querySelectorAll: () => [] } },
+    els: { replayTabStrip: { set innerHTML(value) { markup = value; }, querySelectorAll: () => [], classList: { toggle() {} } } },
     replayTabAutoLabel: (tab) => tab.id, replayTabLabel: (tab) => tab.id,
     replayTabTooltipLabel: (tab, label) => label, escapeHtml: String,
     scrollActiveReplayTabIntoView() {}, document: { activeElement: null },
@@ -127,4 +127,31 @@ test("pinned tabs render on their own row, which renders empty when nothing is p
   state.replayTabs[1].pinned = false;
   context.renderReplayTabs();
   assert.match(markup, /data-replay-tab-row="pinned" aria-label="Pinned tabs"><\/div>/, "empty, so :empty hides it");
+});
+
+// One tab, pinned: the pinned row took its own line and + and the gear sat
+// alone on a second, empty one.
+test("with every tab pinned, the pinned row shares its line with + and the gear", () => {
+  const classes = new Set();
+  const state = { replayTabs: [{ id: "p", pinned: true }], activeReplayTabId: "p", replayRenamingTabId: null };
+  const context = loadFunctions(["renderReplayTabs", "getReplayTabVisualOrder"], {
+    state,
+    els: { replayTabStrip: {
+      set innerHTML(_value) {}, querySelectorAll: () => [],
+      classList: { toggle: (name, force) => (force ? classes.add(name) : classes.delete(name)) },
+    } },
+    replayTabAutoLabel: (tab) => tab.id, replayTabLabel: (tab) => tab.id,
+    replayTabTooltipLabel: (tab, label) => label, escapeHtml: String,
+    scrollActiveReplayTabIntoView() {}, document: { activeElement: null },
+  });
+  context.renderReplayTabs();
+  assert.ok(classes.has("all-pinned"));
+  state.replayTabs.push({ id: "a", pinned: false });
+  context.renderReplayTabs();
+  assert.ok(!classes.has("all-pinned"), "a tab row of its own starts the second line again");
+  state.replayTabs = [];
+  context.renderReplayTabs();
+  assert.ok(!classes.has("all-pinned"), "no tabs at all");
+  const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8");
+  assert.match(css, /\.replay-tab-rows\.all-pinned > \.replay-tab-list-pinned \{[^}]*flex: 0 1 auto;/);
 });
