@@ -532,7 +532,7 @@ class GitOwnershipContractsTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/linux.yml").read_text()
         marker = "      - name: Record exact inputs and build candidate artifacts\n"
         before, remaining = workflow.split(marker, 1)
-        step, after = remaining.split("      - uses: actions/upload-artifact@v4", 1)
+        step, after = remaining.split("      - uses: actions/upload-artifact@v6", 1)
         return before, step, after
 
     def epoch_prologue(self):
