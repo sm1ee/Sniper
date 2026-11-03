@@ -117,14 +117,14 @@ Defaults: the proxy on `127.0.0.1:8080`, the headless server's UI on `127.0.0.1:
 
 ## Screenshots
 
-All captured from Sniper v0.3.2 with synthetic example.com traffic.
+All captured from Sniper v0.3.4 with synthetic example.com traffic.
 
 ### Session
 
 Each session's size, requests, findings, scope, pins, rules and scans, before you open it.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.2-session.jpg" width="800" alt="The Session screen: three sessions with their size, requests and findings, and the selected session's scope, busiest hosts, pinned Replay tab, Replace rules, manual scan and findings" />
+  <img src="docs/assets/sniper-v0.3.4-session.jpg" width="800" alt="The Session screen: three sessions with their size, requests and findings, and the selected session's scope, busiest hosts, pinned Replay tab, Replace rules, manual scan and findings" />
 </p>
 
 ### Replay
@@ -132,7 +132,7 @@ Each session's size, requests, findings, scope, pins, rules and scans, before yo
 Edit a captured request, send it again and read the answer beside it.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.2-replay.jpg" width="800" alt="Replay with a pinned tab named Cart total check: a POST /v1/cart request on the left and its 201 JSON response on the right" />
+  <img src="docs/assets/sniper-v0.3.4-replay.jpg" width="800" alt="Replay with a pinned tab named Cart total check: a POST /v1/cart request on the left and its 201 JSON response on the right" />
 </p>
 
 ### Scan ▸ Active Scan
@@ -140,7 +140,7 @@ Edit a captured request, send it again and read the answer beside it.
 Run Nuclei templates against targets you name; a match opens with the exchange that proved it.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.2-scan.jpg" width="800" alt="Scan, Active Scan: 14,035 Nuclei templates imported, a finished manual scan of admin.example.com with two matches, and the matched /actuator/env request and response" />
+  <img src="docs/assets/sniper-v0.3.4-scan.jpg" width="800" alt="Scan, Active Scan: 14,103 Nuclei templates imported, a finished manual scan of admin.example.com with two matches, and the matched /env request and response" />
 </p>
 
 ### Intercept
@@ -148,7 +148,7 @@ Run Nuclei templates against targets you name; a match opens with the exchange t
 Hold a request on its way out, edit it, then forward or drop it.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.2-intercept.jpg" width="800" alt="Intercept holding a POST /v1/cart request in the request queue, with its headers and JSON body open for editing and Drop and Forward buttons" />
+  <img src="docs/assets/sniper-v0.3.4-intercept.jpg" width="800" alt="Intercept holding a POST /v1/cart request in the request queue, with its headers and JSON body open for editing and Drop and Forward buttons" />
 </p>
 
 ### Fuzzer
@@ -158,7 +158,7 @@ The [Fuzzer quick start (한국어)](docs/guides/fuzzer-assisted-workflow.ko.md)
 shows what to paste, how to mark a value and how to preview before sending.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.2-fuzzer.jpg" width="800" alt="The Fuzzer with a marked page parameter and its results sorted by status: quote payloads answered 500, others 400" />
+  <img src="docs/assets/sniper-v0.3.4-fuzzer.jpg" width="800" alt="The Fuzzer with a marked page parameter and its results sorted by status: quote payloads answered 500, others 400" />
 </p>
 
 ### Findings
@@ -166,7 +166,7 @@ shows what to paste, how to mark a value and how to preview before sending.
 Passive checks and template matches, each with its evidence highlighted.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.2-findings.jpg" width="800" alt="Findings from passive checks and template matches, with a Spring Boot health endpoint selected and the matched words highlighted in its response" />
+  <img src="docs/assets/sniper-v0.3.4-findings.jpg" width="800" alt="Findings from passive checks and template matches, with a Spring Boot health endpoint selected and the matched words highlighted in its response" />
 </p>
 
 ### Map ▸ Flow
@@ -174,7 +174,7 @@ Passive checks and template matches, each with its evidence highlighted.
 One origin's requests in time order, page load by page load.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.2-flow.jpg" width="800" alt="Map, Flow: the client, www.example.com, api.example.com and cdn.example.net as lanes, with each page load's requests drawn in time order" />
+  <img src="docs/assets/sniper-v0.3.4-flow.jpg" width="800" alt="Map, Flow: the client, www.example.com, api.example.com and auth.example.org as lanes, with each page load's requests and redirects drawn in time order" />
 </p>
 
 ### Tools
@@ -182,7 +182,7 @@ One origin's requests in time order, page load by page load.
 A pasted JWT opens the JWT tool: header and claims decoded, <code>alg: none</code> variants ready.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.2-tools.jpg" width="800" alt="Tools with a JWT pasted in: the JWT tool opened by itself, with the decoded header and claims and alg none variants" />
+  <img src="docs/assets/sniper-v0.3.4-tools.jpg" width="800" alt="Tools with a JWT pasted in: the JWT tool opened by itself, with the decoded header and claims and alg none variants" />
 </p>
 
 ## CLI and AI agents
