@@ -6,8 +6,9 @@ into the tooltip to select text. Escape, moving away, scrolling or editing
 closes it.
 
 From the keyboard, put the cursor in a token (or select the exact value), Tab to
-the editor's **Decode** button and press Enter or Space. While the button has
-focus, the arrow, Page Up/Down and Home/End keys scroll a long preview.
+the editor's **Decode** button, which shows only while it has focus, and press
+Enter or Space. While the button has focus, the arrow, Page Up/Down and
+Home/End keys scroll a long preview.
 
 ## What it decodes
 
