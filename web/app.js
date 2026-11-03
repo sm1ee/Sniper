@@ -20182,16 +20182,8 @@ async function toggleIntercept() {
     state.runtime = runtime;
     renderInterceptStatus();
 
+    // The server forwards what was held when Intercept turns off.
     if (turningOff && state.runtime?.intercept_enabled === false) {
-      const [requestResponse, responseResponse] = await Promise.all([
-        fetch(sessionWritePath("/api/intercepts/forward-all", sessionId), { method: "POST" }),
-        fetch(sessionWritePath("/api/response-intercepts/forward-all", sessionId), { method: "POST" }),
-      ]);
-      await requireOkResponse(requestResponse, "Failed to forward queued requests.");
-      await requireOkResponse(responseResponse, "Failed to forward queued responses.");
-      if (requestSeq !== _interceptToggleRequestSeq || sessionId !== currentSessionId()) {
-        return;
-      }
       await Promise.all([loadIntercepts(false), loadResponseIntercepts(false)]);
       if (sessionId === currentSessionId()) {
         scheduleRefresh();

@@ -4405,6 +4405,39 @@ async fn update_runtime_settings(
         persist_rolled_back_session_snapshot(&state, &session, "runtime settings update").await;
         return response;
     }
+    // Turning interception off lets go of what it held, as the UI's switch, Burp
+    // and Caido do; otherwise each held exchange waits out its client's timeout.
+    // Only once the setting is saved, since a forward cannot be taken back. A
+    // request that read the old setting can still queue just after; Forward all
+    // releases it.
+    if previous.intercept_enabled && !snapshot.intercept_enabled {
+        let events_before_release = session
+            .event_log
+            .snapshot(Some(state.config.max_entries))
+            .await;
+        let requests = session.intercepts.forward_all().await;
+        let responses = session.response_intercepts.forward_all().await;
+        if requests + responses > 0 {
+            session
+                .event_log
+                .push(
+                    EventLevel::Info,
+                    "intercept",
+                    "Held traffic forwarded",
+                    format!(
+                        "Intercept turned off: {requests} request(s) and {responses} response(s) forwarded"
+                    ),
+                )
+                .await;
+            persist_nonrollbackable_event_log_mutation(
+                &state,
+                &session,
+                events_before_release,
+                "intercept off forward",
+            )
+            .await;
+        }
+    }
     Json(snapshot.redacted_for_read()).into_response()
 }
 
@@ -16042,6 +16075,85 @@ mod tests {
             second_task.await.unwrap(),
             ResponseInterceptResolution::Forward { .. }
         ));
+    }
+
+    // `sniper-cli capture intercept off` only changed the setting, so traffic held
+    // at that moment waited out its client's timeout. The UI's switch forwarded
+    // it, as Burp and Caido do.
+    #[tokio::test]
+    async fn turning_intercept_off_forwards_what_it_held() {
+        let config = test_app_config("sniper-intercept-off-forwards");
+        let data_dir = config.data_dir.clone();
+        let state = Arc::new(AppState::new(config).unwrap());
+        let session = state.session().await;
+        let set = |intercept_enabled: Option<bool>, scope_patterns: Option<Vec<String>>| {
+            super::update_runtime_settings(
+                State(state.clone()),
+                Json(RuntimeSettingsUpdate {
+                    intercept_enabled,
+                    scope_patterns,
+                    ..RuntimeSettingsUpdate::default()
+                }),
+            )
+        };
+        assert_eq!(set(Some(true), None).await.status(), StatusCode::OK);
+        let request_task = tokio::spawn({
+            let queue = session.intercepts.clone();
+            async move {
+                queue
+                    .enqueue(InterceptRecord {
+                        id: Uuid::new_v4(),
+                        started_at: Utc::now(),
+                        peer_addr: "127.0.0.1:12345".to_string(),
+                        request: test_editable_request("/held"),
+                        is_websocket: false,
+                    })
+                    .await
+            }
+        });
+        let response_task = tokio::spawn({
+            let queue = session.response_intercepts.clone();
+            async move {
+                queue
+                    .enqueue(ResponseInterceptRecord {
+                        id: Uuid::new_v4(),
+                        started_at: Utc::now(),
+                        scheme: "https".to_string(),
+                        host: "example.test".to_string(),
+                        method: "GET".to_string(),
+                        path: "/held".to_string(),
+                        status: 200,
+                        response: test_editable_response(200),
+                    })
+                    .await
+            }
+        });
+        for _ in 0..20 {
+            if session.intercepts.list().await.len() == 1
+                && session.response_intercepts.list().await.len() == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Changing something else while interception stays on keeps them held.
+        let scope = Some(vec!["example.test".to_string()]);
+        assert_eq!(set(None, scope).await.status(), StatusCode::OK);
+        assert_eq!(session.intercepts.list().await.len(), 1);
+        assert_eq!(session.response_intercepts.list().await.len(), 1);
+
+        assert_eq!(set(Some(false), None).await.status(), StatusCode::OK);
+        assert!(session.intercepts.list().await.is_empty());
+        assert!(session.response_intercepts.list().await.is_empty());
+        assert!(matches!(
+            request_task.await.unwrap(),
+            InterceptResolution::Forward { edited: false, .. }
+        ));
+        assert!(matches!(
+            response_task.await.unwrap(),
+            ResponseInterceptResolution::Forward { edited: false, .. }
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     #[test]

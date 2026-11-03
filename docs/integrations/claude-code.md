@@ -101,6 +101,8 @@ sniper-cli --output compact capture intercept forward --id <uuid> --yes
 
 `intercept_scope_only` defaults to `true`, so an out-of-scope request goes
 straight through without an error. Set scope to your target first.
+`capture intercept off` forwards whatever is still held, as the switch in the
+UI does.
 
 **"Resend that 404 and tell me whether it is consistent."**
 
