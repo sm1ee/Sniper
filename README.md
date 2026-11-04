@@ -106,7 +106,7 @@ Defaults: the proxy on `127.0.0.1:8080`, the headless server's UI on `127.0.0.1:
 | **Scan ▸ Recon** | Endpoint discovery per session from a scoped crawler, urlscan and Wayback, with consent per external service and optional limits |
 | **Scan ▸ Active Scan** | Nuclei community templates: turned-on templates check captured in-scope traffic without sending anything; a manual scan sends the ones you pick to targets you name |
 | **Known vulnerabilities** | Advisories for detected front-end library versions, from retire.js, CISA KEV and FIRST EPSS files fetched once a day and matched locally: Info findings and Service Map badges, leads to confirm |
-| **Replay** | Edit and resend any captured request, override host and port, render the response |
+| **Replay** | Edit and resend any captured request, override host and port, render the response. **Fields** reads Protobuf (without a schema), MessagePack, CBOR and gRPC bodies and edits Protobuf, MessagePack and CBOR request fields; binary bodies stay Base64 in every editor so their bytes never change |
 | **Fuzzer** | Payload lists sent at marked positions (Sniper or Battering ram), in the background with progress and Stop |
 | **Tools** | Decode, encode, hash, JWT inspector, data transformations |
 | **Sessions** | Separate workspaces, each with its own records, scope and state |
