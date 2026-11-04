@@ -5876,6 +5876,19 @@ fn service_map_output_schema(operation: &str) -> Option<Value> {
         "type":"string","pattern":"^v1\\.",
         "description":"Evidence of the origin's newest retained icon: a GET answered 200 with a raster image at a favicon or apple-touch-icon path, kept whole. The GUI's card shows it. Found before the display filter; never fetched from the target. Absent when none was captured."
     });
+    let known = service_map_object(json!({
+        "product_id":{"type":"string","pattern":"^[a-z0-9_]{1,40}$"},
+        "name":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9 .!+_-]{0,39}$"},
+        "version":{"type":"string","pattern":"^[0-9][0-9A-Za-z.+-]{0,39}$"},
+        "count":{"type":"integer","minimum":1},
+        "kev_count":{"type":"integer","minimum":0},
+        "highest_severity":{"type":"string","enum":["critical","high","medium","low","unknown"]}
+    }));
+    origin["properties"]["known_vulnerabilities"] = json!({
+        "type":"array","maxItems":32,
+        "description":"For each front-end version the vulnerability data (retire.js, CISA KEV, FIRST EPSS) lists advisories for: how many, how many CISA lists as exploited, and the highest severity word. A lead from the version string alone; vulndata lookup lists the advisories. Absent when none, before the data has loaded, and on older servers.",
+        "items":known
+    });
     origin["properties"]["front_technologies"] = json!({
         "type":"array","maxItems":32,
         "description":"Front-end frameworks, CMSs, UI kits, libraries and analytics retained scripts, pages and asset URLs name: license banners, runtime values such as Next.js's window.next, page markup such as ng-version or data-v- attributes, <meta name=generator>, CDN package@version paths, versioned file names and build directories such as /_next/static/. An asset's goes to the page that loaded it when that page is in the map.",

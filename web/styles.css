@@ -8599,6 +8599,11 @@ button.utility-button.replay-tab-add {
 .service-map-products-more:hover::after, .service-map-exposure:hover::after, .service-map-auth:hover::after, .service-map-card:focus-visible .service-map-products-more::after { content: attr(data-more); position: absolute; z-index: 3; left: 52px; top: calc(100% - 6px); min-width: 120px; max-width: 220px; padding: 6px 9px; white-space: pre-line; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--panel-elevated); color: var(--text); font-size: var(--font-xs); line-height: 1.6; text-align: left; box-shadow: 0 4px 18px rgba(0,0,0,.25); pointer-events: none; }
 .service-map-products > .service-map-exposure { flex: 0 0 auto; color: var(--danger); border-color: var(--danger); }
 .service-map-products > .service-map-auth { flex: 0 0 auto; color: var(--token-url-color); }
+.service-map-advisories, .service-map-kev { margin-left: 5px; padding: 0 4px; border: 1px solid var(--line-strong); border-radius: 4px; font-size: var(--font-xs); white-space: nowrap; }
+.service-map-advisories { color: var(--text-secondary); }
+.service-map-kev { margin-left: 3px; color: var(--danger); border-color: var(--danger); }
+/* A card's badge says more on hover, as ⚠ does; the inspector prints it. */
+.service-map-products .service-map-advisories:hover::after, .service-map-products .service-map-kev:hover::after { content: attr(data-more); position: absolute; z-index: 3; left: 52px; top: calc(100% - 6px); min-width: 120px; max-width: 260px; padding: 6px 9px; white-space: pre-line; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--panel-elevated); color: var(--text); font-size: var(--font-xs); line-height: 1.6; text-align: left; box-shadow: 0 4px 18px rgba(0,0,0,.25); pointer-events: none; }
 .service-map-api-auth { flex: 0 0 auto; margin-left: 6px; color: var(--token-url-color); font-size: var(--font-xs); white-space: nowrap; }
 .service-map-product-icon { width: 1em; height: 1em; margin-right: 2px; vertical-align: -0.12em; }
 .service-map-mark svg { width: 15px; height: 15px; }

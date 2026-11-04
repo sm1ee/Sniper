@@ -237,6 +237,11 @@ pub struct ServiceOrigin {
     /// `service_map_libraries`. Absent when none, as on older servers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub front_technologies: Vec<FrontTechnology>,
+    /// What the vulnerability data lists for those versions, joined when the
+    /// map is served; see `vulndata::annotate`. Absent when none, before the
+    /// data has loaded, and on older servers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known_vulnerabilities: Vec<KnownVulnerabilities>,
     /// What the origin's own headers, cookies and bodies say about the servers
     /// behind it, and what they expose. See `service_map_servers`. Absent when
     /// none, as on older servers.
@@ -334,6 +339,18 @@ pub struct FrontTechnology {
 }
 
 const MAX_FRONT_TECHNOLOGIES_PER_ORIGIN: usize = 32;
+
+/// A front-end version's known advisories: how many, how many CISA lists as
+/// exploited, and the highest severity word. A lead from the version string.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownVulnerabilities {
+    pub product_id: String,
+    pub name: String,
+    pub version: String,
+    pub count: usize,
+    pub kev_count: usize,
+    pub highest_severity: String,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceEndpoint {
@@ -1557,6 +1574,7 @@ impl MapBuilder {
                 header_links: vec![],
                 header_sources: vec![],
                 front_technologies: vec![],
+                known_vulnerabilities: vec![],
                 server_technologies: vec![],
                 favicon: None,
                 auth: vec![],

@@ -5924,8 +5924,12 @@ async fn get_target_service_map_impl(
         Err(response) => return response,
     };
     let (include, exclude) = session.runtime.scope_lists().await;
-    let cache_key =
-        format!("{catalog:?}|{catalog_marker:?}|{cache_query:?}|{include:?}|{exclude:?}");
+    // New vulnerability data must not be answered from a map cached before it.
+    let known = state.vulndata.index();
+    let known_revision = known.as_ref().map(|index| index.revision.clone());
+    let cache_key = format!(
+        "{catalog:?}|{catalog_marker:?}|{cache_query:?}|{include:?}|{exclude:?}|{known_revision:?}"
+    );
     let worker_include = include.clone();
     let worker_exclude = exclude.clone();
     let worker_session = session.clone();
@@ -5963,6 +5967,9 @@ async fn get_target_service_map_impl(
                     }
                 })?;
             map.technology_catalog_version = catalog_marker;
+            if let Some(index) = &known {
+                crate::vulndata::annotate(&mut map.origins, index);
+            }
             let bytes = bytes::Bytes::from(
                 serde_json::to_vec(&map).map_err(|_| ServiceMapReadError::BuildFailed)?,
             );
@@ -5988,6 +5995,9 @@ async fn get_target_service_map_impl(
         )
         .map_err(|_| ServiceMapReadError::ScopeWorkLimit)?;
         map.technology_catalog_version = catalog_marker;
+        if let Some(index) = &known {
+            crate::vulndata::annotate(&mut map.origins, index);
+        }
         let bytes = serde_json::to_vec(&map).map_err(|_| ServiceMapReadError::BuildFailed)?;
         Ok::<_, ServiceMapReadError>((bytes::Bytes::from(bytes), Some(epoch), permit))
     })

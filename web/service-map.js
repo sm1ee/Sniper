@@ -371,7 +371,21 @@
       }
       entry.seen.push(item);
     }
+    for (const entry of products.values()) {
+      entry.known = (origin?.known_vulnerabilities || []).filter((item) => item.product_id === entry.id && entry.versions.has(item.version));
+    }
     return [...products.values()].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  }
+  // Known advisories for a product's versions: a count, and KEV when CISA
+  // lists one as exploited. A lead from the version string alone. The
+  // sentence shows on hover, as ⚠'s does: the desktop app shows no title.
+  const advisorySentence = (item) => `${item.count} known advisories for ${item.name} ${item.version}, ${item.kev_count} exploited (CISA KEV). Tentative: version match only.`;
+  function advisoryBadges(known) {
+    if (!known?.length) return "";
+    const total = known.reduce((sum, item) => sum + item.count, 0);
+    const exploited = known.reduce((sum, item) => sum + item.kev_count, 0);
+    const more = escape(known.map(advisorySentence).join("\n"));
+    return `<span class="service-map-advisories" data-more="${more}" title="">${total} advisor${total === 1 ? "y" : "ies"}</span>${exploited ? `<span class="service-map-kev" data-more="${more}" title="">KEV</span>` : ""}`;
   }
   function productMatches(origin, productId = "", version = "") {
     if (!productId && !version) return true;
@@ -456,7 +470,7 @@
       ...product.declared.map((item) => `${item.name}${item.version ? ` ${item.version}` : ""} · ${item.row_count} retained row${item.row_count === 1 ? "" : "s"} from ${item.source_origin}`),
       ...product.seen.map((item) => `${item.name}${item.version ? ` ${item.version}` : ""} · ${item.row_count} retained row${item.row_count === 1 ? "" : "s"} · ${item.signals.join(", ")}`)].filter(Boolean).join("\n");
     const label = (product) => `${product.name}${product.versions.size > 1 ? ` · ${product.versions.size} versions` : product.versions.size ? ` ${[...product.versions][0]}` : ""}`;
-    return `<span class="service-map-clues service-map-products" title="${escape(products.map(full).join("\n"))}">${warning}${lock}${products.slice(0, shown).map((product) => `<span title="${escape(full(product))}">${productIcon(product.id)}${escape(label(product))}</span>`).join("")}${products.length > shown ? `<span class="service-map-products-more" aria-label="${products.length - shown} additional products" data-more="${escape(products.slice(shown).map(label).join("\n"))}" title="">+${products.length - shown}</span>` : ""}</span>`;
+    return `<span class="service-map-clues service-map-products" title="${escape(products.map(full).join("\n"))}">${warning}${lock}${products.slice(0, shown).map((product) => `<span title="${escape(full(product))}">${productIcon(product.id)}${escape(label(product))}${advisoryBadges(product.known)}</span>`).join("")}${products.length > shown ? `<span class="service-map-products-more" aria-label="${products.length - shown} additional products" data-more="${escape(products.slice(shown).map(label).join("\n"))}" title="">+${products.length - shown}</span>` : ""}</span>`;
   }
   // What an origin serves, read from the response types of its loaded
   // endpoints: pages (Front), API data, or static files. A front-end framework
@@ -1138,6 +1152,12 @@
           source_origin: safeOrigin(entry.source_origin), row_count: count(entry.row_count),
           evidence: array(entry.evidence).filter((id) => typeof id === "string" && id.length > 0),
         })),
+        // Advisories the vulnerability data lists for those versions.
+        known_vulnerabilities: array(item.known_vulnerabilities).filter((entry) => /^[a-z0-9_]{1,40}$/.test(entry?.product_id)
+          && /^[A-Za-z0-9][A-Za-z0-9 .!+_-]{0,39}$/.test(entry.name) && /^[0-9][0-9A-Za-z.+-]{0,39}$/.test(entry.version)
+          && count(entry.count) > 0 && ["critical", "high", "medium", "low", "unknown"].includes(entry.highest_severity))
+          .slice(0, 32).map((entry) => ({ product_id: entry.product_id, name: entry.name, version: entry.version,
+            count: count(entry.count), kev_count: count(entry.kev_count), highest_severity: entry.highest_severity })),
         // What no rule names: a banner, a header name, a cookie name.
         unnamed: Object.fromEntries(["banners", "headers", "cookies"].map((kind) => [kind, array(item.unnamed?.[kind])
           .filter((signal) => typeof signal?.value === "string" && /^[\x20-\x7e]{1,80}$/.test(signal.value)).slice(0, 16)
@@ -3881,7 +3901,7 @@
     }
     function frontTechnologiesMarkup(origin) {
       if (!origin.front_technologies?.length) return "";
-      return `<section class="service-map-technologies" aria-label="Front-end"><h4>Front-end</h4><ul class="service-map-references">${origin.front_technologies.map((item) => `<li><strong>${escape(item.name)}</strong>${item.version ? ` · ${escape(item.version)}` : ""}<p class="service-map-muted">${item.row_count} retained row${item.row_count === 1 ? "" : "s"} from ${escape(item.source_origin)}</p><div class="service-map-evidence-list">${item.evidence.map((id, index) => `<button class="service-map-evidence-button" type="button" data-service-relation-origin="${escape(item.source_origin)}" data-service-relation-evidence="${escape(id)}" data-service-focus="library:${escape(JSON.stringify([item.product_id, item.version, id]))}"><span>${escape(item.name)}${item.version ? ` ${escape(item.version)}` : ""}</span><span>View source${item.evidence.length > 1 ? ` ${index + 1}` : ""} ›</span></button>`).join("")}</div></li>`).join("")}</ul></section>`;
+      return `<section class="service-map-technologies" aria-label="Front-end"><h4>Front-end</h4><ul class="service-map-references">${origin.front_technologies.map((item) => { const known = (origin.known_vulnerabilities || []).filter((entry) => entry.product_id === item.product_id && entry.version === item.version); return `<li><strong>${escape(item.name)}</strong>${item.version ? ` · ${escape(item.version)}` : ""}${advisoryBadges(known)}<p class="service-map-muted">${item.row_count} retained row${item.row_count === 1 ? "" : "s"} from ${escape(item.source_origin)}</p>${known.map((entry) => `<p class="service-map-muted">${escape(advisorySentence(entry))}</p>`).join("")}<div class="service-map-evidence-list">${item.evidence.map((id, index) => `<button class="service-map-evidence-button" type="button" data-service-relation-origin="${escape(item.source_origin)}" data-service-relation-evidence="${escape(id)}" data-service-focus="library:${escape(JSON.stringify([item.product_id, item.version, id]))}"><span>${escape(item.name)}${item.version ? ` ${escape(item.version)}` : ""}</span><span>View source${item.evidence.length > 1 ? ` ${index + 1}` : ""} ›</span></button>`).join("")}</div></li>`; }).join("")}</ul></section>`;
     }
     function evidenceMarkup(origin) {
       const items = evidenceItems(origin), row = state.evidence, endpoint = state.endpointIndex === null ? null : origin.endpoints[state.endpointIndex];

@@ -496,6 +496,37 @@ async fn download(client: &reqwest::Client, id: SourceId) -> Result<Vec<u8>> {
     Ok(body)
 }
 
+/// Fills each origin's known vulnerabilities from its front-end versions, once
+/// per product and version however many places served it.
+pub fn annotate(origins: &mut [crate::service_map::ServiceOrigin], index: &VulnIndex) {
+    for origin in origins {
+        let mut known: Vec<crate::service_map::KnownVulnerabilities> = Vec::new();
+        for technology in &origin.front_technologies {
+            let Some(version) = technology.version.as_ref() else {
+                continue;
+            };
+            if known.len() == 32
+                || known.iter().any(|item| {
+                    item.product_id == technology.product_id && &item.version == version
+                })
+            {
+                continue;
+            }
+            if let Some(summary) = index.summary(&technology.product_id, version) {
+                known.push(crate::service_map::KnownVulnerabilities {
+                    product_id: technology.product_id.clone(),
+                    name: technology.name.clone(),
+                    version: version.clone(),
+                    count: summary.count,
+                    kev_count: summary.kev_count,
+                    highest_severity: summary.highest_severity,
+                });
+            }
+        }
+        origin.known_vulnerabilities = known;
+    }
+}
+
 // ---- API ----
 
 pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<VulnDataStatus> {
@@ -685,6 +716,40 @@ mod tests {
         assert_eq!(index.advisories("jquery", "3.4.1").len(), 1);
         assert!(data.status().revision.is_some());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn annotate_counts_advisories_for_front_end_versions() {
+        let front = |source: &str, version: Option<&str>| {
+            serde_json::json!({"product_id": "jquery", "name": "jQuery", "category": "library",
+                "version": version, "source_origin": source, "row_count": 1, "evidence": []})
+        };
+        let mut origin: crate::service_map::ServiceOrigin =
+            serde_json::from_value(serde_json::json!({
+                "origin": "https://app.example.com", "host": "app.example.com", "scheme": "https",
+                "port": 443, "in_scope": true, "request_count": 1,
+                "first_seen": "2026-11-04T00:00:00Z", "last_seen": "2026-11-04T00:00:00Z",
+                "endpoints": [], "technology_clues": [], "redirects": [], "header_links": [],
+                "front_technologies": [
+                    front("https://cdn.example.com", Some("3.3.1")),
+                    front("https://app.example.com", Some("3.3.1")),
+                    front("https://app.example.com", None),
+                ]
+            }))
+            .unwrap();
+        let index = findings::tests::jquery_index(false);
+        annotate(std::slice::from_mut(&mut origin), &index);
+        assert_eq!(
+            origin.known_vulnerabilities,
+            [crate::service_map::KnownVulnerabilities {
+                product_id: "jquery".into(),
+                name: "jQuery".into(),
+                version: "3.3.1".into(),
+                count: 2,
+                kev_count: 1,
+                highest_severity: "medium".into(),
+            }]
+        );
     }
 
     // Review focus 2: an oversized download is refused and changes nothing.
