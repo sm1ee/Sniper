@@ -166,9 +166,15 @@ pub fn detail(index: Option<&VulnIndex>, finding: &ScannerFinding) -> String {
         .fetched_at
         .map(|at| format!("; fetched {}", at.format("%Y-%m-%d")))
         .unwrap_or_default();
+    let missing: Vec<&str> = index.missing.iter().map(|id| id.name()).collect();
+    let missing = if missing.is_empty() {
+        String::new()
+    } else {
+        format!("; {} not loaded", missing.join(" and "))
+    };
     lines.push(String::new());
     lines.push(format!(
-        "Data: retire.js (Apache-2.0), CISA KEV (CC0), FIRST EPSS (https://www.first.org/epss){fetched}."
+        "Data: retire.js (Apache-2.0), CISA KEV (CC0), FIRST EPSS (https://www.first.org/epss){fetched}{missing}."
     ));
     lines.join("\n")
 }
@@ -291,6 +297,22 @@ pub(crate) mod tests {
             for_record(&index, &alone)[0].host,
             for_record(&index, &loaded)[0].host
         );
+    }
+
+    #[test]
+    fn the_detail_says_which_marks_have_not_loaded() {
+        let record = script(
+            "/npm/jquery@3.4.1/dist/jquery.min.js",
+            Some("https://app.example.com/shop"),
+        );
+        let mut index = jquery_index(false);
+        let stored = for_record(&index, &record).remove(0);
+        assert!(!detail(Some(&index), &stored).contains("not loaded"));
+        index.missing = vec![
+            super::super::sources::SourceId::Kev,
+            super::super::sources::SourceId::Epss,
+        ];
+        assert!(detail(Some(&index), &stored).ends_with("; CISA KEV and FIRST EPSS not loaded."));
     }
 
     #[test]

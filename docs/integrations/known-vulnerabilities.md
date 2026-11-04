@@ -23,7 +23,8 @@ confirmed vulnerability, so every such finding is Info.
   Runtime ▸ Vulnerability data** turns this off; **Update now** fetches all
   three regardless.
 - **Failures.** Each file loads or fails on its own, and the status shows
-  why one failed. Matching starts once all three have loaded.
+  why one failed. Matching starts once retire.js has loaded; KEV and EPSS
+  add their marks when they load, and a finding says which have not.
 - **Checks.** A file over its size limit or that does not parse is refused,
   and the previous one stays. No source signs its file, so the status says
   "not verified (TLS only)", or "not verified" for an imported file.

@@ -46,6 +46,8 @@ pub struct VulnIndex {
     pub revision: String,
     /// When the newest of the three files loaded, for the finding detail.
     pub fetched_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// KEV or EPSS when it has not loaded: its marks are absent, not "no".
+    pub missing: Vec<super::sources::SourceId>,
 }
 
 impl VulnIndex {
@@ -89,6 +91,7 @@ impl VulnIndex {
             epss,
             revision,
             fetched_at: None,
+            missing: Vec::new(),
         }
     }
 

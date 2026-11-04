@@ -10,7 +10,7 @@ const source = (id, extra = {}) => ({
 });
 const status = (extra = {}) => ({
   auto_update: true, updating: false, revision: null,
-  sources: [source("retire", { fetched_at: "2026-11-04T00:00:00Z", origin: "import" }), source("kev", { error: "www.cisa.gov could not be reached" }), source("epss")],
+  sources: [source("retire", { fetched_at: "2026-11-04T00:00:00Z", origin: "import" }), source("kev", { error: "data.example.com could not be reached" }), source("epss")],
   ...extra,
 });
 
@@ -42,7 +42,7 @@ test("a source whose last update failed says so, with why, and no dialog", () =>
   const f = fixture();
   f.c.renderVulndataStatus(status());
   const html = f.node("vulndataSources").innerHTML;
-  assert.match(html, /CISA KEV[\s\S]*Last update failed: www\.cisa\.gov could not be reached/);
+  assert.match(html, /CISA KEV[\s\S]*Last update failed: data\.example\.com could not be reached/);
   // TLS carried only what Sniper downloaded; an imported file came by hand.
   assert.match(html, /retire\.js<\/strong><span class="vulndata-facts">imported 2026-11-04T00:00:00Z · Apache-2\.0 · not verified<\/span>/);
   assert.match(html, /FIRST EPSS<\/strong><span class="vulndata-facts">not fetched yet · Apache-2\.0 · not verified \(TLS only\)<\/span>/);

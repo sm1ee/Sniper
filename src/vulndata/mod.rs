@@ -184,7 +184,7 @@ impl VulnData {
         data
     }
 
-    /// None until all three sources have loaded once.
+    /// None until retire.js has loaded once.
     pub fn index(&self) -> Option<Arc<VulnIndex>> {
         self.index.read().unwrap().clone()
     }
@@ -371,29 +371,45 @@ impl VulnData {
         }
     }
 
-    /// From the files on disk. Until all three have loaded once, or if one no
+    /// From the files on disk. Until retire.js has loaded once, or if it no
     /// longer reads, the index stays as it was.
     fn rebuild_index(&self) {
         let _rebuilding = self.rebuilding.lock().unwrap();
         let built = (|| -> Result<VulnIndex> {
-            let read = |id: SourceId| {
-                fs::read(self.dir.join(file_name(id)))
-                    .with_context(|| format!("reading {}", file_name(id)))
-            };
-            let (retire, kev, epss) = (
-                read(SourceId::Retire)?,
-                read(SourceId::Kev)?,
-                read(SourceId::Epss)?,
-            );
-            let revision = [&retire, &kev, &epss]
-                .map(|bytes| crate::skill_status::sha256(bytes)[..12].to_string())
+            let read = |id: SourceId| fs::read(self.dir.join(file_name(id)));
+            let retire = read(SourceId::Retire)
+                .with_context(|| format!("reading {}", file_name(SourceId::Retire)))?;
+            // retire.js lists the advisories; KEV and EPSS only mark them, so
+            // a network that blocks one host leaves out its marks, not them.
+            let (kev, epss) = (read(SourceId::Kev).ok(), read(SourceId::Epss).ok());
+            let exploited = kev
+                .as_deref()
+                .and_then(|bytes| sources::parse_kev(bytes).ok());
+            let scores = epss
+                .as_deref()
+                .and_then(|bytes| sources::parse_epss(bytes).ok());
+            let revision = [Some(&retire), kev.as_ref(), epss.as_ref()]
+                .map(|bytes| {
+                    bytes.map_or_else(
+                        || "none".to_string(),
+                        |bytes| crate::skill_status::sha256(bytes)[..12].to_string(),
+                    )
+                })
                 .join("-");
+            let missing = [
+                (SourceId::Kev, exploited.is_none()),
+                (SourceId::Epss, scores.is_none()),
+            ]
+            .into_iter()
+            .filter_map(|(id, missing)| missing.then_some(id))
+            .collect();
             let mut index = VulnIndex::build(
                 sources::parse_retire(&retire)?,
-                sources::parse_kev(&kev)?,
-                sources::parse_epss(&epss)?,
+                exploited.unwrap_or_default(),
+                scores.unwrap_or_default(),
                 revision,
             );
+            index.missing = missing;
             index.fetched_at = self
                 .manifest
                 .lock()
@@ -610,7 +626,7 @@ pub async fn lookup(
     let Some(index) = state.vulndata.index() else {
         return (
             StatusCode::CONFLICT,
-            "Vulnerability data has not loaded yet: it needs retire.js, CISA KEV and FIRST EPSS once each.",
+            "Vulnerability data has not loaded yet: it needs retire.js once.",
         )
             .into_response();
     };
@@ -686,7 +702,7 @@ mod tests {
                 let reachable = reachable.load(std::sync::atomic::Ordering::SeqCst);
                 async move {
                     if id == SourceId::Kev && !reachable {
-                        anyhow::bail!("www.cisa.gov could not be reached");
+                        anyhow::bail!("data.example.com could not be reached");
                     }
                     Ok(fixture(id))
                 }
@@ -708,12 +724,18 @@ mod tests {
                 "{id:?}"
             );
         }
-        assert!(data.index().is_none());
+        // retire.js lists the advisories; KEV and EPSS only mark them.
+        let index = data.index().expect("retire.js alone gives an index");
+        let advisories = index.advisories("jquery", "3.4.1");
+        assert_eq!(advisories.len(), 1);
+        assert!(!advisories[0].kev);
+        assert_eq!(index.missing, [SourceId::Kev]);
 
         kev_reachable.store(true, std::sync::atomic::Ordering::SeqCst);
         data.update_sources(fetch(kev_reachable)).await;
-        let index = data.index().expect("all three sources loaded");
-        assert_eq!(index.advisories("jquery", "3.4.1").len(), 1);
+        let index = data.index().unwrap();
+        assert!(index.advisories("jquery", "3.4.1")[0].kev);
+        assert!(index.missing.is_empty());
         assert!(data.status().revision.is_some());
         let _ = std::fs::remove_dir_all(dir);
     }

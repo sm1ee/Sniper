@@ -4020,7 +4020,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "vulndata.status",
             "vulndata status",
-            "Read the vulnerability data: for retire.js (Apache-2.0), CISA KEV (CC0) and FIRST EPSS, when each last loaded (fetched_at), from a download or an import (origin), its size and SHA-256 and the last error; whether the daily update is on and an update is running; and the revision of the loaded index, null until all three loaded once. verified is always false: no source signs its file, so TLS is the only check. Local; contacts nothing.",
+            "Read the vulnerability data: for retire.js (Apache-2.0), CISA KEV (CC0) and FIRST EPSS, when each last loaded (fetched_at), from a download or an import (origin), its size and SHA-256 and the last error; whether the daily update is on and an update is running; and the revision of the loaded index, null until retire.js loaded once; KEV and EPSS only mark its advisories. verified is always false: no source signs its file, so TLS is the only check. Local; contacts nothing.",
             Read,
             false,
             &[],
