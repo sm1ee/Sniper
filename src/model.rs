@@ -1041,6 +1041,10 @@ impl std::io::Write for LimitedVecWriter {
     }
 }
 
+/// Formats whose small messages are often valid UTF-8 yet never text. Not
+/// `application/octet-stream`: nginx's default type, it is how a `.env`, a
+/// `.git/config` or a dump comes back, and only a text body is scanned. The
+/// editors still treat it as bytes.
 pub(crate) fn is_binary_body_content_type(content_type: Option<&str>) -> bool {
     let mime = content_type
         .unwrap_or("")
@@ -1056,7 +1060,6 @@ pub(crate) fn is_binary_body_content_type(content_type: Option<&str>) -> bool {
             | "application/msgpack"
             | "application/x-msgpack"
             | "application/cbor"
-            | "application/octet-stream"
             | "application/grpc"
             | "application/grpc+proto"
             | "application/grpc+json"
@@ -1141,7 +1144,6 @@ mod tests {
             "Application/X-Protobuf; charset=utf-8",
             "application/msgpack",
             "application/cbor",
-            "application/octet-stream",
             "application/grpc+json",
         ] {
             let bytes = b"\x0a\x03A\r\n";
