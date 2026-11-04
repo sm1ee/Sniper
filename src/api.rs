@@ -9375,8 +9375,39 @@ async fn fuzzer_workflow_js() -> Response {
     )
 }
 
+async fn grpc_envelope_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/grpc-envelope.js"),
+    )
+}
+
+async fn cbor_reader_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/cbor-reader.js"),
+    )
+}
+
+async fn cbor_editor_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/cbor-editor.js"),
+    )
+}
+
 async fn msgpack_reader_js() -> Response {
-    asset_response("application/javascript", include_str!("../web/msgpack-reader.js"))
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/msgpack-reader.js"),
+    )
+}
+
+async fn msgpack_editor_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/msgpack-editor.js"),
+    )
 }
 
 async fn protobuf_wire_js() -> Response {
@@ -27364,20 +27395,4 @@ mod web_assets {
             "call generateUuid() instead of crypto.randomUUID()"
         );
     }
-}
-
-async fn msgpack_editor_js() -> Response {
-    asset_response("application/javascript", include_str!("../web/msgpack-editor.js"))
-}
-
-async fn grpc_envelope_js() -> Response {
-    asset_response("application/javascript", include_str!("../web/grpc-envelope.js"))
-}
-
-async fn cbor_reader_js() -> Response {
-    asset_response("application/javascript", include_str!("../web/cbor-reader.js"))
-}
-
-async fn cbor_editor_js() -> Response {
-    asset_response("application/javascript", include_str!("../web/cbor-editor.js"))
 }

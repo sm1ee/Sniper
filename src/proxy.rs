@@ -9525,7 +9525,12 @@ mod tests {
     #[test]
     fn proxy_intercept_preserves_utf8_shaped_binary_bodies() {
         let body = Bytes::from_static(b"\x0a\x03A\r\n");
-        for mime in ["application/protobuf", "application/msgpack", "application/cbor", "application/grpc+json"] {
+        for mime in [
+            "application/protobuf",
+            "application/msgpack",
+            "application/cbor",
+            "application/grpc+json",
+        ] {
             let request = Request::builder()
                 .method("POST")
                 .uri("http://example.com/upload")

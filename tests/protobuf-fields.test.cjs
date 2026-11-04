@@ -223,7 +223,7 @@ test('MessagePack duplicate occurrence edit, width refusal, stale guard and key 
 test('MessagePack editor script is served and loaded after reader',()=>{
  const api=fs.readFileSync('src/api.rs','utf8'), html=fs.readFileSync('web/index.html','utf8');
  assert.ok(api.includes('.route("/msgpack-editor.js", get(msgpack_editor_js))'));
- assert.ok(api.includes('asset_response("application/javascript", include_str!("../web/msgpack-editor.js"))'));
+ assert.ok(api.includes('include_str!("../web/msgpack-editor.js")'));
  assert.ok(html.indexOf('/msgpack-reader.js')<html.indexOf('/msgpack-editor.js'));
  assert.ok(html.indexOf('/msgpack-editor.js')<html.indexOf('/protobuf-fields.js'));
 });
