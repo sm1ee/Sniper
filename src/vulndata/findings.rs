@@ -95,18 +95,17 @@ pub fn for_record(index: &VulnIndex, record: &TransactionRecord) -> Vec<ScannerF
 
 /// A script or asset belongs to the page that loaded it, as in the Service
 /// Map, so the In scope filter keeps a library a CDN served; a page, or an
-/// asset with no page, belongs to its own host.
+/// asset with no page, belongs to its own host. The host drops its default
+/// port, as a Referer does, or a page and the script it loaded would hold two
+/// findings for one library.
 fn owner(record: &TransactionRecord, kind: Option<Kind>) -> (String, String, String) {
     if kind != Some(Kind::Page) {
         if let Some(page) = referer(record) {
             return page;
         }
     }
-    (
-        record.scheme.clone(),
-        record.host.clone(),
-        record.path.clone(),
-    )
+    let host = crate::store::host_without_default_port(&record.host, &record.scheme);
+    (record.scheme.clone(), host.to_string(), record.path.clone())
 }
 
 fn referer(record: &TransactionRecord) -> Option<(String, String, String)> {
@@ -277,7 +276,21 @@ pub(crate) mod tests {
         );
         assert!(for_record(&index, &partial).is_empty());
         let alone = script("/npm/jquery@3.4.1/dist/jquery.min.js", None);
-        assert_eq!(for_record(&index, &alone)[0].host, "cdn.example.com:443");
+        assert_eq!(for_record(&index, &alone)[0].host, "cdn.example.com");
+    }
+
+    #[test]
+    fn a_page_and_a_script_it_loaded_name_its_host_alike() {
+        let index = jquery_index(false);
+        let alone = script("/npm/jquery@3.4.1/dist/jquery.min.js", None);
+        let loaded = script(
+            "/npm/jquery@3.4.1/dist/jquery.min.js",
+            Some("https://cdn.example.com/demo"),
+        );
+        assert_eq!(
+            for_record(&index, &alone)[0].host,
+            for_record(&index, &loaded)[0].host
+        );
     }
 
     #[test]
