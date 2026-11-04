@@ -33,7 +33,7 @@ function fixture() {
 }
 
 
-for (const mime of ['application/protobuf','application/cbor','application/msgpack','application/grpc+proto']) test(mime + ' legacy Fuzzer preserves bytes',()=>{
+for (const mime of ['application/protobuf','application/cbor','application/msgpack','application/grpc+proto','application/grpc-web']) test(mime + ' legacy Fuzzer preserves bytes',()=>{
  const f=fixture(); const body='\n\x03A\r\n';
  f.state.fuzzerBaseRequest={body_encoding:'utf8',headers:[{name:'Content-Type',value:mime}]};
  f.state.fuzzerRequestText=`POST /a HTTP/1.1\nHost: a.test\nContent-Type: ${mime}\n\n${body}`;

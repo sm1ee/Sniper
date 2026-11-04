@@ -15784,7 +15784,7 @@ function renderReplay(options = {}) {
   if (tab.baseRequest && tab.baseRequest.body_encoding !== "base64") {
     const raw = tab.requestBytes ? new TextDecoder().decode(tab.requestBytes) : String(tab.requestText || "");
     const split = splitRawHttpMessage(raw);
-    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json)?)(?:\s*;|\s*$)/im;
+    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/im;
     const baseHeaders = (tab.baseRequest.headers || []).map(h => `${h.name}: ${h.value}`).join("\n");
     const boundary = /\r?\n\r?\n/.exec(raw);
     if (boundary && (binaryMime.test(split.head) || binaryMime.test(baseHeaders))) {
@@ -16838,7 +16838,7 @@ function renderFuzzer() {
   if (base && base.body_encoding !== "base64") {
     const raw = String(state.fuzzerRequestText || "");
     const boundary = /\r?\n\r?\n/.exec(raw);
-    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json)?)(?:\s*;|\s*$)/im;
+    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/im;
     const originalHeaders = (base.headers || []).map(h => `${h.name}: ${h.value}`).join("\n");
     if (boundary && (binaryMime.test(raw.slice(0, boundary.index)) || binaryMime.test(originalHeaders))) {
       const body = raw.slice(boundary.index + boundary[0].length);
@@ -18165,7 +18165,7 @@ function fuzzerRequestTextForAction() {
 
 function parseFuzzerRequestTemplate(text, fallback = state.fuzzerBaseRequest || createDefaultEditableRequest()) {
   const raw = String(text || "");
-  const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json)?)(?:\s*;|\s*$)/im;
+  const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/im;
   const split = splitRawHttpMessage(raw);
   const originalHeaders = (fallback?.headers || []).map(h => `${h.name}: ${h.value}`).join("\n");
   if (fallback?.body_encoding !== "base64" && /§|\$payload\$/.test(split.body)

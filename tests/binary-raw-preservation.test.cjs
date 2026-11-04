@@ -1,7 +1,7 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const vm=require('node:vm');
 const {editorFixture,source}=require('./replay-editor-fixture.cjs');
-for(const mime of ['application/protobuf','application/x-msgpack','application/cbor','application/grpc+json','Application/Protobuf; charset=utf-8']) {
+for(const mime of ['application/protobuf','application/x-msgpack','application/cbor','application/grpc+json','application/grpc-web+proto','Application/Protobuf; charset=utf-8']) {
  test(`${mime} legacy utf8 body survives header-only edit and undo redo`,()=>{
   const f=editorFixture();const body='\n\x03A\r\n';
   f.a.baseRequest.body_encoding='utf8';
