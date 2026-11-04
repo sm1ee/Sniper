@@ -8602,6 +8602,11 @@ button.utility-button.replay-tab-add {
 .service-map-advisories, .service-map-kev { margin-left: 5px; padding: 0 4px; border: 1px solid var(--line-strong); border-radius: 4px; font-size: var(--font-xs); white-space: nowrap; }
 .service-map-advisories { color: var(--text-secondary); }
 .service-map-kev { margin-left: 3px; color: var(--danger); border-color: var(--danger); }
+/* In a crowded row the name gives way, never the count or KEV; a short line
+   keeps their borders inside the row's fixed height. */
+.service-map-products > .service-map-known { display: inline-flex; align-items: center; }
+.service-map-known-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.service-map-known > .service-map-advisories, .service-map-known > .service-map-kev { flex: none; line-height: 1.2; }
 /* A card's badge says more on hover, as ⚠ does; the inspector prints it. */
 .service-map-products .service-map-advisories:hover::after, .service-map-products .service-map-kev:hover::after { content: attr(data-more); position: absolute; z-index: 3; left: 52px; top: calc(100% - 6px); min-width: 120px; max-width: 260px; padding: 6px 9px; white-space: pre-line; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--panel-elevated); color: var(--text); font-size: var(--font-xs); line-height: 1.6; text-align: left; box-shadow: 0 4px 18px rgba(0,0,0,.25); pointer-events: none; }
 .service-map-api-auth { flex: 0 0 auto; margin-left: 6px; color: var(--token-url-color); font-size: var(--font-xs); white-space: nowrap; }
@@ -8843,6 +8848,9 @@ button.utility-button.replay-tab-add {
 .service-map-endpoint-summary p { color: var(--text-dim); font-size: var(--font-xs); }
 .service-map-references { padding-left: 16px; color: var(--text-soft); font-size: var(--font-xs); line-height: 1.7; overflow-wrap: anywhere; }
 .service-map-references span { display: block; color: var(--text-dim); }
+/* A badge sits on its product's line, not on a dim line of its own. */
+.service-map-references .service-map-advisories, .service-map-references .service-map-kev { display: inline-block; color: var(--text-secondary); }
+.service-map-references .service-map-kev { color: var(--danger); }
 .service-map-api-catalog { overflow: auto; padding: 18px; }
 .service-map-catalog-header { display: flex; align-items: flex-start; gap: 18px; justify-content: space-between; margin-bottom: 18px; }
 .service-map-catalog-header h3 { margin: 0; }

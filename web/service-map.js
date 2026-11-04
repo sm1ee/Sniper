@@ -379,13 +379,15 @@
   // Known advisories for a product's versions: a count, and KEV when CISA
   // lists one as exploited. A lead from the version string alone. The
   // sentence shows on hover, as ⚠'s does: the desktop app shows no title.
-  const advisorySentence = (item) => `${item.count} known advisories for ${item.name} ${item.version}, ${item.kev_count} exploited (CISA KEV). Tentative: version match only.`;
-  function advisoryBadges(known) {
+  const advisories = (count) => `${count} known advisor${count === 1 ? "y" : "ies"}`;
+  const advisorySentence = (item) => `${advisories(item.count)} for ${item.name} ${item.version}, ${item.kev_count} exploited (CISA KEV). Tentative: version match only.`;
+  // A card's row has room for the count alone; the inspector names it.
+  function advisoryBadges(known, compact = false) {
     if (!known?.length) return "";
     const total = known.reduce((sum, item) => sum + item.count, 0);
     const exploited = known.reduce((sum, item) => sum + item.kev_count, 0);
     const more = escape(known.map(advisorySentence).join("\n"));
-    return `<span class="service-map-advisories" data-more="${more}" title="">${total} advisor${total === 1 ? "y" : "ies"}</span>${exploited ? `<span class="service-map-kev" data-more="${more}" title="">KEV</span>` : ""}`;
+    return `<span class="service-map-advisories" aria-label="${advisories(total)}" data-more="${more}" title="">${compact ? total : `${total} advisor${total === 1 ? "y" : "ies"}`}</span>${exploited ? `<span class="service-map-kev" data-more="${more}" title="">KEV</span>` : ""}`;
   }
   function productMatches(origin, productId = "", version = "") {
     if (!productId && !version) return true;
@@ -452,7 +454,10 @@
     private_key: "Private key", jwt: "JWT", private_ip: "Private IP" };
   const productRank = (product) => RANKS[product.category] ?? (product.observations.length ? 5 : 15);
   function productSummaryMarkup(origin) {
-    const products = reportedProducts(origin).sort((a, b) => productRank(a) - productRank(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    // A version with known advisories leads, as an exposure does: hidden under
+    // +N, its badge would not be seen.
+    const products = reportedProducts(origin).sort((a, b) => Number(b.known.length > 0) - Number(a.known.length > 0)
+      || productRank(a) - productRank(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     const exposures = (origin?.server_technologies || []).filter((item) => item.category === "exposure");
     const methods = origin?.auth || [];
     if (!products.length && !exposures.length && !methods.length) return "";
@@ -464,13 +469,17 @@
     const primary = methods.find((item) => !AUTH_FLOWS.includes(item.kind)) || methods[0];
     const lock = primary ? `<span class="service-map-auth" aria-label="Authentication: ${escape(methods.map(authName).join(", "))}" data-more="${escape(methods.map((item) => `${authName(item)}${item.name && item.kind !== "scheme" ? ` (${item.name})` : ""}`).join("\n"))}" title="">${LOCK_ICON}${escape(authWord(primary))}${methods.length > 1 ? ` +${methods.length - 1}` : ""}</span>` : "";
     // An exposure and the way requests authenticate each take a product place.
-    const shown = 2 - (warning ? 1 : 0) - (lock ? 1 : 0);
+    // A version with advisories takes both: beside a second product its name
+    // would shrink to a letter.
+    const shown = Math.min(2 - (warning ? 1 : 0) - (lock ? 1 : 0), products[0]?.known.length ? 1 : 2);
     const full = (product) => [product.observations.length ? "Header-reported declarations; versions unverified." : "",
       ...product.observations.map((item) => `${productText(item)} · ${item.header_name} header · ${item.row_count} retained row${item.row_count === 1 ? "" : "s"} · First: ${item.first_seen} · Last: ${item.last_seen}`),
       ...product.declared.map((item) => `${item.name}${item.version ? ` ${item.version}` : ""} · ${item.row_count} retained row${item.row_count === 1 ? "" : "s"} from ${item.source_origin}`),
       ...product.seen.map((item) => `${item.name}${item.version ? ` ${item.version}` : ""} · ${item.row_count} retained row${item.row_count === 1 ? "" : "s"} · ${item.signals.join(", ")}`)].filter(Boolean).join("\n");
     const label = (product) => `${product.name}${product.versions.size > 1 ? ` · ${product.versions.size} versions` : product.versions.size ? ` ${[...product.versions][0]}` : ""}`;
-    return `<span class="service-map-clues service-map-products" title="${escape(products.map(full).join("\n"))}">${warning}${lock}${products.slice(0, shown).map((product) => `<span title="${escape(full(product))}">${productIcon(product.id)}${escape(label(product))}${advisoryBadges(product.known)}</span>`).join("")}${products.length > shown ? `<span class="service-map-products-more" aria-label="${products.length - shown} additional products" data-more="${escape(products.slice(shown).map(label).join("\n"))}" title="">+${products.length - shown}</span>` : ""}</span>`;
+    return `<span class="service-map-clues service-map-products" title="${escape(products.map(full).join("\n"))}">${warning}${lock}${products.slice(0, shown).map((product) => product.known.length
+      ? `<span class="service-map-known" title="${escape(full(product))}"><span class="service-map-known-name">${productIcon(product.id)}${escape(label(product))}</span>${advisoryBadges(product.known, true)}</span>`
+      : `<span title="${escape(full(product))}">${productIcon(product.id)}${escape(label(product))}</span>`).join("")}${products.length > shown ? `<span class="service-map-products-more" aria-label="${products.length - shown} additional products" data-more="${escape(products.slice(shown).map(label).join("\n"))}" title="">+${products.length - shown}</span>` : ""}</span>`;
   }
   // What an origin serves, read from the response types of its loaded
   // endpoints: pages (Front), API data, or static files. A front-end framework
