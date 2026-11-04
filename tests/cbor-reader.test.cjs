@@ -1,0 +1,15 @@
+const {test}=require('node:test'),a=require('node:assert/strict');const {inspect,limits}=require('../web/cbor-reader.js');
+const dec=h=>inspect(Uint8Array.from(Buffer.from(h,'hex')));const val=h=>{let r=dec(h);a.equal(r.ok,true,JSON.stringify(r.error));return r.value;};
+test('integer extremes and nonpreferred encodings',()=>{for(const [h,v] of [['00','0'],['1817','23'],['1bffffffffffffffff','18446744073709551615'],['3bffffffffffffffff','-18446744073709551616'],['20','-1']])a.equal(val(h).value,v);});
+test('float widths and special values',()=>{for(const [h,v] of [['f90000','0'],['f98000','-0'],['f93c00','1'],['f90001',String(2**-24)],['f97c00','Infinity'],['f9fc00','-Infinity'],['f97e00','NaN'],['fa47c35000','100000'],['fb3ff199999999999a','1.1']])a.equal(val(h).value,v);});
+test('simple bool null undefined',()=>{a.equal(val('f4').value,false);a.equal(val('f5').value,true);a.equal(val('f6').type,'null');a.equal(val('f7').type,'undefined');a.equal(dec('f818').error.code,'invalid-simple');a.equal(val('f820').value,32);});
+test('text and BOM preserved',()=>{a.equal(val('6449455446').value,'IETF');a.equal(val('63efbbbf').value,'\ufeff');a.equal(dec('61ff').error.code,'invalid-utf8');});
+test('definite bytes offsets',()=>{const v=val('4401020304');a.equal(v.dataOffset,1);a.equal(v.length,4);a.equal(v.end,5);});
+test('indefinite strings retain chunks',()=>{const v=val('7f657374726561646d696e67ff');a.equal(v.chunks.map(x=>x.value).join(''),'streaming');a.equal(v.indefinite,true);a.equal(val('5f42010243030405ff').chunks.length,2);});
+test('indefinite arrays and maps',()=>{a.equal(val('9f018202039f0405ffff').children.length,3);a.equal(val('bf616101616202ff').children.length,4);});
+test('map duplicate nonstring keys preserved',()=>{const v=val('a301020103810405');a.deepEqual(v.children.map(x=>x.type),['uint','uint','uint','uint','array','uint']);a.equal(v.children[0].value,v.children[2].value);});
+test('tags are opaque, full uint64',()=>{const v=val('dbffffffffffffffff00');a.equal(v.tag,'18446744073709551615');a.equal(v.child.value,'0');});
+test('malformed and trailing errors',()=>{for(const h of ['', 'ff','1c','1d','1e','1f','3f','df','f81f','5f6100ff','7f5fffff','5f5fffff','9f','bf01ff','8201','1800ff','6161ff','7f61c261a2ff'])a.equal(dec(h).ok,false,h);});
+test('limits',()=>{a.equal(inspect(new Uint8Array(limits.bytes+1)).error.code,'byte-limit');a.equal(dec('81'.repeat(66)+'00').error.code,'depth-limit');a.equal(dec('9a00002710'+'00'.repeat(10000)).error.code,'node-limit');a.equal(dec('5bffffffffffffffff').ok,false);});
+test('original copy immutable even errors',()=>{const b=Uint8Array.of(0x18,0);let r=inspect(b);b[1]=1;let c=r.originalBytes();c[1]=2;a.deepEqual([...r.originalBytes()],[24,0]);const e=dec('ff');a.deepEqual([...e.originalBytes()],[255]);});
+test('10000 arbitrary inputs bounded no crashes',()=>{let seed=1;for(let i=0;i<10000;i++){const b=new Uint8Array(i%80);for(let j=0;j<b.length;j++){seed=(Math.imul(seed,1664525)+1013904223)>>>0;b[j]=seed>>>24;}let r=inspect(b);a.equal(typeof r.ok,'boolean');if(r.ok){a.deepEqual(r.originalBytes(),b);a.equal(r.value.end,b.length);}}});

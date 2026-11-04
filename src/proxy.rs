@@ -5336,7 +5336,11 @@ fn editable_request_from_parts(
         });
     }
 
-    let body_encoding = if is_raw_request_body_utf8(request_bytes.as_ref()) {
+    let binary_mime = headers.iter().any(|header| {
+        header.name.eq_ignore_ascii_case("content-type")
+            && crate::model::is_binary_body_content_type(Some(&header.value))
+    });
+    let body_encoding = if !binary_mime && is_raw_request_body_utf8(request_bytes.as_ref()) {
         BodyEncoding::Utf8
     } else {
         BodyEncoding::Base64
@@ -9545,6 +9549,29 @@ mod tests {
             .headers
             .iter()
             .any(|header| header.name.eq_ignore_ascii_case("content-length")));
+    }
+
+    #[test]
+    fn proxy_intercept_preserves_utf8_shaped_binary_bodies() {
+        let body = Bytes::from_static(b"\x0a\x03A\r\n");
+        for mime in [
+            "application/protobuf",
+            "application/msgpack",
+            "application/cbor",
+            "application/grpc+json",
+        ] {
+            let request = Request::builder()
+                .method("POST")
+                .uri("http://example.com/upload")
+                .header(CONTENT_TYPE, mime)
+                .body(())
+                .unwrap();
+            let (parts, _) = request.into_parts();
+            let uri: Uri = "http://example.com/upload".parse().unwrap();
+            let editable = editable_request_from_parts(&parts, &body, &uri);
+            assert_eq!(editable.body_encoding, BodyEncoding::Base64);
+            assert_eq!(editable.body_bytes(), body.as_ref());
+        }
     }
 
     #[test]

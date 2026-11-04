@@ -978,6 +978,7 @@
                   <button class="replay-view-tab active" data-replay-target="request" data-replay-view="pretty">Pretty</button>
                   <button class="replay-view-tab" data-replay-target="request" data-replay-view="raw">Raw</button>
                   <button class="replay-view-tab" data-replay-target="request" data-replay-view="hex">Hex</button>
+                  <button class="replay-fields-tab" hidden data-fields-target="request" title="Inspect Protobuf, MessagePack, CBOR or gRPC fields">Fields</button>
                 </div>
               </header>
               <div class="editor-panel">
@@ -999,6 +1000,7 @@
                   <button class="replay-view-tab active" data-replay-target="response" data-replay-view="pretty">Pretty</button>
                   <button class="replay-view-tab" data-replay-target="response" data-replay-view="raw">Raw</button>
                   <button class="replay-view-tab" data-replay-target="response" data-replay-view="hex">Hex</button>
+                  <button class="replay-fields-tab" hidden data-fields-target="response" title="Inspect Protobuf, MessagePack, CBOR or gRPC fields">Fields</button>
                   <button class="replay-view-tab" data-replay-target="response" data-replay-view="render" title="The page as a browser draws it, sandboxed: no scripts, forms, navigation or network">Render</button>
                 </div>
               </header>
@@ -2292,6 +2294,14 @@
     <script src="/recon.js" defer></script>
     <script src="/templates.js" defer></script>
     <script src="/fuzzer-workflow.js" defer></script>
+    <script src="/grpc-envelope.js" defer></script>
+    <script src="/cbor-reader.js" defer></script>
+    <script src="/cbor-editor.js" defer></script>
+    <script src="/msgpack-reader.js" defer></script>
+    <script src="/msgpack-editor.js" defer></script>
+    <script src="/protobuf-wire.js" defer></script>
+    <script src="/protobuf-edit.js" defer></script>
+    <script src="/protobuf-fields.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

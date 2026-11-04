@@ -8504,6 +8504,28 @@ mod tests {
     }
 
     #[test]
+    fn a_text_file_served_as_octet_stream_is_still_scanned() {
+        // nginx's default_type answers a .env, a .git/config or a dump this way.
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            "application/octet-stream".parse().unwrap(),
+        );
+        let body = b"APP_NAME=Shop\nAPP_KEY=base64:x\n";
+        let mut record = make_record(vec![], vec![], "", 200);
+        record.path = "/.env".into();
+        record.response = Some(MessageRecord::from_headers_and_body(&headers, body, 1024));
+        let titles: Vec<String> = scan_transaction(&record, &ScannerConfig::default())
+            .into_iter()
+            .map(|finding| finding.title)
+            .collect();
+        assert!(
+            titles.contains(&".env file exposed".to_string()),
+            "{titles:?}"
+        );
+    }
+
+    #[test]
     fn password_rule_ignores_code_labels_templates_and_field_names() {
         let password = "Password in response detected in response".to_string();
         let json = |body: &str| titles_for("/api/user", "application/json", body);

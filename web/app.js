@@ -329,7 +329,11 @@ function safeEncodeBase64(value) {
 }
 
 function decodedBase64Length(value) {
-  return atob(value || "").length;
+  try {
+    return atob(value || "").length;
+  } catch (_error) {
+    throw new Error("Enter a valid Base64 body.");
+  }
 }
 
 function editableRequestBodyLength(body, bodyEncoding) {
@@ -341,7 +345,7 @@ function editableRequestBodyLength(body, bodyEncoding) {
 
 function editableResponseBodyLength(bodyText, bodyEncoding) {
   if (bodyEncoding === "base64") {
-    return decodedBase64Length(safeEncodeBase64(bodyText || ""));
+    return decodedBase64Length(bodyText || "");
   }
   return new TextEncoder().encode(bodyText || "").length;
 }
@@ -2460,12 +2464,48 @@ function bindEvents() {
     btn.addEventListener("click", () => {
       const target = btn.dataset.replayTarget;
       const view = btn.dataset.replayView;
+      globalThis.SniperProtobufFields?.close(target);
       state.replayMessageViews[target] = view;
       renderReplayViewTabs();
       renderReplayViewContent(target);
     });
   });
 
+  globalThis.SniperProtobufFields?.init(() => {
+    const tab = getActiveReplayTab();
+    return {
+      owner: tab,
+      views: state.replayMessageViews,
+      revision: tab?.protobufEditRevision || 0,
+      requestText: tab?.requestText,
+      editable: state.replayMessageViews.request === "raw",
+      applyFields: (snapshot, bytes) => {
+        const current = getActiveReplayTab();
+        if (current !== tab || current !== snapshot.owner
+            || (current.protobufEditRevision || 0) !== snapshot.revision
+            || current.requestText !== snapshot.requestText
+            || state.replayMessageViews.request !== "raw") throw new Error("stale-source");
+        const parsed = parseEditableRawRequest(current.requestText, current.baseRequest);
+        if (globalThis.SniperProtobufFields.editBlockReason(parsed, snapshot.format || "protobuf")) throw new Error("editing-blocked");
+        let binary = "";
+        for (const byte of bytes) binary += String.fromCharCode(byte);
+        const { head } = splitRawHttpMessage(current.requestText);
+        let next = `${head}\n\n${btoa(binary)}`;
+        // Use the existing framing policy; auto-length off may reject a size change.
+        const updated = parseEditableRawRequest(next, current.baseRequest);
+        next = updated._normalizedRawText || next;
+        setReplayRequestEditorText(next, { preserveSelection: false });
+        syncReplayRequestTextFromEditor(next);
+      },
+      request: () => {
+        if (!tab || tab.type === "websocket") return null;
+        // Inspection never falls back to an older request after a parse error.
+        if ((tab.requestText || "").length > 2 * 1024 * 1024) throw new Error("limit");
+        return parseEditableRawRequest(tab.requestText, tab.baseRequest);
+      },
+      response: () => tab?.responseRecord?.response || null,
+    };
+  });
   bindWsReplayEvents();
   bindFindingsEvents();
 
@@ -14181,7 +14221,7 @@ function handleInterceptDraftReadFailure(queue, status, { capture = false, owner
   const view = getCMView(response ? "interceptRes" : "interceptReq");
   const editor = response ? els.interceptResponseEditor : els.interceptRequestEditor;
   const text = view ? view.getContent() : editor?.value;
-  const original = response ? buildEditableRawResponse(record.response) : buildEditableRawRequest(record.request);
+  const original = response ? buildEditableRawResponse(record.response) : buildEditableRawRequest(record.request, true);
   // Both CM and native textareas normalize line endings. Compare in that
   // editor domain without rewriting the text retained for recovery.
   const comparableOriginal = original.replace(/\r\n?/g, "\n");
@@ -14473,7 +14513,7 @@ function renderIntercepts() {
   if (els.interceptRequestCM) {
     if (state.interceptEditorSeedId !== state.selectedInterceptRecord.id) {
       setInterceptPaneContent("interceptReq", els.interceptRequestCM,
-        takeInterceptDraftRecovery("request", state.selectedInterceptRecord) ?? buildEditableRawRequest(state.selectedInterceptRecord.request), {
+        takeInterceptDraftRecovery("request", state.selectedInterceptRecord) ?? buildEditableRawRequest(state.selectedInterceptRecord.request, true), {
         mode: "http", readOnly: false,
       });
       state.interceptEditorSeedId = state.selectedInterceptRecord.id;
@@ -14482,7 +14522,7 @@ function renderIntercepts() {
     els.interceptRequestEditor.placeholder = "";
     if (state.interceptEditorSeedId !== state.selectedInterceptRecord.id) {
       els.interceptRequestEditor.value = takeInterceptDraftRecovery("request", state.selectedInterceptRecord)
-        ?? buildEditableRawRequest(state.selectedInterceptRecord.request);
+        ?? buildEditableRawRequest(state.selectedInterceptRecord.request, true);
       state.interceptEditorSeedId = state.selectedInterceptRecord.id;
     }
     renderInterceptRequestHighlight(els.interceptRequestEditor.value);
@@ -15748,13 +15788,36 @@ function renderReplay(options = {}) {
     return;
   }
 
+  // Migrate old UTF-8 binary drafts before they enter a newline-normalizing
+  // editor. This changes only the presentation, never the payload bytes.
+  let migratedBinaryDraft = false;
+  if (tab.baseRequest && tab.baseRequest.body_encoding !== "base64") {
+    const raw = tab.requestBytes ? new TextDecoder().decode(tab.requestBytes) : String(tab.requestText || "");
+    const split = splitRawHttpMessage(raw);
+    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/im;
+    const baseHeaders = (tab.baseRequest.headers || []).map(h => `${h.name}: ${h.value}`).join("\n");
+    const boundary = /\r?\n\r?\n/.exec(raw);
+    if (boundary && (binaryMime.test(split.head) || binaryMime.test(baseHeaders))) {
+      const bytes = new TextEncoder().encode(split.body);
+      let binary = "";
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      const encoded = btoa(binary);
+      tab.requestText = raw.slice(0, boundary.index + boundary[0].length) + encoded;
+      tab.baseRequest = { ...tab.baseRequest, body: encoded, body_encoding: "base64" };
+      tab.requestBytes = null;
+      tab.requestOriginalBytes = null;
+      tab.protobufEditRevision = (tab.protobufEditRevision || 0) + 1;
+      migratedBinaryDraft = true;
+      scheduleWorkspaceStateSave();
+    }
+  }
   const previousOwner = getRenderedHttpReplayDraftOwner(tab);
   const draftOwner = {
     tab,
     sessionId: currentSessionId(),
     generation: workspaceStateGeneration,
     // Keep the editor's history on redraw, while refreshing draft-capture state.
-    editorOwner: previousOwner?.editorOwner || {},
+    editorOwner: migratedBinaryDraft ? {} : previousOwner?.editorOwner || {},
   };
   // Async captured-record opens and workspace adoption can change owners without
   // going through a tab-click handler. Focus only protects this owner's draft.
@@ -15959,9 +16022,21 @@ function syncReplayRequestTextFromEditor(newText) {
   }
   // Input synchronization invalidates an earlier capture even after edit-and-revert.
   if (renderedHttpReplayDraftOwner?.tab === activeTab) renderedHttpReplayDraftOwner.preservedVersionDraft = null;
+  activeTab.protobufEditRevision = (activeTab.protobufEditRevision || 0) + 1;
   const previousText = activeTab.requestText;
   const rendered = replayRequestEditorText(previousText);
   if (rendered !== previousText && newText === rendered) return;
+  // A header-only edit must not adopt CodeMirror's newline normalization
+  // for the body. This also protects old binary drafts classified as UTF-8
+  // across MIME changes, reloads and undo; explicit body edits still win.
+  if (activeTab.baseRequest?.body_encoding !== "base64") {
+    const before = splitRawHttpMessage(previousText);
+    const after = splitRawHttpMessage(newText);
+    if (before.body.replace(/\r\n?/g, "\n") === after.body.replace(/\r\n?/g, "\n")) {
+      const boundary = /\r?\n\r?\n/.exec(newText);
+      if (boundary) newText = newText.slice(0, boundary.index + boundary[0].length) + before.body;
+    }
+  }
   let nextText = newText;
   let parsed = null;
   try {
@@ -15992,6 +16067,7 @@ function syncReplayRequestTextFromEditor(newText) {
   syncReplayToolbar(activeTab);
   refreshReplayTabLabel(activeTab.id);
   updateReplaySearchPane("request", nextText, { scrollToFirst: false });
+  globalThis.SniperProtobufFields?.sync();
   scheduleWorkspaceStateSave();
 }
 
@@ -16086,6 +16162,7 @@ function renderReplayResponseView(text) {
   }
   // Every path that redraws the response comes through here, so Render follows.
   syncReplayResponsePreview(text);
+  globalThis.SniperProtobufFields?.sync();
 }
 
 function syncReplayResponsePreview(placeholder) {
@@ -16147,6 +16224,7 @@ function renderReplayViewTabs() {
     const view = btn.dataset.replayView;
     btn.classList.toggle("active", state.replayMessageViews[target] === view);
   });
+  globalThis.SniperProtobufFields?.sync();
 }
 
 function renderReplayViewContent(target) {
@@ -16764,6 +16842,33 @@ async function retryFuzzerWorkspaceLoad() {
 }
 
 function renderFuzzer() {
+  let binaryMarkersBlocked = false;
+  // Legacy binary drafts must not enter CodeMirror as newline-normalized text.
+  const base = state.fuzzerBaseRequest;
+  if (base && base.body_encoding !== "base64") {
+    const raw = String(state.fuzzerRequestText || "");
+    const boundary = /\r?\n\r?\n/.exec(raw);
+    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/im;
+    const originalHeaders = (base.headers || []).map(h => `${h.name}: ${h.value}`).join("\n");
+    if (boundary && (binaryMime.test(raw.slice(0, boundary.index)) || binaryMime.test(originalHeaders))) {
+      const body = raw.slice(boundary.index + boundary[0].length);
+      if (/§|\$payload\$/.test(body)) {
+        binaryMarkersBlocked = true;
+        state.fuzzerNoticeError = true;
+        state.fuzzerNotice = "Legacy binary body contains payload markers. Reopen the original request, then use header or query positions.";
+      } else {
+        let binary = "";
+        for (const byte of new TextEncoder().encode(body)) binary += String.fromCharCode(byte);
+        const encoded = btoa(binary);
+        state.fuzzerRequestText = raw.slice(0, boundary.index + boundary[0].length) + encoded;
+        state.fuzzerBaseRequest = { ...base, body: encoded, body_encoding: "base64" };
+        state.fuzzerBinaryPresentationRevision = (state.fuzzerBinaryPresentationRevision || 0) + 1;
+        state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+        state._fuzzerMarkerUndo = null;
+        scheduleWorkspaceStateSave();
+      }
+    }
+  }
   const retry = els.fuzzerRetryWorkspaceButton;
   if (retry) {
     retry.classList.toggle("hidden", workspaceLoaded || !state.workspaceLoadError);
@@ -16775,11 +16880,11 @@ function renderFuzzer() {
     const cv = getCMView("fuzzerReq");
     const sessionId = currentSessionId();
     const generation = workspaceStateGeneration;
-    const owner = JSON.stringify([sessionId, generation]);
+    const owner = JSON.stringify([sessionId, generation, state.fuzzerBinaryPresentationRevision || 0]);
     // A session/workspace replacement retires history even for identical text.
-    if (!cv || cv._owner !== owner || cv._editable !== workspaceLoaded || cv.getContent() !== state.fuzzerRequestText) {
+    if (!cv || cv._owner !== owner || cv._editable !== (workspaceLoaded && !binaryMarkersBlocked) || cv.getContent() !== state.fuzzerRequestText) {
       updateCodePaneCM("fuzzerReq", els.fuzzerRequestCM, state.fuzzerRequestText, {
-        mode: "http", readOnly: !workspaceLoaded, owner,
+        mode: "http", readOnly: !workspaceLoaded || binaryMarkersBlocked, owner,
         payloadHighlight: true,
         placeholder: "Paste an HTTP request, then mark the values to fuzz",
       });
@@ -16790,7 +16895,7 @@ function renderFuzzer() {
       if (newCv && !newCv._fuzzerOnChangeWired) {
         newCv._fuzzerOnChangeWired = true;
         addCMUpdateListener(newCv.view, (newText) => {
-          if (!workspaceLoaded || getCMView("fuzzerReq") !== newCv || sessionId !== currentSessionId()
+          if (!workspaceLoaded || binaryMarkersBlocked || getCMView("fuzzerReq") !== newCv || sessionId !== currentSessionId()
             || generation !== workspaceStateGeneration) return;
           updateFuzzerRequestText(newText, { userEdit: true });
           scheduleWorkspaceStateSave();
@@ -16799,7 +16904,7 @@ function renderFuzzer() {
       }
     }
   } else if (els.fuzzerRequestEditor) {
-    els.fuzzerRequestEditor.readOnly = !workspaceLoaded;
+    els.fuzzerRequestEditor.readOnly = !workspaceLoaded || binaryMarkersBlocked;
     if (els.fuzzerRequestEditor.value !== state.fuzzerRequestText) {
       els.fuzzerRequestEditor.value = state.fuzzerRequestText;
     }
@@ -18070,6 +18175,14 @@ function fuzzerRequestTextForAction() {
 
 function parseFuzzerRequestTemplate(text, fallback = state.fuzzerBaseRequest || createDefaultEditableRequest()) {
   const raw = String(text || "");
+  const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/im;
+  const split = splitRawHttpMessage(raw);
+  const originalHeaders = (fallback?.headers || []).map(h => `${h.name}: ${h.value}`).join("\n");
+  if (fallback?.body_encoding !== "base64" && /§|\$payload\$/.test(split.body)
+    && (binaryMime.test(split.head) || binaryMime.test(originalHeaders))) {
+    throw new Error("Legacy binary body contains payload markers. Reopen the original request, then use header or query positions.");
+  }
+
   const boundary = /\r?\n\r?\n/.exec(raw);
   const { body } = splitRawHttpMessage(raw);
   const bodyEncoding = fallback?.body_encoding === "base64" ? "base64" : "utf8";
@@ -19675,10 +19788,11 @@ function syncSequenceStepFromDom({ allowInvalidRequests = false } = {}) {
     if (labelInput) step.label = labelInput.value;
     const reqTextarea = card.querySelector(".step-request-text");
     if (reqTextarea) {
-      step.request_text = reqTextarea.value;
+      if (!step.binary_body_blocked) step.request_text = reqTextarea.value;
       const httpVersion = replayHttpVersionFromText(reqTextarea.value);
       step.http_version = httpVersion || null;
       try {
+        if (step.binary_body_blocked) throw new Error(step.binary_body_blocked);
         const parsed = parseEditableRawRequest(reqTextarea.value, step.request);
         parsed.http_version = httpVersion || undefined;
         Object.assign(step.request, parsed);
@@ -20027,13 +20141,39 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
 
   if (hasSequence) {
     stepsContainer.innerHTML = editing.steps.map((step, idx) => {
+      // Migrate legacy binary drafts before textarea newline normalization.
+      // Body template substitution operates on text: do not silently encode it.
+      delete step.binary_body_blocked;
+      if (step.request?.body_encoding !== "base64" && (Array.isArray(step.request?.headers) ? step.request.headers : []).some(h =>
+        String(h?.name || "").toLowerCase() === "content-type" && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()))) {
+        try {
+          const raw = step.request_text ?? buildEditableRawRequest(step.request);
+          const originalBody = splitRawHttpMessage(raw).body;
+          if (/\{\{|§/.test(originalBody)) throw new Error("Reopen the original binary request before adding body variables.");
+          const parsed = parseEditableRawRequest(raw, step.request);
+          const safe = buildEditableRawRequest(parsed, true);
+          // A draft may already have changed its MIME. Encode from the original
+          // binary classification rather than relying on the edited headers.
+          let binary = "";
+          for (const byte of new TextEncoder().encode(originalBody)) binary += String.fromCharCode(byte);
+          const encoded = btoa(binary);
+          const { head } = splitRawHttpMessage(safe);
+          step.request = { ...parsed, body: encoded, body_encoding: "base64" };
+          step.request_text = encoded ? `${head}\n\n${encoded}` : head;
+          delete step.request_parse_error;
+          state.sequenceDirty = true;
+        } catch (error) {
+          step.binary_body_blocked = error?.message || "Reopen the original binary request.";
+          step.request_parse_error = step.binary_body_blocked;
+        }
+      }
       const requestForRender = {
         ...(step.request || {}),
         http_version: normalizeReplayHttpVersion(step.http_version || step.request?.http_version || "")
           || step.request?.http_version,
       };
       const reqText = step.request_text ?? buildEditableRawRequest(requestForRender);
-      const requestError = requestErrorSteps.has(step.id) && step.request_parse_error
+      const requestError = (step.binary_body_blocked || requestErrorSteps.has(step.id)) && step.request_parse_error
         ? sequenceRequestErrorMessage(step, idx, step.request_parse_error)
         : "";
       const requestErrorId = `sequenceStepRequestError-${idx}`;
@@ -20068,7 +20208,7 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
           <button class="step-move" type="button" data-move-step="${idx}" data-move-direction="1" title="Move step ${idx + 1} down" aria-label="Move step ${idx + 1} down" aria-disabled="${idx === editing.steps.length - 1}">&darr;</button>
           <button class="step-remove" data-remove-step="${idx}" title="Remove step" aria-label="Remove step ${idx + 1}">&times;</button>
         </div>
-        <textarea class="step-request-text" spellcheck="false" aria-label="Step ${idx + 1} raw HTTP request" aria-invalid="${Boolean(requestError)}" aria-describedby="${requestErrorId}">${escapeHtml(reqText)}</textarea>
+        <textarea class="step-request-text"${step.binary_body_blocked ? " readonly" : ""} spellcheck="false" aria-label="Step ${idx + 1} raw HTTP request" aria-invalid="${Boolean(requestError)}" aria-describedby="${requestErrorId}">${escapeHtml(reqText)}</textarea>
         <p class="step-request-error${requestError ? "" : " hidden"}" id="${requestErrorId}">${escapeHtml(requestError)}</p>
         <details class="step-extractions"${expandedSteps.has(step.id) || focusExtractionStepId === step.id ? " open" : ""}>
           <summary>Extractions (${step.extractions.length}) <button class="secondary-action ext-add" data-add-ext="${idx}" aria-label="Add extraction to step ${idx + 1}">+ Extract</button></summary>
@@ -20710,12 +20850,13 @@ async function forwardSelectedIntercept() {
   const request = parseEditableRawRequest(
     interceptReqText,
     state.selectedInterceptRecord.request,
+    true,
   );
   // The editor is the only place that knows whether anything was actually typed.
   // Comparing the parsed request against the held one on the server reports edits
   // that never happened, because the round trip through text normalises headers
   // and can rewrite Content-Length on its own.
-  const edited = interceptReqText !== buildEditableRawRequest(state.selectedInterceptRecord.request);
+  const edited = interceptReqText.replace(/\r\n?/g, "\n") !== buildEditableRawRequest(state.selectedInterceptRecord.request, true).replace(/\r\n?/g, "\n");
   if (state.selectedInterceptRecord.is_websocket && request.body) {
     showToast("WebSocket upgrade requests must not include a request body.", "error");
     return;
@@ -20890,8 +21031,13 @@ function buildEditableRawResponse(resp) {
     text += `${h.name}: ${h.value}\r\n`;
   }
   text += "\r\n";
-  if (source.body_encoding === "base64") {
-    text += safeDecodeBase64(source.body);
+  const binaryMime = normalizedHeaders(source.headers).some(h =>
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
+  if (source.body_encoding !== "base64" && binaryMime) {
+    // Encode UTF-8 bytes, not Latin-1 code units, before the editor normalizes lines.
+    let binary = "";
+    for (const byte of new TextEncoder().encode(source.body || "")) binary += String.fromCharCode(byte);
+    text += btoa(binary);
   } else {
     text += source.body || "";
   }
@@ -20924,7 +21070,9 @@ function parseEditableRawResponse(text, original, requestMethod = "") {
   }
 
   const bodyText = body;
-  const isText = !original || original.body_encoding === "utf8";
+  const originalBinaryMime = normalizedHeaders(original?.headers).some(h =>
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
+  const isText = (!original || original.body_encoding === "utf8") && !originalBinaryMime;
   const bodyEncoding = isText ? "utf8" : "base64";
   const bodyLength = editableResponseBodyLength(bodyText, bodyEncoding);
   if (responseMustNotIncludeBody(status, requestMethod) && bodyLength > 0) {
@@ -20948,7 +21096,7 @@ function parseEditableRawResponse(text, original, requestMethod = "") {
   return {
     status,
     headers,
-    body: isText ? bodyText : safeEncodeBase64(bodyText),
+    body: bodyText,
     body_encoding: bodyEncoding,
   };
 }
@@ -21051,7 +21199,7 @@ async function forwardSelectedResponseIntercept() {
     state.selectedResponseInterceptRecord.method,
   );
   const edited =
-    interceptResText !== buildEditableRawResponse(state.selectedResponseInterceptRecord.response);
+    interceptResText.replace(/\r\n?/g, "\n") !== buildEditableRawResponse(state.selectedResponseInterceptRecord.response).replace(/\r\n?/g, "\n");
 
   // Optimistic UI
   state.responseIntercepts = state.responseIntercepts.filter((i) => i.id !== id);
@@ -26248,7 +26396,7 @@ function editableRequestFromRecord(record) {
   };
 }
 
-function buildEditableRawRequest(request) {
+function buildEditableRawRequest(request, binarySafe = false) {
   const source = request || {};
   const headers = normalizedHeaders(source.headers);
   if (!headers.some((header) => headerNameEquals(header, "host")) && source.host) {
@@ -26257,12 +26405,18 @@ function buildEditableRawRequest(request) {
   const httpVer = source.http_version || "HTTP/1.1";
   const head = `${source.method || "GET"} ${source.path || "/"} ${httpVer}`;
   const headerBlock = mergeHeaders(headers).map((header) => `${header.name}: ${header.value}`).join("\n");
-  const body = source.body || "";
+  let body = source.body || "";
+  if (binarySafe && source.body_encoding !== "base64" && headers.some(h =>
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()))) {
+    let binary = "";
+    for (const byte of new TextEncoder().encode(body)) binary += String.fromCharCode(byte);
+    body = btoa(binary);
+  }
   const rawHead = headerBlock ? `${head}\n${headerBlock}` : head;
   return body.length > 0 ? `${rawHead}\n\n${body}` : rawHead;
 }
 
-function parseEditableRawRequest(text, fallback) {
+function parseEditableRawRequest(text, fallback, binarySafe = false) {
   const { head, body } = splitRawHttpMessage(text);
   const lines = head.split("\n").filter((line) => line.length > 0);
   const fallbackPath = fallback?.path && String(fallback.path).trim()
@@ -26339,7 +26493,9 @@ function parseEditableRawRequest(text, fallback) {
     throw new Error("Request is missing a Host header");
   }
 
-  const bodyEncoding = fallback?.body_encoding === "base64" ? "base64" : "utf8";
+  const legacyBinary = binarySafe && normalizedHeaders(fallback?.headers).some(h =>
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
+  const bodyEncoding = fallback?.body_encoding === "base64" || legacyBinary ? "base64" : "utf8";
   const bodyLength = editableRequestBodyLength(body, bodyEncoding);
   const acceptedBodyLengths = [bodyLength];
   let contentLengthChanged = false;
@@ -26358,8 +26514,13 @@ function parseEditableRawRequest(text, fallback) {
   }
   validateRawHttpBodyFraming(headers, bodyLength, acceptedBodyLengths);
 
-  const fallbackBody = String(fallback?.body ?? fallback?.body_preview ?? "");
-  const fallbackBodyEncoding = fallback?.body_encoding === "base64" ? "base64" : "utf8";
+  let fallbackBody = String(fallback?.body ?? fallback?.body_preview ?? "");
+  if (legacyBinary && fallback?.body_encoding !== "base64") {
+    let binary = "";
+    for (const byte of new TextEncoder().encode(fallbackBody)) binary += String.fromCharCode(byte);
+    fallbackBody = btoa(binary);
+  }
+  const fallbackBodyEncoding = fallback?.body_encoding === "base64" || legacyBinary ? "base64" : "utf8";
   const previewTruncated = Boolean(fallback?.preview_truncated)
     && body === fallbackBody
     && bodyEncoding === fallbackBodyEncoding;
