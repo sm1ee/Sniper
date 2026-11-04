@@ -53,7 +53,7 @@ enum DesktopUserEvent {
     /// A download from the page ended; the web view shows no download bar,
     /// so the page says where it went.
     DownloadFinished {
-        place: String,
+        place: Option<String>,
         ok: bool,
     },
 }
@@ -419,14 +419,14 @@ fn run_desktop() -> Result<()> {
             }
         })
         .with_download_completed_handler(move |url, path, ok| {
-            let Some((path, ok)) =
-                finished_download(&mut download_paths.borrow_mut(), &url, path, ok)
-            else {
-                return;
-            };
+            // A cancel in the save panel has no place; the page still stops
+            // the button's ring.
+            let finished = finished_download(&mut download_paths.borrow_mut(), &url, path, ok);
             let event = DesktopUserEvent::DownloadFinished {
-                place: display_download_path(&path, download_home.as_deref()),
-                ok,
+                place: finished
+                    .as_ref()
+                    .map(|(path, _)| display_download_path(path, download_home.as_deref())),
+                ok: finished.is_some_and(|(_, ok)| ok),
             };
             if let Err(error) = download_event_proxy.send_event(event) {
                 warn!(?error, "failed to tell the page a download finished");

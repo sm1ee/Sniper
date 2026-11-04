@@ -57,9 +57,38 @@ test("a download is named from Content-Disposition, then the URL, and never name
   assert.equal(downloadFileName(response('attachment; filename=".hidden"'), ""), "hidden");
 });
 
+test("in the desktop app Download stays busy until the save ends, a cancel included", async () => {
+  const toasts = [];
+  const clicks = [];
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+  const c = loadFunctions(["downloadResponseBody", "reportDesktopDownload"], {
+    pendingDesktopDownload: null, clearTimeout, Blob,
+    // The blob URL is freed a minute later; that timer must not hold the run open.
+    setTimeout: (fn, ms) => { const timer = setTimeout(fn, ms); timer.unref(); return timer; },
+    window: { ipc: { postMessage() {} } },
+    showToast: (...args) => toasts.push(args),
+    messageBodyBytes: () => new Uint8Array([37, 80, 68, 70]),
+    downloadFileName: () => "report.pdf",
+    URL: { createObjectURL: () => "blob:x", revokeObjectURL() {} },
+    document: {
+      createElement: () => ({ click() { clicks.push(this.download); }, remove() {} }),
+      body: { appendChild() {} },
+    },
+  });
+  let settled = false;
+  c.downloadResponseBody({}, "").then(() => { settled = true; });
+  await tick();
+  assert.deepEqual(clicks, ["report.pdf"]);
+  assert.equal(settled, false, "still saving");
+  c.reportDesktopDownload({ place: null, ok: false });
+  await tick();
+  assert.equal(settled, true);
+  assert.deepEqual(toasts, [], "a cancel in the save panel says nothing");
+});
+
 test("the desktop app's download report says where the file went", () => {
   const toasts = [];
-  const { reportDesktopDownload } = loadFunctions(["reportDesktopDownload"], { showToast: (...args) => toasts.push(args) });
+  const { reportDesktopDownload } = loadFunctions(["reportDesktopDownload"], { pendingDesktopDownload: null, showToast: (...args) => toasts.push(args) });
   reportDesktopDownload({ place: "~/Downloads/report.pdf", ok: true });
   reportDesktopDownload({ place: "~/Downloads/report.pdf", ok: false });
   assert.equal(toasts[0][0], "Saved to ~/Downloads/report.pdf");

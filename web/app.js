@@ -3295,8 +3295,12 @@ window.__sniperCheckForUpdates = checkForUpdatesNow;
 // The desktop app's web view shows no download bar; the app reports where
 // the file went, held long enough to read the path.
 function reportDesktopDownload(result) {
-  if (result?.ok) showToast(`Saved to ${result.place}`, "success", 6000);
-  else showToast(`Could not save ${result?.place || "the file"}.`, "error", 6000);
+  pendingDesktopDownload?.();
+  pendingDesktopDownload = null;
+  // No place: cancelled in the save panel.
+  if (!result?.place) return;
+  if (result.ok) showToast(`Saved to ${result.place}`, "success", 6000);
+  else showToast(`Could not save ${result.place}.`, "error", 6000);
 }
 window.__sniperDownloadFinished = reportDesktopDownload;
 
@@ -13799,7 +13803,7 @@ function renderResponsePreview({ view, editor, search }, active, subject) {
       save.type = "button";
       save.className = "secondary-action render-download";
       save.textContent = "Download";
-      save.addEventListener("click", () => downloadResponseBody(response, subject.url));
+      save.addEventListener("click", () => withButtonProgress(save, () => downloadResponseBody(response, subject.url)));
       children.push(save);
     }
   } else if (model.image) {
@@ -13913,14 +13917,32 @@ function downloadFileName(response, url) {
 // The body as Sniper kept it; a cut preview saves what was kept, as the
 // banner says. octet-stream, so a browser saves it rather than opening it,
 // and the URL lives long enough for the desktop app's download to read it.
-function downloadResponseBody(response, url) {
+// Settles when a browser has the file, or when the desktop app reports the
+// save ended (reportDesktopDownload), so the button's ring covers the wait.
+let pendingDesktopDownload = null;
+async function downloadResponseBody(response, url) {
+  // Let the button's ring start before a large body is decoded.
+  await new Promise((resolve) => setTimeout(resolve, 0));
   const link = document.createElement("a");
   link.href = URL.createObjectURL(new Blob([messageBodyBytes(response)], { type: "application/octet-stream" }));
   link.download = downloadFileName(response, url);
+  const saved = typeof window.ipc?.postMessage === "function"
+    ? new Promise((resolve) => {
+      // ponytail: a save panel left open two minutes stops the ring early.
+      const timer = setTimeout(finish, 120_000);
+      function finish() {
+        clearTimeout(timer);
+        resolve();
+      }
+      pendingDesktopDownload?.();
+      pendingDesktopDownload = finish;
+    })
+    : null;
   document.body.appendChild(link);
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(link.href), 60_000);
+  await saved;
 }
 
 // Captured HTML must never run with Sniper's privileges or reach the network.
