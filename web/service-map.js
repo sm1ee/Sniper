@@ -389,6 +389,46 @@
     const more = escape(known.map(advisorySentence).join("\n"));
     return `<span class="service-map-advisories" aria-label="${advisories(total)}" data-more="${more}" title="">${compact ? total : `${total} advisor${total === 1 ? "y" : "ies"}`}</span>${exploited ? `<span class="service-map-kev" data-more="${more}" title="">KEV</span>` : ""}`;
   }
+  // A chip's list (+N, ⚠, the lock, an advisory badge) opens in one popup on
+  // the page: the map's layer clips anything past its edge, which left a
+  // one-row map's list a line tall. Below the chip, or above it near the
+  // window's bottom, and unscaled by the zoom.
+  function morePopupPlacement(anchor, size, view, gap = 4) {
+    const fitsBelow = anchor.bottom + gap + size.height <= view.height;
+    const fitsAbove = anchor.top - gap - size.height >= 0;
+    const top = !fitsBelow && fitsAbove
+      ? anchor.top - gap - size.height
+      : Math.max(0, Math.min(anchor.bottom + gap, view.height - size.height));
+    return { left: Math.max(0, Math.min(anchor.left, view.width - size.width)), top };
+  }
+  function createMorePopup(doc) {
+    let popup = null;
+    return {
+      show(anchor) {
+        const text = anchor?.getAttribute?.("data-more");
+        if (!text || !doc?.body) return;
+        if (!popup) {
+          popup = doc.createElement("div");
+          popup.className = "service-map-more";
+          popup.setAttribute("role", "tooltip");
+          doc.body.appendChild(popup);
+        }
+        popup.textContent = text;
+        popup.hidden = false;
+        const view = { width: doc.documentElement?.clientWidth || 0, height: doc.documentElement?.clientHeight || 0 };
+        const place = morePopupPlacement(anchor.getBoundingClientRect(), { width: popup.offsetWidth, height: popup.offsetHeight }, view);
+        popup.style.left = `${place.left}px`;
+        popup.style.top = `${place.top}px`;
+      },
+      hide() {
+        if (popup) popup.hidden = true;
+      },
+      remove() {
+        popup?.remove();
+        popup = null;
+      },
+    };
+  }
   // The advisories behind a badge, from GET /api/vulndata/lookup.
   const ADVISORY_TOKEN = /^[\x21-\x7e]{1,100}$/;
   function normalizeAdvisories(payload) {
@@ -1744,6 +1784,7 @@
     let refreshTimer = null;
     let historyPresentationPending = false;
     const eventDisposers = [];
+    const morePopup = createMorePopup(doc);
     function listen(element, type, handler, options) {
       const owned = (...args) => { if (!destroyed) return handler(...args); };
       element?.addEventListener?.(type, owned, options);
@@ -1832,6 +1873,7 @@
     function applyGraphScale() {
       // Mutating the canvas variables leaves card DOM, focus, inspector and
       // in-flight exact-source reads untouched, including during polling.
+      morePopup.hide();
       if (currentLayout && els.canvas.style) {
         els.canvas.style.setProperty("--service-map-scale", String(state.zoomScale));
         els.canvas.style.setProperty("--service-map-scaled-width", `${currentLayout.width * state.zoomScale}px`);
@@ -1886,6 +1928,8 @@
     }
     function replace(element, html, force = false) {
       if (!element) return;
+      // A redrawn map may drop the chip a list was opened from.
+      if (element === els.canvas) morePopup.hide();
       // Compare our last output, not browser serialization: boolean attributes
       // and native control/disclosure state can change innerHTML without a new
       // render. Replacing an unchanged select dismisses its native popup.
@@ -4274,6 +4318,23 @@
         ? { x: event.clientX - rect.left, y: event.clientY - rect.top } : null;
     };
     listen(els.viewport, "scroll", pinFlowHeads, { passive: true });
+    const moreAnchor = (target) => target?.closest?.("[data-more]") || null;
+    listen(els.viewport, "pointerover", (event) => {
+      const anchor = moreAnchor(event.target);
+      if (anchor) morePopup.show(anchor);
+    });
+    listen(els.viewport, "pointerout", (event) => {
+      const anchor = moreAnchor(event.target);
+      if (anchor && !anchor.contains(event.relatedTarget)) morePopup.hide();
+    });
+    // +N's list also opens when its card has keyboard focus.
+    listen(els.viewport, "focusin", (event) => {
+      const more = event.target?.matches?.(".service-map-card:focus-visible")
+        ? event.target.querySelector(".service-map-products-more[data-more]") : null;
+      if (more) morePopup.show(more);
+    });
+    listen(els.viewport, "focusout", () => morePopup.hide());
+    listen(els.viewport, "scroll", () => morePopup.hide(), { passive: true });
     listen(els.viewport, "wheel", (event) => {
       if (!event.ctrlKey || pinchStartScale !== null || !zoomAvailable()) return;
       event.preventDefault();
@@ -4433,6 +4494,7 @@
         cancelParameters();
         resizeObserver?.disconnect();
         for (const dispose of eventDisposers) dispose();
+        morePopup.remove();
         if (faviconRedraw !== null) root.clearTimeout?.(faviconRedraw);
         faviconRedraw = null;
         doc?.removeEventListener?.("visibilitychange", onVisibilityChange);
@@ -4496,5 +4558,5 @@
       getState: () => state,
     };
   }
-  root.SniperServiceMap = { createController, normalizePacket, technologyLiteral, normalizeFlow, flowLayout, flowMarkup, flowHeadsOffset, flowMermaid, EXPOSURE_LABELS, AUTH_KINDS, relationshipOrder, siteKey, groupSites, originRole, originRoles, reportedProducts, productMatches, productSummaryMarkup, normalizeAdvisories, advisoryListMarkup, normalizeSnapshot, normalizeRowTechnologies, normalizeBodyReferences, normalizeHtmlGenerators, normalizeLinkDeclarations, normalizeSocketPeer, normalizePeerMatches, usableSocketPeer, peerGraphLayout, PEER_MATCH_LIMITS, LINK_DECLARATION_LIMITS, BODY_REFERENCE_LIMITS, HTML_GENERATOR_LIMITS, MAX_RELATION_LAYERS, stableOrder, graphLayout, graphGeometry, safeOrigin, safePath, MAX_CARDS, MAX_EDGES, MAX_REFERENCE_CARDS, GRAPH_GEOMETRY, ZOOM_LIMITS };
+  root.SniperServiceMap = { createController, normalizePacket, technologyLiteral, normalizeFlow, flowLayout, flowMarkup, flowHeadsOffset, flowMermaid, EXPOSURE_LABELS, AUTH_KINDS, relationshipOrder, siteKey, groupSites, originRole, originRoles, reportedProducts, productMatches, productSummaryMarkup, normalizeAdvisories, advisoryListMarkup, morePopupPlacement, createMorePopup, normalizeSnapshot, normalizeRowTechnologies, normalizeBodyReferences, normalizeHtmlGenerators, normalizeLinkDeclarations, normalizeSocketPeer, normalizePeerMatches, usableSocketPeer, peerGraphLayout, PEER_MATCH_LIMITS, LINK_DECLARATION_LIMITS, BODY_REFERENCE_LIMITS, HTML_GENERATOR_LIMITS, MAX_RELATION_LAYERS, stableOrder, graphLayout, graphGeometry, safeOrigin, safePath, MAX_CARDS, MAX_EDGES, MAX_REFERENCE_CARDS, GRAPH_GEOMETRY, ZOOM_LIMITS };
 })(typeof window === "undefined" ? globalThis : window);

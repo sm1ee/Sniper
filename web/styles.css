@@ -8592,11 +8592,12 @@ button.utility-button.replay-tab-add {
 .service-map-product-filter-panel p { margin: 8px 0 0; overflow-wrap: anywhere; }
 .service-map-products > span { min-width: 0; flex: 0 1 auto; }
 .service-map-products > .service-map-products-more { flex: 0 0 auto; }
-/* The products +N stands for, and what ⚠ and the lock name, show on hover (+N on
-   keyboard focus too): the desktop app's web view shows no title tooltip.
-   Placed against the card, below it, so the clipped chip row does not cut the
-   list off. */
-.service-map-products-more:hover::after, .service-map-exposure:hover::after, .service-map-auth:hover::after, .service-map-card:focus-visible .service-map-products-more::after { content: attr(data-more); position: absolute; z-index: 3; left: 52px; top: calc(100% - 6px); min-width: 120px; max-width: 220px; padding: 6px 9px; white-space: pre-line; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--panel-elevated); color: var(--text); font-size: var(--font-xs); line-height: 1.6; text-align: left; box-shadow: 0 4px 18px rgba(0,0,0,.25); pointer-events: none; }
+/* What +N stands for, what ⚠ and the lock name, and a badge's advisories open
+   on hover (+N on keyboard focus too): the desktop app's web view shows no
+   title tooltip. createMorePopup in service-map.js places it on the page,
+   outside the map's clipping layer. */
+.service-map-more { position: fixed; z-index: 30; min-width: 120px; max-width: 260px; padding: 6px 9px; white-space: pre-line; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--panel-elevated); color: var(--text); font-size: var(--font-xs); line-height: 1.6; text-align: left; box-shadow: 0 4px 18px rgba(0,0,0,.25); pointer-events: none; }
+.service-map-more[hidden] { display: none; }
 .service-map-products > .service-map-exposure { flex: 0 0 auto; color: var(--danger); border-color: var(--danger); }
 .service-map-products > .service-map-auth { flex: 0 0 auto; color: var(--token-url-color); }
 .service-map-advisories, .service-map-kev { margin-left: 5px; padding: 0 4px; border: 1px solid var(--line-strong); border-radius: 4px; font-size: var(--font-xs); white-space: nowrap; }
@@ -8607,8 +8608,6 @@ button.utility-button.replay-tab-add {
 .service-map-products > .service-map-known { display: inline-flex; align-items: center; }
 .service-map-known-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .service-map-known > .service-map-advisories, .service-map-known > .service-map-kev { flex: none; line-height: 1.2; }
-/* A card's badge says more on hover, as ⚠ does; the inspector prints it. */
-.service-map-products .service-map-advisories:hover::after, .service-map-products .service-map-kev:hover::after { content: attr(data-more); position: absolute; z-index: 3; left: 52px; top: calc(100% - 6px); min-width: 120px; max-width: 260px; padding: 6px 9px; white-space: pre-line; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--panel-elevated); color: var(--text); font-size: var(--font-xs); line-height: 1.6; text-align: left; box-shadow: 0 4px 18px rgba(0,0,0,.25); pointer-events: none; }
 .service-map-api-auth { flex: 0 0 auto; margin-left: 6px; color: var(--token-url-color); font-size: var(--font-xs); white-space: nowrap; }
 .service-map-product-icon { width: 1em; height: 1em; margin-right: 2px; vertical-align: -0.12em; }
 .service-map-mark svg { width: 15px; height: 15px; }
