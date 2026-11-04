@@ -59,7 +59,9 @@ impl SourceId {
 
 const MAX_EPSS_UNPACKED: u64 = 128 << 20;
 const MAX_ADVISORIES: usize = 20_000;
-const MAX_EPSS_ROWS: usize = 400_000;
+// ponytail: about 140 MB while a hostile file at this ceiling parses; keep
+// only the CVEs the advisories name during the parse if that ever matters.
+const MAX_EPSS_ROWS: usize = 2_000_000;
 const MAX_SUMMARY_CHARS: usize = 300;
 const MAX_URL_BYTES: usize = 2048;
 const MAX_URLS: usize = 5;
@@ -379,6 +381,17 @@ mod tests {
             assert_eq!(scores.len(), 1);
             assert!((scores["CVE-2020-11023"] - 0.94).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn epss_keeps_loading_as_the_cve_count_grows() {
+        // Some 300,000 CVEs carry a score today, and tens of thousands more
+        // are published every year.
+        let mut csv = String::from("cve,epss,percentile\n");
+        for n in 0..600_000 {
+            csv.push_str(&format!("CVE-2030-{n:06},0.5,0.5\n"));
+        }
+        assert_eq!(parse_epss(csv.as_bytes()).unwrap().len(), 600_000);
     }
 
     #[test]
