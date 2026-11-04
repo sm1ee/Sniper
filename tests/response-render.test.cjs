@@ -57,6 +57,17 @@ test("a download is named from Content-Disposition, then the URL, and never name
   assert.equal(downloadFileName(response('attachment; filename=".hidden"'), ""), "hidden");
 });
 
+test("the desktop app's download report says where the file went", () => {
+  const toasts = [];
+  const { reportDesktopDownload } = loadFunctions(["reportDesktopDownload"], { showToast: (...args) => toasts.push(args) });
+  reportDesktopDownload({ place: "~/Downloads/report.pdf", ok: true });
+  reportDesktopDownload({ place: "~/Downloads/report.pdf", ok: false });
+  assert.equal(toasts[0][0], "Saved to ~/Downloads/report.pdf");
+  assert.ok(toasts[0][2] >= 5000, "long enough to read the path");
+  assert.equal(toasts[1][0], "Could not save ~/Downloads/report.pdf.");
+  assert.equal(toasts[1][1], "error");
+});
+
 test("an image response is shown, as Burp's Render tab does", () => {
   const png = responseRenderModel({ content_type: "image/png", body_encoding: "base64", body_preview: "iVBORw0KGgo=", preview_truncated: true });
   assert.deepEqual(png, { image: "data:image/png;base64,iVBORw0KGgo=", truncated: true });

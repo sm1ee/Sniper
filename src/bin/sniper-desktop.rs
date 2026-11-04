@@ -53,8 +53,7 @@ enum DesktopUserEvent {
     /// A download from the page ended; the web view shows no download bar,
     /// so the page says where it went.
     DownloadFinished {
-        file: String,
-        folder: String,
+        place: String,
         ok: bool,
     },
 }
@@ -367,6 +366,12 @@ fn run_desktop() -> Result<()> {
     let download_home = env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
         .map(PathBuf::from);
+    // The path each download was given, by URL: WebKit reports none when the
+    // download ends.
+    let download_paths = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::<
+        String,
+        PathBuf,
+    >::new()));
     let ui_task = runtime.spawn(async move {
         if let Err(error) = api::serve_api(ui_listener, ui_state).await {
             error!(?error, "ui task stopped");
@@ -399,27 +404,28 @@ fn run_desktop() -> Result<()> {
         })
         // Render's Download saves a body the view cannot draw. Without these,
         // WKWebView cancels every download.
-        .with_download_started_handler(move |_url, path| {
-            match desktop_download_path(path, download_home.as_deref()) {
-                Some(target) => {
-                    *path = target;
-                    true
-                }
-                None => false,
+        .with_download_started_handler({
+            let download_paths = download_paths.clone();
+            let download_home = download_home.clone();
+            move |url, path| {
+                let Some(target) = desktop_download_path(path, download_home.as_deref())
+                    .and_then(|suggested| ask_download_path(&suggested))
+                else {
+                    return false;
+                };
+                download_paths.borrow_mut().insert(url, target.clone());
+                *path = target;
+                true
             }
         })
-        .with_download_completed_handler(move |_url, path, ok| {
-            let name = |part: Option<&std::ffi::OsStr>| {
-                part.map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default()
+        .with_download_completed_handler(move |url, path, ok| {
+            let Some((path, ok)) =
+                finished_download(&mut download_paths.borrow_mut(), &url, path, ok)
+            else {
+                return;
             };
             let event = DesktopUserEvent::DownloadFinished {
-                file: name(path.as_deref().and_then(Path::file_name)),
-                folder: name(
-                    path.as_deref()
-                        .and_then(Path::parent)
-                        .and_then(Path::file_name),
-                ),
+                place: display_download_path(&path, download_home.as_deref()),
                 ok,
             };
             if let Err(error) = download_event_proxy.send_event(event) {
@@ -594,8 +600,8 @@ fn run_desktop() -> Result<()> {
                     "window.__sniperScrollGesture && window.__sniperScrollGesture('began')"
                 });
             }
-            Event::UserEvent(DesktopUserEvent::DownloadFinished { file, folder, ok }) => {
-                let detail = serde_json::json!({ "file": file, "folder": folder, "ok": ok });
+            Event::UserEvent(DesktopUserEvent::DownloadFinished { place, ok }) => {
+                let detail = serde_json::json!({ "place": place, "ok": ok });
                 let _ = webview.evaluate_script(&format!(
                     "window.__sniperDownloadFinished && window.__sniperDownloadFinished({detail})"
                 ));
@@ -1306,6 +1312,76 @@ fn desktop_download_path(suggested: &Path, home: Option<&Path>) -> Option<PathBu
     )
 }
 
+/// Asks where to save a download, opening at the suggested folder and name.
+/// None when the person cancels. A file they agree to replace is removed
+/// first, since WebKit will not write over one.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn ask_download_path(suggested: &Path) -> Option<PathBuf> {
+    use cocoa::{
+        appkit::{NSModalResponse, NSSavePanel},
+        base::{id, nil, selector, YES},
+        foundation::{NSString, NSURL},
+    };
+    use objc::Message;
+
+    let folder = suggested.parent()?.to_str()?;
+    let name = suggested.file_name()?.to_str()?;
+    // SAFETY: WebKit asks the download delegate for a destination on the main
+    // thread, where AppKit runs panels, and every object here is one AppKit
+    // just returned.
+    let chosen = unsafe {
+        let panel: id = NSSavePanel::savePanel(nil);
+        panel.setCanCreateDirectories(YES);
+        panel.setDirectoryURL(NSURL::fileURLWithPath_(
+            nil,
+            NSString::alloc(nil).init_str(folder),
+        ));
+        (*panel)
+            .send_message::<_, ()>(
+                selector("setNameFieldStringValue:"),
+                (NSString::alloc(nil).init_str(name),),
+            )
+            .ok()?;
+        if panel.runModal() != NSModalResponse::NSModalResponseOk {
+            return None;
+        }
+        let path = panel.URL().path();
+        PathBuf::from(std::ffi::CStr::from_ptr(path.UTF8String()).to_str().ok()?)
+    };
+    if chosen.exists() {
+        std::fs::remove_file(&chosen).ok()?;
+    }
+    Some(chosen)
+}
+
+/// WebView2 and WebKitGTK keep their own download prompts.
+#[cfg(not(target_os = "macos"))]
+fn ask_download_path(suggested: &Path) -> Option<PathBuf> {
+    Some(suggested.to_path_buf())
+}
+
+/// When a download ends: where it went and whether it finished. WebKit reports
+/// no path, so the one the download was given stands in; with neither, the
+/// person cancelled in the save panel and nothing needs saying.
+fn finished_download(
+    given: &mut std::collections::HashMap<String, PathBuf>,
+    url: &str,
+    reported: Option<PathBuf>,
+    ok: bool,
+) -> Option<(PathBuf, bool)> {
+    let given = given.remove(url);
+    reported.or(given).map(|path| (path, ok))
+}
+
+/// A saved file's path as the page shows it, the home folder written `~`.
+fn display_download_path(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
 fn is_same_origin(url: &str, expected_origin: &str) -> bool {
     let (Ok(url), Ok(expected)) = (Url::parse(url), Url::parse(expected_origin)) else {
         return false;
@@ -1326,14 +1402,16 @@ mod tests {
     use super::{
         begin_desktop_teardown, block_desktop_shutdown, combine_desktop_persist_results,
         complete_desktop_shutdown, desktop_close_flush_script, desktop_download_path,
-        desktop_user_event_from_ipc, finish_desktop_teardown, handle_navigation_request,
-        handle_new_window_request, is_blocked_desktop_navigation_scheme, is_same_origin,
-        normalize_empty_data_dir_env, persist_desktop_session_state,
-        process_path_points_to_desktop_bundle, should_install_cli_path_on_launch,
-        should_install_skills_on_launch, should_request_existing_desktop_focus, AppConfig,
-        AppState, DesktopUserEvent, SNIPER_DATA_DIR_ENV,
+        desktop_user_event_from_ipc, display_download_path, finish_desktop_teardown,
+        finished_download, handle_navigation_request, handle_new_window_request,
+        is_blocked_desktop_navigation_scheme, is_same_origin, normalize_empty_data_dir_env,
+        persist_desktop_session_state, process_path_points_to_desktop_bundle,
+        should_install_cli_path_on_launch, should_install_skills_on_launch,
+        should_request_existing_desktop_focus, AppConfig, AppState, DesktopUserEvent,
+        SNIPER_DATA_DIR_ENV,
     };
-    use std::path::Path;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -1709,6 +1787,32 @@ mod tests {
         );
         assert_eq!(desktop_download_path(Path::new("x.bin"), None), None);
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_finished_download_says_where_it_went_and_a_cancel_says_nothing() {
+        let saved = PathBuf::from("/Users/someone/Downloads/report.pdf");
+        let mut pending = HashMap::from([("blob:one".to_string(), saved.clone())]);
+        // WebKit reports no path when a download ends; the one chosen is kept.
+        assert_eq!(
+            finished_download(&mut pending, "blob:one", None, true),
+            Some((saved.clone(), true))
+        );
+        assert!(pending.is_empty());
+        assert_eq!(
+            finished_download(&mut pending, "blob:two", None, false),
+            None,
+            "cancelled in the save panel"
+        );
+        let home = Path::new("/Users/someone");
+        assert_eq!(
+            display_download_path(&saved, Some(home)),
+            "~/Downloads/report.pdf"
+        );
+        assert_eq!(
+            display_download_path(Path::new("/Volumes/USB/report.pdf"), Some(home)),
+            "/Volumes/USB/report.pdf"
+        );
     }
 
     #[test]

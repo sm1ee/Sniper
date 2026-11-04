@@ -3292,11 +3292,13 @@ async function checkForUpdatesNow() {
 }
 
 window.__sniperCheckForUpdates = checkForUpdatesNow;
-// The desktop app's web view shows no download bar; the app reports here.
-window.__sniperDownloadFinished = (result) => {
-  if (result?.ok) showToast(`Saved ${result.file} to ${result.folder || "Downloads"}`);
-  else showToast("The download did not finish.", "error");
-};
+// The desktop app's web view shows no download bar; the app reports where
+// the file went, held long enough to read the path.
+function reportDesktopDownload(result) {
+  if (result?.ok) showToast(`Saved to ${result.place}`, "success", 6000);
+  else showToast(`Could not save ${result?.place || "the file"}.`, "error", 6000);
+}
+window.__sniperDownloadFinished = reportDesktopDownload;
 
 // The steps the server reports that the button reacts to. It sends others meant
 // for logs, such as where the installer's log file is; those are ignored here, so an
