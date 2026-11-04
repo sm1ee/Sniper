@@ -22801,10 +22801,19 @@ function toggleReplayTabPin(id) {
 
 
 function scrollActiveReplayTabIntoView() {
-  const activeTab = els.replayTabStrip.querySelector(".replay-tab.active");
-  if (activeTab) {
-    activeTab.scrollIntoView({ behavior: "smooth", inline: "nearest", block: "nearest" });
-  }
+  revealReplayTab(els.replayTabStrip.querySelector(".replay-tab.active"));
+}
+
+// Only the tab's own row moves, at once and just far enough. A smooth
+// scrollIntoView did not finish: Ctrl+Tab from the last tab made the first
+// active and left the strip at its far end, the new tab out of view.
+function revealReplayTab(tab) {
+  const row = tab?.closest(".replay-tab-list");
+  if (!row) return;
+  const left = tab.getBoundingClientRect().left - row.getBoundingClientRect().left + row.scrollLeft;
+  const right = left + tab.getBoundingClientRect().width;
+  if (left < row.scrollLeft) row.scrollLeft = left;
+  else if (right > row.scrollLeft + row.clientWidth) row.scrollLeft = right - row.clientWidth;
 }
 
 function getRenderedHttpReplayDraftOwner(tab) {
