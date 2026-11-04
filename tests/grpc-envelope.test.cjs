@@ -1,0 +1,14 @@
+const {test}=require('node:test');const a=require('node:assert/strict');const g=require('../web/grpc-envelope');
+const frame=(data=[],flag=0)=>Uint8Array.from([flag,(data.length>>>24)&255,(data.length>>>16)&255,(data.length>>>8)&255,data.length&255,...data]);
+test('empty stream and empty message distinct',()=>{a.equal(g.parse(new Uint8Array()).messages.length,0);a.equal(g.parse(frame()).messages.length,1)});
+test('multiple and compression opaque',()=>{const p=g.parse(Uint8Array.from([...frame([8,1]),...frame([0xff],1)]));a.equal(p.ok,true);a.deepEqual(p.messages.map(m=>[m.offset,m.payloadOffset,m.length,m.compressed]),[[0,5,2,false],[7,12,1,true]]);a.deepEqual([...p.messageBytes(1)],[255])});
+test('all cut positions',()=>{const b=frame([1,2,3,4]);for(let i=1;i<b.length;i++)a.equal(g.parse(b.slice(0,i)).ok,false)});
+test('flags reject grpc-web trailer flags',()=>{for(let f=2;f<256;f++)a.equal(g.parse(frame([],f)).error.code,'invalid-flag')});
+test('uint32 high bit and max length safe',()=>{for(const n of [128,255])a.equal(g.parse(Uint8Array.from([0,n,255,255,255])).error.code,'message-size-limit')});
+test('input and message limits',()=>{a.equal(g.parse(new Uint8Array(g.MAX_BYTES+1)).error.code,'input-limit');a.equal(g.parse(new Uint8Array(g.MAX_MESSAGES*5)).messages.length,g.MAX_MESSAGES);a.equal(g.parse(new Uint8Array((g.MAX_MESSAGES+1)*5)).error.code,'message-limit')});
+test('copies preserve snapshot and spans',()=>{const b=frame([3]);const p=g.parse(b);b[5]=8;p.originalBytes()[5]=9;p.messageBytes(0)[0]=10;a.equal(p.messageBytes(0)[0],3);a.throws(()=>p.messageBytes(-1));a.throws(()=>p.messageBytes(0.5))});
+test('failure exposes no partial messages',()=>{const p=g.parse(Uint8Array.from([...frame([1]),0]));a.equal(p.ok,false);a.equal(p.messages,undefined)});
+test('strict mime distinction',()=>{a.equal(g.classifyContentType('Application/Grpc+Proto; charset=x'),'proto');a.equal(g.classifyContentType('application/grpc'),'proto');a.equal(g.classifyContentType('application/grpc+json'),'json');for(const s of ['application/grpc-web','application/grpc-web+proto','application/grpc-web-text','application/grpc+foo','application/json','application/grpc,application/json'])a.equal(g.classifyContentType(s),null)});
+test('arbitrary inputs bounded and no throws',()=>{let seed=1;for(let i=0;i<10000;i++){const b=new Uint8Array(i%200);for(let j=0;j<b.length;j++){seed=(seed*1664525+1013904223)>>>0;b[j]=seed>>>24;}const p=g.parse(b);a.equal(typeof p.ok,'boolean')}});
+test('exact total cap accepted',()=>{const b=new Uint8Array(g.MAX_BYTES);let n=b.length-5;b[1]=n>>>24;b[2]=n>>>16;b[3]=n>>>8;b[4]=n;a.equal(g.parse(b).ok,true)});
+test('wrong input type',()=>{for(const x of [null,[],{},''])a.equal(g.parse(x).error.code,'invalid-input')});

@@ -82,10 +82,10 @@ function fixture({ labels = ['Start', 'Sign in', 'Finish'], invalid = [1], store
     'bumpSequenceDraftVersion', 'syncSequenceStepFromDom', 'currentSequenceSessionId', 'isCurrentSequenceSession',
     'isCurrentSequenceRun', 'runCurrentSequence', 'buildEditableRawRequest', 'parseEditableRawRequest', 'splitRawHttpMessage',
     'normalizeReplayHttpVersion', 'replayHttpVersionFromText', 'parseReplayHttpVersionToken', 'headerValue', 'normalizedHeaders',
-    'mergeHeaders', 'headerNameEquals', 'editableRequestBodyLength', 'validateRawHttpBodyFraming', 'escapeHtml',
+    'mergeHeaders', 'headerNameEquals', 'decodedBase64Length', 'isBase64Text', 'editableRequestBodyLength', 'validateRawHttpBodyFraming', 'escapeHtml',
     'onClickWithProgress', 'withButtonProgress'];
   if (/^function sequenceRequestErrorMessage\(/m.test(appSource)) names.push('sequenceRequestErrorMessage');
-  c = loadFunctions(names, { state, document, TextEncoder, URL, workspaceLoaded: true, workspaceStateGeneration: 1,
+  c = loadFunctions(names, { state, document, TextEncoder, URL, btoa, atob, workspaceLoaded: true, workspaceStateGeneration: 1,
     currentSessionId: () => state.activeSession.id, expectedActiveSessionIdForWrite: id => id,
     generateUuid: () => `added-${++uuid}`, renderSequenceList() {}, jsonArray: value => Array.isArray(value) ? value : [],
     formatTimestamp: String, showToast: message => notices.push(message), scheduleRefresh() {},
@@ -240,3 +240,62 @@ test('Run reveals the trailing inline explanation after its textarea without cha
   }
   assert.equal(f.requests.length, 0);
 });
+
+for (const mime of ['application/protobuf', 'application/msgpack', 'application/cbor', 'application/grpc']) {
+  test(`legacy binary Sequence preserves bytes and header variables: ${mime}`, () => {
+    const f = fixture({invalid:[]}); const step = f.state.editingSequence.steps[0];
+    step.request = {scheme:'https',host:'example.com',method:'POST',path:'/a',headers:[{name:'Content-Type',value:mime},{name:'X-Token',value:'{{token}}'}],body:'\n\x03A\r\n',body_encoding:'utf8'};
+    delete step.request_text;
+    f.c.renderSequencePanel();
+    assert.equal(step.request.body_encoding, 'base64');
+    assert.equal(step.request.body,'CgNBDQo=');
+    assert.match(f.cards()[0].request.value,/{{token}}/);
+    f.type(0, f.cards()[0].request.value.replace('/a ', '/b ').replace(/\r\n/g,'\n'));
+    assert.equal(step.request.path,'/b'); assert.equal(step.request.body,'CgNBDQo=');
+    f.type(0,f.cards()[0].request.value.replace('CgNBDQo=','CgNCDQo='));
+    assert.equal(step.request.body,'CgNCDQo=');
+    f.state.editingSequence = JSON.parse(JSON.stringify(f.state.editingSequence));
+    f.c.renderSequencePanel(); assert.match(f.cards()[0].request.value,/CgNCDQo=/);
+  });
+}
+test('legacy binary Sequence body template stays intact and blocks Run', async () => {
+  const f=fixture({invalid:[]}); const step=f.state.editingSequence.steps[0];
+  step.request={scheme:'https',host:'example.com',method:'POST',path:'/a',headers:[{name:'Content-Type',value:'application/protobuf'}],body:'{{token}}\r\n',body_encoding:'utf8'};
+  delete step.request_text; f.c.renderSequencePanel();
+  assert.match(f.cards()[0].markup,/readonly/);
+  assert.equal(step.request.body,'{{token}}\r\n');
+  await f.run(); assert.equal(f.requests.length,0);
+  assert.match(step.request_parse_error,/Reopen/);
+});
+
+for (const invalidBody of ['{{body}}', '§payload§', '!!!']) {
+  test(`migrated binary body rejects ${JSON.stringify(invalidBody)} with a short error and recovers`, async () => {
+    const f = fixture({invalid: []});
+    const step = f.state.editingSequence.steps[0];
+    step.request = {scheme:'https',host:'example.com',method:'POST',path:'/a',headers:[{name:'Content-Type',value:'application/protobuf'}],body:'\n\x03A\r\n',body_encoding:'utf8'};
+    delete step.request_text;
+    f.c.renderSequencePanel();
+    const validRaw = f.cards()[0].request.value;
+    assert.equal(step.request.body, 'CgNBDQo=');
+    f.type(0, validRaw.replace('CgNBDQo=', invalidBody));
+    await f.run();
+    assert.equal(f.requests.length, 0);
+    assert.equal(step.request_parse_error, 'Enter a valid Base64 body.');
+    assertInvalid(f.cards()[0], 1, step.label, 'Enter a valid Base64 body.');
+    assert.doesNotMatch(f.notices.at(-1), /atob|InvalidCharacterError|not correctly encoded/);
+    assert.equal(step.request.body, 'CgNBDQo=');
+    assert.ok(step.request_text.includes(invalidBody));
+    f.type(0, validRaw);
+    assert.equal(step.request_parse_error, undefined);
+    assert.equal(f.cards()[0].error.textContent, '');
+    await f.run();
+    assert.equal(f.requests.length, 1);
+    assert.equal(f.requests[0].url, '/api/sequences');
+    assert.equal(f.saves[0].steps[0].request.body, 'CgNBDQo=');
+    assert.equal(f.saves[0].steps[0].request.body_encoding, 'base64');
+    await f.finishSave();
+    assert.equal(f.requests[1].url, '/api/sequences/draft/run');
+    f.requests[1].resolve({ok:true,json:async()=>({sequence_name:'Three-step flow',status:'completed',step_results:[]})});
+    await Promise.all(f.promises);
+  });
+}

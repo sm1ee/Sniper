@@ -56,6 +56,8 @@ function editorFixture() {
   }
   Object.setPrototypeOf(MemoryEditorView, CM.EditorView);
   Object.assign(f.context, {
+    btoa: s => Buffer.from(s, "binary").toString("base64"),
+    atob: s => Buffer.from(s, "base64").toString("binary"),
     CM: { ...CM, EditorView: MemoryEditorView }, _cmViews: pool,
     CM_SEARCH_DECORATION_LIMIT: 5000,
     CM_DEFAULT_SEARCH_CLASSES: { hit: "tok-search-hit", active: "tok-search-active" },
@@ -74,7 +76,7 @@ function editorFixture() {
     "renderReplayClearedState", "syncReplayToolbar", "updateReplaySearchPane", "toHexDumpFromBytes",
     "syncReplayRequestTextFromEditor", "clearReplayResponseForDraftChange", "setReplayTargetInputValidity",
     "parseEditableRawRequest", "splitRawHttpMessage", "parseReplayHttpVersionToken", "headerValue",
-    "editableRequestBodyLength", "validateRawHttpBodyFraming", "deriveRepeaterRequest",
+    "editableRequestBodyLength", "decodedBase64Length", "validateRawHttpBodyFraming", "deriveRepeaterRequest",
     "duplicateActiveReplayTab", "openBlankReplayTab", "setReplayRequestEditorText",
   ]) vm.runInContext(source(name), f.context);
   const fieldsStart = appSource.indexOf("const setSearchQuery = CM.StateEffect.define();");

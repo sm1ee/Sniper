@@ -1041,7 +1041,34 @@ impl std::io::Write for LimitedVecWriter {
     }
 }
 
+pub(crate) fn is_binary_body_content_type(content_type: Option<&str>) -> bool {
+    let mime = content_type
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        mime.as_str(),
+        "application/protobuf"
+            | "application/x-protobuf"
+            | "application/msgpack"
+            | "application/x-msgpack"
+            | "application/cbor"
+            | "application/octet-stream"
+            | "application/grpc"
+            | "application/grpc+proto"
+            | "application/grpc+json"
+            | "application/grpc-web"
+            | "application/grpc-web+proto"
+    )
+}
+
 fn is_textual_body(content_type: Option<&str>, sample: &[u8]) -> bool {
+    if is_binary_body_content_type(content_type) {
+        return false;
+    }
     if sample.is_empty() {
         return true;
     }
@@ -1066,6 +1093,9 @@ fn is_textual_body(content_type: Option<&str>, sample: &[u8]) -> bool {
 }
 
 fn is_textual_body_preview(content_type: Option<&str>, sample: &[u8], truncated: bool) -> bool {
+    if is_binary_body_content_type(content_type) {
+        return false;
+    }
     if sample.is_empty() {
         return true;
     }
@@ -1104,6 +1134,29 @@ fn utf8_preview_len(sample: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn binary_mime_never_uses_text_even_for_valid_utf8() {
+        for mime in [
+            "application/protobuf",
+            "Application/X-Protobuf; charset=utf-8",
+            "application/msgpack",
+            "application/cbor",
+            "application/octet-stream",
+            "application/grpc+json",
+        ] {
+            let bytes = b"\x0a\x03A\r\n";
+            assert!(!is_textual_body(Some(mime), bytes));
+            assert!(!is_textual_body_preview(Some(mime), bytes, true));
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_TYPE, mime.parse().unwrap());
+            let record = MessageRecord::from_headers_and_body(&headers, bytes, 1024);
+            assert_eq!(record.body_encoding, BodyEncoding::Base64);
+            assert_eq!(record.body_bytes(), bytes);
+        }
+        assert!(is_textual_body(Some("application/json"), b"{}\r\n"));
+        assert!(is_textual_body(Some("text/plain"), b"A\r\n"));
+    }
+
     use flate2::{
         write::{GzEncoder, ZlibEncoder},
         Compression,

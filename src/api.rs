@@ -362,6 +362,14 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/decoder/*path", get(decoder_asset))
         .route("/app.js", get(app_js))
         .route("/fuzzer-workflow.js", get(fuzzer_workflow_js))
+        .route("/grpc-envelope.js", get(grpc_envelope_js))
+        .route("/cbor-reader.js", get(cbor_reader_js))
+        .route("/cbor-editor.js", get(cbor_editor_js))
+        .route("/msgpack-reader.js", get(msgpack_reader_js))
+        .route("/msgpack-editor.js", get(msgpack_editor_js))
+        .route("/protobuf-wire.js", get(protobuf_wire_js))
+        .route("/protobuf-edit.js", get(protobuf_edit_js))
+        .route("/protobuf-fields.js", get(protobuf_fields_js))
         .route("/recon.js", get(recon_js))
         .route("/templates.js", get(templates_js))
         .route("/api/recon", get(crate::recon::list))
@@ -9364,6 +9372,31 @@ async fn fuzzer_workflow_js() -> Response {
     asset_response(
         "application/javascript; charset=utf-8",
         include_str!("../web/fuzzer-workflow.js"),
+    )
+}
+
+async fn msgpack_reader_js() -> Response {
+    asset_response("application/javascript", include_str!("../web/msgpack-reader.js"))
+}
+
+async fn protobuf_wire_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/protobuf-wire.js"),
+    )
+}
+
+async fn protobuf_edit_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/protobuf-edit.js"),
+    )
+}
+
+async fn protobuf_fields_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/protobuf-fields.js"),
     )
 }
 
@@ -27331,4 +27364,20 @@ mod web_assets {
             "call generateUuid() instead of crypto.randomUUID()"
         );
     }
+}
+
+async fn msgpack_editor_js() -> Response {
+    asset_response("application/javascript", include_str!("../web/msgpack-editor.js"))
+}
+
+async fn grpc_envelope_js() -> Response {
+    asset_response("application/javascript", include_str!("../web/grpc-envelope.js"))
+}
+
+async fn cbor_reader_js() -> Response {
+    asset_response("application/javascript", include_str!("../web/cbor-reader.js"))
+}
+
+async fn cbor_editor_js() -> Response {
+    asset_response("application/javascript", include_str!("../web/cbor-editor.js"))
 }

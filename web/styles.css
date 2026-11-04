@@ -9489,3 +9489,34 @@ button.utility-button.replay-tab-add {
   background: var(--panel);
   border-radius: var(--radius-md);
 }
+
+/* Fields is an inspection overlay; hiding the editor preserves its draft/history. */
+.replay-fields-tab { background: transparent; border: 0; color: var(--text-soft); padding: 6px 9px; cursor: pointer; }
+.replay-fields-tab.active { color: var(--accent); box-shadow: inset 0 -2px var(--accent); }
+.replay-fields-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.protobuf-fields-open > .editor-panel,
+.protobuf-fields-open > .render-view,
+.protobuf-fields-open > .pane-footer { display: none !important; }
+.protobuf-fields-view { flex: 1; min-height: 0; overflow: auto; padding: 6px 12px; font-family: var(--mono); }
+.protobuf-fields-view[hidden] { display: none; }
+.protobuf-fields-view p { color: var(--text-soft); margin: 0 0 12px; }
+.protobuf-fields-view table { width: 100%; border-collapse: collapse; }
+.protobuf-fields-view th, .protobuf-fields-view td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.protobuf-fields-view button { margin: 12px 8px 0 0; }
+
+.protobuf-fields-summary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px; padding: 2px 8px 6px; color: var(--text-soft); }
+
+.protobuf-field-edit { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.protobuf-field-edit label { display: flex; flex-direction: column; gap: 4px; }
+.protobuf-field-edit input { min-width: 160px; max-width: 100%; font-family: var(--mono); }
+.protobuf-field-edit [role="alert"] { flex-basis: 100%; }
+.protobuf-fields-view td > button { float: right; margin: 0 0 0 8px; padding: 2px 6px; min-width: 32px; min-height: 24px; line-height: 18px; font: inherit; background: transparent; border: 1px solid var(--line); border-radius: 3px; color: var(--text-soft); cursor: pointer; }
+.protobuf-fields-view td > button:hover { color: var(--text); border-color: var(--text-soft); }
+.protobuf-field-edit button { margin: 0; min-height: 24px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; color: var(--text); font: inherit; padding: 3px 6px; cursor: pointer; }
+.protobuf-field-edit input { background: var(--panel); color: var(--text); border: 1px solid var(--line); padding: 3px 6px; }
+.protobuf-fields-view button:focus-visible, .protobuf-field-edit input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.protobuf-fields-summary select, .protobuf-fields-summary .grpc-message-picker { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 2px 6px; min-height: 24px; }
+.protobuf-fields-summary select:focus-visible, .protobuf-fields-summary .grpc-message-picker:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Preserve native hidden semantics even alongside tab display rules. */
+.replay-fields-tab[hidden] { display: none; }
