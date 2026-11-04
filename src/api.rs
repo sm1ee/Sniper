@@ -12918,6 +12918,8 @@ mod tests {
         expected.client_version = 0;
         expected.expected_active_session_id = None;
         expected.replay.tabs[0].custom_label = "Saved conversation".into();
+        // This route is sniper-cli's, so the person's tab is flagged as well.
+        expected.replay.tabs[0].agent_edited = true;
         assert_eq!(
             serde_json::to_value(&actual).unwrap(),
             serde_json::to_value(&expected).unwrap()

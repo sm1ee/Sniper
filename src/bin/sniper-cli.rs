@@ -13592,6 +13592,8 @@ async fn handle_replay(api: ApiClient, command: ReplayCommand) -> Result<()> {
                 tab.source_transaction_id,
                 &tab.target_scheme,
             );
+            // A tab a person opened shows them an agent changed it.
+            tab.agent_edited |= !tab.opened_by_agent;
             let snapshot = post_workspace_state(&api, &mut workspace, args.session_id).await?;
             let tab = find_replay_tab(&snapshot.replay, &args.tab_id)?;
             print_json_with_session(tab, workspace.session_id)
@@ -13650,6 +13652,7 @@ async fn handle_replay(api: ApiClient, command: ReplayCommand) -> Result<()> {
             }
             tab_mut.response_record = Some(record.clone());
             tab_mut.notice = replay_error.clone().unwrap_or_default();
+            tab_mut.agent_edited |= !tab_mut.opened_by_agent;
             let history_entry = ReplayHistoryEntryState {
                 request: Some(request),
                 request_text: tab_mut.request_text.clone(),
@@ -16580,6 +16583,8 @@ async fn open_replay_tab(
         target_port: normalized.port,
         history_entries: Vec::new(),
         history_index: None,
+        // The CLI is how agents drive Replay; the UI keeps their tabs apart.
+        opened_by_agent: true,
         ..Default::default()
     };
     // Refuse before pushing: past the cap the server rejects every

@@ -112,6 +112,13 @@ pub struct ReplayTabState {
     pub history_entries_complete: Option<bool>,
     #[serde(default)]
     pub pinned: bool,
+    /// An agent opened it (sniper-cli or the saved tab calls): Replay keeps it
+    /// in its own row until a person drags it out or pins it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub opened_by_agent: bool,
+    /// An agent changed a tab a person opened; Replay marks it until viewed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub agent_edited: bool,
     // WebSocket tab fields
     #[serde(default)]
     pub ws_scheme: String,
@@ -226,6 +233,21 @@ pub(crate) enum WorkspaceTransformError<E> {
     CommittedButUncertain(E),
 }
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+/// Replay's rows, top to bottom: pinned, an agent's, then the rest.
+fn replay_row(tab: &ReplayTabState) -> u8 {
+    if tab.pinned {
+        0
+    } else if tab.opened_by_agent {
+        1
+    } else {
+        2
+    }
+}
+
 /// Transform saved state only: draft text, embedded bodies and transaction
 /// references must never pass through the request parser or body hydrator here.
 pub(crate) fn transform_saved_replay_tab(
@@ -252,13 +274,18 @@ pub(crate) fn transform_saved_replay_tab(
         .to_string());
     }
     let mut next = current.clone();
+    // These calls are sniper-cli's, so an agent's: what it changes on a tab a
+    // person opened is marked for that person.
+    let marks_a_persons_tab = !source.opened_by_agent;
     match operation {
         SavedReplayTabOperation::SetLabel(label) => {
             next.replay.tabs[index].custom_label = label;
+            next.replay.tabs[index].agent_edited |= marks_a_persons_tab;
         }
         SavedReplayTabOperation::SetPinned(pinned) => {
             // This is desired-state assignment, never a toggle or reorder.
             next.replay.tabs[index].pinned = pinned;
+            next.replay.tabs[index].agent_edited |= marks_a_persons_tab;
         }
         SavedReplayTabOperation::Close => {
             // Legacy counters can lag the saved tabs. Closing the last/highest
@@ -271,7 +298,7 @@ pub(crate) fn transform_saved_replay_tab(
                 .fold(current.replay.tab_sequence, usize::max);
             if current.replay.active_tab_id.as_deref() == Some(tab_id) {
                 let mut visual: Vec<_> = current.replay.tabs.iter().collect();
-                visual.sort_by_key(|tab| !tab.pinned);
+                visual.sort_by_key(|tab| replay_row(tab));
                 let position = visual.iter().position(|tab| tab.id == tab_id).unwrap();
                 next.replay.active_tab_id = position
                     .checked_sub(1)
@@ -306,6 +333,8 @@ pub(crate) fn transform_saved_replay_tab(
             }
             duplicate.sequence = sequence;
             duplicate.pinned = false;
+            duplicate.opened_by_agent = true;
+            duplicate.agent_edited = false;
             next.replay.tabs.push(duplicate);
             next.replay.tab_sequence = sequence;
         }
@@ -952,6 +981,59 @@ mod saved_http_tab_tests {
     }
 
     #[test]
+    fn what_an_agent_does_to_a_tab_is_marked_for_the_person() {
+        let current = fixture();
+        // "middle" is a tab a person opened.
+        let labelled = transform_saved_replay_tab(
+            &current,
+            "middle",
+            SavedReplayTabOperation::SetLabel("Found".into()),
+        )
+        .unwrap();
+        assert!(labelled.replay.tabs[1].agent_edited);
+        let pinned = transform_saved_replay_tab(
+            &current,
+            "middle",
+            SavedReplayTabOperation::SetPinned(true),
+        )
+        .unwrap();
+        assert!(pinned.replay.tabs[1].agent_edited);
+        let duplicated =
+            transform_saved_replay_tab(&current, "middle", SavedReplayTabOperation::Duplicate)
+                .unwrap();
+        let copy = duplicated.replay.tabs.last().unwrap();
+        assert!(copy.opened_by_agent && !copy.agent_edited);
+        // An agent changing its own tab marks nothing.
+        let mut own = current.clone();
+        own.replay.tabs[1].opened_by_agent = true;
+        let relabelled = transform_saved_replay_tab(
+            &own,
+            "middle",
+            SavedReplayTabOperation::SetLabel("Again".into()),
+        )
+        .unwrap();
+        assert!(!relabelled.replay.tabs[1].agent_edited);
+        // Neither mark is written while unset.
+        assert!(value(&current)["replay"]["tabs"][1]
+            .get("opened_by_agent")
+            .is_none());
+        assert!(value(&current)["replay"]["tabs"][1]
+            .get("agent_edited")
+            .is_none());
+    }
+
+    #[test]
+    fn closing_the_active_tab_follows_the_rows_pinned_then_agent_then_the_rest() {
+        let mut current = fixture();
+        // Rows: pinned | last (an agent's) | first, middle.
+        current.replay.tabs[2].opened_by_agent = true;
+        current.replay.active_tab_id = Some("first".into());
+        let closed =
+            transform_saved_replay_tab(&current, "first", SavedReplayTabOperation::Close).unwrap();
+        assert_eq!(closed.replay.active_tab_id.as_deref(), Some("last"));
+    }
+
+    #[test]
     fn saved_http_duplicate_keeps_raw_saved_state_and_focus_with_fresh_unpinned_identity() {
         let current = fixture();
         let next =
@@ -967,6 +1049,7 @@ mod saved_http_tab_tests {
         duplicate.id = current.replay.tabs[1].id.clone();
         duplicate.sequence = current.replay.tabs[1].sequence;
         duplicate.pinned = current.replay.tabs[1].pinned;
+        duplicate.opened_by_agent = current.replay.tabs[1].opened_by_agent;
         assert_eq!(
             serde_json::to_value(duplicate).unwrap(),
             value(&current)["replay"]["tabs"][1]
@@ -1067,6 +1150,8 @@ mod saved_http_tab_tests {
                         }
                         _ => continue,
                     }
+                    // These operations are sniper-cli's, so the person's tab is flagged.
+                    expected["replay"]["tabs"][1]["agent_edited"] = json!(true);
                     let next =
                         transform_saved_replay_tab(&current, "middle", operation.clone()).unwrap();
                     let repeated =
