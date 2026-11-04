@@ -200,7 +200,8 @@ sniper-cli call capture.http.clear --input '{"session_id":"<session-uuid>"}' --y
 ### Existing intercept rules and saved labels
 
 - `capture.intercept_rule.update` patches a rule by UUID, and `capture.intercept_rule.set_enabled` sets its `enabled` boolean. Both accept `session_id`. Omitted fields keep their values. An empty `host_pattern` or `path_pattern` clears that matcher; `method_filter: []` or `--clear-methods` clears the methods, and repeated `--method` replaces them. A missing rule ID fails without creating a rule. Neither changes the runtime intercept switch or forwards queued traffic.
-- A label-only `replay.update` sets `custom_label` on a saved HTTP or WebSocket tab and changes nothing else. `label: ""` clears it; whitespace collapses and the limit is 80 characters. Request and target inputs stay HTTP-only. It sends no traffic.
+- A label-only `replay.update` sets `custom_label` on a saved HTTP or WebSocket tab and changes no other input. `label: ""` clears it; whitespace collapses and the limit is 80 characters. Request and target inputs stay HTTP-only. It sends no traffic.
+- The person sees what you do in Replay. Tabs you open or duplicate carry `opened_by_agent` and sit on a blue row of their own; a change you make to a tab they opened sets `agent_edited`, a blue dot until they select the tab.
 - Prefer an explicit session UUID, and reread the saved state after a conflict or uncertain response. They do not use `saved.v1` receipts.
 
 ## Common commands

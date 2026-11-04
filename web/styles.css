@@ -4731,20 +4731,37 @@ body.pane-resizing-y {
   display: contents;
 }
 
-.replay-tab-list-pinned {
+.replay-tab-list-pinned,
+.replay-tab-list-agent {
   flex: 1 0 100%;
   width: auto;
 }
 
-.replay-tab-list-pinned:empty {
+.replay-tab-list-pinned:empty,
+.replay-tab-list-agent:empty {
   display: none;
 }
 
-/* Every tab is pinned (see renderReplayTabs): the pinned row keeps the line
-   with + and the gear, and the empty tab row beside it is where a dragged tab
-   goes to be unpinned. */
-.replay-tab-rows.all-pinned > .replay-tab-list-pinned {
+/* No tab row to start the last line (see renderReplayTabs): the row above it
+   keeps the line with + and the gear, and the empty tab row beside it is where
+   a dragged tab goes to be unpinned, or taken from an agent. */
+.replay-tab-rows.all-pinned > .replay-tab-list-pinned,
+.replay-tab-rows.agent-last > .replay-tab-list-agent {
   flex: 0 1 auto;
+}
+
+/* While an agent's tab is dragged its row stays up, at the height it has with
+   a tab in it, so it can go back and nothing below it moves. */
+.replay-tab-rows.agent-drag > .replay-tab-list-agent {
+  display: flex;
+  min-width: 96px;
+  min-height: 32px;
+}
+
+/* The pin zone below opens at the head of the tabs' own line, so the agent's
+   row stays the line above it. */
+.replay-tab-rows.pin-zone > .replay-tab-list-agent {
+  order: -1;
 }
 
 /* While a tab is dragged the pinned row stays up as a drop target, even when
@@ -4785,7 +4802,8 @@ body.pane-resizing-y {
   padding-bottom: 0;
 }
 
-.replay-tab-rows.wrap > .replay-tab-list-pinned {
+.replay-tab-rows.wrap > .replay-tab-list-pinned,
+.replay-tab-rows.wrap > .replay-tab-list-agent {
   max-height: 78px;
 }
 
@@ -4935,6 +4953,37 @@ body.pane-resizing-y {
 .replay-tab.pinned.active .replay-tab-button,
 .replay-tab.pinned.active .replay-tab-close {
   color: #f0e0e0;
+}
+
+/* An agent's tabs (sniper-cli) are blue the way pinned ones are red. */
+.replay-tab.agent {
+  border-color: rgba(70, 130, 210, 0.5);
+  background: rgba(70, 130, 210, 0.1);
+}
+
+.replay-tab.agent .replay-tab-button,
+.replay-tab.agent .replay-tab-close {
+  color: var(--info);
+}
+
+.replay-tab.agent.active {
+  border-color: rgba(70, 130, 210, 0.8);
+  background: rgba(70, 130, 210, 0.22);
+}
+
+.replay-tab.agent.active .replay-tab-button,
+.replay-tab.agent.active .replay-tab-close {
+  color: var(--text);
+}
+
+/* A tab of the person's that an agent changed since they last looked at it. */
+.replay-tab-agent-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: rgb(70, 130, 210);
 }
 
 .replay-tab-add {
@@ -6949,7 +6998,7 @@ button.utility-button.replay-tab-add {
 
 @media (max-width: 1240px) {
   /* Stacked panes need more height; see the wrapped tab row cap above. */
-  .replay-tab-rows.wrap > .replay-tab-list:not(.replay-tab-list-pinned) {
+  .replay-tab-rows.wrap > .replay-tab-list:not(.replay-tab-list-pinned):not(.replay-tab-list-agent) {
     max-height: max(78px, calc(100vh - 805px));
   }
 

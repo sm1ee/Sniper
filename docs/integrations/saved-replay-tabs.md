@@ -37,11 +37,15 @@ conflict changes nothing. Only HTTP tabs are accepted, including legacy tabs
 with an empty or missing type.
 
 - Close removes the tab and its history. If it was active, its previous neighbor
-  (pinned tabs first) becomes active, else the next one, else none.
-- Duplicate copies the tab into a new unpinned tab with a fresh UUID and leaves
-  focus alone.
-- Set-pinned changes only the flag. Repeating a value does not toggle it, but
-  still advances the revision.
+  (pinned tabs first, then tabs an agent opened) becomes active, else the next
+  one, else none.
+- Duplicate copies the tab into a new unpinned tab with a fresh UUID, marked
+  `opened_by_agent`, and leaves focus alone.
+- Set-pinned changes the flag. Repeating a value does not toggle it, but still
+  advances the revision.
+
+These routes are an agent's, so a pin or label it sets on a tab the person
+opened also sets `agent_edited` on that tab.
 
 A success returns exactly `session_id`, the new `revision` and `active_tab_id`,
 plus `closed_tab_id` (close), `tab_id` and `pinned` (set-pinned), or
@@ -67,3 +71,8 @@ A clean desktop workspace follows a tab closed elsewhere. If the desktop has an
 unsaved or conflicting draft, it keeps the editor and stops autosaving until the
 conflict is resolved. Copy the draft before reloading. Pin changes made
 elsewhere merge even during an edit, unless the pin was also changed locally.
+
+Tabs an agent opened sit on a blue row under the pinned one. Dragging one to
+another row, or pinning it, makes it the person's; a person cannot drag a tab
+into that row. A tab the person opened that an agent changed shows a blue dot
+until they select it.
