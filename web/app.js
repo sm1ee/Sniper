@@ -26377,6 +26377,75 @@ function prettyJsonText(text) {
 
 // `jsonLines: false` is for an editor whose text is sent: spreading a JSON line
 // over several would change a line-delimited stream.
+// Where a tag ends: its first > outside an attribute's quotes.
+function markupTagEnd(source, open) {
+  let quote = "";
+  for (let at = open + 1; at < source.length; at += 1) {
+    const char = source[at];
+    if (quote) {
+      if (char === quote) quote = "";
+    } else if ((char === '"' || char === "'") && /=\s*$/.test(source.slice(Math.max(open, at - 8), at))) {
+      quote = char;
+    } else if (char === ">") {
+      return at + 1;
+    }
+  }
+  return source.length;
+}
+
+// One tag or text run per line, two spaces a level. Only the whitespace
+// between tags changes: comments, doctypes and attributes stay whole, script
+// and style keep their code, and pre and textarea their spaces.
+// ponytail: no implied end tags; an unclosed <p> or <li> leaves what follows
+// one level deeper.
+function prettyMarkup(source, { xml = false } = {}) {
+  const voidElements = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
+  const rawElements = new Set(["script", "style", "pre", "textarea"]);
+  const lines = [];
+  const lower = source.toLowerCase();
+  let depth = 0;
+  let at = 0;
+  const push = (text) => {
+    const trimmed = text.trim();
+    if (trimmed) lines.push(`${"  ".repeat(depth)}${trimmed}`);
+  };
+  while (at < source.length) {
+    let open = source.indexOf("<", at);
+    // A < that starts no tag, as in "a < b", is text.
+    while (open !== -1 && !/[A-Za-z/!?]/.test(source[open + 1] || "")) open = source.indexOf("<", open + 1);
+    if (open === -1) {
+      push(source.slice(at));
+      break;
+    }
+    push(source.slice(at, open));
+    const marker = source.startsWith("<!--", open) ? "-->" : source.startsWith("<![CDATA[", open) ? "]]>" : "";
+    const found = marker ? source.indexOf(marker, open + 4) : -1;
+    const end = marker ? (found === -1 ? source.length : found + marker.length) : markupTagEnd(source, open);
+    const tag = source.slice(open, end);
+    at = end;
+    if (tag.startsWith("</")) {
+      depth = Math.max(0, depth - 1);
+      push(tag);
+      continue;
+    }
+    push(tag);
+    const name = /^<([A-Za-z][\w:.-]*)/.exec(tag)?.[1].toLowerCase();
+    if (!name || tag.endsWith("/>") || (!xml && voidElements.has(name))) continue;
+    depth += 1;
+    if (xml || !rawElements.has(name)) continue;
+    const close = lower.indexOf(`</${name}`, end);
+    const stop = close === -1 ? source.length : close;
+    const inner = source.slice(end, stop);
+    if (name === "pre" || name === "textarea") {
+      if (inner) lines.push(inner);
+    } else {
+      push(inner);
+    }
+    at = stop;
+  }
+  return lines.join("\n");
+}
+
 function prettyFormat(text, message, { jsonLines = true } = {}) {
   if (!message || message.body_encoding === "base64") {
     return text;
@@ -26391,6 +26460,16 @@ function prettyFormat(text, message, { jsonLines = true } = {}) {
   const head = text.slice(0, boundary);
   const body = text.slice(boundary + divider.length);
   const contentType = (message.content_type || "").toLowerCase();
+  // HTML and XML are laid out by tag, as Burp's Pretty does; minified pages
+  // were one line. The editable request passes no type, so its body stays
+  // as captured.
+  const markup = contentType.includes("html") ? "html" : contentType.includes("xml") ? "xml" : "";
+  if (markup) {
+    const notice = "\n\n[preview truncated]";
+    const cut = body.endsWith(notice);
+    const source = cut ? body.slice(0, -notice.length) : body;
+    return `${head}${divider}${prettyMarkup(source, { xml: markup === "xml" })}${cut ? notice : ""}`;
+  }
   // Server-sent events, as streamed API replies send them, carry JSON after
   // "data:" on their own lines.
   const events = contentType.includes("text/event-stream");
