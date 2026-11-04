@@ -389,6 +389,17 @@
     const more = escape(known.map(advisorySentence).join("\n"));
     return `<span class="service-map-advisories" aria-label="${advisories(total)}" data-more="${more}" title="">${compact ? total : `${total} advisor${total === 1 ? "y" : "ies"}`}</span>${exploited ? `<span class="service-map-kev" data-more="${more}" title="">KEV</span>` : ""}`;
   }
+  // The advisories behind a badge, from GET /api/vulndata/lookup.
+  const ADVISORY_TOKEN = /^[\x21-\x7e]{1,100}$/;
+  function normalizeAdvisories(payload) {
+    return array(payload?.advisories).filter((row) => ADVISORY_TOKEN.test(row?.id) && /^[a-z]{1,10}$/.test(row.severity)
+      && ADVISORY_TOKEN.test(row.fixed_in) && typeof row.kev === "boolean")
+      .slice(0, 100).map((row) => ({ id: row.id, severity: row.severity, fixed_in: row.fixed_in, kev: row.kev,
+        epss: typeof row.epss === "number" && row.epss >= 0 && row.epss <= 1 ? row.epss : null,
+        summary: typeof row.summary === "string" ? row.summary.slice(0, 300) : "" }));
+  }
+  // The finding detail's own lines.
+  const advisoryListMarkup = (rows) => rows.map((row) => `<p>${escape(`${row.id} · ${row.severity}${row.kev ? " · KEV" : ""}${row.epss === null ? "" : ` · EPSS ${row.epss.toFixed(2)}`} · fixed in ${row.fixed_in}`)}</p>${row.summary ? `<p class="service-map-muted">${escape(row.summary)}</p>` : ""}`).join("");
   function productMatches(origin, productId = "", version = "") {
     if (!productId && !version) return true;
     return reportedProducts(origin).some((product) => (!productId || product.id === productId)
@@ -1704,6 +1715,7 @@
       bodyReferencesSource: null, relationLayers: Object.freeze([]), bodyOverlayNotice: "", apiDocs: null, apiDocsRequestId: 0,
       relationshipKind: "body", linkDeclarations: null, linkDeclarationsSource: null, linkDeclarationsError: "",
       parameters: null, parametersKey: null, parametersLoading: false, parametersError: "", parametersRequestId: 0, busyRetries: 0,
+      advisories: new Map(),
       htmlGenerators: null, htmlGeneratorsLoading: false, htmlGeneratorsError: "", htmlGeneratorsRequestId: 0, htmlGeneratorsSource: null,
       inactiveSessionId: null, historyVersion: 0, stale: false, anchorOrigin: null, modeNotice: "", zoomScale: 1,
       flowOrigin: null, flow: null, flowLoading: false, flowError: "", flowRequestId: 0,
@@ -3908,9 +3920,33 @@
       const total = groups.reduce((sum, [kind]) => sum + origin.unnamed[kind].length, 0);
       return `<details class="service-map-technologies service-map-unnamed"><summary data-service-focus="unnamed:summary">Unnamed signals · ${total}</summary>${groups.map(([kind, title]) => `<h4>${title}</h4><div class="service-map-evidence-list">${origin.unnamed[kind].map((signal) => `<button class="service-map-evidence-button" type="button" data-service-relation-origin="${escape(origin.origin)}" data-service-relation-evidence="${escape(signal.evidence[0] || "")}" data-service-focus="unnamed:${escape(JSON.stringify([kind, signal.value]))}" ${signal.evidence.length ? "" : "disabled"}><span><code>${escape(signal.value)}</code> · ${rowCount(signal.row_count)}</span><span>View source ›</span></button>`).join("")}</div>`).join("")}</details>`;
     }
+    // The map carries counts only; the advisories behind a badge are read
+    // when the inspector shows the library, before any Rescan raises findings.
+    const advisoryKey = (entry) => JSON.stringify([state.snapshot?.snapshot.generation, entry.product_id, entry.version]);
+    function advisoryListFor(entry) {
+      const loaded = state.advisories.get(advisoryKey(entry));
+      if (!loaded) Promise.resolve().then(() => loadAdvisories(entry));
+      if (!loaded || loaded === "loading") return `<p class="service-map-muted">Loading advisories…</p>`;
+      return Array.isArray(loaded) ? advisoryListMarkup(loaded) : `<p class="service-map-muted">Advisories unavailable.</p>`;
+    }
+    async function loadAdvisories(entry) {
+      const key = advisoryKey(entry);
+      if (state.advisories.has(key)) return;
+      if (state.advisories.size > 200) state.advisories.clear();
+      state.advisories.set(key, "loading");
+      let rows = null;
+      try {
+        const response = await request(`/api/vulndata/lookup?${new URLSearchParams({ product: entry.product_id, version: entry.version })}`);
+        if (response.ok) rows = normalizeAdvisories(await response.json());
+      } catch {
+        // Shown as unavailable below.
+      }
+      state.advisories.set(key, rows ?? "unavailable");
+      renderDetail();
+    }
     function frontTechnologiesMarkup(origin) {
       if (!origin.front_technologies?.length) return "";
-      return `<section class="service-map-technologies" aria-label="Front-end"><h4>Front-end</h4><ul class="service-map-references">${origin.front_technologies.map((item) => { const known = (origin.known_vulnerabilities || []).filter((entry) => entry.product_id === item.product_id && entry.version === item.version); return `<li><strong>${escape(item.name)}</strong>${item.version ? ` · ${escape(item.version)}` : ""}${advisoryBadges(known)}<p class="service-map-muted">${item.row_count} retained row${item.row_count === 1 ? "" : "s"} from ${escape(item.source_origin)}</p>${known.map((entry) => `<p class="service-map-muted">${escape(advisorySentence(entry))}</p>`).join("")}<div class="service-map-evidence-list">${item.evidence.map((id, index) => `<button class="service-map-evidence-button" type="button" data-service-relation-origin="${escape(item.source_origin)}" data-service-relation-evidence="${escape(id)}" data-service-focus="library:${escape(JSON.stringify([item.product_id, item.version, id]))}"><span>${escape(item.name)}${item.version ? ` ${escape(item.version)}` : ""}</span><span>View source${item.evidence.length > 1 ? ` ${index + 1}` : ""} ›</span></button>`).join("")}</div></li>`; }).join("")}</ul></section>`;
+      return `<section class="service-map-technologies" aria-label="Front-end"><h4>Front-end</h4><ul class="service-map-references">${origin.front_technologies.map((item) => { const known = (origin.known_vulnerabilities || []).filter((entry) => entry.product_id === item.product_id && entry.version === item.version); return `<li><strong>${escape(item.name)}</strong>${item.version ? ` · ${escape(item.version)}` : ""}${advisoryBadges(known)}<p class="service-map-muted">${item.row_count} retained row${item.row_count === 1 ? "" : "s"} from ${escape(item.source_origin)}</p>${known.map((entry) => `<p class="service-map-muted">${escape(advisorySentence(entry))}</p>${advisoryListFor(entry)}`).join("")}<div class="service-map-evidence-list">${item.evidence.map((id, index) => `<button class="service-map-evidence-button" type="button" data-service-relation-origin="${escape(item.source_origin)}" data-service-relation-evidence="${escape(id)}" data-service-focus="library:${escape(JSON.stringify([item.product_id, item.version, id]))}"><span>${escape(item.name)}${item.version ? ` ${escape(item.version)}` : ""}</span><span>View source${item.evidence.length > 1 ? ` ${index + 1}` : ""} ›</span></button>`).join("")}</div></li>`; }).join("")}</ul></section>`;
     }
     function evidenceMarkup(origin) {
       const items = evidenceItems(origin), row = state.evidence, endpoint = state.endpointIndex === null ? null : origin.endpoints[state.endpointIndex];
@@ -4460,5 +4496,5 @@
       getState: () => state,
     };
   }
-  root.SniperServiceMap = { createController, normalizePacket, technologyLiteral, normalizeFlow, flowLayout, flowMarkup, flowHeadsOffset, flowMermaid, EXPOSURE_LABELS, AUTH_KINDS, relationshipOrder, siteKey, groupSites, originRole, originRoles, reportedProducts, productMatches, productSummaryMarkup, normalizeSnapshot, normalizeRowTechnologies, normalizeBodyReferences, normalizeHtmlGenerators, normalizeLinkDeclarations, normalizeSocketPeer, normalizePeerMatches, usableSocketPeer, peerGraphLayout, PEER_MATCH_LIMITS, LINK_DECLARATION_LIMITS, BODY_REFERENCE_LIMITS, HTML_GENERATOR_LIMITS, MAX_RELATION_LAYERS, stableOrder, graphLayout, graphGeometry, safeOrigin, safePath, MAX_CARDS, MAX_EDGES, MAX_REFERENCE_CARDS, GRAPH_GEOMETRY, ZOOM_LIMITS };
+  root.SniperServiceMap = { createController, normalizePacket, technologyLiteral, normalizeFlow, flowLayout, flowMarkup, flowHeadsOffset, flowMermaid, EXPOSURE_LABELS, AUTH_KINDS, relationshipOrder, siteKey, groupSites, originRole, originRoles, reportedProducts, productMatches, productSummaryMarkup, normalizeAdvisories, advisoryListMarkup, normalizeSnapshot, normalizeRowTechnologies, normalizeBodyReferences, normalizeHtmlGenerators, normalizeLinkDeclarations, normalizeSocketPeer, normalizePeerMatches, usableSocketPeer, peerGraphLayout, PEER_MATCH_LIMITS, LINK_DECLARATION_LIMITS, BODY_REFERENCE_LIMITS, HTML_GENERATOR_LIMITS, MAX_RELATION_LAYERS, stableOrder, graphLayout, graphGeometry, safeOrigin, safePath, MAX_CARDS, MAX_EDGES, MAX_REFERENCE_CARDS, GRAPH_GEOMETRY, ZOOM_LIMITS };
 })(typeof window === "undefined" ? globalThis : window);

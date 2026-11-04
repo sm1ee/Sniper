@@ -63,6 +63,21 @@ test("the inspector's badges sit on the product line, KEV in the danger colour",
   assert.match(css, /\.service-map-references \.service-map-kev \{[^}]*color: var\(--danger\);/);
 });
 
+test("the inspector lists a version's advisories as the finding does, escaped", () => {
+  const rows = map.normalizeAdvisories({ product: "jquery", version: "3.4.1", advisories: [
+    { id: "CVE-2020-11023", cves: ["CVE-2020-11023"], severity: "medium", summary: "<img src=x onerror=alert(1)>", fixed_in: "3.5.0", urls: [], kev: true, epss: 0.94 },
+    { id: "retire:angularjs:1.6.3", cves: [], severity: "low", fixed_in: "1.6.3", urls: [], kev: false },
+    { id: "has space", severity: "medium", fixed_in: "3.5.0", urls: [], kev: false },
+  ] });
+  assert.equal(rows.length, 2, "an id with a space is not one the data writes");
+  const markup = map.advisoryListMarkup(rows);
+  assert.match(markup, /CVE-2020-11023 · medium · KEV · EPSS 0\.94 · fixed in 3\.5\.0/);
+  assert.match(markup, /retire:angularjs:1\.6\.3 · low · fixed in 1\.6\.3/);
+  assert.match(markup, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(markup, /<img/);
+  assert.deepEqual(plain(map.normalizeAdvisories({ advisories: "nope" })), []);
+});
+
 test("a name in the data is escaped, never markup", () => {
   const markup = map.productSummaryMarkup(origin([{ ...entry, name: "<img src=x onerror=alert(1)>" }]));
   assert.doesNotMatch(markup, /<img/);
