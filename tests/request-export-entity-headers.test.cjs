@@ -7,7 +7,7 @@ const { loadFunctions } = require("./frontend-test-helpers.cjs");
 const toasts = [];
 const c = loadFunctions([
   "recordToFormat", "selectedRecordToFormat", "historyRequestToFormat", "historyRequestExportBlockedReason",
-  "buildRawRequest", "buildRawRequestHead", "renderBody", "mergeHeaders", "normalizedHeaders", "headerNameEquals",
+  "buildRawRequest", "buildRawRequestHead", "renderBody", "safeDecodeBase64", "mergeHeaders", "normalizedHeaders", "headerNameEquals",
   "parseRequestForExport", "parseHeaderLineForExport", "normalizeReplayHttpVersion",
   "exportHeaderValue", "exportableHeaderCandidates", "buildUrlFromTarget", "normalizeRepeaterTargetInput",
   "authorityToTargetState", "stripIpv6Brackets", "normalizePortValue", "defaultHttpPortForScheme",

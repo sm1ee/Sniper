@@ -60,7 +60,7 @@ function fixture() {
     'snapshotFuzzerWorkspace', 'workspaceSnapshotValueChanged', 'cloneEditableRequest', 'normalizeFuzzerTargetOverride',
     'clearFuzzerResponsePane', 'syncFuzzerResponsePreview', 'syncFuzzerDetailTabs', 'renderFuzzerDetailPanes',
     'buildRawRequest', 'buildRawResponse', 'buildRawRequestHead', 'buildRawResponseHead', 'normalizedHeaders',
-    'mergeHeaders', 'headerNameEquals', 'renderBody', 'binaryBodyPlaceholder', 'prettyFormat', 'prettyJsonText',
+    'mergeHeaders', 'headerNameEquals', 'renderBody', 'safeDecodeBase64', 'binaryBodyPlaceholder', 'prettyFormat', 'prettyJsonText',
     'confirmFuzzerReset', 'resetFuzzer', 'fuzzerRequestTextForAction', 'buildEditableRawRequest',
     'invalidateFuzzerRun', 'updateFuzzerRequestText', 'markFuzzerDraftChanged',
     'requireOkResponse', 'readApiErrorMessage', 'retireFindingActionProgress', 'invalidateFindingNavigation', 'setActiveTool', 'renderToolPanels',

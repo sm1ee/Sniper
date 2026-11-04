@@ -52,7 +52,7 @@ function fixture() {
     "cancelHistoryDetailLoading", "scheduleHistoryDetailLoading", "renderDetail", "renderEmptyDetail", "renderLoadingDetail",
     "renderMessagePanes", "renderViewTabs", "getHistoryPacketViewer", "createPacketViewerController", "normalizedHeaders", "renderSummaryRows", "renderHeaderList", "renderProtocolStrip",
     "inferProtocolState", "formatTimestamp", "formatSize", "escapeHtml", "buildMessagePresentation", "buildRawRequest",
-    "buildRawRequestHead", "buildRawResponse", "buildRawResponseHead", "renderBody", "mergeHeaders", "headerNameEquals",
+    "buildRawRequestHead", "buildRawResponse", "buildRawResponseHead", "renderBody", "safeDecodeBase64", "mergeHeaders", "headerNameEquals",
     "clearHttpHistorySelectionPreview", "clearHttpHistoryLoadedRowsForPendingQuery", "adjustHistoryPagingAfterLocalRemoval",
     "refreshHistoryPagingCursorFromItems", "isKnownCount", "canUseSequenceCursorForHistoryPaging",
     "toggleSort", "defaultSortDirection", "mergeHistoryItems", "trimHistoryCache", "reconcileHistorySelectionAfterTrim",

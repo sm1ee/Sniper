@@ -26214,8 +26214,11 @@ function renderBody(message) {
   }
 
   let body = message.body_preview || "";
+  // A binary body shows its bytes, one character each, as Burp's Raw tab
+  // does; a stand-in said nothing about a PDF or a protobuf. The stand-in
+  // stays for a preview that is not Base64 after all.
   if (body && message.body_encoding === "base64") {
-    body = binaryBodyPlaceholder(message);
+    body = safeDecodeBase64(body, binaryBodyPlaceholder(message));
   }
 
   return message.preview_truncated

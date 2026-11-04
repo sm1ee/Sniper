@@ -6,7 +6,7 @@ const state = { messageViews: { request: "hex", response: "hex" } };
 const c = loadFunctions([
   "buildMessagePresentation", "buildMessageHexPresentation", "buildRawRequest", "buildRawResponse",
   "buildRawRequestHead", "buildRawResponseHead", "normalizedHeaders", "mergeHeaders", "headerNameEquals",
-  "renderBody", "binaryBodyPlaceholder", "formatSize", "toHexDumpFromHttpParts", "toHexDump",
+  "renderBody", "safeDecodeBase64", "binaryBodyPlaceholder", "formatSize", "toHexDumpFromHttpParts", "toHexDump",
   "toHexDumpFromBytes", "messageBodyBytes", "base64ToBytes", "renderHexHtml", "wrapCodeLine", "escapeHtml",
 ], { state, TextEncoder, Uint8Array, atob });
 function record(target, preview, truncated) {

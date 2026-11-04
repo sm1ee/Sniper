@@ -44,7 +44,7 @@ function fixture(message = {}, mode = "hex", legacy = false) {
   const c = loadFunctions([
     "renderReplay", "renderReplayResponseOnly", "renderReplayViewContent", "renderReplayResponseView", "renderReplayEmptyResponse", "setReplayTargetInputValidity",
     "buildRawResponse", "buildRawResponseHead", "normalizedHeaders", "headerNameEquals",
-    "renderBody", "binaryBodyPlaceholder", "formatSize", "formatStatus", "prettyFormat", "prettyJsonText", "replayRequestEditorText",
+    "renderBody", "safeDecodeBase64", "binaryBodyPlaceholder", "formatSize", "formatStatus", "prettyFormat", "prettyJsonText", "replayRequestEditorText",
     "toHexDump", "buildMessageHexPresentation", "toHexDumpFromHttpParts", "messageBodyBytes",
     "base64ToBytes", "toHexDumpFromBytes", "renderCodeHtml", "renderHexHtml", "wrapCodeLine", "escapeHtml",
   ], {
@@ -136,10 +136,10 @@ for (const [controller, run] of Object.entries(controllers)) {
         assert.equal(JSON.stringify(f.record), original);
       });
 
-      test(`${controller}: ${mode} keeps the binary placeholder (truncated=${truncated})`, () => {
+      test(`${controller}: ${mode} shows a binary body's bytes, one character each (truncated=${truncated})`, () => {
         const f = fixture({ body_preview: "AAEC/w==", body_encoding: "base64", preview_truncated: truncated }, mode);
         run(f);
-        assert.equal(f.shown(), `${HEAD}\n\n[application/octet-stream, 4 B, base64 preview omitted]${truncated ? "\n\n[preview truncated]" : ""}`);
+        assert.equal(f.shown(), `${HEAD}\n\n\u0000\u0001\u0002\u00ff${truncated ? "\n\n[preview truncated]" : ""}`);
         assert.equal(f.searched(), f.shown());
       });
     }
@@ -186,7 +186,7 @@ test("switching Replay response modes and records does not leak old bytes or not
     f.state.replayMessageViews.response = mode;
     f.c.renderReplayViewContent("response");
     if (mode === "hex") assert.deepEqual(dumpBytes(f.shown()), expectedBytes(f.record.response));
-    else assert.equal(f.shown(), `${HEAD}\n\n[application/octet-stream, 4 B, base64 preview omitted]\n\n[preview truncated]`);
+    else assert.equal(f.shown(), `${HEAD}\n\n\u0000\u0001\u0002\u00ff\n\n[preview truncated]`);
     assert.equal(f.searched(), f.shown());
   }
   assert.equal(f.destroyed(), 2);

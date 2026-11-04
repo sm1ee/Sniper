@@ -4,10 +4,10 @@ const test = require("node:test");
 const { loadFunctions } = require("./frontend-test-helpers.cjs");
 
 const functions = [
-  "findingsBodyPlaceholder", "renderBody", "binaryBodyPlaceholder", "formatSize",
+  "findingsBodyPlaceholder", "renderBody", "safeDecodeBase64", "binaryBodyPlaceholder", "formatSize",
   "buildFindingsRawMessage", "normalizedHeaders", "mergeHeaders", "headerNameEquals",
 ];
-const c = loadFunctions(functions);
+const c = loadFunctions(functions, { atob });
 
 function savedRecord(side, message) {
   return {
@@ -28,7 +28,7 @@ const previews = [
   ["empty text", { body_preview: "", body_encoding: "utf8" }, ""],
   ["empty binary", { body_preview: "", body_encoding: "base64" }, ""],
   ["omitted preview", { body_encoding: "utf8" }, ""],
-  ["binary", { body_preview: "AAEC", body_encoding: "base64" }, "[binary, 128 B, base64 preview omitted]"],
+  ["binary", { body_preview: "AAEC", body_encoding: "base64" }, "\u0000\u0001\u0002"],
   ["text", { body_preview: "café 😀\n  ", body_encoding: "utf8" }, "café 😀\n  "],
 ];
 
@@ -71,7 +71,7 @@ for (const useCodeMirror of [false, true]) {
       findingsReqCM: useCodeMirror ? element() : null, findingsResCM: useCodeMirror ? element() : null,
     };
     const rendered = [];
-    const view = loadFunctions([...functions, "showFindingDetail"], {
+    const view = loadFunctions([...functions, "showFindingDetail"], { atob,
       els, setFindingDetailActionsEnabled: noop, severityClass: () => "info", severityLabel: () => "Info",
       renderFindingDescription: noop, fallbackFindingLocationFromPaneResults: noop, scrollFindingLocationIntoView: noop,
       updateFindingsCodePaneCM(key, container, text) { rendered.push(text); },
@@ -83,7 +83,12 @@ for (const useCodeMirror of [false, true]) {
     view.showFindingDetail({ record_id: "synthetic-record", severity: "info", category: "saved", title: "Saved entry" }, record);
     assert.equal(rendered.length, 2);
     assert.equal(rendered[0], `${expectedHead("request")}\n\n[preview truncated]`);
-    assert.equal(rendered[1], "HTTP/2 200\n\n[binary, 128 B, base64 preview omitted]\n\n[preview truncated]");
+    assert.equal(rendered[1], "HTTP/2 200\n\n\u0000\u0001\u0002\n\n[preview truncated]");
     assert.equal(JSON.stringify(record), original);
   });
 }
+
+test("a preview that is not Base64 after all keeps the stand-in", () => {
+  assert.equal(c.renderBody({ body_preview: "not base64!", body_encoding: "base64", body_size: 11, content_type: "application/pdf" }),
+    "[application/pdf, 11 B, base64 preview omitted]");
+});

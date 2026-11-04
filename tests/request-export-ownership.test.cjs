@@ -35,7 +35,7 @@ const functions = [
   "createTransactionRecordMenuTarget", "loadMenuTargetRecord", "loadTransactionRecordById", "currentSessionId",
   "sessionQueryPath", "transactionPath", "openContextMenu", "closeContextMenu", "positionContextMenu", "contextMenuSessionIsCurrent",
   "recordToFormat", "historyRequestExportBlockedReason", "buildRawRequest", "buildRawRequestHead", "buildRawResponse", "buildRawResponseHead",
-  "renderBody", "mergeHeaders", "normalizedHeaders", "headerNameEquals", "normalizeReplayHttpVersion",
+  "renderBody", "safeDecodeBase64", "mergeHeaders", "normalizedHeaders", "headerNameEquals", "normalizeReplayHttpVersion",
   "parseRequestForExport", "parseHeaderLineForExport", "exportHeaderValue", "exportableHeaderCandidates",
   "buildUrlFromTarget", "normalizeRepeaterTargetInput", "authorityToTargetState", "stripIpv6Brackets",
   "normalizePortValue", "defaultHttpPortForScheme", "isDefaultPortForScheme", "joinAuthority",

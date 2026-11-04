@@ -4,7 +4,7 @@ const test = require("node:test");
 const { loadFunctions } = require("./frontend-test-helpers.cjs");
 const state = { messageViews: { request: "raw", response: "raw" } };
 const c = loadFunctions([
-  "renderBody", "binaryBodyPlaceholder", "formatSize", "buildMessagePresentation", "buildMessageHexPresentation",
+  "renderBody", "safeDecodeBase64", "binaryBodyPlaceholder", "formatSize", "buildMessagePresentation", "buildMessageHexPresentation",
   "buildRawRequest", "buildRawResponse", "buildRawRequestHead", "buildRawResponseHead", "normalizedHeaders",
   "mergeHeaders", "headerNameEquals", "prettyFormat", "prettyJsonText", "toHexDumpFromHttpParts", "toHexDump",
   "toHexDumpFromBytes", "messageBodyBytes", "base64ToBytes",
@@ -25,7 +25,7 @@ for (const target of ["request", "response"]) {
         state.messageViews[target] = mode;
         const view = c.buildMessagePresentation(target, saved);
         const head = target === "request" ? c.buildRawRequestHead(saved) : c.buildRawResponseHead(saved);
-        const body = !preview ? "" : encoding === "base64" ? c.binaryBodyPlaceholder(saved[target]) : preview;
+        const body = !preview ? "" : encoding === "base64" ? atob(preview) : preview;
         assert.equal(view, `${head}\n\n${body}${body ? "\n\n" : ""}[preview truncated]`);
         assert.equal(JSON.stringify(saved), original);
       });
@@ -33,11 +33,11 @@ for (const target of ["request", "response"]) {
   }
 }
 
-test("complete empty, missing, text, and binary body presentations keep their previous behavior", () => {
+test("complete empty, missing and text bodies keep their presentation; binary shows its bytes", () => {
   for (const body of [null, undefined, {}, { body_preview: "", preview_truncated: false }]) assert.equal(c.renderBody(body), "");
   assert.equal(c.renderBody({ body_preview: "café 😀", body_encoding: "utf8", preview_truncated: false }), "café 😀");
   const binary = { body_preview: "AAEC", body_encoding: "base64", preview_truncated: false, body_size: 3 };
-  assert.equal(c.renderBody(binary), c.binaryBodyPlaceholder(binary));
+  assert.equal(c.renderBody(binary), "\u0000\u0001\u0002");
 });
 
 test("a missing preview with explicit truncation still displays its metadata notice", () => {
