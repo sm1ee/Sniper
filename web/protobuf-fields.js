@@ -103,9 +103,17 @@
     if (["application/protobuf", "application/x-protobuf"].includes(types[0])) return "protobuf";
     return "";
   }
+  // Hex opens the way to Fields only for a body whose type does not say what
+  // it is; a PDF, an image or JSON says, and Fields offered for one was noise.
+  function untypedBody(message) {
+    if (!(message?.body ?? message?.body_preview)) return false;
+    const types = (message.headers || []).filter(h => String(h.name).toLowerCase() === "content-type")
+      .map(h => String(h.value).split(";")[0].trim().toLowerCase());
+    return types.every(type => ["", "application/octet-stream", "binary/octet-stream"].includes(type));
+  }
   function showFieldsButton(source, target, message, open = false) {
     if (!source.owner || source.owner.type === "websocket") return false;
-    return Boolean(open || formatFromMime(message) || source.views?.[target] === "hex");
+    return Boolean(open || formatFromMime(message) || (source.views?.[target] === "hex" && untypedBody(message)));
   }
   function editBlockReason(message, format = "protobuf") {
     if (!message || message.preview_truncated) return "A complete body is required.";

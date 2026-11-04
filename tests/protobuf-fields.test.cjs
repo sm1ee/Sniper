@@ -237,7 +237,12 @@ test('Fields visibility follows each pane MIME, with keyboard-native Hex fallbac
   const views={request:'raw',response:'pretty'};
   fields.init(()=>({owner,views,request:()=>request,response:()=>response}));
   assert.equal(req.hidden,true); assert.equal(res.hidden,false);
-  views.request='hex';fields.sync();assert.equal(req.hidden,false);
+  // Hex opens the way only for a body whose type does not say what it is:
+  // JSON or a PDF says, so Fields stays away.
+  views.request='hex';fields.sync();assert.equal(req.hidden,true);
+  request=msg('application/pdf');fields.sync();assert.equal(req.hidden,true);
+  request={headers:[],body_encoding:'base64',body:''};fields.sync();assert.equal(req.hidden,true,'no body, nothing to read');
+  request=msg('application/octet-stream');fields.sync();assert.equal(req.hidden,false);
   req.click();assert.equal(reqCard.children[0].hidden,false);assert.equal(req.hidden,false);
   // Raw/Pretty handlers close first, then sync with the new view.
   fields.close('request');views.request='raw';fields.sync();assert.equal(req.hidden,true);
