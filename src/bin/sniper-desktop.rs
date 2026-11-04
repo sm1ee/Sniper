@@ -29,7 +29,7 @@ use uuid::Uuid;
 use wry::WebViewBuilderExtUnix;
 use wry::{WebView, WebViewBuilder};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum DesktopUserEvent {
     ShutdownSignal,
     /// A trackpad scroll gesture began or ended. `wheel` events carry no phase,
@@ -49,6 +49,13 @@ enum DesktopUserEvent {
     },
     WebviewCloseFlushTimedOut {
         generation: u64,
+    },
+    /// A download from the page ended; the web view shows no download bar,
+    /// so the page says where it went.
+    DownloadFinished {
+        file: String,
+        folder: String,
+        ok: bool,
     },
 }
 
@@ -356,6 +363,10 @@ fn run_desktop() -> Result<()> {
     let ui_url = format!("http://{}/", config.ui_addr);
     let ui_origin = format!("http://{}", config.ui_addr);
     let ipc_event_proxy = event_loop.create_proxy();
+    let download_event_proxy = event_loop.create_proxy();
+    let download_home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
     let ui_task = runtime.spawn(async move {
         if let Err(error) = api::serve_api(ui_listener, ui_state).await {
             error!(?error, "ui task stopped");
@@ -385,6 +396,35 @@ fn run_desktop() -> Result<()> {
         .with_new_window_req_handler({
             let ui_origin = ui_origin.clone();
             move |url| handle_new_window_request(&url, &ui_origin)
+        })
+        // Render's Download saves a body the view cannot draw. Without these,
+        // WKWebView cancels every download.
+        .with_download_started_handler(move |_url, path| {
+            match desktop_download_path(path, download_home.as_deref()) {
+                Some(target) => {
+                    *path = target;
+                    true
+                }
+                None => false,
+            }
+        })
+        .with_download_completed_handler(move |_url, path, ok| {
+            let name = |part: Option<&std::ffi::OsStr>| {
+                part.map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            };
+            let event = DesktopUserEvent::DownloadFinished {
+                file: name(path.as_deref().and_then(Path::file_name)),
+                folder: name(
+                    path.as_deref()
+                        .and_then(Path::parent)
+                        .and_then(Path::file_name),
+                ),
+                ok,
+            };
+            if let Err(error) = download_event_proxy.send_event(event) {
+                warn!(?error, "failed to tell the page a download finished");
+            }
         })
         .with_ipc_handler(move |request| {
             let Some(event) = desktop_user_event_from_ipc(request.body()) else {
@@ -553,6 +593,12 @@ fn run_desktop() -> Result<()> {
                 } else {
                     "window.__sniperScrollGesture && window.__sniperScrollGesture('began')"
                 });
+            }
+            Event::UserEvent(DesktopUserEvent::DownloadFinished { file, folder, ok }) => {
+                let detail = serde_json::json!({ "file": file, "folder": folder, "ok": ok });
+                let _ = webview.evaluate_script(&format!(
+                    "window.__sniperDownloadFinished && window.__sniperDownloadFinished({detail})"
+                ));
             }
             #[cfg(target_os = "macos")]
             Event::UserEvent(DesktopUserEvent::CheckForUpdates) => {
@@ -1223,6 +1269,43 @@ fn is_blocked_desktop_navigation_scheme(url: &str) -> bool {
     matches!(parsed.scheme(), "data" | "javascript" | "file")
 }
 
+/// Where a download from the page (Render's Download) is saved. WebKit
+/// suggests a bare file name, which goes to the user's Downloads under its
+/// last component only, numbered if taken; WebView2 suggests a full path in
+/// the download folder, which stands. No home, no download.
+fn desktop_download_path(suggested: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    if suggested.is_absolute() {
+        return Some(suggested.to_path_buf());
+    }
+    let home = home?;
+    let downloads = home.join("Downloads");
+    let dir = if downloads.is_dir() {
+        downloads
+    } else {
+        home.to_path_buf()
+    };
+    let name = suggested
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("download");
+    let first = dir.join(name);
+    if !first.exists() {
+        return Some(first);
+    }
+    let (stem, extension) = match name.rfind('.') {
+        Some(at) if at > 0 => name.split_at(at),
+        _ => (name, ""),
+    };
+    // ponytail: past 999 copies the last one is overwritten.
+    Some(
+        (1..1000)
+            .map(|n| dir.join(format!("{stem} ({n}){extension}")))
+            .find(|path| !path.exists())
+            .unwrap_or(first),
+    )
+}
+
 fn is_same_origin(url: &str, expected_origin: &str) -> bool {
     let (Ok(url), Ok(expected)) = (Url::parse(url), Url::parse(expected_origin)) else {
         return false;
@@ -1242,14 +1325,15 @@ mod tests {
     use super::request_existing_desktop_focus_with;
     use super::{
         begin_desktop_teardown, block_desktop_shutdown, combine_desktop_persist_results,
-        complete_desktop_shutdown, desktop_close_flush_script, desktop_user_event_from_ipc,
-        finish_desktop_teardown, handle_navigation_request, handle_new_window_request,
-        is_blocked_desktop_navigation_scheme, is_same_origin, normalize_empty_data_dir_env,
-        persist_desktop_session_state, process_path_points_to_desktop_bundle,
-        should_install_cli_path_on_launch, should_install_skills_on_launch,
-        should_request_existing_desktop_focus, AppConfig, AppState, DesktopUserEvent,
-        SNIPER_DATA_DIR_ENV,
+        complete_desktop_shutdown, desktop_close_flush_script, desktop_download_path,
+        desktop_user_event_from_ipc, finish_desktop_teardown, handle_navigation_request,
+        handle_new_window_request, is_blocked_desktop_navigation_scheme, is_same_origin,
+        normalize_empty_data_dir_env, persist_desktop_session_state,
+        process_path_points_to_desktop_bundle, should_install_cli_path_on_launch,
+        should_install_skills_on_launch, should_request_existing_desktop_focus, AppConfig,
+        AppState, DesktopUserEvent, SNIPER_DATA_DIR_ENV,
     };
+    use std::path::Path;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -1604,6 +1688,27 @@ mod tests {
             "http://[::1]:3000/dashboard",
             "http://[::1]:3000",
         ));
+    }
+
+    #[test]
+    fn a_download_lands_in_downloads_under_its_own_name_only() {
+        let home = std::env::temp_dir().join(format!("sniper-download-{}", uuid::Uuid::new_v4()));
+        let downloads = home.join("Downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        let place = |suggested: &str| desktop_download_path(Path::new(suggested), Some(&home));
+        assert_eq!(place("report.pdf"), Some(downloads.join("report.pdf")));
+        std::fs::write(downloads.join("report.pdf"), b"").unwrap();
+        assert_eq!(place("report.pdf"), Some(downloads.join("report (1).pdf")));
+        assert_eq!(place("../../evil.sh"), Some(downloads.join("evil.sh")));
+        assert_eq!(place(""), Some(downloads.join("download")));
+        // WebView2 suggests a full path in the user's download folder.
+        let absolute = home.join("elsewhere").join("x.bin");
+        assert_eq!(
+            desktop_download_path(&absolute, Some(&home)),
+            Some(absolute.clone())
+        );
+        assert_eq!(desktop_download_path(Path::new("x.bin"), None), None);
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

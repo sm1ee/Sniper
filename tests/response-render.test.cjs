@@ -34,6 +34,29 @@ test("each reason for not rendering is explained", () => {
   assert.match(responseRenderModel(html({ body_preview: "" })).note, /no body/);
 });
 
+test("a body Render cannot draw, such as a PDF, is offered as a download instead", () => {
+  const pdf = { content_type: "application/pdf", body_encoding: "base64", body_preview: "JVBERi0xLjQ=" };
+  assert.equal(responseRenderModel(pdf).download, true);
+  assert.match(responseRenderModel(pdf).note, /application\/pdf/);
+  assert.equal(responseRenderModel(html({ body_encoding: "base64" })).download, true);
+  assert.equal(responseRenderModel({ ...pdf, body_preview: "" }).download, undefined, "nothing to save");
+  assert.equal(responseRenderModel(html()).download, undefined);
+});
+
+test("a download is named from Content-Disposition, then the URL, and never names a path", () => {
+  const { downloadFileName } = loadFunctions(["downloadFileName", "normalizedHeaders", "headerNameEquals"], { URL });
+  const response = (disposition, type = "application/pdf") => ({
+    content_type: type, headers: disposition ? [{ name: "Content-Disposition", value: disposition }] : [],
+  });
+  assert.equal(downloadFileName(response('attachment; filename="Q3 report.pdf"'), "https://www.example.com/files/x"), "Q3_report.pdf");
+  assert.equal(downloadFileName(response("attachment; filename*=UTF-8''%EB%B3%B4%EA%B3%A0%EC%84%9C.pdf"), ""), "보고서.pdf");
+  assert.equal(downloadFileName(response(""), "https://www.example.com/files/report.pdf?v=2"), "report.pdf");
+  assert.equal(downloadFileName(response('attachment; filename="../../etc/passwd"'), ""), "passwd");
+  assert.equal(downloadFileName(response("", "application/pdf"), "https://www.example.com/"), "response.pdf");
+  assert.equal(downloadFileName(response("", "application/octet-stream"), "https://www.example.com/"), "response.bin");
+  assert.equal(downloadFileName(response('attachment; filename=".hidden"'), ""), "hidden");
+});
+
 test("an image response is shown, as Burp's Render tab does", () => {
   const png = responseRenderModel({ content_type: "image/png", body_encoding: "base64", body_preview: "iVBORw0KGgo=", preview_truncated: true });
   assert.deepEqual(png, { image: "data:image/png;base64,iVBORw0KGgo=", truncated: true });

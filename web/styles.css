@@ -3140,6 +3140,11 @@ body.pane-resizing-y {
   line-height: 1.6;
 }
 
+.render-download {
+  align-self: flex-start;
+  margin: 0 14px 14px;
+}
+
 .render-banner {
   margin: 0;
   padding: 6px 14px;

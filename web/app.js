@@ -3292,6 +3292,11 @@ async function checkForUpdatesNow() {
 }
 
 window.__sniperCheckForUpdates = checkForUpdatesNow;
+// The desktop app's web view shows no download bar; the app reports here.
+window.__sniperDownloadFinished = (result) => {
+  if (result?.ok) showToast(`Saved ${result.file} to ${result.folder || "Downloads"}`);
+  else showToast("The download did not finish.", "error");
+};
 
 // The steps the server reports that the button reacts to. It sends others meant
 // for logs, such as where the installer's log file is; those are ignored here, so an
@@ -13787,6 +13792,14 @@ function renderResponsePreview({ view, editor, search }, active, subject) {
       note.textContent = model.note;
       children.push(note);
     }
+    if (model.download) {
+      const save = document.createElement("button");
+      save.type = "button";
+      save.className = "secondary-action render-download";
+      save.textContent = "Download";
+      save.addEventListener("click", () => downloadResponseBody(response, subject.url));
+      children.push(save);
+    }
   } else if (model.image) {
     // An <img> never runs script, SVG included, so an image needs no frame.
     const image = document.createElement("img");
@@ -13842,8 +13855,11 @@ function responseRenderModel(response) {
   const mime = String(response.content_type || "").split(";")[0].trim().toLowerCase();
   const html = mime === "text/html" || mime === "application/xhtml+xml";
   const image = /^image\/[\w.+-]+$/.test(mime);
+  // What Render cannot draw, a PDF say, it offers to save, as Burp and
+  // Postman leave a PDF to a viewer of its own.
+  const download = response.body_preview ? { download: true } : {};
   if (!html && !image) {
-    return { note: `Render draws HTML and images. This response is ${mime || "untyped"}.` };
+    return { note: `Render draws HTML and images. This response is ${mime || "untyped"}.`, ...download };
   }
   if (!response.body_preview) {
     return { note: "This response has no body to render." };
@@ -13858,9 +13874,51 @@ function responseRenderModel(response) {
     return { image: data, truncated };
   }
   if (base64) {
-    return { note: "This HTML body is binary, so it cannot be rendered." };
+    return { note: "This HTML body is binary, so it cannot be rendered.", ...download };
   }
   return { html: response.body_preview, truncated };
+}
+
+// A saved body's file name: Content-Disposition's, else the URL's last path
+// segment, else "response" with the type's extension. Only a last path
+// component survives, with what a file system or a shell could trip on
+// swapped out.
+function downloadFileName(response, url) {
+  const disposition = normalizedHeaders(response?.headers)
+    .find((header) => headerNameEquals(header, "content-disposition"))?.value || "";
+  const extended = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(disposition);
+  const quoted = /filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(disposition);
+  let name = "";
+  try {
+    name = extended ? decodeURIComponent(extended[1].trim()) : "";
+  } catch {
+    name = "";
+  }
+  if (!name && quoted) name = (quoted[1] ?? quoted[2] ?? "").trim();
+  if (!name) {
+    try {
+      name = decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
+    } catch {
+      name = "";
+    }
+  }
+  name = name.split(/[\\/]/).pop().replace(/[^\p{L}\p{N}._-]+/gu, "_").replace(/^[._]+/, "").slice(0, 120);
+  if (name) return name;
+  const subtype = String(response?.content_type || "").split(";")[0].trim().toLowerCase().split("/")[1] || "";
+  return `response.${/^[a-z0-9]{1,8}$/.test(subtype) ? subtype : "bin"}`;
+}
+
+// The body as Sniper kept it; a cut preview saves what was kept, as the
+// banner says. octet-stream, so a browser saves it rather than opening it,
+// and the URL lives long enough for the desktop app's download to read it.
+function downloadResponseBody(response, url) {
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([messageBodyBytes(response)], { type: "application/octet-stream" }));
+  link.download = downloadFileName(response, url);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 60_000);
 }
 
 // Captured HTML must never run with Sniper's privileges or reach the network.
