@@ -105,7 +105,10 @@ impl VulnIndex {
                     continue;
                 }
                 let row = self.row(&entry.advisory);
-                if !rows.iter().any(|existing| existing.id == row.id) {
+                // A CVE or GHSA id names one advisory however many components
+                // list it; without one, two advisories can share a bound.
+                let named = !entry.advisory.cves.is_empty() || entry.advisory.ghsa.is_some();
+                if !named || !rows.iter().any(|existing| existing.id == row.id) {
                     rows.push(row);
                 }
             }
@@ -254,5 +257,24 @@ mod tests {
             })
         );
         assert_eq!(index.summary("jquery", "3.5.0"), None);
+    }
+
+    #[test]
+    fn advisories_without_a_cve_or_ghsa_id_each_count() {
+        // retire.js lists two AngularJS advisories below 1.6.3 that name
+        // neither: a $sanitize DoS and a CSP bypass.
+        let bare = |summary: &str| RetireAdvisory {
+            cves: Vec::new(),
+            summary: Some(summary.into()),
+            ..advisory("angularjs", None, "1.6.3", "")
+        };
+        let index = VulnIndex::build(
+            vec![bare("DoS in $sanitize"), bare("CSP bypass")],
+            HashSet::new(),
+            HashMap::new(),
+            "test".into(),
+        );
+        assert_eq!(index.advisories("angularjs", "1.5.8").len(), 2);
+        assert_eq!(index.summary("angularjs", "1.5.8").unwrap().count, 2);
     }
 }
