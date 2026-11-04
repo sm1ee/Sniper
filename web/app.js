@@ -26306,10 +26306,18 @@ function renderBody(message) {
 
   let body = message.body_preview || "";
   // A binary body shows its bytes, one character each, as Burp's Raw tab
-  // does; a stand-in said nothing about a PDF or a protobuf. The stand-in
-  // stays for a preview that is not Base64 after all.
+  // does; a stand-in said nothing about a PDF or a protobuf. Only the first
+  // 64 KiB, and only those decoded: a 5 MB PDF drawn whole made the editor
+  // crawl. The stand-in stays for a preview that is not Base64 after all.
   if (body && message.body_encoding === "base64") {
-    body = safeDecodeBase64(body, binaryBodyPlaceholder(message));
+    const limit = 64 * 1024;
+    const held = Math.floor((body.length * 3) / 4);
+    const placeholder = binaryBodyPlaceholder(message);
+    const decoded = safeDecodeBase64(held > limit ? body.slice(0, Math.ceil(limit / 3) * 4) : body, placeholder);
+    const total = Number(message.decoded_body_size ?? message.body_size) || held;
+    body = decoded === placeholder || held <= limit
+      ? decoded
+      : `${decoded.slice(0, limit)}\n\n[first ${formatSize(limit)} of ${formatSize(total)} shown; Hex shows every byte]`;
   }
 
   return message.preview_truncated
