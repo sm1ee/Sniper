@@ -251,7 +251,7 @@ function installSettingsControls(f) {
   Object.assign(f.context, {
     compareLoadGeneration: 0, displaySettingsReturnFocus: null, displaySettingsPreviewActive: false,
     displaySettingsEditedControls: new Set(), activeConfirmDialog: null,
-    hydrateDisplaySettingsForm() {}, applyDisplaySettingsState() {}, renderShortcutReference() {},
+    hydrateDisplaySettingsForm() {}, applyDisplaySettingsState() {}, renderShortcutReference() {}, loadVulndataStatus() {},
     saveDisplaySettingsFromForm() { assert.fail('No Settings Apply'); }, fetch() { assert.fail('No API request'); },
   });
   for (const name of ['openDisplaySettingsModal', 'closeDisplaySettingsModal', 'selectSettingsTab', 'isModalVisible', 'getActiveModalAction', 'restoreModalFocus']) {

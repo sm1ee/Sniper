@@ -225,7 +225,7 @@ function attachSettings(f) {
   context.els.closeDisplaySettingsButton = { focus() {} }; context.els.openDisplaySettingsButton = node();
   Object.assign(context, { displaySettingsReturnFocus: null, displaySettingsPreviewActive: false,
     displaySettingsEditedControls: new Set(), hydrateDisplaySettingsForm() {}, applyDisplaySettingsState() {},
-    renderShortcutReference() {}, selectSettingsTab() {}, isModalVisible: element => !element.classList.contains('hidden') });
+    renderShortcutReference() {}, loadVulndataStatus() {}, selectSettingsTab() {}, isModalVisible: element => !element.classList.contains('hidden') });
   for (const name of ['openDisplaySettingsModal', 'closeDisplaySettingsModal']) {
     const match = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, 'm'));
     assert.ok(match); vm.runInContext(match[0], context);

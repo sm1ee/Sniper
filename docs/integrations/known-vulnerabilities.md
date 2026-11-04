@@ -26,7 +26,7 @@ confirmed vulnerability, so every such finding is Info.
   why one failed. Matching starts once all three have loaded.
 - **Checks.** A file over its size limit or that does not parse is refused,
   and the previous one stays. No source signs its file, so the status says
-  "not verified (TLS only)".
+  "not verified (TLS only)", or "not verified" for an imported file.
 - **Offline.** **Import** loads `jsrepository-v4.json`,
   `known_exploited_vulnerabilities.json` or the EPSS `.csv.gz` from disk. The
   next successful fetch replaces it.

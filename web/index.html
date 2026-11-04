@@ -1987,6 +1987,28 @@
               </div>
               <p class="modal-copy settings-inline-status" id="installCliPathStatus" role="status" aria-live="polite" aria-atomic="true">Checking command-line availability…</p>
             </section>
+<section class="filter-group" aria-labelledby="vulndataTitle">
+              <div class="filter-group-header">
+                <h3 id="vulndataTitle">Vulnerability data</h3>
+                <div class="filter-group-actions">
+                  <details class="more-menu" id="vulndataMore">
+                    <summary class="secondary-action" aria-label="More">⋯</summary>
+                    <div class="context-menu more-menu-list" role="menu">
+                      <button class="context-menu-item" id="vulndataUpdateNow" type="button" role="menuitem">Update now</button>
+                      <button class="context-menu-item" id="vulndataImportMenu" type="button" role="menuitem">Import…</button>
+                    </div>
+                  </details>
+                </div>
+              </div>
+              <div class="vulndata-update">
+                <span id="vulndataUpdateLabel">Update daily</span>
+                <button class="switch" id="vulndataAutoUpdate" type="button" role="switch" aria-checked="true" aria-labelledby="vulndataUpdateLabel"></button>
+              </div>
+              <ul class="vulndata-sources" id="vulndataSources"></ul>
+              <p class="modal-copy hidden" id="vulndataRescanNote">Traffic captured before the data arrived needs a Findings Rescan.</p>
+              <p class="modal-copy settings-inline-status" id="vulndataMessage" role="status" aria-live="polite"></p>
+              <input class="hidden" id="vulndataImportFile" type="file" multiple accept=".json,.csv,.gz,application/json,text/csv,application/gzip" />
+            </section>
 <section class="filter-group filter-group-wide">
               <div class="filter-group-header">
                 <h3>Certificate authority</h3>

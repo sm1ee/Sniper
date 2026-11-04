@@ -1819,6 +1819,7 @@ function bindEvents() {
   if (els.toolsClearButton) els.toolsClearButton.addEventListener("click", clearToolsInputs);
   els.closeDisplaySettingsButton.addEventListener("click", closeDisplaySettingsModal);
   bindCliPathControls();
+  bindVulndataControls();
   els.displaySettingsModal.querySelectorAll("[data-settings-tab]").forEach((tab) => {
     tab.addEventListener("click", () => selectSettingsTab(tab.dataset.settingsTab));
   });
@@ -23908,6 +23909,97 @@ function openDisplaySettingsModal() {
   // is still display:none.
   selectSettingsTab("runtime");
   els.closeDisplaySettingsButton.focus();
+  loadVulndataStatus();
+}
+
+// Settings ▸ Runtime ▸ Vulnerability data: the three files known-vulnerability
+// findings are matched against, their daily update, Update now and Import.
+let vulndataStatus = null;
+let vulndataPoll = 0;
+
+function bindVulndataControls() {
+  document.getElementById("vulndataAutoUpdate")?.addEventListener("click", toggleVulndataAutoUpdate);
+  document.getElementById("vulndataUpdateNow")?.addEventListener("click", updateVulndataNow);
+  document.getElementById("vulndataImportMenu")?.addEventListener("click", () => {
+    document.getElementById("vulndataMore").open = false;
+    document.getElementById("vulndataImportFile")?.click();
+  });
+  document.getElementById("vulndataImportFile")?.addEventListener("change", (event) => importVulndataFiles(event.target));
+}
+
+function loadVulndataStatus() {
+  return vulndataRequest("/api/vulndata");
+}
+
+function toggleVulndataAutoUpdate() {
+  const enabled = !(vulndataStatus?.auto_update ?? true);
+  return vulndataRequest("/api/vulndata/auto-update", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }),
+  });
+}
+
+function updateVulndataNow() {
+  document.getElementById("vulndataMore").open = false;
+  return vulndataRequest("/api/vulndata/update", { method: "POST" });
+}
+
+async function vulndataRequest(path, init) {
+  try {
+    const response = await fetch(path, init);
+    await requireOkResponse(response, "The vulnerability data request failed.");
+    renderVulndataStatus(await response.json());
+  } catch (error) {
+    setVulndataMessage(error?.message || "The vulnerability data request failed.", true);
+  }
+}
+
+// One upload per file; Sniper tells which source each one is.
+async function importVulndataFiles(input) {
+  const files = Array.from(input.files || []);
+  input.value = "";
+  for (const file of files) {
+    try {
+      const response = await fetch("/api/vulndata/import", {
+        method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file,
+      });
+      await requireOkResponse(response, `${file.name} could not be imported.`);
+      renderVulndataStatus((await response.json()).status);
+    } catch (error) {
+      setVulndataMessage(`${file.name}: ${error?.message || "could not be imported."}`, true);
+    }
+  }
+}
+
+function renderVulndataStatus(status) {
+  if (!Array.isArray(status?.sources)) return;
+  vulndataStatus = status;
+  document.getElementById("vulndataAutoUpdate")?.setAttribute("aria-checked", String(Boolean(status.auto_update)));
+  const list = document.getElementById("vulndataSources");
+  if (list) {
+    // A failure says why where it is read: the desktop app shows no title tooltip.
+    list.innerHTML = status.sources.map((source) => {
+      const imported = source.origin === "import";
+      // TLS carried only what Sniper downloaded; an imported file came by hand.
+      const facts = [
+        source.fetched_at ? `${imported ? "imported" : "fetched"} ${formatTimestamp(source.fetched_at)}` : "not fetched yet",
+        source.license,
+        imported ? "not verified" : "not verified (TLS only)",
+      ].filter(Boolean).join(" · ");
+      const failed = source.error ? `<span class="vulndata-error">Last update failed: ${escapeHtml(source.error)}</span>` : "";
+      return `<li><strong>${escapeHtml(source.name)}</strong><span class="vulndata-facts">${escapeHtml(facts)}</span>${failed}</li>`;
+    }).join("");
+  }
+  document.getElementById("vulndataRescanNote")?.classList.toggle("hidden", !status.revision);
+  setVulndataMessage(status.updating ? "Updating…" : "", false);
+  clearTimeout(vulndataPoll);
+  if (status.updating) vulndataPoll = setTimeout(loadVulndataStatus, 2000);
+}
+
+function setVulndataMessage(message, error) {
+  const line = document.getElementById("vulndataMessage");
+  if (!line) return;
+  line.textContent = message;
+  line.classList.toggle("error", Boolean(error));
 }
 
 function createCliPathState() {

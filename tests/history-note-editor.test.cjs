@@ -113,7 +113,7 @@ function fixture({ joinAnnotations = false } = {}) {
     IMPLEMENTED_PROXY_TABS: new Set(["http-history", "websockets-history"]),
     compareLoadGeneration: 0, displaySettingsReturnFocus: null, displaySettingsPreviewActive: false, displaySettingsEditedControls: new Set(), filterSettingsReturnFocus: null,
     filterSettingsEditedControls: new Set(),
-    hydrateDisplaySettingsForm() {}, applyDisplaySettingsState() {}, renderShortcutReference() {}, selectSettingsTab() {},
+    hydrateDisplaySettingsForm() {}, applyDisplaySettingsState() {}, renderShortcutReference() {}, loadVulndataStatus() {}, selectSettingsTab() {},
     hydrateFilterForm() {},
     contextMenuTargetId: null, contextMenuSessionId: null, contextMenuRecordTarget: null, contextMenuAnchor: { x: 0, y: 0 },
     async selectHistoryTransaction() {}, loadUserNote() {},
