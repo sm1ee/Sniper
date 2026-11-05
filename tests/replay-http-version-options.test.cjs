@@ -29,7 +29,7 @@ function setup(version = "HTTP/1.0") {
     '  document.getElementById("replayHttpVersionSelect")?.addEventListener("change", (e) => {',
   ));
   vm.runInContext(binding.slice(0, binding.indexOf("\n  });") + 6), f.context);
-  for (const name of ["buildRawResponse", "buildRawResponseHead", "renderBody", "safeDecodeBase64", "formatStatus"]) {
+  for (const name of ["shownResponseView", "responseRenders", "buildRawResponse", "buildRawResponseHead", "renderBody", "safeDecodeBase64", "formatStatus"]) {
     vm.runInContext(source(name), f.context);
   }
   f.a.requestText = f.a.requestText.replace("HTTP/1.1", version);

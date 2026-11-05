@@ -4,7 +4,7 @@ const test = require("node:test");
 const { loadFunctions } = require("./frontend-test-helpers.cjs");
 const state = { messageViews: { request: "raw", response: "raw" } };
 const c = loadFunctions([
-  "renderBody", "safeDecodeBase64", "binaryBodyPlaceholder", "formatSize", "buildMessagePresentation", "buildMessageHexPresentation",
+  "renderBody", "safeDecodeBase64", "binaryBodyPlaceholder", "formatSize", "shownResponseView", "responseRenders", "buildMessagePresentation", "buildMessageHexPresentation",
   "buildRawRequest", "buildRawResponse", "buildRawRequestHead", "buildRawResponseHead", "normalizedHeaders",
   "mergeHeaders", "headerNameEquals", "prettyFormat", "prettyJsonText", "toHexDumpFromHttpParts", "toHexDump",
   "toHexDumpFromBytes", "messageBodyBytes", "base64ToBytes",

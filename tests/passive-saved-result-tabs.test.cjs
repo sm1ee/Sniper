@@ -57,7 +57,7 @@ function fixture() {
     },
   };
   const pending = [];
-  const c = loadFunctions(["renderViewTabs", "syncFuzzerDetailTabs", "loadTransactionDetail", "renderDetail"], {
+  const c = loadFunctions(["shownResponseView", "responseRenders", "renderViewTabs", "syncFuzzerDetailTabs", "loadTransactionDetail", "renderDetail"], {
     state, els, document, _fuzzerDetailViewModes: modes, _historyDetailGeneration: 0,
     renderMessagePanes() { renders.http += 1; },
     renderFuzzerDetailPanes() { renders.saved += 1; c.syncFuzzerDetailTabs(); },

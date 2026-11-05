@@ -42,7 +42,7 @@ function fixture(message = {}, mode = "hex", legacy = false) {
     destroy() { destroyed += 1; }
   }
   const c = loadFunctions([
-    "renderReplay", "renderReplayResponseOnly", "renderReplayViewContent", "renderReplayResponseView", "renderReplayEmptyResponse", "setReplayTargetInputValidity",
+    "renderReplay", "shownResponseView", "responseRenders", "renderReplayResponseOnly", "renderReplayViewContent", "renderReplayResponseView", "renderReplayEmptyResponse", "setReplayTargetInputValidity",
     "buildRawResponse", "buildRawResponseHead", "normalizedHeaders", "headerNameEquals",
     "renderBody", "safeDecodeBase64", "binaryBodyPlaceholder", "formatSize", "formatStatus", "prettyFormat", "prettyJsonText", "replayRequestEditorText",
     "toHexDump", "buildMessageHexPresentation", "toHexDumpFromHttpParts", "messageBodyBytes",

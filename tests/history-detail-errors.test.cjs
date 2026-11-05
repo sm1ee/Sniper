@@ -50,7 +50,7 @@ function fixture() {
     "selectHistoryTransaction", "loadTransactionDetail", "canReuseSelectedHistoryRecord", "historyRecordSummarySignature",
     "currentSessionId", "transactionPath", "sessionQueryPath", "getHistoryItem", "rebuildHistoryItemIndex", "updateHistorySelection",
     "cancelHistoryDetailLoading", "scheduleHistoryDetailLoading", "renderDetail", "renderEmptyDetail", "renderLoadingDetail",
-    "renderMessagePanes", "renderViewTabs", "getHistoryPacketViewer", "createPacketViewerController", "normalizedHeaders", "renderSummaryRows", "renderHeaderList", "renderProtocolStrip",
+    "shownResponseView", "responseRenders", "renderMessagePanes", "renderViewTabs", "getHistoryPacketViewer", "createPacketViewerController", "normalizedHeaders", "renderSummaryRows", "renderHeaderList", "renderProtocolStrip",
     "inferProtocolState", "formatTimestamp", "formatSize", "escapeHtml", "buildMessagePresentation", "buildRawRequest",
     "buildRawRequestHead", "buildRawResponse", "buildRawResponseHead", "renderBody", "safeDecodeBase64", "mergeHeaders", "headerNameEquals",
     "clearHttpHistorySelectionPreview", "clearHttpHistoryLoadedRowsForPendingQuery", "adjustHistoryPagingAfterLocalRemoval",

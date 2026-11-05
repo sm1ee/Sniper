@@ -58,7 +58,7 @@ function fixture() {
     'selectFuzzerRow', 'normalizeFuzzerAttackRecord', 'setFuzzerAttackRecord', 'clearFuzzerAttackRecord',
     'fuzzerWorkspaceAttackRecordId', 'applyFuzzerWorkspace', 'followRestoredFuzzerAttack', 'hydrateFuzzerAttackRecordById', 'showFuzzerResultDetail', 'hideFuzzerDetailPanel',
     'snapshotFuzzerWorkspace', 'workspaceSnapshotValueChanged', 'cloneEditableRequest', 'normalizeFuzzerTargetOverride',
-    'clearFuzzerResponsePane', 'syncFuzzerResponsePreview', 'syncFuzzerDetailTabs', 'renderFuzzerDetailPanes',
+    'clearFuzzerResponsePane', 'syncFuzzerResponsePreview', 'syncFuzzerDetailTabs', 'shownResponseView', 'responseRenders', 'renderFuzzerDetailPanes',
     'buildRawRequest', 'buildRawResponse', 'buildRawRequestHead', 'buildRawResponseHead', 'normalizedHeaders',
     'mergeHeaders', 'headerNameEquals', 'renderBody', 'safeDecodeBase64', 'binaryBodyPlaceholder', 'prettyFormat', 'prettyJsonText',
     'confirmFuzzerReset', 'resetFuzzer', 'fuzzerRequestTextForAction', 'buildEditableRawRequest',

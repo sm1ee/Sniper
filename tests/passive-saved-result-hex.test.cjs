@@ -7,7 +7,7 @@ function fixture(modes) {
   const panes = new Map();
   const els = { fuzzerDetailReqCM: {}, fuzzerDetailResCM: {}, fuzzerDetailResponseMeta: {} };
   const c = loadFunctions([
-    "renderFuzzerDetailPanes", "buildRawRequest", "buildRawResponse", "buildRawRequestHead", "buildRawResponseHead",
+    "shownResponseView", "responseRenders", "renderFuzzerDetailPanes", "buildRawRequest", "buildRawResponse", "buildRawRequestHead", "buildRawResponseHead",
     "normalizedHeaders", "mergeHeaders", "headerNameEquals", "renderBody", "safeDecodeBase64", "binaryBodyPlaceholder", "formatSize",
     "prettyFormat", "prettyJsonText", "toHexDump", "buildMessageHexPresentation", "toHexDumpFromHttpParts",
     "messageBodyBytes", "base64ToBytes", "toHexDumpFromBytes",

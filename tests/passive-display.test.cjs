@@ -11,7 +11,7 @@ const state = { messageViews: { request: 'pretty', response: 'pretty' } };
 const c = loadFunctions([
   'prettyJsonText', 'prettyFormat', 'renderBody', 'safeDecodeBase64', 'binaryBodyPlaceholder', 'formatSize', 'formatTimestamp',
   'normalizedHeaders', 'headerNameEquals', 'mergeHeaders', 'buildRawRequestHead',
-  'buildRawResponseHead', 'buildRawRequest', 'buildRawResponse', 'buildMessagePresentation',
+  'buildRawResponseHead', 'buildRawRequest', 'buildRawResponse', 'shownResponseView', 'responseRenders', 'buildMessagePresentation',
   'buildMessageHexPresentation', 'toHexDumpFromHttpParts', 'messageBodyBytes', 'base64ToBytes',
   'toHexDumpFromBytes', 'toHexDump', 'renderBinaryFrameDetailText', 'renderFramePreview',
   'showFrameDetail', 'normalizeWebsocketFrame', 'normalizeWebsocketFrames', 'escapeHtml',

@@ -72,7 +72,7 @@ function editorFixture() {
   for (const name of [
     "createBaseExtensions", "addCMUpdateListener", "normalizeSearchClasses", "normalizeSearchEffectValue",
     "forEachCodeSearchMatch", "buildSearchDecorations", "buildChangedLineDecorations", "buildSearchMeta",
-    "updateCodePaneCM", "getCMView", "renderReplay", "renderReplayViewContent", "renderReplayViewTabs",
+    "updateCodePaneCM", "getCMView", "renderReplay", "renderReplayViewContent", "renderReplayViewTabs", "shownResponseView", "responseRenders",
     "renderReplayClearedState", "syncReplayToolbar", "updateReplaySearchPane", "toHexDumpFromBytes",
     "syncReplayRequestTextFromEditor", "clearReplayResponseForDraftChange", "setReplayTargetInputValidity",
     "parseEditableRawRequest", "splitRawHttpMessage", "parseReplayHttpVersionToken", "headerValue",

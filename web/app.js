@@ -13635,7 +13635,10 @@ function createPacketViewerController({ panes, bindControls = true, onMode, onVa
         : pane.legacy && pane.lines ? updateCodePane(pane.legacy, pane.lines, text, mode, side) : null;
       if (pane.search && pane.search.value !== query) pane.search.value = query;
       if (pane.meta) pane.meta.innerHTML = buildSearchMeta(result?.lineCount || 0, result?.matchCount || 0);
-      for (const tab of pane.column?.querySelectorAll?.(".view-tab[data-view]") || []) tab.classList.toggle("active", tab.dataset.view === mode);
+      for (const tab of pane.column?.querySelectorAll?.(".view-tab[data-view]") || []) {
+        tab.classList.toggle("active", tab.dataset.view === mode);
+        if (side === "response" && tab.dataset.view === "render") tab.hidden = !responseRenders(renderSubject?.response);
+      }
       if (pane.notice) { pane.notice.textContent = notice; pane.notice.classList.toggle("hidden", !notice); }
       if (side === "response") renderResponsePreview({ view: pane.render, editor: pane.cm?.closest?.(".editor-shell"), search: pane.search }, mode === "render", renderSubject || { note: "No response selected." });
       return result;
@@ -13698,7 +13701,8 @@ function mountServiceMapPacketViewer(container, { packet, row, isCurrent }) {
   });
   function draw(side) {
     if (!current()) return;
-    const message = packet[side]?.message, raw = buildPacketMessagePresentation(message, side), mode = modes[side];
+    const message = packet[side]?.message, raw = buildPacketMessagePresentation(message, side);
+    const mode = side === "response" ? shownResponseView(modes.response, message?.body) : modes[side];
     let text = raw.text;
     if (mode === "pretty" && message?.body.available && message.body.body_encoding === "utf8") text = prettyFormat(text, message.body);
     else if (mode === "hex") text = message?.body.available ? toHexDumpFromHttpParts(raw.head, message.body) : toHexDump(text);
@@ -13746,7 +13750,7 @@ function renderMessagePanes() {
     : (state.historyDetailError || (detailLoading ? "Loading response details." : "No response selected."));
 
   const reqMode = state.messageViews.request;
-  const resMode = state.messageViews.response;
+  const resMode = shownResponseView(state.messageViews.response, responseRecord?.response);
   // Map view mode to CM highlight mode: pretty/raw → http, hex → hex, diff → diff
   const cmMode = (m) => (m === "hex" ? "hex" : m === "diff" ? "diff" : "http");
 
@@ -13892,6 +13896,19 @@ function renderResponsePreview({ view, editor, search }, active, subject) {
 // What Render shows for a response: HTML to draw, an image to show, or why there
 // is neither. HTML and images are what Burp's Render tab covers too. Pure so it
 // can be tested without a DOM.
+// Render draws a page, an image or a file to save. A response in text that
+// Pretty shows whole has nothing there to add, so for it Render is hidden and a
+// choice of Render shows Pretty; the choice stands for the next response.
+function responseRenders(response) {
+  const mime = String(response?.content_type || "").split(";")[0].trim().toLowerCase();
+  return Boolean(response?.body_preview) && (mime === "text/html" || mime === "application/xhtml+xml"
+    || /^image\/[\w.+-]+$/.test(mime) || response.body_encoding === "base64");
+}
+
+function shownResponseView(mode, response) {
+  return mode === "render" && !responseRenders(response) ? "pretty" : mode;
+}
+
 function responseRenderModel(response) {
   if (!response) {
     return { note: "This request has no response to render." };
@@ -14261,7 +14278,10 @@ function renderViewTabs() {
   const hasResponseDiff = Boolean(record?.original_response);
   viewTabs.forEach((tab) => {
     const target = tab.dataset.target;
-    tab.classList.toggle("active", state.messageViews[target] === tab.dataset.view);
+    const shown = target === "response"
+      ? shownResponseView(state.messageViews.response, record?.response) : state.messageViews[target];
+    tab.classList.toggle("active", shown === tab.dataset.view);
+    if (tab.dataset.view === "render") tab.hidden = !responseRenders(record?.response);
   });
   els.requestMrToggle.classList.toggle("hidden", !hasRequestDiff);
   els.responseMrToggle.classList.toggle("hidden", !hasResponseDiff);
@@ -16011,7 +16031,7 @@ function renderReplay(options = {}) {
   els.replayResponseMeta.textContent = ""; // The response says its status; its foot, the time.
 
   const rawResponseText = buildRawResponse(tab.responseRecord);
-  const respMode = state.replayMessageViews.response;
+  const respMode = shownResponseView(state.replayMessageViews.response, tab.responseRecord.response);
   let responseText;
   if (respMode === "hex") {
     responseText = buildMessageHexPresentation("response", tab.responseRecord, rawResponseText);
@@ -16290,7 +16310,7 @@ function syncReplayResponsePreview(placeholder) {
       editor: els.replayResponseCM?.closest(".editor-panel"),
       search: els.replayResponseSearchInput,
     },
-    state.replayMessageViews.response === "render",
+    shownResponseView(state.replayMessageViews.response, record?.response) === "render",
     record
       ? { response: record.response || null, key: `${tab.id}:${record.id}`, url: recordPageUrl(record) }
       : { note: placeholder ?? "" },
@@ -16317,7 +16337,7 @@ function renderReplayResponseOnly(tab) {
   els.replayFollowRedirectButton.classList.toggle("hidden", !(isRedirect && hasLocation));
   els.replayResponseMeta.textContent = ""; // The response says its status; its foot, the time.
   const rawResponseText = buildRawResponse(tab.responseRecord);
-  const respMode = state.replayMessageViews.response;
+  const respMode = shownResponseView(state.replayMessageViews.response, tab.responseRecord.response);
   let responseText;
   if (respMode === "hex") {
     responseText = buildMessageHexPresentation("response", tab.responseRecord, rawResponseText);
@@ -16331,10 +16351,14 @@ function renderReplayResponseOnly(tab) {
 }
 
 function renderReplayViewTabs() {
+  const response = getActiveReplayTab()?.responseRecord?.response;
   document.querySelectorAll(".replay-view-tab").forEach((btn) => {
     const target = btn.dataset.replayTarget;
     const view = btn.dataset.replayView;
-    btn.classList.toggle("active", state.replayMessageViews[target] === view);
+    const shown = target === "response"
+      ? shownResponseView(state.replayMessageViews.response, response) : state.replayMessageViews[target];
+    btn.classList.toggle("active", shown === view);
+    if (view === "render") btn.hidden = !responseRenders(response);
   });
   globalThis.SniperProtobufFields?.sync();
 }
@@ -16405,7 +16429,7 @@ function renderReplayViewContent(target) {
       renderReplayEmptyResponse(tab);
       return;
     }
-    const mode = state.replayMessageViews.response;
+    const mode = shownResponseView(state.replayMessageViews.response, tab.responseRecord.response);
     const rawText = buildRawResponse(tab.responseRecord);
     let displayText;
     if (mode === "hex") {
@@ -17794,7 +17818,7 @@ function clearFuzzerResponsePane() {
 function syncFuzzerResponsePreview(record) {
   renderResponsePreview(
     { view: els.fuzzerDetailResRenderView, editor: els.fuzzerDetailResCM?.closest(".editor-shell") },
-    _fuzzerDetailViewModes.response === "render",
+    shownResponseView(_fuzzerDetailViewModes.response, record?.response) === "render",
     record
       ? { response: record.response || null, key: `${record.id}`, url: recordPageUrl(record) }
       : { note: "" },
@@ -17852,21 +17876,25 @@ async function showFuzzerResultDetail(transactionId, selectionKey = `tx:${transa
   }
 }
 
-function syncFuzzerDetailTabs() {
+function syncFuzzerDetailTabs(record = state._fuzzerDetailRecord) {
+  const response = record?.response;
   document.querySelectorAll(".fuzzer-detail-view-tab").forEach((btn) => {
     const target = btn.dataset.fuzzerDetailTarget;
     const view = btn.dataset.fuzzerDetailView;
-    btn.classList.toggle("active", view === _fuzzerDetailViewModes[target]);
+    const shown = target === "response"
+      ? shownResponseView(_fuzzerDetailViewModes.response, response) : _fuzzerDetailViewModes[target];
+    btn.classList.toggle("active", view === shown);
+    if (view === "render") btn.hidden = !responseRenders(response);
   });
 }
 
 function renderFuzzerDetailPanes(record) {
   if (!record) return;
 
-  syncFuzzerDetailTabs();
+  syncFuzzerDetailTabs(record);
 
   const reqMode = _fuzzerDetailViewModes.request;
-  const resMode = _fuzzerDetailViewModes.response;
+  const resMode = shownResponseView(_fuzzerDetailViewModes.response, record.response);
 
   // Request
   const rawReq = buildRawRequest(record);
@@ -25986,7 +26014,8 @@ async function openCertificateFolder() {
 }
 
 function buildMessagePresentation(target, record) {
-  const mode = state.messageViews[target];
+  const mode = target === "response"
+    ? shownResponseView(state.messageViews.response, record?.response) : state.messageViews[target];
   const text = target === "request" ? buildRawRequest(record) : buildRawResponse(record);
 
   if (mode === "hex") {
