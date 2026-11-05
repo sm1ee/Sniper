@@ -518,6 +518,28 @@ test('Reuse of a Sniper run restores its payload list once and its attack option
   assert.deepEqual(Array.from(f.c.splitFuzzerPayloadLines(f.state.fuzzerPayloadsText)), ['a', 'a']);
   assert.deepEqual([f.state.fuzzerAttackType, f.state.fuzzerUrlEncode, f.state.fuzzerConcurrency], ['sniper', false, 8]);
 });
+test('Reuse restores the run\'s delay and stop text, and clears them for a run without', async () => {
+  const f = fixture(), saved = run('run-b');
+  Object.assign(saved, { delay: { min_ms: 200, max_ms: 800 }, stop_match: { text: 'Welcome', regex: true } });
+  f.pick('run-b'); let read = f.reuse();
+  f.requests.at(-1).resolve(response(saved)); await read;
+  f.confirmations[0].confirm();
+  assert.deepEqual([f.state.fuzzerDelayText, f.state.fuzzerStopMatchText, f.state.fuzzerStopRegex], ['200-800', 'Welcome', true]);
+  const fixed = run('run-c');
+  Object.assign(fixed, { delay: { min_ms: 500, max_ms: 500 } });
+  f.pick('run-c'); read = f.reuse();
+  f.requests.at(-1).resolve(response(fixed)); await read;
+  f.confirmations[1].confirm();
+  assert.deepEqual([f.state.fuzzerDelayText, f.state.fuzzerStopMatchText, f.state.fuzzerStopRegex], ['500', '', false]);
+});
+test('a run stopped by a matching response marks that row and says which', () => {
+  const f = fixture(), stopped = run('run-m', [result(0), { ...result(1), matched: true }]);
+  Object.assign(stopped, { stopped: true, planned: 5 });
+  f.c.setFuzzerAttackRecord(stopped); f.c.renderFuzzer();
+  assert.match(f.els.fuzzerMeta.textContent, /^Stopped after 2 of 5 requests: #2 matched · /);
+  const rows = f.els.fuzzerResultsBody.innerHTML.match(/<tr class="fuzzer-result-row[^"]*"/g);
+  assert.deepEqual(rows, ['<tr class="fuzzer-result-row"', '<tr class="fuzzer-result-row fuzzer-result-matched"']);
+});
 for (const boundary of ['draft', 'reset', 'session-bounce', 'new-run', 'picker-bounce', 'new-view']) {
   test(`Reuse confirmation cannot replace newer work after ${boundary}`, async () => {
     const f = fixture(); f.pick('run-b'); const read = f.reuse(); f.requests.at(-1).resolve(response(run('run-b'))); await read;

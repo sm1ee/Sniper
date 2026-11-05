@@ -230,6 +230,7 @@ sniper-cli replay send --tab-id <tab-id> --dry-run
 sniper-cli fuzzer set-template --transaction-id <uuid> --dry-run
 sniper-cli fuzzer set-payloads --file payloads.txt --dry-run
 sniper-cli fuzzer run --attack-type sniper --dry-run
+sniper-cli fuzzer run --delay 200-800 --stop-on-match 'Welcome' --dry-run
 sniper-cli fuzzer stop --id <uuid> --dry-run
 sniper-cli capture intercept on --dry-run
 sniper-cli capture intercept list

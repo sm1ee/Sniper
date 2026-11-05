@@ -37,9 +37,9 @@
 1. 요청을 직접 입력하거나, HTTP History나 HTTP Replay에서 요청을 골라 `Send to Fuzzer`를 누른다. 다른 요청을 가져와도 payload 목록은 남는다.
 2. 요청에서 값을 선택하고 `Add §`를 누른다. query/form 값이 있으면 요청 위에 `Choose a value`가 나타난다. 펼쳐서 `Value`에서 값을 고르고 `Mark value`를 눌러도 된다. 표시한 값은 `§값§`이 되고 원래 값은 표시 안에 남는다. `§값§`이나 `$payload$`(원래 값 없음)를 직접 써도 된다. 이름이 같은 파라미터는 따로 표시되고 인코딩은 바뀌지 않는다. `Undo`는 마지막 표시 작업을 되돌린다. 표시한 뒤 요청을 고쳤다면 되돌리지 않는다.
 3. Payload를 한 줄에 하나씩 붙여 넣는다. `Import file`로 UTF-8 텍스트 파일을 가져오거나, Payloads의 `Generate payloads`를 펼쳐 작은 경계값 preset이나 정수 범위를 쓸 수 있다. 기본으로는 기존 목록에 더한다. `On import`에서 `Replace list`를 고르면 기존 목록을 바꾼다.
-4. `Attack`에서 방식을 고른다. Sniper(기본)는 위치를 하나씩 골라 payload를 넣고 나머지 위치에는 원래 값을 둔다. 요청 수는 payload 수 × 위치 수다. Battering ram은 모든 위치에 같은 payload를 넣는다. URL(경로와 쿼리)의 payload는 기본으로 URL 인코딩한다. `Options`의 `URL-encode in the URL`을 끄면 그대로 넣는다. 본문과 헤더에는 그대로 넣는다. `Options`의 `Concurrent requests`는 동시 요청 수다(1–16). 상단에서 연결 대상, HTTP 버전, 위치 수, `N payloads → N planned requests`를 확인한다.
+4. `Attack`에서 방식을 고른다. Sniper(기본)는 위치를 하나씩 골라 payload를 넣고 나머지 위치에는 원래 값을 둔다. 요청 수는 payload 수 × 위치 수다. Battering ram은 모든 위치에 같은 payload를 넣는다. URL(경로와 쿼리)의 payload는 기본으로 URL 인코딩한다. `Options`의 `URL-encode in the URL`을 끄면 그대로 넣는다. 본문과 헤더에는 그대로 넣는다. `Options`의 `Concurrent requests`는 동시 요청 수다(1–16). `Delay (ms)`는 요청 사이에 기다리는 시간이다. `500`처럼 고정값을, `200-800`처럼 범위를 쓰면 매번 그 안에서 무작위로 기다린다. `Stop when the response contains`에 글자를 넣으면 응답 헤더나 본문에 그 글자가 처음 나올 때 공격을 멈춘다. 대소문자는 가리지 않는다. `Regex`를 켜면 정규식으로 찾는다. 상단에서 연결 대상, HTTP 버전, 위치 수, `N payloads → N planned requests`를 확인한다.
 5. `Preview & details`에서 샘플을 최대 3개 본다. Content-Length는 본문 길이에 맞춰 다시 계산한다. 샘플은 템플릿을 확장한 미리보기다. 실제 전송 내용은 Match/Replace 등으로 달라질 수 있다. 큰 샘플은 생략하거나 잘렸다고 표시한다.
-6. 대상이 본인 소유이거나 테스트 허가를 받았는지 확인하고 `Start`를 누른다. 공격은 백그라운드에서 돌고 결과는 도착하는 대로 보인다. `Stop`을 누르면 멈춘다. 보낼 수 없는 요청(잘못된 경로 등)은 결과 행에 이유를 남기고, 나머지는 계속 보낸다. 보낸 요청은 HTTP 기록에 `Sent from Fuzzer.` 메모와 함께 남는다.
+6. 대상이 본인 소유이거나 테스트 허가를 받았는지 확인하고 `Start`를 누른다. 공격은 백그라운드에서 돌고 결과는 도착하는 대로 보인다. `Stop`을 누르면 멈춘다. 멈춤 글자가 나와서 멈췄다면 그 결과 행 왼쪽에 표시가 붙고, 위쪽에 몇 번째 결과가 일치했는지 나온다. 보낼 수 없는 요청(잘못된 경로 등)은 결과 행에 이유를 남기고, 나머지는 계속 보낸다. 보낸 요청은 HTTP 기록에 `Sent from Fuzzer.` 메모와 함께 남는다.
 7. 결과를 상태 코드 그룹, 크기(응답 본문 bytes), 소요 시간으로 거르고 정렬한다. 결과를 골라 요청과 응답을 본다. 결과 목록에 포커스가 있으면 `↑`/`↓`로 고르고 `Enter`로 상세 내용을 다시 연다. 두 결과를 비교하려면 한쪽에서 `Set compare base`를, 다른 쪽에서 `Compare selected`를 누른다. 기존 비교 화면이 열린다.
 
 ## 빈 값과 파일

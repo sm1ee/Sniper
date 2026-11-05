@@ -1305,6 +1305,17 @@
                         <input id="fuzzerConcurrency" type="number" min="1" max="16" step="1" value="4" />
                       </label>
                       <label class="fuzzer-check" for="fuzzerUrlEncode"><input id="fuzzerUrlEncode" type="checkbox" checked /> URL-encode in the URL</label>
+                      <label class="compact-field fuzzer-delay-field" for="fuzzerDelay" title="Wait between requests: 500, or a random time in a range such as 200-800">
+                        <span>Delay (ms)</span>
+                        <input id="fuzzerDelay" type="text" inputmode="numeric" placeholder="0" spellcheck="false" autocomplete="off" />
+                      </label>
+                    </div>
+                    <div class="fuzzer-control-row fuzzer-stop-options">
+                      <label class="compact-field fuzzer-field-grow" for="fuzzerStopMatch" title="Stop the attack at the first response whose headers or body contain this, in any case">
+                        <span>Stop when the response contains</span>
+                        <input id="fuzzerStopMatch" type="text" maxlength="1024" spellcheck="false" autocomplete="off" />
+                      </label>
+                      <label class="fuzzer-check" for="fuzzerStopRegex"><input id="fuzzerStopRegex" type="checkbox" /> Regex</label>
                     </div>
                   </div>
                 </details>

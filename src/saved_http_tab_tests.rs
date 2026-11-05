@@ -323,6 +323,8 @@ async fn saved_http_tab_duplicate_clones_every_saved_field_without_focus_or_capt
         marker_count: 1,
         results: vec![],
         notes: vec!["generated saved fuzzer run".into()],
+        delay: None,
+        stop_match: None,
     };
     let attack_id = attack.id;
     session.fuzzer.insert(attack).await;

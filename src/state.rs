@@ -4163,6 +4163,8 @@ mod tests {
                 marker_count: 1,
                 results: Vec::new(),
                 notes: Vec::new(),
+                delay: None,
+                stop_match: None,
             })
             .await;
         session

@@ -3828,6 +3828,19 @@ body.pane-resizing-y {
   width: 64px;
 }
 
+.fuzzer-attack-options .fuzzer-delay-field input {
+  width: 96px;
+}
+
+.fuzzer-stop-options {
+  align-items: end;
+}
+
+/* The result whose response stopped the attack. */
+.fuzzer-result-matched > td:first-child {
+  box-shadow: inset 3px 0 0 var(--point);
+}
+
 .fuzzer-check {
   display: inline-flex;
   align-items: center;

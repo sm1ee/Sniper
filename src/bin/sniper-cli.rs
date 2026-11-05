@@ -16,7 +16,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use sniper::{
     event_log::EventLogEntry,
-    fuzzer::FuzzerAttackRecord,
+    fuzzer::{FuzzerAttackRecord, FuzzerDelay, FuzzerStopMatch},
     history_retention::{history_retention_config_token, HistoryRetentionPolicy},
     history_selection::HistorySelection,
     intercept::{
@@ -2329,6 +2329,41 @@ struct FuzzerRunArgs {
     /// Requests sent at once, 1-16
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=16))]
     concurrency: u8,
+    /// Wait between requests, in milliseconds: `500`, or a random time in a
+    /// range such as `200-800`
+    #[arg(long, alias = "sleep", value_parser = parse_fuzzer_delay)]
+    delay: Option<FuzzerDelay>,
+    /// Stop at the first response whose headers or body contain this text, in any case
+    #[arg(long, conflicts_with = "stop_on_regex")]
+    stop_on_match: Option<String>,
+    /// Stop at the first response whose headers or body match this regex
+    #[arg(long)]
+    stop_on_regex: Option<String>,
+}
+
+impl FuzzerRunArgs {
+    fn stop_match(&self) -> Option<FuzzerStopMatch> {
+        self.stop_on_match
+            .clone()
+            .map(|text| FuzzerStopMatch { text, regex: false })
+            .or_else(|| {
+                self.stop_on_regex
+                    .clone()
+                    .map(|text| FuzzerStopMatch { text, regex: true })
+            })
+    }
+}
+
+/// `500` or `200-800`, in milliseconds.
+fn parse_fuzzer_delay(value: &str) -> std::result::Result<FuzzerDelay, String> {
+    let (min, max) = value.split_once('-').unwrap_or((value, value));
+    let parse = |part: &str| part.trim().parse::<u64>();
+    match (parse(min), parse(max)) {
+        (Ok(min_ms), Ok(max_ms)) if min_ms <= max_ms => Ok(FuzzerDelay { min_ms, max_ms }),
+        _ => Err(format!(
+            "expected milliseconds such as `500`, or a range such as `200-800`; got `{value}`"
+        )),
+    }
 }
 
 /// How payloads fill the marked positions, as Burp Intruder names it.
@@ -3453,6 +3488,10 @@ struct FuzzerRunPayload {
     attack_type: &'static str,
     url_encode: bool,
     concurrency: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delay: Option<FuzzerDelay>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_match: Option<FuzzerStopMatch>,
 }
 
 #[derive(Serialize)]
@@ -4356,7 +4395,11 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             Write,
             true,
             &[],
-            vec![json!({}), json!({"attack_type":"sniper","concurrency":4})],
+            vec![
+                json!({}),
+                json!({"attack_type":"sniper","concurrency":4}),
+                json!({"attack_type":"sniper","delay":"200-800","stop_on_match":"Welcome"}),
+            ],
         ),
         op(
             "fuzzer.status",
@@ -7456,6 +7499,9 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "attack_type",
             "raw_payloads",
             "concurrency",
+            "delay",
+            "stop_on_match",
+            "stop_on_regex",
         ],
         "fuzzer.status" | "fuzzer.results" | "fuzzer.stop" => &["id", "session_id"],
         "fuzzer.list" => &["session_id", "limit"],
@@ -7830,6 +7876,9 @@ fn fuzzer_input_preview(command: &FuzzerCommand) -> Value {
             "attack_type": args.attack_type.api_name(),
             "raw_payloads": args.raw_payloads,
             "concurrency": args.concurrency,
+            "delay": args.delay,
+            "stop_on_match": args.stop_on_match,
+            "stop_on_regex": args.stop_on_regex,
         }),
         FuzzerCommand::Status(args) | FuzzerCommand::Stop(args) => {
             json!({ "id": args.id, "session_id": args.session_id })
@@ -9746,6 +9795,22 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
             if !(1..=16).contains(&concurrency) {
                 bail!("invalid field `concurrency` for `{operation}`; expected 1-16");
             }
+            // Milliseconds as a number, or the flag's `500` / `200-800` text.
+            let delay = match call_optional::<Value>(operation, input, "delay")? {
+                None => None,
+                Some(Value::Number(ms)) => Some(parse_fuzzer_delay(&ms.to_string())),
+                Some(Value::String(text)) => Some(parse_fuzzer_delay(&text)),
+                Some(_) => Some(Err("expected milliseconds or a range".to_string())),
+            }
+            .transpose()
+            .map_err(|error| anyhow!("invalid field `delay` for `{operation}`; {error}"))?;
+            let stop_on_match = call_optional::<String>(operation, input, "stop_on_match")?;
+            let stop_on_regex = call_optional::<String>(operation, input, "stop_on_regex")?;
+            if stop_on_match.is_some() && stop_on_regex.is_some() {
+                bail!(
+                    "fields `stop_on_match` and `stop_on_regex` have conflicts for `{operation}`"
+                );
+            }
             Command::Fuzzer {
                 command: FuzzerCommand::Run(FuzzerRunArgs {
                     session_id: call_optional(operation, input, "session_id")?,
@@ -9757,6 +9822,9 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                     },
                     raw_payloads: call_bool_any(operation, input, &["raw_payloads"])?,
                     concurrency,
+                    delay,
+                    stop_on_match,
+                    stop_on_regex,
                 }),
             }
         }
@@ -14168,6 +14236,8 @@ async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
                         attack_type: args.attack_type.api_name(),
                         url_encode: !args.raw_payloads,
                         concurrency: args.concurrency.max(1),
+                        delay: args.delay,
+                        stop_match: args.stop_match(),
                     },
                 )
                 .await?;
@@ -22184,6 +22254,71 @@ mod tests {
             command_from_operation_input("fuzzer.run", &json!({"attack_type":"pitchfork"}))
                 .is_err()
         );
+
+        // A delay, fixed or a range (`--sleep` reads the same), and a stop
+        // pattern as text or a regex.
+        let delay = |min_ms, max_ms| Some(sniper::fuzzer::FuzzerDelay { min_ms, max_ms });
+        let stop = |text: &str, regex| {
+            Some(sniper::fuzzer::FuzzerStopMatch {
+                text: text.into(),
+                regex,
+            })
+        };
+        let parse = |flags: &[&str]| -> Option<super::FuzzerRunArgs> {
+            let mut argv = vec!["sniper-cli", "fuzzer", "run"];
+            argv.extend_from_slice(flags);
+            match Cli::try_parse_from(argv).ok()?.command {
+                Command::Fuzzer {
+                    command: FuzzerCommand::Run(args),
+                } => Some(args),
+                _ => None,
+            }
+        };
+        let args = parse(&["--delay", "500", "--stop-on-match", "Welcome"]).unwrap();
+        assert_eq!(
+            (args.delay, args.stop_match()),
+            (delay(500, 500), stop("Welcome", false))
+        );
+        let args = parse(&["--sleep", "200-800", "--stop-on-regex", "role.?:.?admin"]).unwrap();
+        assert_eq!(
+            (args.delay, args.stop_match()),
+            (delay(200, 800), stop("role.?:.?admin", true))
+        );
+        for bad in [
+            &["--delay", "800-200"][..],
+            &["--delay", "soon"],
+            &["--stop-on-match", "a", "--stop-on-regex", "b"],
+        ] {
+            assert!(parse(bad).is_none(), "{bad:?}");
+        }
+        let input = json!({"delay":"200-800","stop_on_regex":"admin"});
+        let Command::Fuzzer {
+            command: FuzzerCommand::Run(args),
+        } = command_from_operation_input("fuzzer.run", &input).unwrap()
+        else {
+            panic!("expected fuzzer run");
+        };
+        assert_eq!(
+            (args.delay, args.stop_match()),
+            (delay(200, 800), stop("admin", true))
+        );
+        let input = json!({"delay":300,"stop_on_match":"ok"});
+        let Command::Fuzzer {
+            command: FuzzerCommand::Run(args),
+        } = command_from_operation_input("fuzzer.run", &input).unwrap()
+        else {
+            panic!("expected fuzzer run");
+        };
+        assert_eq!(
+            (args.delay, args.stop_match()),
+            (delay(300, 300), stop("ok", false))
+        );
+        assert!(command_from_operation_input(
+            "fuzzer.run",
+            &json!({"stop_on_match":"a","stop_on_regex":"b"})
+        )
+        .is_err());
+        assert!(command_from_operation_input("fuzzer.run", &json!({"delay":"9-1"})).is_err());
 
         let id = "22222222-2222-2222-2222-222222222222";
         let Command::Fuzzer {

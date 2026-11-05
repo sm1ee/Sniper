@@ -7,11 +7,13 @@ use std::{
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use regex::Regex;
+use rand::Rng;
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{watch, RwLock},
+    sync::{watch, Mutex as AsyncMutex, RwLock},
     task::JoinHandle,
+    time::Instant,
 };
 use uuid::Uuid;
 
@@ -27,6 +29,9 @@ const MAX_FUZZER_CONCURRENCY: usize = 16;
 const MAX_FUZZER_NOTES: usize = 20;
 /// How long a stop waits for requests in flight before abandoning them.
 const STOP_GRACE: Duration = Duration::from_secs(5);
+/// The longest wait between requests.
+const MAX_FUZZER_DELAY_MS: u64 = 60_000;
+const MAX_FUZZER_STOP_MATCH_BYTES: usize = 1024;
 
 /// A position is `§original§`, as Burp marks one, or `$payload$`, whose
 /// original is empty. Sniper leaves every other position at its original.
@@ -35,7 +40,7 @@ static MARKER_REGEX: LazyLock<Regex> =
 
 use crate::{
     event_log::EventLevel,
-    model::{EditableRequest, RequestTargetOverride},
+    model::{EditableRequest, MessageRecord, RequestTargetOverride},
     proxy,
     state::AppState,
 };
@@ -92,6 +97,94 @@ pub struct FuzzerAttackResult {
     /// The position Sniper put the payload in; none for Battering ram.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<usize>,
+    /// Its response matched the attack's stop pattern, which stopped it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub matched: bool,
+}
+
+/// The wait before each request but the first: `min_ms`, or a random time up
+/// to `max_ms`, as Burp's random variations and ffuf's `-p 0.2-0.8` do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FuzzerDelay {
+    pub min_ms: u64,
+    pub max_ms: u64,
+}
+
+impl FuzzerDelay {
+    fn sample(&self) -> Duration {
+        let ms = if self.max_ms > self.min_ms {
+            rand::thread_rng().gen_range(self.min_ms..=self.max_ms)
+        } else {
+            self.min_ms
+        };
+        Duration::from_millis(ms)
+    }
+}
+
+/// The attack stops at the first response whose headers or body contain
+/// `text`, in any case, or match it as a regex.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FuzzerStopMatch {
+    pub text: String,
+    #[serde(default)]
+    pub regex: bool,
+}
+
+enum StopMatcher {
+    /// Lowercased, for the lowercased response.
+    Text(String),
+    Regex(Regex),
+}
+
+impl StopMatcher {
+    fn new(stop: &FuzzerStopMatch) -> std::result::Result<Self, String> {
+        if stop.text.is_empty() {
+            return Err("The text to stop at is empty.".to_string());
+        }
+        if stop.text.len() > MAX_FUZZER_STOP_MATCH_BYTES {
+            return Err(format!(
+                "The text to stop at is over {MAX_FUZZER_STOP_MATCH_BYTES} bytes."
+            ));
+        }
+        if !stop.regex {
+            return Ok(Self::Text(stop.text.to_lowercase()));
+        }
+        // A response reads as lines, so `^` and `$` hold one, CRLF included.
+        RegexBuilder::new(&stop.text)
+            .multi_line(true)
+            .crlf(true)
+            .size_limit(1 << 20)
+            .build()
+            .map(Self::Regex)
+            .map_err(|error| {
+                // A syntax error draws the pattern with a caret over lines; its
+                // last line says what is wrong.
+                let detail = error.to_string();
+                let reason = detail.lines().last().unwrap_or_default();
+                format!(
+                    "The stop pattern is not a valid regex: {}",
+                    reason.trim().trim_start_matches("error: ")
+                )
+            })
+    }
+
+    /// Reads the response as its headers, one `name: value` a line, a blank
+    /// line, then the body.
+    fn matches(&self, response: &MessageRecord) -> bool {
+        let mut text = String::new();
+        for header in &response.headers {
+            text.push_str(&header.name);
+            text.push_str(": ");
+            text.push_str(&header.value);
+            text.push_str("\r\n");
+        }
+        text.push_str("\r\n");
+        text.push_str(&String::from_utf8_lossy(&response.body_bytes()));
+        match self {
+            Self::Text(needle) => text.to_lowercase().contains(needle.as_str()),
+            Self::Regex(regex) => regex.is_match(&text),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -118,6 +211,10 @@ pub struct FuzzerAttackRecord {
     pub planned: usize,
     #[serde(default = "one")]
     pub concurrency: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay: Option<FuzzerDelay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_match: Option<FuzzerStopMatch>,
     /// Still sending. Checkpoints keep its results as a stopped attack: a
     /// restart must neither discard completed work nor resume network traffic.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -164,6 +261,10 @@ pub struct FuzzerAttackPayload {
     pub url_encode: bool,
     #[serde(default = "one")]
     pub concurrency: usize,
+    #[serde(default)]
+    pub delay: Option<FuzzerDelay>,
+    #[serde(default)]
+    pub stop_match: Option<FuzzerStopMatch>,
 }
 
 fn one() -> usize {
@@ -179,11 +280,13 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// How an attack sends, besides its request and payloads.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct FuzzerAttackOptions {
     pub attack_type: FuzzerAttackType,
     pub url_encode: bool,
     pub concurrency: usize,
+    pub delay: Option<FuzzerDelay>,
+    pub stop_match: Option<FuzzerStopMatch>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -391,7 +494,7 @@ pub(crate) struct AttackPlan {
 pub(crate) fn plan_attack(
     template: &EditableRequest,
     payloads: Vec<String>,
-    options: FuzzerAttackOptions,
+    options: &FuzzerAttackOptions,
 ) -> Result<AttackPlan> {
     let positions = count_request_markers(template);
     if positions == 0 {
@@ -457,12 +560,26 @@ pub async fn start_attack(
             "Concurrency is 1–{MAX_FUZZER_CONCURRENCY} requests at once."
         )));
     }
+    if options
+        .delay
+        .is_some_and(|delay| delay.min_ms > delay.max_ms || delay.max_ms > MAX_FUZZER_DELAY_MS)
+    {
+        return Err(FuzzerStartError::Invalid(format!(
+            "The delay is 0–{MAX_FUZZER_DELAY_MS} ms, its shortest no longer than its longest."
+        )));
+    }
+    let stop_matcher = options
+        .stop_match
+        .as_ref()
+        .map(StopMatcher::new)
+        .transpose()
+        .map_err(FuzzerStartError::Invalid)?;
     if template.preview_truncated {
         return Err(FuzzerStartError::Invalid(
             "request body preview is truncated and cannot be replayed safely".to_string(),
         ));
     }
-    let plan = plan_attack(&template, payloads, options)
+    let plan = plan_attack(&template, payloads, &options)
         .map_err(|error| FuzzerStartError::Invalid(error.to_string()))?;
     if session.fuzzer.is_running() {
         return Err(FuzzerStartError::Busy);
@@ -483,6 +600,8 @@ pub async fn start_attack(
         url_encode: options.url_encode,
         planned: plan.requests.len(),
         concurrency: options.concurrency,
+        delay: options.delay,
+        stop_match: options.stop_match.clone(),
         running: true,
         stopped: false,
     };
@@ -510,6 +629,10 @@ pub async fn start_attack(
         http_version,
         target,
         url_encode: options.url_encode,
+        delay: options.delay,
+        next_start: AsyncMutex::new(Instant::now()),
+        stop_matcher,
+        stop: cancel.clone(),
     });
     let task = tokio::spawn(run.execute(plan.requests, options.concurrency, cancelled));
     *session.fuzzer.running.lock().unwrap() = Some(RunningAttack {
@@ -531,6 +654,12 @@ struct AttackRun {
     http_version: Option<String>,
     target: Option<RequestTargetOverride>,
     url_encode: bool,
+    delay: Option<FuzzerDelay>,
+    /// When the next request may start, under `delay`.
+    next_start: AsyncMutex<Instant>,
+    stop_matcher: Option<StopMatcher>,
+    /// The attack's own Stop, for a response that matches.
+    stop: watch::Sender<bool>,
 }
 
 impl AttackRun {
@@ -548,12 +677,27 @@ impl AttackRun {
                     if *cancel.borrow() {
                         return;
                     }
+                    if let Some(delay) = run.delay {
+                        // One request starts at a time, the delay after the
+                        // one before it, however many may be in flight.
+                        let mut next = run.next_start.lock().await;
+                        tokio::select! {
+                            _ = tokio::time::sleep_until(*next) => {}
+                            _ = cancel.wait_for(|stop| *stop) => return,
+                        }
+                        *next = Instant::now() + delay.sample();
+                    }
                     if let Some(result) = run.send(index, position, payload, &mut cancel).await {
+                        let matched = result.matched;
                         run.session
                             .fuzzer
                             .update(run.id, |record| record.results.push(result))
                             .await;
                         run.session.schedule_state_persist();
+                        if matched {
+                            // As Stop does: requests still in flight are dropped.
+                            let _ = run.stop.send(true);
+                        }
                     }
                 }
             })
@@ -609,6 +753,7 @@ impl AttackRun {
             response_bytes: 0,
             note: None,
             position,
+            matched: false,
         };
         let request = match build_request(&self.template, payload_text, position, self.url_encode)
             .map_err(|error| error.to_string())
@@ -632,28 +777,26 @@ impl AttackRun {
             ) => sent,
             _ = cancel.wait_for(|stop| *stop) => return None,
         };
-        match sent {
-            Ok(record) => {
-                result.transaction_id = Some(record.id);
-                result.status = record.status;
-                result.duration_ms = Some(record.duration_ms);
-                result.response_bytes = record
-                    .response
-                    .as_ref()
-                    .map_or(0, |response| response.body_size);
-            }
+        let record = match &sent {
+            Ok(record) => Some(record),
             Err(error) => {
                 result.note = Some(error.to_string());
-                if let Some(record) = error.record() {
-                    result.transaction_id = Some(record.id);
-                    result.status = record.status;
-                    result.duration_ms = Some(record.duration_ms);
-                    result.response_bytes = record
-                        .response
-                        .as_ref()
-                        .map_or(0, |response| response.body_size);
-                }
+                error.record()
             }
+        };
+        if let Some(record) = record {
+            result.transaction_id = Some(record.id);
+            result.status = record.status;
+            result.duration_ms = Some(record.duration_ms);
+            result.response_bytes = record
+                .response
+                .as_ref()
+                .map_or(0, |response| response.body_size);
+            result.matched = self
+                .stop_matcher
+                .as_ref()
+                .zip(record.response.as_ref())
+                .is_some_and(|(matcher, response)| matcher.matches(response));
         }
         Some(result)
     }
@@ -1230,8 +1373,10 @@ mod tests {
             attack_type: FuzzerAttackType::BatteringRam,
             url_encode: true,
             concurrency: 1,
+            delay: None,
+            stop_match: None,
         };
-        let error = plan_attack(&request, vec!["demo".to_string()], options)
+        let error = plan_attack(&request, vec!["demo".to_string()], &options)
             .err()
             .expect("authority-only marker should be ignored by the fixed Host header");
 
@@ -1281,6 +1426,8 @@ mod tests {
             attack_type: FuzzerAttackType::BatteringRam,
             url_encode: false,
             concurrency: 1,
+            delay: None,
+            stop_match: None,
         };
         let started = start_attack(
             state,
@@ -1390,6 +1537,7 @@ mod tests {
                     response_bytes: 0,
                     note: Some("Not sent: synthetic invalid request".to_string()),
                     position: None,
+                    matched: false,
                 },
                 FuzzerAttackResult {
                     index: 0,
@@ -1400,6 +1548,7 @@ mod tests {
                     response_bytes: 2,
                     note: None,
                     position: None,
+                    matched: false,
                 },
             ],
             notes: Vec::new(),
@@ -1409,6 +1558,8 @@ mod tests {
             concurrency: 2,
             running: true,
             stopped: false,
+            delay: None,
+            stop_match: None,
         };
         store.insert(record).await;
         assert!(store.snapshot(Some(0)).await.is_empty());
@@ -1469,6 +1620,7 @@ mod tests {
                 response_bytes: 2,
                 note: None,
                 position: None,
+                matched: false,
             })
             .collect();
         let store = FuzzerStore::new(1);
@@ -1523,6 +1675,8 @@ mod tests {
                 attack_type: FuzzerAttackType::BatteringRam,
                 url_encode: true,
                 concurrency: 1,
+                delay: None,
+                stop_match: None,
             },
         )
         .await
@@ -1582,6 +1736,8 @@ mod tests {
             attack_type: FuzzerAttackType::Sniper,
             url_encode: true,
             concurrency: 2,
+            delay: None,
+            stop_match: None,
         };
         let started = start_attack(
             state,
@@ -1652,6 +1808,8 @@ mod tests {
             attack_type: FuzzerAttackType::BatteringRam,
             url_encode: false,
             concurrency: 1,
+            delay: None,
+            stop_match: None,
         };
         let started = start_attack(
             state,
@@ -1687,6 +1845,8 @@ mod tests {
             attack_type: FuzzerAttackType::BatteringRam,
             url_encode: true,
             concurrency: 1,
+            delay: None,
+            stop_match: None,
         };
         let payloads: Vec<String> = (0..20).map(|index| format!("p{index}")).collect();
         let template = local_template(addr, "/$payload$");
@@ -1698,7 +1858,7 @@ mod tests {
             None,
             None,
             None,
-            options,
+            options.clone(),
         )
         .await
         .unwrap();
@@ -1725,6 +1885,234 @@ mod tests {
         assert!(
             !session.fuzzer.stop(Some(started.id)).await,
             "nothing left to stop"
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    /// A loopback upstream that answers each request with its path, in the
+    /// body and in an `X-Seen` header.
+    async fn echo_upstream() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4096];
+                    let read = stream.read(&mut buffer).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buffer[..read]);
+                    let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    // Mixed case, so a match in any case is put to the test.
+                    let body = format!("Body {path}");
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nX-Seen: {path}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        addr
+    }
+
+    fn options_with(
+        concurrency: usize,
+        delay: Option<FuzzerDelay>,
+        stop_match: Option<FuzzerStopMatch>,
+    ) -> FuzzerAttackOptions {
+        FuzzerAttackOptions {
+            attack_type: FuzzerAttackType::BatteringRam,
+            url_encode: false,
+            concurrency,
+            delay,
+            stop_match,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_delay_spaces_out_the_requests_even_with_several_allowed_at_once() {
+        let addr = upstream(Duration::ZERO).await;
+        let (state, session, data_dir) = scratch_state("delay").await;
+        let delay = FuzzerDelay {
+            min_ms: 150,
+            max_ms: 150,
+        };
+        let begun = std::time::Instant::now();
+        let started = start_attack(
+            state,
+            Arc::clone(&session),
+            local_template(addr, "/$payload$"),
+            (0..4).map(|index| format!("p{index}")).collect(),
+            None,
+            None,
+            None,
+            options_with(4, Some(delay), None),
+        )
+        .await
+        .unwrap();
+        let attack = wait_for_end(&session, started.id).await;
+        // The first goes at once; each of the other three waits its turn.
+        assert!(
+            begun.elapsed() >= Duration::from_millis(450),
+            "{:?}",
+            begun.elapsed()
+        );
+        assert_eq!(attack.results.len(), 4);
+        assert!(!attack.stopped);
+        assert_eq!(attack.delay, Some(delay), "kept for Reuse");
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn a_delay_range_waits_a_random_time_inside_it() {
+        let range = FuzzerDelay {
+            min_ms: 200,
+            max_ms: 800,
+        };
+        let waits: Vec<Duration> = (0..200).map(|_| range.sample()).collect();
+        let inside = Duration::from_millis(200)..=Duration::from_millis(800);
+        assert!(waits.iter().all(|wait| inside.contains(wait)));
+        assert!(
+            waits.iter().any(|wait| *wait != waits[0]),
+            "not one fixed wait"
+        );
+        let fixed = FuzzerDelay {
+            min_ms: 500,
+            max_ms: 500,
+        };
+        assert_eq!(fixed.sample(), Duration::from_millis(500));
+    }
+
+    #[tokio::test]
+    async fn the_attack_stops_at_the_first_response_that_matches() {
+        let addr = echo_upstream().await;
+        let (state, session, data_dir) = scratch_state("stop-match").await;
+        let payloads: Vec<String> = (0..20).map(|index| format!("p{index}")).collect();
+        let run = |stop_match: FuzzerStopMatch| {
+            let state = Arc::clone(&state);
+            let session = Arc::clone(&session);
+            let payloads = payloads.clone();
+            async move {
+                let started = start_attack(
+                    state,
+                    Arc::clone(&session),
+                    local_template(addr, "/$payload$"),
+                    payloads,
+                    None,
+                    None,
+                    None,
+                    options_with(1, None, Some(stop_match)),
+                )
+                .await
+                .unwrap();
+                wait_for_end(&session, started.id).await
+            }
+        };
+        let matched = |attack: &FuzzerAttackRecord| -> Vec<usize> {
+            attack
+                .results
+                .iter()
+                .filter(|result| result.matched)
+                .map(|result| result.index)
+                .collect()
+        };
+
+        // Plain text, in any case, in the body.
+        let attack = run(FuzzerStopMatch {
+            text: "BODY /P3".into(),
+            regex: false,
+        })
+        .await;
+        assert!(attack.stopped);
+        assert_eq!(attack.results.len(), 4, "nothing sent after the match");
+        assert_eq!(matched(&attack), [3]);
+        assert_eq!(
+            attack.stop_match.as_ref().map(|stop| stop.text.as_str()),
+            Some("BODY /P3"),
+            "kept for Reuse"
+        );
+
+        // A regex, in a header.
+        let attack = run(FuzzerStopMatch {
+            text: r"seen: /p1[2-9]\b".into(),
+            regex: true,
+        })
+        .await;
+        assert!(attack.stopped);
+        assert_eq!(matched(&attack), [12]);
+
+        // Line by line, as a response reads: `^` and `$` hold a header line.
+        let attack = run(FuzzerStopMatch {
+            text: r"(?i)^x-seen: /p5$".into(),
+            regex: true,
+        })
+        .await;
+        assert_eq!(matched(&attack), [5]);
+
+        // Nothing matches: every request is sent.
+        let attack = run(FuzzerStopMatch {
+            text: "never there".into(),
+            regex: false,
+        })
+        .await;
+        assert!(!attack.stopped);
+        assert_eq!(attack.results.len(), 20);
+        assert!(matched(&attack).is_empty());
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn a_delay_or_stop_pattern_that_cannot_work_is_refused_before_anything_is_sent() {
+        let (state, session, data_dir) = scratch_state("controls").await;
+        let template = local_template("127.0.0.1:1".parse().unwrap(), "/$payload$");
+        let stop = |text: &str, regex: bool| {
+            Some(FuzzerStopMatch {
+                text: text.into(),
+                regex,
+            })
+        };
+        for (delay, stop_match) in [
+            (
+                Some(FuzzerDelay {
+                    min_ms: 800,
+                    max_ms: 200,
+                }),
+                None,
+            ),
+            (
+                Some(FuzzerDelay {
+                    min_ms: 0,
+                    max_ms: MAX_FUZZER_DELAY_MS + 1,
+                }),
+                None,
+            ),
+            (None, stop("(", true)),
+            (None, stop("", false)),
+            (
+                None,
+                stop(&"x".repeat(MAX_FUZZER_STOP_MATCH_BYTES + 1), false),
+            ),
+        ] {
+            let error = start_attack(
+                Arc::clone(&state),
+                Arc::clone(&session),
+                template.clone(),
+                vec!["a".to_string()],
+                None,
+                None,
+                None,
+                options_with(1, delay, stop_match.clone()),
+            )
+            .await
+            .unwrap_err();
+            let FuzzerStartError::Invalid(message) = &error else {
+                panic!("{delay:?} {stop_match:?}: {error:?}");
+            };
+            // Shown beside Start, so one line.
+            assert!(!message.contains('\n'), "{message:?}");
+        }
+        assert!(
+            session.fuzzer.snapshot(None).await.is_empty(),
+            "nothing started"
         );
         let _ = std::fs::remove_dir_all(data_dir);
     }
@@ -1913,6 +2301,8 @@ mod tests {
                 marker_count: 1,
                 results: Vec::new(),
                 notes: Vec::new(),
+                delay: None,
+                stop_match: None,
             }
         }
 
@@ -1976,15 +2366,17 @@ mod tests {
             attack_type: FuzzerAttackType::Sniper,
             url_encode: false,
             concurrency: 1,
+            delay: None,
+            stop_match: None,
         };
-        let plan = plan_attack(&template, vec![payload.clone()], options)
+        let plan = plan_attack(&template, vec![payload.clone()], &options)
             .expect("each selected-position request fits the existing limit");
         assert_eq!(plan.requests.len(), 65);
         assert!(
             plan_attack(
                 &template,
                 vec![payload],
-                FuzzerAttackOptions {
+                &FuzzerAttackOptions {
                     attack_type: FuzzerAttackType::BatteringRam,
                     ..options
                 }
@@ -2046,10 +2438,12 @@ mod tests {
         plan_attack(
             &template,
             vec![payload.clone()],
-            FuzzerAttackOptions {
+            &FuzzerAttackOptions {
                 attack_type: FuzzerAttackType::BatteringRam,
                 url_encode: false,
                 concurrency: 1,
+                delay: None,
+                stop_match: None,
             },
         )
         .unwrap();
@@ -2130,13 +2524,15 @@ mod tests {
             attack_type: FuzzerAttackType::Sniper,
             url_encode: false,
             concurrency: 1,
+            delay: None,
+            stop_match: None,
         };
-        plan_attack(&template, vec!["x".to_string()], options).unwrap();
+        plan_attack(&template, vec!["x".to_string()], &options).unwrap();
         let rendered = build_request(&template, "x", Some(0), false).unwrap();
         assert_eq!(sizing_fields(&rendered), MAX_FUZZER_EXPANDED_REQUEST_BYTES);
         drop(rendered);
         template.body.push('x');
-        assert!(plan_attack(&template, vec!["x".to_string()], options).is_err());
+        assert!(plan_attack(&template, vec!["x".to_string()], &options).is_err());
         assert!(build_request(&template, "x", Some(0), false).is_err());
     }
 
@@ -2150,10 +2546,12 @@ mod tests {
             attack_type: FuzzerAttackType::Sniper,
             url_encode: false,
             concurrency: 1,
+            delay: None,
+            stop_match: None,
         };
-        assert!(plan_attack(&template, vec!["x".to_string()], options).is_err());
+        assert!(plan_attack(&template, vec!["x".to_string()], &options).is_err());
         options.attack_type = FuzzerAttackType::BatteringRam;
-        plan_attack(&template, vec!["x".to_string()], options).unwrap();
+        plan_attack(&template, vec!["x".to_string()], &options).unwrap();
         assert_eq!(
             sizing_fields(&build_request(&template, "x", None, false).unwrap()),
             22
@@ -2173,10 +2571,12 @@ mod tests {
         plan_attack(
             &template,
             vec!["Host".to_string()],
-            FuzzerAttackOptions {
+            &FuzzerAttackOptions {
                 attack_type: FuzzerAttackType::BatteringRam,
                 url_encode: false,
                 concurrency: 1,
+                delay: None,
+                stop_match: None,
             },
         )
         .unwrap();
@@ -2203,8 +2603,10 @@ mod tests {
             attack_type: FuzzerAttackType::BatteringRam,
             url_encode: false,
             concurrency: 1,
+            delay: None,
+            stop_match: None,
         };
-        plan_attack(&template, vec![payload.clone()], options)
+        plan_attack(&template, vec![payload.clone()], &options)
             .expect("legacy pre-normalization admission fits exactly");
         // Content-Length normalization adds six digits. The complete request is
         // otherwise runnable; only the final field-byte cap must stop this send.
@@ -2217,6 +2619,7 @@ mod tests {
         );
         sendable(&normalized, None).unwrap();
         drop(normalized);
+        let (cancel, mut cancellation) = watch::channel(false);
         let mut run = AttackRun {
             state,
             session: Arc::clone(&session),
@@ -2227,8 +2630,11 @@ mod tests {
             http_version: None,
             target: None,
             url_encode: false,
+            delay: None,
+            next_start: AsyncMutex::new(Instant::now()),
+            stop_matcher: None,
+            stop: cancel,
         };
-        let (_cancel, mut cancellation) = watch::channel(false);
         let result = tokio::time::timeout(
             Duration::from_secs(5),
             run.send(0, None, 0, &mut cancellation),

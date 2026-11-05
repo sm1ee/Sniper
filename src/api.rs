@@ -8501,6 +8501,8 @@ async fn run_fuzzer_attack(
             attack_type: payload.attack_type,
             url_encode: payload.url_encode,
             concurrency: payload.concurrency,
+            delay: payload.delay,
+            stop_match: payload.stop_match,
         },
     )
     .await;
@@ -21294,6 +21296,8 @@ mod tests {
             marker_count: 0,
             results: Vec::new(),
             notes: Vec::new(),
+            delay: None,
+            stop_match: None,
         };
         let attack_id = attack.id;
         let snapshot = WorkspaceStateSnapshot {
@@ -22224,6 +22228,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22274,6 +22280,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22335,6 +22343,8 @@ mod tests {
                 attack_type: Default::default(),
                 url_encode: true,
                 concurrency: 1,
+                delay: None,
+                stop_match: None,
                 session_id: Some(session.id()),
                 expected_active_session_id: None,
                 expected_workspace_revision: None,
@@ -22421,6 +22431,8 @@ mod tests {
                     host: "example.test".to_string(),
                     port: "443".to_string(),
                 }),
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22482,6 +22494,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22550,6 +22564,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22609,6 +22625,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22670,6 +22688,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: Some("HTTP/3".to_string()),
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22719,6 +22739,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22788,6 +22810,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22846,6 +22870,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -24001,6 +24027,8 @@ mod tests {
             marker_count: 0,
             results: Vec::new(),
             notes: vec!["inactive attack".to_string()],
+            delay: None,
+            stop_match: None,
         };
         let attack_id = attack.id;
         original.fuzzer.insert(attack).await;

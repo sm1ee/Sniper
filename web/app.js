@@ -582,6 +582,9 @@ const state = {
   fuzzerAttackType: "sniper",
   fuzzerUrlEncode: true,
   fuzzerConcurrency: 4,
+  fuzzerDelayText: "",
+  fuzzerStopMatchText: "",
+  fuzzerStopRegex: false,
   // The attack this session runs now, so Stop can reach it.
   fuzzerRunningAttackId: null,
   fuzzerStopRequest: null,
@@ -17071,9 +17074,10 @@ function renderFuzzer() {
 
   const planned = attackRecord.planned || attackRecord.payload_count || attackRecord.results.length;
   const sent = attackRecord.results.length;
+  const matched = attackRecord.results.find((result) => result?.matched);
   els.fuzzerMeta.textContent = [
     attackRecord.running ? `Sending… ${sent} of ${planned} requests`
-      : attackRecord.stopped ? `Stopped after ${sent} of ${planned} requests`
+      : attackRecord.stopped ? `Stopped after ${sent} of ${planned} requests${matched ? `: #${Number(matched.index) + 1} matched` : ""}`
         : `${attackRecord.payload_count ?? sent} payload${(attackRecord.payload_count ?? sent) === 1 ? "" : "s"}`,
     `${attackRecord.marker_count ?? 0} position${attackRecord.marker_count === 1 ? "" : "s"}`,
     ...(attackRecord.running || attackRecord.stopped ? [] : [attackRecord.status || "completed"]),
@@ -17474,6 +17478,10 @@ async function readFuzzerSavedRun(action) {
           if (record.attack_type) state.fuzzerAttackType = record.attack_type;
           if (typeof record.url_encode === "boolean") state.fuzzerUrlEncode = record.url_encode;
           if (record.concurrency) state.fuzzerConcurrency = record.concurrency;
+          const { min_ms: min, max_ms: max } = record.delay || {};
+          state.fuzzerDelayText = max ? (min === max ? String(min) : `${min}-${max}`) : "";
+          state.fuzzerStopMatchText = record.stop_match?.text || "";
+          state.fuzzerStopRegex = !!record.stop_match?.regex;
           state.fuzzerSourceTransactionId = null;
           state.fuzzerTarget = null;
           state.fuzzerTargetRequestText = null;
@@ -17578,8 +17586,9 @@ function renderFuzzerResultsVirtual() {
     const resultIndex = Number.isFinite(Number(result.index)) ? Number(result.index) : sourceIndex;
     const selectionKey = fuzzerSelectionKeyForResult(result, sourceIndex);
     const selectedClass = state._selectedFuzzerResultKey === selectionKey ? " fuzzer-result-selected" : "";
+    const matchedClass = result.matched ? " fuzzer-result-matched" : "";
     rows.push(`
-      <tr class="fuzzer-result-row${selectedClass}" data-transaction-id="${escapeHtml(result.transaction_id || "")}" data-result-index="${resultIndex}" data-row-index="${rowIndex}" data-source-index="${sourceIndex}">
+      <tr class="fuzzer-result-row${selectedClass}${matchedClass}" data-transaction-id="${escapeHtml(result.transaction_id || "")}" data-result-index="${resultIndex}" data-row-index="${rowIndex}" data-source-index="${sourceIndex}">
         <td>${resultIndex + 1}</td>
         <td class="cell-url">${result.position != null && (state.fuzzerAttackRecord?.marker_count || 0) > 1 ? `<span class="fuzzer-position">§${Number(result.position) + 1}</span> ` : ""}${escapeHtml(result.payload)}</td>
         <td>${escapeHtml(formatStatus(result.status))}</td>
@@ -18366,7 +18375,28 @@ function fuzzerSetupPreflight(raw = fuzzerRequestTextForAction()) {
   const target = activeFuzzerTargetForRequest(raw);
   const httpVersion = replayHttpVersionFromText(raw) || template.http_version || undefined;
   const options = { target, httpVersion, attackType: state.fuzzerAttackType || "sniper", urlEncode: state.fuzzerUrlEncode !== false };
-  return { ...SniperFuzzerWorkflow.preflight(template, payloads, options), template, payloads, target, httpVersion };
+  const checked = SniperFuzzerWorkflow.preflight(template, payloads, options);
+  const { error } = fuzzerRunControls();
+  return { ...checked, ...(error ? { valid: false, errors: [error, ...(checked.errors || [])] } : {}),
+    template, payloads, target, httpVersion };
+}
+
+// The Options a run takes besides concurrency: a wait between requests, `500`
+// or a random one in a range such as `200-800` ms, and a text or regex that
+// stops the attack at the first response it is found in.
+function fuzzerRunControls() {
+  const delayText = String(state.fuzzerDelayText || "").trim();
+  const range = /^(\d{1,5})(?:\s*-\s*(\d{1,5}))?$/.exec(delayText);
+  const min = range ? Number(range[1]) : 0;
+  const max = range?.[2] !== undefined ? Number(range[2]) : min;
+  if (delayText && (!range || min > max || max > 60000)) {
+    return { error: "Delay is milliseconds up to 60000: 500, or a range such as 200-800." };
+  }
+  const text = String(state.fuzzerStopMatchText || "").trim();
+  return {
+    delay: max ? { min_ms: min, max_ms: max } : null,
+    stop_match: text ? { text, regex: !!state.fuzzerStopRegex } : null,
+  };
 }
 
 function fuzzerTransportState(raw = fuzzerRequestTextForAction(), template = undefined) {
@@ -18494,6 +18524,12 @@ function renderFuzzerSetup() {
   if (attackType) { attackType.value = state.fuzzerAttackType || "sniper"; attackType.disabled = busy; }
   if (urlEncode) { urlEncode.checked = state.fuzzerUrlEncode !== false; urlEncode.disabled = busy; }
   if (concurrency) { concurrency.value = String(state.fuzzerConcurrency || 4); concurrency.disabled = busy; }
+  for (const [id, field] of [["fuzzerDelay", "fuzzerDelayText"], ["fuzzerStopMatch", "fuzzerStopMatchText"]]) {
+    const input = fuzzerSetupNode(id);
+    if (input) { input.value = state[field] || ""; input.disabled = busy; }
+  }
+  const stopRegex = fuzzerSetupNode("fuzzerStopRegex");
+  if (stopRegex) { stopRegex.checked = !!state.fuzzerStopRegex; stopRegex.disabled = busy; }
   for (const id of ["fuzzerMarkSelectionButton", "fuzzerClearMarkersButton", "fuzzerMarkCandidateButton", "fuzzerImportPayloadButton", "fuzzerApplyPresetButton", "fuzzerGenerateRangeButton"]) {
     const button = fuzzerSetupNode(id);
     if (button) button.disabled = busy;
@@ -18839,6 +18875,22 @@ function initFuzzerSetupControls() {
     const concurrency = Number.isFinite(value) ? Math.min(16, Math.max(1, value)) : 4;
     const changed = concurrency !== (state.fuzzerConcurrency || 4);
     state.fuzzerConcurrency = concurrency;
+    finishFuzzerOptionChange(changed);
+  });
+  for (const [id, field] of [["fuzzerDelay", "fuzzerDelayText"], ["fuzzerStopMatch", "fuzzerStopMatchText"]]) {
+    fuzzerSetupNode(id)?.addEventListener("change", (event) => {
+      if (!workspaceLoaded) return;
+      const value = String(event.target.value).trim();
+      const changed = value !== (state[field] || "");
+      state[field] = value;
+      finishFuzzerOptionChange(changed);
+    });
+  }
+  fuzzerSetupNode("fuzzerStopRegex")?.addEventListener("change", (event) => {
+    if (!workspaceLoaded) return;
+    const value = !!event.target.checked;
+    const changed = value !== !!state.fuzzerStopRegex;
+    state.fuzzerStopRegex = value;
     finishFuzzerOptionChange(changed);
   });
   bind("fuzzerImportPayloadButton", () => fuzzerSetupNode("fuzzerPayloadFile")?.click());
@@ -19388,6 +19440,8 @@ async function runFuzzerAttack() {
     const concurrency = Math.min(16, Math.max(1, Number(state.fuzzerConcurrency) || 4));
     const setupCheck = SniperFuzzerWorkflow.preflight(template, payloads, { attackType, urlEncode });
     if (!setupCheck.valid) throw new Error(setupCheck.errors.join(" "));
+    const controls = fuzzerRunControls();
+    if (controls.error) throw new Error(controls.error);
 
     if (payloads.length === 0) {
       clearFuzzerAttackRecord();
@@ -19428,6 +19482,8 @@ async function runFuzzerAttack() {
         attack_type: attackType,
         url_encode: urlEncode,
         concurrency,
+        delay: controls.delay,
+        stop_match: controls.stop_match,
       }),
     });
     if (!isCurrentFuzzerRun(runToken, sessionId)) {
