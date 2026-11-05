@@ -52,7 +52,7 @@ function fixture() {
   const c = loadFunctions(['tableArrowStep', 'isEditableTarget',
     'fuzzerResultsWorkflowState', 'fuzzerResultMetric', 'fuzzerResultFilterValidation', 'visibleFuzzerResults', 'renderFuzzerResultsWorkflow',
     'fuzzerSelectedTransactionId', 'cancelPendingFuzzerComparison',
-    'currentSessionId', 'sessionQueryPath', 'transactionPath', 'jsonArray', 'escapeHtml', 'formatStatus', 'responseMetaText', 'formatSize',
+    'currentSessionId', 'sessionQueryPath', 'transactionPath', 'jsonArray', 'escapeHtml', 'formatStatus', 'formatSize',
     'renderFuzzer', 'fuzzerSelectionKeyForResult', 'fuzzerSelectedResultIndex', 'fuzzerResultsShell',
     'renderEmptyFuzzerResults', 'renderFuzzerResultsVirtual', 'scrollFuzzerResultToIndex', 'selectFuzzerResultIndex',
     'selectFuzzerRow', 'normalizeFuzzerAttackRecord', 'setFuzzerAttackRecord', 'clearFuzzerAttackRecord',

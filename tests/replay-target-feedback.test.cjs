@@ -14,7 +14,7 @@ const fields = [['replayHostInput', 'replayHostError', 'hostError'], ['replayPor
 function setup() {
   const f = editorFixture();
   vm.runInContext(source('applyReplayTargetFields'), f.context);
-  Object.assign(f.context, { formatStatus: value => String(value), responseMetaText: () => '', buildRawResponse: () => 'Prior response' });
+  Object.assign(f.context, { formatStatus: value => String(value), buildRawResponse: () => 'Prior response' });
   for (const [inputId, errorId] of fields) {
     const input = f.els[inputId];
     input.attributes = {};

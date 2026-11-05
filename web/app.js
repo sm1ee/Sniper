@@ -16008,7 +16008,7 @@ function renderReplay(options = {}) {
   const hasLocation = normalizedHeaders(tab.responseRecord.response?.headers).some((h) => headerNameEquals(h, "location"));
   els.replayFollowRedirectButton.classList.toggle("hidden", !(isRedirect && hasLocation));
 
-  els.replayResponseMeta.textContent = responseMetaText(tab.responseRecord);
+  els.replayResponseMeta.textContent = ""; // The response says its status; its foot, the time.
 
   const rawResponseText = buildRawResponse(tab.responseRecord);
   const respMode = state.replayMessageViews.response;
@@ -16315,7 +16315,7 @@ function renderReplayResponseOnly(tab) {
   const isRedirect = [301, 302, 303, 307, 308].includes(tab.responseRecord.status);
   const hasLocation = normalizedHeaders(tab.responseRecord.response?.headers).some((h) => headerNameEquals(h, "location"));
   els.replayFollowRedirectButton.classList.toggle("hidden", !(isRedirect && hasLocation));
-  els.replayResponseMeta.textContent = responseMetaText(tab.responseRecord);
+  els.replayResponseMeta.textContent = ""; // The response says its status; its foot, the time.
   const rawResponseText = buildRawResponse(tab.responseRecord);
   const respMode = state.replayMessageViews.response;
   let responseText;
@@ -16443,11 +16443,13 @@ function updateReplaySearchPane(target, text, options = {}) {
       return;
     }
   }
+  const took = isRequest ? NaN : Number(getActiveReplayTab()?.responseRecord?.duration_ms);
+  const withTime = (html) => (Number.isFinite(took) ? `${html} · ${took} ms` : html);
   // CM path for response (via existing _replayResponseCMView)
   if (!isRequest && _replayResponseCMView) {
     const result = _replayResponseCMView.applySearch(query || "", { scrollToFirst });
     const mode = state.replayMessageViews[target] || "pretty";
-    meta.innerHTML = buildSearchMeta(_replayResponseCMView.view.state.doc.lines, result.matchCount);
+    meta.innerHTML = withTime(buildSearchMeta(_replayResponseCMView.view.state.doc.lines, result.matchCount));
     return;
   }
 
@@ -16456,7 +16458,7 @@ function updateReplaySearchPane(target, text, options = {}) {
 
   const searchResult = applyCodeSearch(view, query);
   const mode = state.replayMessageViews[target] || "pretty";
-  meta.innerHTML = buildSearchMeta(countLines(text), searchResult.count);
+  meta.innerHTML = withTime(buildSearchMeta(countLines(text), searchResult.count));
 }
 
 function syncReplayToolbar(tab, { force = false } = {}) {
@@ -17894,7 +17896,7 @@ function renderFuzzerDetailPanes(record) {
       updateCodePaneCM("fuzzerDetailRes", els.fuzzerDetailResCM, resText, { mode: cmResMode });
     }
     if (els.fuzzerDetailResponseMeta) {
-      els.fuzzerDetailResponseMeta.textContent = responseMetaText(record);
+      els.fuzzerDetailResponseMeta.textContent = ""; // Its row in the results says the status and time.
     }
   } else {
     if (els.fuzzerDetailResCM) {
@@ -29116,27 +29118,6 @@ function formatKind(kind) {
 function formatStatus(status) {
   if (status == null) return "n/a";
   return String(status);
-}
-
-// "200 OK · 249 ms · application/json": with its reason the code reads as a
-// status, so the number after it reads as the time the exchange took.
-function responseMetaText(record) {
-  const reasons = {
-    100: "Continue", 101: "Switching Protocols", 200: "OK", 201: "Created", 202: "Accepted",
-    204: "No Content", 206: "Partial Content", 301: "Moved Permanently", 302: "Found",
-    303: "See Other", 304: "Not Modified", 307: "Temporary Redirect", 308: "Permanent Redirect",
-    400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
-    405: "Method Not Allowed", 406: "Not Acceptable", 408: "Request Timeout", 409: "Conflict",
-    410: "Gone", 413: "Content Too Large", 415: "Unsupported Media Type", 422: "Unprocessable Content",
-    429: "Too Many Requests", 500: "Internal Server Error", 501: "Not Implemented",
-    502: "Bad Gateway", 503: "Service Unavailable", 504: "Gateway Timeout",
-  };
-  const status = record?.status;
-  return [
-    status == null ? "No response" : [status, reasons[status]].filter(Boolean).join(" "),
-    Number.isFinite(record?.duration_ms) ? `${record.duration_ms} ms` : "",
-    record?.response?.content_type || "",
-  ].filter(Boolean).join(" · ");
 }
 
 function statusTone(status) {

@@ -11,7 +11,7 @@ function setup() {
   Object.assign(f.context, {
     AbortController, REPEATER_HISTORY_LIMIT: 100,
     flushWorkspaceStateForReplayAction: async () => 10,
-    renderReplayResponseOnly() {}, scheduleRefresh() {}, formatStatus: status => String(status), responseMetaText: () => '',
+    renderReplayResponseOnly() {}, scheduleRefresh() {}, formatStatus: status => String(status),
     fetch: async (_url, options) => {
       f.sent.push(JSON.parse(options.body));
       return { ok: true, json: () => f.pendingResponse.promise };
