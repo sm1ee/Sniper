@@ -60,6 +60,14 @@ test("only the selected tab and a pinned one hold a pin button", () => {
   assert.match(css, /\.replay-tab-button\[data-actor\]::before \{[^}]*content: attr\(data-actor\);/);
 });
 
+// A pin sits before the name the way the name of who opened a tab does, with
+// no line between them.
+test("no line separates a tab's pin from its name", () => {
+  const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8");
+  const rule = css.match(/\n\.replay-tab-pin-btn \{([^}]*)\}/)[1];
+  assert.doesNotMatch(rule, /border-right/);
+});
+
 // An agent opened every tab: the agent's row would take a line and leave +
 // and the gear alone on a second, empty one.
 test("with no tab of the person's, the agent's row shares its line with + and the gear", () => {
