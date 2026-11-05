@@ -981,6 +981,15 @@ code {
 .secondary-action:hover {
   border-color: var(--line-strong);
   background: rgba(255, 255, 255, 0.06);
+  /* A wash of the text colour, so a light theme shows it too: white on white
+     did not. */
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+}
+
+/* Anything that can be pressed says so under the pointer. */
+button:not(:disabled),
+summary {
+  cursor: pointer;
 }
 
 .status-pill {
@@ -1023,6 +1032,7 @@ code {
 .replay-view-tab:hover {
   color: var(--text);
   background: rgba(255, 255, 255, 0.04);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
 }
 
 /* The active tab is gold text over a thin gold line on the strip's edge: one
@@ -2542,7 +2552,7 @@ code {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 40px;
+  min-height: 32px;
   padding: 0 10px;
   border-bottom: 1px solid var(--line);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, transparent 100%);
@@ -2569,7 +2579,7 @@ code {
 
 .view-tab,
 .replay-view-tab {
-  padding: 6px 10px;
+  padding: 4px 10px;
 }
 
 /* ── Diff view ─────────────────────────────────────── */
@@ -4903,6 +4913,17 @@ body.pane-resizing-y {
   color: var(--text);
 }
 
+/* Under the pointer a tab lightens over whatever its row's colour is, and its
+   × shows it is a button of its own. */
+.replay-tab:not(.active):hover {
+  box-shadow: inset 0 0 0 100px color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.replay-tab-close:hover {
+  border-radius: 0 7px 7px 0;
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
 .replay-tab-close {
   width: 24px;
   height: 24px;
@@ -6099,6 +6120,20 @@ button.utility-button.replay-tab-add {
 
 .replay-target-error:empty { display: none; }
 
+/* The fields read as what they are (HTTPS, a host, 443, HTTP/1.1), so their
+   names are left to screen readers. */
+.replay-target-bar .compact-field > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .replay-target-bar input[aria-invalid="true"] {
   border-color: var(--danger);
 }
@@ -6247,6 +6282,17 @@ button.utility-button.replay-tab-add {
 
 .replay-panel-toolbar {
   align-items: center;
+}
+
+/* One line of title and view tabs, as tall as the other panes' headers; both
+   classes, so a short window's taller panel toolbars leave it alone. */
+.panel-toolbar.replay-panel-toolbar {
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+.replay-panel-toolbar p {
+  margin: 0;
 }
 
 .replay-workbench > .panel-card {
@@ -6529,6 +6575,11 @@ button.utility-button.replay-tab-add {
   background: var(--point-soft);
   color: var(--text);
   font-weight: 700;
+}
+
+.primary-action:hover {
+  border-color: var(--point);
+  background: color-mix(in srgb, var(--point) 34%, transparent);
 }
 
 .danger-action {
@@ -7326,10 +7377,6 @@ button.utility-button.replay-tab-add {
   .filter-bar {
     gap: 8px;
     padding: 9px 10px;
-  }
-
-  .pane-header {
-    min-height: 40px;
   }
 
   .pane-footer {
