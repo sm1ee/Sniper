@@ -4954,14 +4954,10 @@ body.pane-resizing-y {
   opacity: 1;
 }
 
+/* Not selected, a tab has no pin button: an invisible one would sit before its
+   name as empty space. Select it to pin it, or drag it to the pinned row. */
 .replay-tab-pin-btn.idle {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.replay-tab:hover .replay-tab-pin-btn.idle {
-  opacity: 0.3;
-  pointer-events: auto;
+  display: none;
 }
 
 .replay-tab-pin-icon {
@@ -4989,7 +4985,7 @@ body.pane-resizing-y {
   color: #f0e0e0;
 }
 
-/* An agent's tabs (sniper-cli) are blue the way pinned ones are red. */
+/* The tabs sniper-cli opened are blue the way pinned ones are red. */
 .replay-tab.agent {
   border-color: rgba(70, 130, 210, 0.5);
   background: rgba(70, 130, 210, 0.1);
@@ -5010,7 +5006,23 @@ body.pane-resizing-y {
   color: var(--text);
 }
 
-/* A tab of the person's that an agent changed since they last looked at it. */
+/* Who opened the tab, before its name. The name keeps the room it has on any
+   other tab. */
+.replay-tab.agent .replay-tab-button {
+  max-width: 240px;
+}
+
+.replay-tab-button[data-actor]::before {
+  content: attr(data-actor);
+  margin-right: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(70, 130, 210, 0.22);
+  color: var(--info);
+  font-size: var(--font-2xs);
+}
+
+/* A tab of the person's that sniper-cli changed since they last looked at it. */
 .replay-tab-agent-dot {
   flex: 0 0 auto;
   width: 6px;

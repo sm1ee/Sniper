@@ -3846,16 +3846,17 @@ async function adoptExternalWorkspace({ keepLocal = false } = {}) {
     const baseline = baselineById.get(tab.id);
     if (baseline && baseline.type !== "websocket"
       && existing.type !== "websocket" && tab.type !== "websocket") {
-      // An agent's marks merge the same way: sniper-cli sets them, a person
+      // The CLI's marks merge the same way: sniper-cli sets them, a person
       // clears them by taking the tab or selecting it.
-      for (const [field, key] of [["pinned", "pinned"], ["openedByAgent", "opened_by_agent"], ["agentEdited", "agent_edited"]]) {
-        const next = !!tab[key];
-        if (!!existing[field] === !!baseline[key] || !!existing[field] === next) {
-          if (!!existing[field] !== next) {
+      const name = (value) => value || null;
+      for (const [field, key, value] of [["pinned", "pinned", Boolean], ["openedBy", "opened_by", name], ["changedBy", "changed_by", name]]) {
+        const next = value(tab[key]);
+        if (value(existing[field]) === value(baseline[key]) || value(existing[field]) === next) {
+          if (value(existing[field]) !== next) {
             updated = true;
             existing[field] = next;
           }
-          if (!!baseline[key] !== next) baseline[key] = next;
+          if (value(baseline[key]) !== next) baseline[key] = next;
         }
       }
     }
@@ -4067,7 +4068,7 @@ function hydrateReplayTab(tab) {
       sequence: Number.isFinite(tab.sequence) ? tab.sequence : state.replayTabSequence + 1,
       customLabel: normalizeReplayTabCustomLabel(tab.custom_label || ""),
       pinned: !!tab.pinned,
-      openedByAgent: !!tab.opened_by_agent, agentEdited: !!tab.agent_edited,
+      openedBy: tab.opened_by || null, changedBy: tab.changed_by || null,
       label: `WS ${tab.ws_host || "draft"}`,
       wsScheme,
       wsHost: tab.ws_host || "",
@@ -4117,7 +4118,7 @@ function hydrateReplayTab(tab) {
     sequence: Number.isFinite(tab.sequence) ? tab.sequence : state.replayTabSequence + 1,
     customLabel: normalizeReplayTabCustomLabel(tab.custom_label || ""),
     pinned: !!tab.pinned,
-    openedByAgent: !!tab.opened_by_agent, agentEdited: !!tab.agent_edited,
+    openedBy: tab.opened_by || null, changedBy: tab.changed_by || null,
     baseRequest: fallbackRequest,
     sourceTransactionId: tab.source_transaction_id || null,
     notice: tab.notice || "",
@@ -4280,7 +4281,7 @@ function snapshotHttpReplayTab(tab) {
     sequence: tab.sequence,
     custom_label: tab.customLabel || "",
     pinned: !!tab.pinned,
-    opened_by_agent: !!tab.openedByAgent, agent_edited: !!tab.agentEdited,
+    opened_by: tab.openedBy || null, changed_by: tab.changedBy || null,
     base_request: tab.baseRequest ? cloneEditableRequest(tab.baseRequest) : null,
     source_transaction_id: tab.sourceTransactionId || null,
     notice: tab.notice || "",
@@ -4325,7 +4326,7 @@ function snapshotWorkspaceState(options = {}) {
         sequence: tab.sequence,
         custom_label: tab.customLabel || "",
         pinned: !!tab.pinned,
-        opened_by_agent: !!tab.openedByAgent, agent_edited: !!tab.agentEdited,
+        opened_by: tab.openedBy || null, changed_by: tab.changedBy || null,
         ws_scheme: tab.wsScheme || "wss",
         ws_host: tab.wsHost || "",
         ws_port: tab.wsPort || defaultWsPortForScheme(tab.wsScheme),
@@ -5461,7 +5462,7 @@ function compactWorkspaceUnloadReplayTab(tab, options = {}, liveTab = null) {
       sequence: tab.sequence,
       custom_label: tab.custom_label || "",
       pinned: !!tab.pinned,
-      opened_by_agent: !!tab.opened_by_agent, agent_edited: !!tab.agent_edited,
+      opened_by: tab.opened_by || null, changed_by: tab.changed_by || null,
       ws_scheme: tab.ws_scheme || "wss",
       ws_host: tab.ws_host || "",
       ws_port: tab.ws_port || defaultWsPortForScheme(tab.ws_scheme),
@@ -5499,7 +5500,7 @@ function compactWorkspaceUnloadReplayTab(tab, options = {}, liveTab = null) {
     sequence: tab.sequence,
     custom_label: tab.custom_label || "",
     pinned: !!tab.pinned,
-    opened_by_agent: !!tab.opened_by_agent, agent_edited: !!tab.agent_edited,
+    opened_by: tab.opened_by || null, changed_by: tab.changed_by || null,
     base_request: compactWorkspaceUnloadEditableRequest(tab.base_request, options),
     source_transaction_id: tab.source_transaction_id || null,
     notice: tab.notice || "",
@@ -22406,7 +22407,7 @@ function getActiveReplayTab() {
 
 // The rows top to bottom: pinned, an agent's, then the rest.
 function getReplayTabVisualOrder() {
-  const row = (tab) => (tab.pinned ? 0 : tab.openedByAgent ? 1 : 2);
+  const row = (tab) => (tab.pinned ? 0 : tab.openedBy ? 1 : 2);
   return [...state.replayTabs].sort((a, b) => row(a) - row(b));
 }
 
@@ -22492,9 +22493,9 @@ function commitReplayTabDrag() {
       previousPinned = !!tab.pinned;
       tab.pinned = pinned;
     }
-    // Taken out of an agent's row, the tab is the person's.
-    if (tab.openedByAgent && rowName !== "agent") {
-      tab.openedByAgent = false;
+    // Taken out of the CLI's row, the tab is the person's.
+    if (tab.openedBy && rowName !== "agent") {
+      tab.openedBy = null;
       moved = true;
     }
   }
@@ -22531,7 +22532,7 @@ function replayTabDropRow(event) {
   }
   const target = rows[index]?.row || null;
   const dragged = replayTabById(replayTabDragId);
-  if (target?.dataset?.replayTabRow === "agent" && !(dragged?.openedByAgent && !dragged.pinned)) {
+  if (target?.dataset?.replayTabRow === "agent" && !(dragged?.openedBy && !dragged.pinned)) {
     return rows.find(({ row }) => row.dataset?.replayTabRow === "tabs")?.row || null;
   }
   return target;
@@ -22644,11 +22645,11 @@ function renderReplayTabs(options = {}) {
   const focusedControl = [".replay-tab-button", ".replay-tab-pin-btn", ".replay-tab-close"]
     .find((selector) => focused?.matches?.(selector));
   const sortedTabs = getReplayTabVisualOrder();
-  // What an agent changed on the tab in front of the person is seen.
+  // What the CLI changed on the tab in front of the person is seen.
   const shownTab = state.activeTool === "replay"
     ? sortedTabs.find((tab) => tab.id === state.activeReplayTabId) : null;
-  if (shownTab?.agentEdited) {
-    shownTab.agentEdited = false;
+  if (shownTab?.changedBy) {
+    shownTab.changedBy = null;
     scheduleWorkspaceStateSave();
   }
   const renamingTab = sortedTabs.find((tab) => tab.id === state.replayRenamingTabId);
@@ -22671,9 +22672,13 @@ function renderReplayTabs(options = {}) {
   const tabMarkup = (tab) => {
     const isActive = tab.id === state.activeReplayTabId;
     const active = isActive ? "active" : "";
-    const row = tab.pinned ? "pinned" : tab.openedByAgent ? "agent" : "";
-    const agentDot = tab.agentEdited
-      ? '<span class="replay-tab-agent-dot" role="img" aria-label="Changed by an agent" title="Changed by an agent"></span>' : "";
+    const row = tab.pinned ? "pinned" : tab.openedBy ? "agent" : "";
+    const changedBy = tab.changedBy ? escapeHtml(`Changed by ${tab.changedBy}`) : "";
+    const agentDot = changedBy
+      ? `<span class="replay-tab-agent-dot" role="img" aria-label="${changedBy}" title="${changedBy}"></span>` : "";
+    // Who opened it shows before its name, drawn by CSS so the name can be
+    // replaced alone and a click on it still selects the tab.
+    const actor = row === "agent" ? ` data-actor="${escapeHtml(tab.openedBy)}"` : "";
     const pinBtnState = tab.pinned ? "on" : (!isActive ? "idle" : "");
     const pinHiddenAttrs = pinBtnState === "idle" ? 'tabindex="-1"' : "";
     const pinLabel = tab.pinned ? "Unpin tab" : "Pin tab";
@@ -22683,7 +22688,7 @@ function renderReplayTabs(options = {}) {
     const title = replayTabTooltipLabel(tab, label, autoLabel);
     const labelControl = state.replayRenamingTabId === tab.id
       ? `<input class="replay-tab-name-input" type="text" value="${escapeHtml(tab.customLabel || "")}" placeholder="${escapeHtml(autoLabel)}" maxlength="80" aria-label="Replay tab name">`
-      : `<button class="replay-tab-button" type="button" title="${escapeHtml(title)}">${escapeHtml(label)}</button>`;
+      : `<button class="replay-tab-button" type="button" title="${escapeHtml(title)}"${actor}>${escapeHtml(label)}</button>`;
     // Not draggable while the name is being edited: a draggable ancestor stops
     // the browser letting you select text inside the input.
     const dragAttr = state.replayRenamingTabId === tab.id ? "" : ' draggable="true"';
@@ -22699,11 +22704,11 @@ function renderReplayTabs(options = {}) {
   // The pinned and agent rows render with nothing in them when they have no
   // tabs, so that :empty hides them and a drag can still drop into them.
   const pinnedTabs = sortedTabs.filter((tab) => tab.pinned);
-  const agentTabs = sortedTabs.filter((tab) => !tab.pinned && tab.openedByAgent);
-  const otherTabs = sortedTabs.filter((tab) => !tab.pinned && !tab.openedByAgent);
+  const agentTabs = sortedTabs.filter((tab) => !tab.pinned && tab.openedBy);
+  const otherTabs = sortedTabs.filter((tab) => !tab.pinned && !tab.openedBy);
   els.replayTabStrip.innerHTML =
     `<div class="replay-tab-list replay-tab-list-pinned" data-replay-tab-row="pinned" aria-label="Pinned tabs">${pinnedTabs.map(tabMarkup).join("")}</div>`
-    + `<div class="replay-tab-list replay-tab-list-agent" data-replay-tab-row="agent" aria-label="Opened by an agent">${agentTabs.map(tabMarkup).join("")}</div>`
+    + `<div class="replay-tab-list replay-tab-list-agent" data-replay-tab-row="agent" aria-label="Opened from sniper-cli">${agentTabs.map(tabMarkup).join("")}</div>`
     + `<div class="replay-tab-list" data-replay-tab-row="tabs">${otherTabs.map(tabMarkup).join("")}</div>`;
   // With no tab row to start a last line, the row above it shares its line
   // with + and the gear. Set here rather than with :has(), so the layout holds
@@ -22964,8 +22969,8 @@ function toggleReplayTabPin(id) {
   if (!tab) return;
   const previousPinned = !!tab.pinned;
   tab.pinned = !tab.pinned;
-  // Pinned by a person, an agent's tab is the person's.
-  if (tab.pinned) tab.openedByAgent = false;
+  // Pinned by a person, the CLI's tab is the person's.
+  if (tab.pinned) tab.openedBy = null;
   // Flush immediately so pin state survives quick app quit
   persistReplayTabMetadataEdit(tab, "pinned", previousPinned);
   renderReplayTabs();
@@ -23729,7 +23734,7 @@ function cloneReplayTabState(tab) {
       sequence: tab.sequence,
       customLabel: normalizeReplayTabCustomLabel(tab.customLabel || ""),
       pinned: !!tab.pinned,
-      openedByAgent: !!tab.openedByAgent, agentEdited: !!tab.agentEdited,
+      openedBy: tab.openedBy || null, changedBy: tab.changedBy || null,
       label: tab.label || `WS ${tab.wsHost || "draft"}`,
       wsScheme: tab.wsScheme || "wss",
       wsHost: tab.wsHost || "",
@@ -23772,7 +23777,7 @@ function cloneReplayTabState(tab) {
     sequence: tab.sequence,
     customLabel: normalizeReplayTabCustomLabel(tab.customLabel || ""),
     pinned: !!tab.pinned,
-    openedByAgent: !!tab.openedByAgent, agentEdited: !!tab.agentEdited,
+    openedBy: tab.openedBy || null, changedBy: tab.changedBy || null,
     baseRequest: tab.baseRequest ? cloneEditableRequest(tab.baseRequest) : createDefaultEditableRequest(),
     sourceTransactionId: tab.sourceTransactionId || null,
     notice: tab.notice || "",

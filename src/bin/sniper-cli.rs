@@ -49,7 +49,7 @@ use sniper::{
     skills,
     workspace::{
         FuzzerWorkspaceState, ReplayHistoryEntryState, ReplayTabState, ReplayWorkspaceState,
-        WorkspaceStateSnapshot,
+        WorkspaceStateSnapshot, CLI_WORKSPACE_CLIENT_ID,
     },
 };
 use url::Url;
@@ -3067,6 +3067,25 @@ fn api_failure_detail(status: StatusCode, message: String) -> String {
     message
 }
 
+/// Every request says who drives the CLI, so Replay can name it on the tabs
+/// it opens or changes: SNIPER_ACTOR when set, else Claude when Claude Code
+/// runs the command (it sets CLAUDECODE=1 for the commands it runs). With
+/// neither, the server says the CLI did it.
+fn api_client_builder() -> reqwest::ClientBuilder {
+    let actor = std::env::var("SNIPER_ACTOR").ok().or_else(|| {
+        (std::env::var("CLAUDECODE").as_deref() == Ok("1")).then(|| "Claude".to_string())
+    });
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(value) =
+        actor.and_then(|name| reqwest::header::HeaderValue::from_str(name.trim()).ok())
+    {
+        headers.insert("x-sniper-actor", value);
+    }
+    reqwest::Client::builder()
+        .no_proxy()
+        .default_headers(headers)
+}
+
 #[derive(Clone)]
 struct ApiClient {
     base_url: String,
@@ -3077,19 +3096,16 @@ struct ApiClient {
 
 impl ApiClient {
     async fn discover(cli_api: Option<String>) -> Result<Self> {
-        let probe_client = reqwest::Client::builder()
-            .no_proxy()
+        let probe_client = api_client_builder()
             .timeout(CLI_API_TIMEOUT)
             .build()
             .context("failed to build sniper-cli discovery HTTP client")?;
         let base_url = discover_api_base_url(cli_api, &probe_client).await?;
-        let client = reqwest::Client::builder()
-            .no_proxy()
+        let client = api_client_builder()
             .timeout(CLI_API_TIMEOUT)
             .build()
             .context("failed to build sniper-cli HTTP client")?;
-        let long_client = reqwest::Client::builder()
-            .no_proxy()
+        let long_client = api_client_builder()
             .build()
             .context("failed to build sniper-cli long-running HTTP client")?;
         Ok(Self {
@@ -3308,8 +3324,6 @@ fn api_request_error(error: reqwest::Error, method: &Method, message: String) ->
         error.context(message)
     }
 }
-
-const CLI_WORKSPACE_CLIENT_ID: &str = "sniper-cli";
 
 async fn post_workspace_state(
     api: &ApiClient,
@@ -6444,8 +6458,7 @@ fn recon_api_preview(command: &ReconCommand) -> Value {
 
 async fn discover_recon_api(cli_api: Option<String>) -> Result<ApiClient> {
     // A redirect or transport retry must never repeat a submission elsewhere.
-    let client = reqwest::Client::builder()
-        .no_proxy()
+    let client = api_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .timeout(CLI_API_TIMEOUT)
@@ -11771,8 +11784,7 @@ fn service_map_read_client() -> Result<reqwest::Client> {
 }
 
 fn service_map_client(timeout: std::time::Duration) -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .no_proxy()
+    api_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .timeout(timeout)
@@ -13514,8 +13526,7 @@ fn replay_update_is_label_only(args: &ReplayUpdateArgs) -> bool {
 
 fn saved_configuration_write_client() -> Result<reqwest::Client> {
     // A metadata write must not be replayed automatically or sent to a redirect target.
-    reqwest::Client::builder()
-        .no_proxy()
+    api_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .timeout(CLI_API_TIMEOUT)
@@ -13660,8 +13671,6 @@ async fn handle_replay(api: ApiClient, command: ReplayCommand) -> Result<()> {
                 tab.source_transaction_id,
                 &tab.target_scheme,
             );
-            // A tab a person opened shows them an agent changed it.
-            tab.agent_edited |= !tab.opened_by_agent;
             let snapshot = post_workspace_state(&api, &mut workspace, args.session_id).await?;
             let tab = find_replay_tab(&snapshot.replay, &args.tab_id)?;
             print_json_with_session(tab, workspace.session_id)
@@ -13720,7 +13729,6 @@ async fn handle_replay(api: ApiClient, command: ReplayCommand) -> Result<()> {
             }
             tab_mut.response_record = Some(record.clone());
             tab_mut.notice = replay_error.clone().unwrap_or_default();
-            tab_mut.agent_edited |= !tab_mut.opened_by_agent;
             let history_entry = ReplayHistoryEntryState {
                 request: Some(request),
                 request_text: tab_mut.request_text.clone(),
@@ -14036,8 +14044,7 @@ async fn handle_saved_replay_tab(
 ) -> Result<()> {
     // Do not inherit redirect or protocol retry behavior from legacy clients:
     // an acknowledgement loss must never create a second duplicate or close.
-    let client = reqwest::Client::builder()
-        .no_proxy()
+    let client = api_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .timeout(CLI_API_TIMEOUT)
@@ -16653,8 +16660,6 @@ async fn open_replay_tab(
         target_port: normalized.port,
         history_entries: Vec::new(),
         history_index: None,
-        // The CLI is how agents drive Replay; the UI keeps their tabs apart.
-        opened_by_agent: true,
         ..Default::default()
     };
     // Refuse before pushing: past the cap the server rejects every
@@ -18730,8 +18735,7 @@ async fn run_saved_call(
     let uncertain_outcome = if write { "unknown" } else { "not_applied" };
     // A redirect can transparently resend a destructive POST to another runtime.
     // Keep this policy local to the opt-in contract; legacy clients are unchanged.
-    let client = reqwest::Client::builder()
-        .no_proxy()
+    let client = api_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .timeout(CLI_API_TIMEOUT)

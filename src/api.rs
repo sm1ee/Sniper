@@ -54,9 +54,10 @@ use crate::{
     ui_settings::AppUiSettingsSnapshot,
     websocket::WebSocketListFilters,
     workspace::{
-        can_replace_snapshot, validate_workspace_serialized_size, FuzzerWorkspaceState,
-        ReplayTabState, SavedReplayTabOperation, WorkspaceReplaceError, WorkspaceStateSnapshot,
-        WorkspaceTransformError, MAX_WORKSPACE_SERIALIZED_BYTES,
+        can_replace_snapshot, mark_cli_replay_tabs, validate_workspace_serialized_size,
+        FuzzerWorkspaceState, ReplayTabState, SavedReplayTabOperation, WorkspaceReplaceError,
+        WorkspaceStateSnapshot, WorkspaceTransformError, CLI_WORKSPACE_CLIENT_ID,
+        MAX_WORKSPACE_SERIALIZED_BYTES,
     },
 };
 
@@ -3309,6 +3310,7 @@ struct SetSavedReplayTabLabelPayload {
 
 async fn set_saved_replay_tab_label(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<SetSavedReplayTabLabelPayload>,
 ) -> Response {
     // Apply the same normalization as the tab strip without parsing any draft.
@@ -3333,12 +3335,14 @@ async fn set_saved_replay_tab_label(
             expected_active_session_id: payload.expected_active_session_id,
         },
         SavedReplayTabOperation::SetLabel(label),
+        replay_actor(&headers),
     )
     .await
 }
 
 async fn set_saved_http_tab_pinned(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<SetSavedHttpTabPinnedPayload>,
 ) -> Response {
     mutate_saved_replay_tab(
@@ -3350,34 +3354,55 @@ async fn set_saved_http_tab_pinned(
             expected_active_session_id: payload.expected_active_session_id,
         },
         SavedReplayTabOperation::SetPinned(payload.pinned),
+        replay_actor(&headers),
     )
     .await
 }
 
 async fn close_saved_http_tab(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<SavedHttpTabPayload>,
 ) -> Response {
-    mutate_saved_replay_tab(state, payload, SavedReplayTabOperation::Close).await
+    let actor = replay_actor(&headers);
+    mutate_saved_replay_tab(state, payload, SavedReplayTabOperation::Close, actor).await
 }
 
 async fn duplicate_saved_http_tab(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<SavedHttpTabPayload>,
 ) -> Response {
-    mutate_saved_replay_tab(state, payload, SavedReplayTabOperation::Duplicate).await
+    let actor = replay_actor(&headers);
+    mutate_saved_replay_tab(state, payload, SavedReplayTabOperation::Duplicate, actor).await
+}
+
+/// Who sniper-cli says drives it, for Replay to name on the tabs it opens or
+/// changes. Any local client can send the header, so it is a short label at
+/// most; without one the tab says the CLI did it.
+fn replay_actor(headers: &HeaderMap) -> String {
+    headers
+        .get("x-sniper-actor")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && name.len() <= 32)
+        .unwrap_or("CLI")
+        .to_string()
 }
 
 async fn mutate_saved_replay_tab(
     state: Arc<AppState>,
     payload: SavedHttpTabPayload,
     operation: SavedReplayTabOperation,
+    actor: String,
 ) -> Response {
     // Keep the operation/persistence locks alive through disk commit and memory
     // publication even when the requester disconnects during spawn_blocking.
-    tokio::spawn(mutate_saved_replay_tab_inner(state, payload, operation))
-        .await
-        .unwrap_or_else(|_| saved_http_tab_uncertain_response())
+    tokio::spawn(mutate_saved_replay_tab_inner(
+        state, payload, operation, actor,
+    ))
+    .await
+    .unwrap_or_else(|_| saved_http_tab_uncertain_response())
 }
 
 fn saved_http_tab_uncertain_response() -> Response {
@@ -3392,6 +3417,7 @@ async fn mutate_saved_replay_tab_inner(
     state: Arc<AppState>,
     payload: SavedHttpTabPayload,
     operation: SavedReplayTabOperation,
+    actor: String,
 ) -> Response {
     if payload.tab_id.trim().is_empty() || payload.tab_id.len() > MAX_WORKSPACE_REPLAY_TAB_ID_BYTES
     {
@@ -3440,6 +3466,7 @@ async fn mutate_saved_replay_tab_inner(
             &payload.tab_id,
             payload.expected_workspace_revision,
             operation.clone(),
+            &actor,
         )
         .await
     {
@@ -3519,6 +3546,7 @@ fn workspace_commit_uncertain_response() -> Response {
 
 async fn update_workspace_state(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(snapshot): Json<WorkspaceStateSnapshot>,
 ) -> Response {
     let mut snapshot = snapshot;
@@ -3588,6 +3616,9 @@ async fn update_workspace_state(
         return (StatusCode::CONFLICT, Json(current)).into_response();
     }
     merge_incomplete_workspace_update_ws_frames(&mut snapshot, &current);
+    if snapshot.client_id.as_deref() == Some(CLI_WORKSPACE_CLIENT_ID) {
+        mark_cli_replay_tabs(&mut snapshot, &current, &replay_actor(&headers));
+    }
     if let Err(error) = validate_workspace_state(&snapshot) {
         return (StatusCode::BAD_REQUEST, error).into_response();
     }
@@ -12562,6 +12593,7 @@ mod tests {
         let request = tokio::spawn(async move {
             super::close_saved_http_tab(
                 State(request_state),
+                HeaderMap::new(),
                 Json(super::SavedHttpTabPayload {
                     session_id: id,
                     tab_id: "saved-only".into(),
@@ -12921,7 +12953,7 @@ mod tests {
         expected.expected_active_session_id = None;
         expected.replay.tabs[0].custom_label = "Saved conversation".into();
         // This route is sniper-cli's, so the person's tab is flagged as well.
-        expected.replay.tabs[0].agent_edited = true;
+        expected.replay.tabs[0].changed_by = Some("CLI".into());
         assert_eq!(
             serde_json::to_value(&actual).unwrap(),
             serde_json::to_value(&expected).unwrap()
@@ -14217,7 +14249,8 @@ mod tests {
             ..WorkspaceStateSnapshot::default()
         };
         let current_response =
-            super::update_workspace_state(State(state.clone()), Json(current)).await;
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(current))
+                .await;
         assert_eq!(current_response.status(), StatusCode::OK);
         let saved_current: WorkspaceStateSnapshot = response_json(current_response).await;
 
@@ -14244,7 +14277,8 @@ mod tests {
             ..WorkspaceStateSnapshot::default()
         };
         let update_response =
-            super::update_workspace_state(State(state.clone()), Json(incoming)).await;
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(incoming))
+                .await;
         assert_eq!(update_response.status(), StatusCode::OK);
 
         let reloaded = state.sessions.load_context(session_id).unwrap();
@@ -14292,7 +14326,8 @@ mod tests {
             ..WorkspaceStateSnapshot::default()
         };
         let current_response =
-            super::update_workspace_state(State(state.clone()), Json(current)).await;
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(current))
+                .await;
         assert_eq!(current_response.status(), StatusCode::OK);
         let saved_current: WorkspaceStateSnapshot = response_json(current_response).await;
 
@@ -14319,7 +14354,8 @@ mod tests {
             ..WorkspaceStateSnapshot::default()
         };
         let update_response =
-            super::update_workspace_state(State(state.clone()), Json(incoming)).await;
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(incoming))
+                .await;
         assert_eq!(update_response.status(), StatusCode::OK);
 
         let reloaded = state.sessions.load_context(session_id).unwrap();
@@ -20812,7 +20848,7 @@ mod tests {
             )
             .await
         } else {
-            super::update_workspace_state(State(state), Json(snapshot)).await
+            super::update_workspace_state(State(state), HeaderMap::new(), Json(snapshot)).await
         }
     }
 
@@ -20879,6 +20915,7 @@ mod tests {
             // the unrelated draft that became visible despite the error.
             let stale = super::set_saved_replay_tab_label(
                 State(state.clone()),
+                HeaderMap::new(),
                 Json(super::SetSavedReplayTabLabelPayload {
                     session_id: session.id(),
                     tab_id: "synthetic-tab".into(),
@@ -20912,6 +20949,7 @@ mod tests {
             assert_eq!(refreshed.revision, memory.revision);
             let response = super::set_saved_replay_tab_label(
                 State(state.clone()),
+                HeaderMap::new(),
                 Json(super::SetSavedReplayTabLabelPayload {
                     session_id: session.id(),
                     tab_id: "synthetic-tab".into(),
@@ -21122,7 +21160,9 @@ mod tests {
         std::fs::remove_file(&registry_path).unwrap();
         std::fs::create_dir(&registry_path).unwrap();
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::OK);
         let live = session.workspace.snapshot().await;
@@ -21208,7 +21248,9 @@ mod tests {
         };
         snapshot.replay.active_tab_id = Some("unknown-session-tab".to_string());
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::CONFLICT);
         let active = active_session.workspace.snapshot().await;
@@ -21246,7 +21288,9 @@ mod tests {
             ..ReplayTabState::default()
         });
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::CONFLICT);
         let active = active_session.workspace.snapshot().await;
@@ -21311,7 +21355,9 @@ mod tests {
             ..WorkspaceStateSnapshot::default()
         };
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::OK);
         let saved: WorkspaceStateSnapshot = response_json(response).await;
@@ -21358,7 +21404,9 @@ mod tests {
             ..ReplayTabState::default()
         });
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::OK);
         let active = state.session().await;
@@ -21420,7 +21468,9 @@ mod tests {
             ..ReplayTabState::default()
         });
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::CONFLICT);
         let body = response_body_json(response).await;
@@ -21474,7 +21524,9 @@ mod tests {
             ..ReplayTabState::default()
         });
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::CONFLICT);
         let body = response_body_json(response).await;
@@ -21606,7 +21658,9 @@ mod tests {
             ..ReplayTabState::default()
         });
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::CONFLICT);
         assert!(inactive
@@ -24605,6 +24659,7 @@ mod tests {
 
         let response = super::update_workspace_state(
             State(state.clone()),
+            HeaderMap::new(),
             Json(WorkspaceStateSnapshot {
                 session_id: Some(original_id),
                 ..WorkspaceStateSnapshot::default()
@@ -24663,7 +24718,8 @@ mod tests {
             ..ReplayTabState::default()
         });
 
-        let response = super::update_workspace_state(State(state), Json(stale)).await;
+        let response =
+            super::update_workspace_state(State(state), HeaderMap::new(), Json(stale)).await;
 
         assert_eq!(response.status(), super::StatusCode::CONFLICT);
         let _ = std::fs::remove_dir_all(data_dir);
@@ -26970,7 +27026,9 @@ mod tests {
 
         // Use the ordinary save handler, including its shared operation lock and
         // mutation-safe persistence. Saving a reference does not recreate a row.
-        let response = super::update_workspace_state(State(state.clone()), Json(unsaved)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(unsaved))
+                .await;
         assert_eq!(response.status(), StatusCode::OK);
         let saved: crate::workspace::WorkspaceStateSnapshot = response_json(response).await;
         assert_eq!(saved.replay.tabs.len(), 1);

@@ -1,6 +1,7 @@
-// Tabs an agent opened (sniper-cli) sit in a blue row of their own. A person
-// can take one out, by dragging it to another row or pinning it, but cannot
-// put a tab in. A person's tab an agent changed shows a dot until selected.
+// Tabs sniper-cli opened sit in a blue row of their own, each named with who
+// opened it (Claude, Codex, or CLI). A person can take one out, by dragging it
+// to another row or pinning it, but cannot put a tab in. A person's tab the CLI
+// changed shows a dot, saying who changed it, until selected.
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const vm = require("node:vm");
@@ -14,24 +15,24 @@ const row = (name, rect) => ({ dataset: { replayTabRow: name }, getBoundingClien
 test("the rows run pinned, an agent's, then the rest", () => {
   const { getReplayTabVisualOrder } = loadFunctions(["getReplayTabVisualOrder"], {
     state: { replayTabs: [
-      { id: "a" }, { id: "g", openedByAgent: true }, { id: "p", pinned: true }, { id: "b" },
-      { id: "gp", openedByAgent: true, pinned: true },
+      { id: "a" }, { id: "g", openedBy: "Claude" }, { id: "p", pinned: true }, { id: "b" },
+      { id: "gp", openedBy: "Claude", pinned: true },
     ] },
   });
   assert.deepEqual([...getReplayTabVisualOrder().map((tab) => tab.id)], ["p", "gp", "g", "a", "b"]);
 });
 
-test("an agent's tabs render on a row of their own, and a person's tab it changed shows a dot", () => {
+test("the CLI's tabs render on a row of their own under who opened them, and a person's tab it changed shows a dot", () => {
   let markup = "";
   const state = {
-    replayTabs: [{ id: "a", agentEdited: true }, { id: "g", openedByAgent: true }],
+    replayTabs: [{ id: "a", changedBy: "Codex" }, { id: "g", openedBy: "Claude" }, { id: "x", openedBy: '<b "x">' }],
     activeReplayTabId: "a", replayRenamingTabId: null,
   };
-  const context = loadFunctions(["renderReplayTabs", "getReplayTabVisualOrder"], {
+  const context = loadFunctions(["renderReplayTabs", "getReplayTabVisualOrder", "escapeHtml"], {
     state,
     els: { replayTabStrip: { set innerHTML(value) { markup = value; }, querySelectorAll: () => [], classList: { toggle() {} } } },
     replayTabAutoLabel: (tab) => tab.id, replayTabLabel: (tab) => tab.id,
-    replayTabTooltipLabel: (tab, label) => label, escapeHtml: String,
+    replayTabTooltipLabel: (tab, label) => label,
     scrollActiveReplayTabIntoView() {}, document: { activeElement: null },
   });
   context.renderReplayTabs();
@@ -40,18 +41,30 @@ test("an agent's tabs render on a row of their own, and a person's tab it change
   assert.match(agentRow, /data-replay-tab-id="g"/);
   assert.doesNotMatch(agentRow, /data-replay-tab-id="a"/);
   const tabMarkup = (id) => markup.split(`data-replay-tab-id="${id}"`)[1].split("</div>")[0];
-  assert.match(tabMarkup("a"), /class="replay-tab-agent-dot"/);
+  assert.match(tabMarkup("a"), /class="replay-tab-agent-dot" role="img" aria-label="Changed by Codex" title="Changed by Codex"/);
+  assert.doesNotMatch(tabMarkup("a"), /data-actor/, "a person's tab names no one");
+  assert.match(tabMarkup("g"), /<button class="replay-tab-button"[^>]* data-actor="Claude"/);
   assert.doesNotMatch(tabMarkup("g"), /replay-tab-agent-dot/, "its own tab needs no dot");
-  state.replayTabs[1].openedByAgent = false;
+  assert.match(tabMarkup("x"), /data-actor="&lt;b &quot;x&quot;&gt;"/, "a name is text");
+  state.replayTabs.forEach((tab) => { tab.openedBy = null; });
   context.renderReplayTabs();
-  assert.match(markup, /data-replay-tab-row="agent" aria-label="Opened by an agent"><\/div>/, "empty, so :empty hides it");
+  assert.match(markup, /data-replay-tab-row="agent" aria-label="Opened from sniper-cli"><\/div>/, "empty, so :empty hides it");
+});
+
+// A tab that is not selected shows no pin button: an invisible one would sit
+// in front of the name as empty space.
+test("only the selected tab and a pinned one hold a pin button", () => {
+  const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8");
+  assert.match(css, /\.replay-tab-pin-btn\.idle \{\s*display: none;\s*\}/);
+  assert.doesNotMatch(css, /:hover \.replay-tab-pin-btn\.idle/);
+  assert.match(css, /\.replay-tab-button\[data-actor\]::before \{[^}]*content: attr\(data-actor\);/);
 });
 
 // An agent opened every tab: the agent's row would take a line and leave +
 // and the gear alone on a second, empty one.
 test("with no tab of the person's, the agent's row shares its line with + and the gear", () => {
   const classes = new Set();
-  const state = { replayTabs: [{ id: "p", pinned: true }, { id: "g", openedByAgent: true }],
+  const state = { replayTabs: [{ id: "p", pinned: true }, { id: "g", openedBy: "Claude" }],
     activeReplayTabId: "g", replayRenamingTabId: null };
   const context = loadFunctions(["renderReplayTabs", "getReplayTabVisualOrder"], {
     state,
@@ -75,7 +88,7 @@ test("with no tab of the person's, the agent's row shares its line with + and th
 test("a person's tab cannot be put among an agent's, but an agent's can stay there", () => {
   const rows = [row("pinned", box(0, 0, 0, 0)), row("agent", box(0, 0)), row("tabs", box(0, 32))];
   const context = loadFunctions(["replayTabDropRow", "replayTabById"], {
-    state: { replayTabs: [{ id: "g", openedByAgent: true }, { id: "a" }] },
+    state: { replayTabs: [{ id: "g", openedBy: "Claude" }, { id: "a" }] },
     els: { replayTabStrip: { querySelectorAll: () => rows } },
   });
   vm.runInContext('var replayTabDragId = "g";', context);
@@ -100,35 +113,35 @@ function drop(tabs, draggedId, rowName) {
   return calls;
 }
 
-test("dragging an agent's tab out of its row makes it the person's", () => {
-  const out = [{ id: "g", openedByAgent: true }, { id: "a" }];
+test("dragging the CLI's tab out of its row makes it the person's", () => {
+  const out = [{ id: "g", openedBy: "Claude" }, { id: "a" }];
   const calls = drop(out, "g", "tabs");
-  assert.equal(out[0].openedByAgent, false);
+  assert.equal(out[0].openedBy, null);
   assert.equal(calls.saves, 1);
-  const pinned = [{ id: "g", openedByAgent: true }];
+  const pinned = [{ id: "g", openedBy: "Claude" }];
   drop(pinned, "g", "pinned");
   assert.equal(pinned[0].pinned, true);
-  assert.equal(pinned[0].openedByAgent, false);
-  const stays = [{ id: "g", openedByAgent: true }];
+  assert.equal(pinned[0].openedBy, null);
+  const stays = [{ id: "g", openedBy: "Claude" }];
   drop(stays, "g", "agent");
-  assert.equal(stays[0].openedByAgent, true);
+  assert.equal(stays[0].openedBy, "Claude");
 });
 
 test("pinning an agent's tab makes it the person's", () => {
-  const tab = { id: "g", openedByAgent: true };
+  const tab = { id: "g", openedBy: "Claude" };
   const { toggleReplayTabPin } = loadFunctions(["toggleReplayTabPin"], {
     state: { replayTabs: [tab] }, persistReplayTabMetadataEdit() {}, renderReplayTabs() {},
   });
   toggleReplayTabPin("g");
   assert.equal(tab.pinned, true);
-  assert.equal(tab.openedByAgent, false);
+  assert.equal(tab.openedBy, null);
 });
 
 test("the tab in front of the person loses its dot, and that is saved", () => {
   let markup = "";
   let saves = 0;
   const state = {
-    replayTabs: [{ id: "a", agentEdited: true }, { id: "b", agentEdited: true }],
+    replayTabs: [{ id: "a", changedBy: "Codex" }, { id: "b", changedBy: "Codex" }],
     activeReplayTabId: "a", replayRenamingTabId: null, activeTool: "history",
   };
   const context = loadFunctions(["renderReplayTabs", "getReplayTabVisualOrder"], {
@@ -139,11 +152,11 @@ test("the tab in front of the person loses its dot, and that is saved", () => {
     scrollActiveReplayTabIntoView() {}, document: { activeElement: null },
   });
   context.renderReplayTabs();
-  assert.equal(state.replayTabs[0].agentEdited, true, "Replay is not on screen");
+  assert.equal(state.replayTabs[0].changedBy, "Codex", "Replay is not on screen");
   state.activeTool = "replay";
   context.renderReplayTabs();
-  assert.equal(state.replayTabs[0].agentEdited, false);
-  assert.equal(state.replayTabs[1].agentEdited, true, "only the tab in front");
+  assert.equal(state.replayTabs[0].changedBy, null);
+  assert.equal(state.replayTabs[1].changedBy, "Codex", "only the tab in front");
   assert.equal(saves, 1);
   assert.equal((markup.match(/replay-tab-agent-dot/g) || []).length, 1);
 });
@@ -151,7 +164,7 @@ test("the tab in front of the person loses its dot, and that is saved", () => {
 test("a person's tab hovering over the agent's row stays with the rest; pinned, agent and pin zone split by line", () => {
   const rows = [];
   const context = loadFunctions(["replayTabDropRow", "replayTabById"], {
-    state: { replayTabs: [{ id: "g", openedByAgent: true }, { id: "a" }] },
+    state: { replayTabs: [{ id: "g", openedBy: "Claude" }, { id: "a" }] },
     els: { replayTabStrip: { querySelectorAll: () => rows } },
   });
   const named = (event) => context.replayTabDropRow(event).dataset.replayTabRow;
@@ -175,18 +188,19 @@ test("a person's tab hovering over the agent's row stays with the rest; pinned, 
   assert.equal(named({ clientX: 300, clientY: 10 }), "pinned");
 });
 
-test("an agent's marks arrive with the saved workspace and go back out with the next save", async () => {
+test("the CLI's marks arrive with the saved workspace and go back out with the next save", async () => {
   const f = fixture();
   const mine = f.tab("mine");
   f.seed([mine]);
   const snapshot = f.remote([mine], 12);
-  snapshot.replay.tabs[0].agent_edited = true;
-  snapshot.replay.tabs.push({ ...snapshot.replay.tabs[0], id: "opened-by-agent", sequence: 9,
-    custom_label: "agent", agent_edited: false, opened_by_agent: true });
+  snapshot.replay.tabs[0].changed_by = "Codex";
+  snapshot.replay.tabs.push({ ...snapshot.replay.tabs[0], id: "opened-by-claude", sequence: 9,
+    custom_label: "claude", changed_by: null, opened_by: "Claude" });
   await f.adopt(snapshot);
-  assert.equal(mine.agentEdited, true);
-  const opened = f.state.replayTabs.find((tab) => tab.id === "opened-by-agent");
-  assert.equal(opened.openedByAgent, true);
-  assert.equal(f.context.snapshotHttpReplayTab(mine).agent_edited, true);
-  assert.equal(f.context.snapshotHttpReplayTab(opened).opened_by_agent, true);
+  assert.equal(mine.changedBy, "Codex");
+  const opened = f.state.replayTabs.find((tab) => tab.id === "opened-by-claude");
+  assert.equal(opened.openedBy, "Claude");
+  assert.equal(f.context.snapshotHttpReplayTab(mine).changed_by, "Codex");
+  assert.equal(f.context.snapshotHttpReplayTab(mine).opened_by, null, "an unset mark is written as null");
+  assert.equal(f.context.snapshotHttpReplayTab(opened).opened_by, "Claude");
 });

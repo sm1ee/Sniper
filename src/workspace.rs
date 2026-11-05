@@ -112,13 +112,15 @@ pub struct ReplayTabState {
     pub history_entries_complete: Option<bool>,
     #[serde(default)]
     pub pinned: bool,
-    /// An agent opened it (sniper-cli or the saved tab calls): Replay keeps it
-    /// in its own row until a person drags it out or pins it.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub opened_by_agent: bool,
-    /// An agent changed a tab a person opened; Replay marks it until viewed.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub agent_edited: bool,
+    /// Who opened it with sniper-cli (Claude, Codex, or CLI when nothing said):
+    /// Replay keeps it in its own row, under that name, until a person drags
+    /// it out or pins it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened_by: Option<String>,
+    /// Who changed, with sniper-cli, a tab a person opened; Replay marks it
+    /// until viewed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_by: Option<String>,
     // WebSocket tab fields
     #[serde(default)]
     pub ws_scheme: String,
@@ -233,18 +235,55 @@ pub(crate) enum WorkspaceTransformError<E> {
     CommittedButUncertain(E),
 }
 
-fn is_false(value: &bool) -> bool {
-    !value
-}
+/// What sniper-cli sends as its workspace `client_id`.
+pub const CLI_WORKSPACE_CLIENT_ID: &str = "sniper-cli";
 
-/// Replay's rows, top to bottom: pinned, an agent's, then the rest.
+/// Replay's rows, top to bottom: pinned, the CLI's, then the rest.
 fn replay_row(tab: &ReplayTabState) -> u8 {
     if tab.pinned {
         0
-    } else if tab.opened_by_agent {
+    } else if tab.opened_by.is_some() {
         1
     } else {
         2
+    }
+}
+
+/// Marks a workspace save by sniper-cli: a tab it adds is opened by `actor`,
+/// and a person's tab it changes is changed by `actor`. A CLI that predates
+/// the marks saves the tabs without them, so a CLI save keeps every mark
+/// already stored; only the app clears one, when a person takes or views the
+/// tab.
+pub(crate) fn mark_cli_replay_tabs(
+    next: &mut WorkspaceStateSnapshot,
+    current: &WorkspaceStateSnapshot,
+    actor: &str,
+) {
+    let stored: std::collections::HashMap<_, _> = current
+        .replay
+        .tabs
+        .iter()
+        .map(|tab| (tab.id.as_str(), tab))
+        .collect();
+    for tab in &mut next.replay.tabs {
+        let Some(before) = stored.get(tab.id.as_str()) else {
+            tab.opened_by = Some(actor.to_string());
+            tab.changed_by = None;
+            continue;
+        };
+        if tab.opened_by.is_none() {
+            tab.opened_by.clone_from(&before.opened_by);
+        }
+        if tab.changed_by.is_none() {
+            tab.changed_by.clone_from(&before.changed_by);
+        }
+        // ponytail: serializes each stored tab once per CLI save; CLI saves
+        // are one per command, so a field-wise comparison is not worth it.
+        if tab.opened_by.is_none()
+            && serde_json::to_value(&*tab).ok() != serde_json::to_value(before).ok()
+        {
+            tab.changed_by = Some(actor.to_string());
+        }
     }
 }
 
@@ -254,6 +293,7 @@ pub(crate) fn transform_saved_replay_tab(
     current: &WorkspaceStateSnapshot,
     tab_id: &str,
     operation: SavedReplayTabOperation,
+    actor: &str,
 ) -> Result<WorkspaceStateSnapshot, String> {
     let index = current
         .replay
@@ -274,18 +314,23 @@ pub(crate) fn transform_saved_replay_tab(
         .to_string());
     }
     let mut next = current.clone();
-    // These calls are sniper-cli's, so an agent's: what it changes on a tab a
-    // person opened is marked for that person.
-    let marks_a_persons_tab = !source.opened_by_agent;
+    // These calls are sniper-cli's: what it changes on a tab a person opened
+    // is marked for that person.
+    if source.opened_by.is_none()
+        && matches!(
+            &operation,
+            SavedReplayTabOperation::SetLabel(_) | SavedReplayTabOperation::SetPinned(_)
+        )
+    {
+        next.replay.tabs[index].changed_by = Some(actor.to_string());
+    }
     match operation {
         SavedReplayTabOperation::SetLabel(label) => {
             next.replay.tabs[index].custom_label = label;
-            next.replay.tabs[index].agent_edited |= marks_a_persons_tab;
         }
         SavedReplayTabOperation::SetPinned(pinned) => {
             // This is desired-state assignment, never a toggle or reorder.
             next.replay.tabs[index].pinned = pinned;
-            next.replay.tabs[index].agent_edited |= marks_a_persons_tab;
         }
         SavedReplayTabOperation::Close => {
             // Legacy counters can lag the saved tabs. Closing the last/highest
@@ -333,8 +378,8 @@ pub(crate) fn transform_saved_replay_tab(
             }
             duplicate.sequence = sequence;
             duplicate.pinned = false;
-            duplicate.opened_by_agent = true;
-            duplicate.agent_edited = false;
+            duplicate.opened_by = Some(actor.to_string());
+            duplicate.changed_by = None;
             next.replay.tabs.push(duplicate);
             next.replay.tab_sequence = sequence;
         }
@@ -938,7 +983,8 @@ mod saved_http_tab_tests {
     fn saved_http_close_uses_stable_visual_order_and_retains_monotonic_sequence() {
         let current = fixture();
         let next =
-            transform_saved_replay_tab(&current, "middle", SavedReplayTabOperation::Close).unwrap();
+            transform_saved_replay_tab(&current, "middle", SavedReplayTabOperation::Close, "CLI")
+                .unwrap();
         assert_eq!(next.replay.active_tab_id.as_deref(), Some("pinned"));
         assert_eq!(next.replay.tab_sequence, 20);
         assert_eq!(
@@ -957,12 +1003,14 @@ mod saved_http_tab_tests {
                 &selected_state,
                 selected,
                 SavedReplayTabOperation::Close,
+                "CLI",
             )
             .unwrap();
             assert_eq!(closed.replay.active_tab_id.as_deref(), Some(expected));
         }
         let nonselected =
-            transform_saved_replay_tab(&current, "last", SavedReplayTabOperation::Close).unwrap();
+            transform_saved_replay_tab(&current, "last", SavedReplayTabOperation::Close, "CLI")
+                .unwrap();
         assert_eq!(
             nonselected.replay.active_tab_id,
             current.replay.active_tab_id
@@ -970,75 +1018,128 @@ mod saved_http_tab_tests {
         let mut single = current.clone();
         single.replay.tabs.retain(|tab| tab.id == "middle");
         let empty =
-            transform_saved_replay_tab(&single, "middle", SavedReplayTabOperation::Close).unwrap();
+            transform_saved_replay_tab(&single, "middle", SavedReplayTabOperation::Close, "CLI")
+                .unwrap();
         assert!(empty.replay.tabs.is_empty());
         assert!(empty.replay.active_tab_id.is_none());
         assert_eq!(empty.replay.tab_sequence, 20);
         single.replay.tab_sequence = 0;
         let empty =
-            transform_saved_replay_tab(&single, "middle", SavedReplayTabOperation::Close).unwrap();
+            transform_saved_replay_tab(&single, "middle", SavedReplayTabOperation::Close, "CLI")
+                .unwrap();
         assert_eq!(empty.replay.tab_sequence, 5);
     }
 
     #[test]
-    fn what_an_agent_does_to_a_tab_is_marked_for_the_person() {
+    fn what_the_cli_does_to_a_tab_is_marked_with_who_did_it() {
         let current = fixture();
         // "middle" is a tab a person opened.
         let labelled = transform_saved_replay_tab(
             &current,
             "middle",
             SavedReplayTabOperation::SetLabel("Found".into()),
+            "Claude",
         )
         .unwrap();
-        assert!(labelled.replay.tabs[1].agent_edited);
+        assert_eq!(
+            labelled.replay.tabs[1].changed_by.as_deref(),
+            Some("Claude")
+        );
         let pinned = transform_saved_replay_tab(
             &current,
             "middle",
             SavedReplayTabOperation::SetPinned(true),
+            "Codex",
         )
         .unwrap();
-        assert!(pinned.replay.tabs[1].agent_edited);
-        let duplicated =
-            transform_saved_replay_tab(&current, "middle", SavedReplayTabOperation::Duplicate)
-                .unwrap();
+        assert_eq!(pinned.replay.tabs[1].changed_by.as_deref(), Some("Codex"));
+        let duplicated = transform_saved_replay_tab(
+            &current,
+            "middle",
+            SavedReplayTabOperation::Duplicate,
+            "CLI",
+        )
+        .unwrap();
         let copy = duplicated.replay.tabs.last().unwrap();
-        assert!(copy.opened_by_agent && !copy.agent_edited);
-        // An agent changing its own tab marks nothing.
+        assert_eq!(copy.opened_by.as_deref(), Some("CLI"));
+        assert_eq!(copy.changed_by, None);
+        // The CLI changing a tab it opened marks nothing.
         let mut own = current.clone();
-        own.replay.tabs[1].opened_by_agent = true;
+        own.replay.tabs[1].opened_by = Some("Claude".into());
         let relabelled = transform_saved_replay_tab(
             &own,
             "middle",
             SavedReplayTabOperation::SetLabel("Again".into()),
+            "Claude",
         )
         .unwrap();
-        assert!(!relabelled.replay.tabs[1].agent_edited);
+        assert_eq!(relabelled.replay.tabs[1].changed_by, None);
         // Neither mark is written while unset.
         assert!(value(&current)["replay"]["tabs"][1]
-            .get("opened_by_agent")
+            .get("opened_by")
             .is_none());
         assert!(value(&current)["replay"]["tabs"][1]
-            .get("agent_edited")
+            .get("changed_by")
             .is_none());
+    }
+
+    #[test]
+    fn a_cli_save_names_who_opened_or_changed_a_tab_and_never_clears_a_mark() {
+        let mut current = fixture();
+        current.replay.tabs[0].opened_by = Some("Claude".into());
+        current.replay.tabs[2].changed_by = Some("Codex".into());
+        // An older CLI saves without the marks, having changed "middle" and
+        // opened a tab of its own.
+        let mut next = current.clone();
+        for tab in &mut next.replay.tabs {
+            tab.opened_by = None;
+            tab.changed_by = None;
+        }
+        next.replay.tabs[1].request_text = "GET /changed HTTP/1.1\r\n\r\n".into();
+        let mut added = next.replay.tabs[3].clone();
+        added.id = "added".into();
+        next.replay.tabs.push(added);
+        mark_cli_replay_tabs(&mut next, &current, "CLI");
+        let marks = next
+            .replay
+            .tabs
+            .iter()
+            .map(|tab| (tab.opened_by.as_deref(), tab.changed_by.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            marks,
+            [
+                (Some("Claude"), None),
+                (None, Some("CLI")),
+                (None, Some("Codex")),
+                (None, None),
+                (Some("CLI"), None),
+            ]
+        );
     }
 
     #[test]
     fn closing_the_active_tab_follows_the_rows_pinned_then_agent_then_the_rest() {
         let mut current = fixture();
         // Rows: pinned | last (an agent's) | first, middle.
-        current.replay.tabs[2].opened_by_agent = true;
+        current.replay.tabs[2].opened_by = Some("Claude".into());
         current.replay.active_tab_id = Some("first".into());
         let closed =
-            transform_saved_replay_tab(&current, "first", SavedReplayTabOperation::Close).unwrap();
+            transform_saved_replay_tab(&current, "first", SavedReplayTabOperation::Close, "CLI")
+                .unwrap();
         assert_eq!(closed.replay.active_tab_id.as_deref(), Some("last"));
     }
 
     #[test]
     fn saved_http_duplicate_keeps_raw_saved_state_and_focus_with_fresh_unpinned_identity() {
         let current = fixture();
-        let next =
-            transform_saved_replay_tab(&current, "middle", SavedReplayTabOperation::Duplicate)
-                .unwrap();
+        let next = transform_saved_replay_tab(
+            &current,
+            "middle",
+            SavedReplayTabOperation::Duplicate,
+            "CLI",
+        )
+        .unwrap();
         assert_eq!(next.replay.active_tab_id, current.replay.active_tab_id);
         assert_eq!(next.replay.tab_sequence, 21);
         let mut duplicate = next.replay.tabs.last().unwrap().clone();
@@ -1049,7 +1150,7 @@ mod saved_http_tab_tests {
         duplicate.id = current.replay.tabs[1].id.clone();
         duplicate.sequence = current.replay.tabs[1].sequence;
         duplicate.pinned = current.replay.tabs[1].pinned;
-        duplicate.opened_by_agent = current.replay.tabs[1].opened_by_agent;
+        duplicate.opened_by = current.replay.tabs[1].opened_by.clone();
         assert_eq!(
             serde_json::to_value(duplicate).unwrap(),
             value(&current)["replay"]["tabs"][1]
@@ -1065,10 +1166,15 @@ mod saved_http_tab_tests {
         let mut behind = current.clone();
         behind.replay.tab_sequence = 0;
         assert_eq!(
-            transform_saved_replay_tab(&behind, "middle", SavedReplayTabOperation::Duplicate)
-                .unwrap()
-                .replay
-                .tab_sequence,
+            transform_saved_replay_tab(
+                &behind,
+                "middle",
+                SavedReplayTabOperation::Duplicate,
+                "CLI"
+            )
+            .unwrap()
+            .replay
+            .tab_sequence,
             6
         );
     }
@@ -1151,11 +1257,13 @@ mod saved_http_tab_tests {
                         _ => continue,
                     }
                     // These operations are sniper-cli's, so the person's tab is flagged.
-                    expected["replay"]["tabs"][1]["agent_edited"] = json!(true);
+                    expected["replay"]["tabs"][1]["changed_by"] = json!("CLI");
                     let next =
-                        transform_saved_replay_tab(&current, "middle", operation.clone()).unwrap();
+                        transform_saved_replay_tab(&current, "middle", operation.clone(), "CLI")
+                            .unwrap();
                     let repeated =
-                        transform_saved_replay_tab(&next, "middle", operation.clone()).unwrap();
+                        transform_saved_replay_tab(&next, "middle", operation.clone(), "CLI")
+                            .unwrap();
                     for transformed in [&next, &repeated] {
                         assert_eq!(
                             value(transformed),
@@ -1235,13 +1343,15 @@ mod saved_http_tab_tests {
         assert!(transform_saved_replay_tab(
             &current,
             "middle",
-            SavedReplayTabOperation::SetLabel("name".into())
+            SavedReplayTabOperation::SetLabel("name".into()),
+            "CLI"
         )
         .is_err());
         assert!(transform_saved_replay_tab(
             &current,
             "missing",
-            SavedReplayTabOperation::SetLabel("name".into())
+            SavedReplayTabOperation::SetLabel("name".into()),
+            "CLI"
         )
         .is_err());
     }
@@ -1255,28 +1365,36 @@ mod saved_http_tab_tests {
             SavedReplayTabOperation::SetPinned(true),
             SavedReplayTabOperation::SetPinned(false),
         ] {
-            assert!(transform_saved_replay_tab(&current, " middle ", operation.clone()).is_err());
+            assert!(
+                transform_saved_replay_tab(&current, " middle ", operation.clone(), "CLI").is_err()
+            );
             for kind in ["websocket", "unknown", "HTTP"] {
                 let mut wrong = current.clone();
                 wrong.replay.tabs[1].tab_type = kind.into();
-                assert!(transform_saved_replay_tab(&wrong, "middle", operation.clone()).is_err());
+                assert!(
+                    transform_saved_replay_tab(&wrong, "middle", operation.clone(), "CLI").is_err()
+                );
             }
         }
         let mut full = current.clone();
         full.replay
             .tabs
             .resize(MAX_WORKSPACE_REPLAY_TABS, current.replay.tabs[0].clone());
-        assert!(
-            transform_saved_replay_tab(&full, "middle", SavedReplayTabOperation::Duplicate)
-                .is_err()
-        );
+        assert!(transform_saved_replay_tab(
+            &full,
+            "middle",
+            SavedReplayTabOperation::Duplicate,
+            "CLI"
+        )
+        .is_err());
         for sequence in [usize::MAX, usize::MAX - 1] {
             let mut exhausted = current.clone();
             exhausted.replay.tab_sequence = sequence;
             assert!(transform_saved_replay_tab(
                 &exhausted,
                 "middle",
-                SavedReplayTabOperation::Duplicate
+                SavedReplayTabOperation::Duplicate,
+                "CLI"
             )
             .is_err());
             exhausted.replay.tab_sequence = 0;
@@ -1284,7 +1402,8 @@ mod saved_http_tab_tests {
             assert!(transform_saved_replay_tab(
                 &exhausted,
                 "middle",
-                SavedReplayTabOperation::Duplicate
+                SavedReplayTabOperation::Duplicate,
+                "CLI"
             )
             .is_err());
         }
@@ -1299,7 +1418,12 @@ mod saved_http_tab_tests {
             .transform_snapshot_checked_persisting(
                 8,
                 |current| {
-                    transform_saved_replay_tab(current, "middle", SavedReplayTabOperation::Close)
+                    transform_saved_replay_tab(
+                        current,
+                        "middle",
+                        SavedReplayTabOperation::Close,
+                        "CLI",
+                    )
                 },
                 |_| async { Ok::<_, String>(None) },
             )
@@ -1343,7 +1467,9 @@ mod saved_http_tab_tests {
             let failure = store
                 .transform_snapshot_checked_persisting(
                     8,
-                    |current| transform_saved_replay_tab(current, "middle", operation.clone()),
+                    |current| {
+                        transform_saved_replay_tab(current, "middle", operation.clone(), "CLI")
+                    },
                     |_| async { Err::<Option<String>, _>("before rename".into()) },
                 )
                 .await;
@@ -1353,7 +1479,9 @@ mod saved_http_tab_tests {
             let uncertainty = store
                 .transform_snapshot_checked_persisting(
                     8,
-                    |current| transform_saved_replay_tab(current, "middle", operation.clone()),
+                    |current| {
+                        transform_saved_replay_tab(current, "middle", operation.clone(), "CLI")
+                    },
                     |_| async {
                         Ok::<_, String>(Some("directory sync failed after rename".into()))
                     },
@@ -1363,7 +1491,8 @@ mod saved_http_tab_tests {
                 uncertainty,
                 Err(WorkspaceTransformError::CommittedButUncertain(_))
             ));
-            let mut expected = transform_saved_replay_tab(&current, "middle", operation).unwrap();
+            let mut expected =
+                transform_saved_replay_tab(&current, "middle", operation, "CLI").unwrap();
             expected.revision = 9;
             expected.client_id = None;
             expected.client_version = 0;

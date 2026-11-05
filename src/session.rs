@@ -1220,6 +1220,7 @@ impl SessionContext {
         tab_id: &str,
         expected_revision: u64,
         operation: SavedReplayTabOperation,
+        actor: &str,
     ) -> std::result::Result<WorkspaceStateSnapshot, WorkspaceTransformError<anyhow::Error>> {
         let _mutation_guard = self.mutation_lock.lock().await;
         let _persist_guard = self.persist_lock.lock().await;
@@ -1228,7 +1229,7 @@ impl SessionContext {
             .transform_snapshot_checked_persisting(
                 expected_revision,
                 |current| {
-                    let mut next = transform_saved_replay_tab(current, tab_id, operation)?;
+                    let mut next = transform_saved_replay_tab(current, tab_id, operation, actor)?;
                     next.session_id = Some(self.id());
                     next.revision = expected_revision + 1;
                     next.expected_active_session_id = None;

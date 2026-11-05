@@ -384,8 +384,8 @@ async fn saved_http_tab_duplicate_clones_every_saved_field_without_focus_or_capt
     expected.id = new_id.into();
     expected.sequence = 91;
     expected.pinned = false;
-    // sniper-cli made the copy, so it is the agent's.
-    expected.opened_by_agent = true;
+    // sniper-cli made the copy, and nothing said who drives it.
+    expected.opened_by = Some("CLI".into());
     assert_eq!(serialized(duplicate), serialized(&expected));
     assert_eq!(duplicate.response_record_complete, Some(true));
     assert_eq!(duplicate.history_entries_complete, Some(true));
@@ -1172,7 +1172,7 @@ async fn saved_http_tab_set_pinned_is_idempotent_desired_state_only_and_survives
                 .unwrap();
             changed.pinned = pinned;
             // This route is sniper-cli's, so the person's tab is flagged.
-            changed.agent_edited = true;
+            changed.changed_by = Some("CLI".into());
             expected.revision += 1;
             expected.session_id = Some(session.id());
             expected.client_id = None;
