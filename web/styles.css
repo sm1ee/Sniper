@@ -6274,7 +6274,10 @@ button.utility-button.replay-tab-add {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   min-height: 0;
   height: 100%;
-  padding: 14px;
+  /* The messages are the work here: as little frame around them as keeps
+     the two cards apart. */
+  padding: 6px;
+  gap: 6px;
   grid-auto-rows: minmax(0, 1fr);
   align-items: stretch;
   align-content: stretch;
@@ -6300,6 +6303,7 @@ button.utility-button.replay-tab-add {
   min-height: 0;
   min-width: 0;
   width: 100%;
+  border-radius: var(--radius-md);
 }
 
 .replay-workbench .editor-panel,
