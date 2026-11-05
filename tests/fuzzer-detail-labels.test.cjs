@@ -36,7 +36,7 @@ function setup() {
     transactionPath: id => `/synthetic/${id}`,
     fetch: url => new Promise((resolve, reject) => pending.push({ url, resolve, reject })),
   });
-  for (const name of ['renderFuzzerDetailPanes', 'clearFuzzerResponsePane', 'showFuzzerResultDetail'])
+  for (const name of ['renderFuzzerDetailPanes', 'clearFuzzerResponsePane', 'showFuzzerResultDetail', 'responseMetaText'])
     vm.runInContext(source(name), f.context);
   f.detailView = side => f.context.getCMView(`fuzzerDetail${side}`);
   f.assertNames = () => {

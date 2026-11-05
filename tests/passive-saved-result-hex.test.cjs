@@ -7,7 +7,7 @@ function fixture(modes) {
   const panes = new Map();
   const els = { fuzzerDetailReqCM: {}, fuzzerDetailResCM: {}, fuzzerDetailResponseMeta: {} };
   const c = loadFunctions([
-    "renderFuzzerDetailPanes", "buildRawRequest", "buildRawResponse", "buildRawRequestHead", "buildRawResponseHead",
+    "renderFuzzerDetailPanes", "responseMetaText", "buildRawRequest", "buildRawResponse", "buildRawRequestHead", "buildRawResponseHead",
     "normalizedHeaders", "mergeHeaders", "headerNameEquals", "renderBody", "safeDecodeBase64", "binaryBodyPlaceholder", "formatSize",
     "prettyFormat", "prettyJsonText", "toHexDump", "buildMessageHexPresentation", "toHexDumpFromHttpParts",
     "messageBodyBytes", "base64ToBytes", "toHexDumpFromBytes",
@@ -107,5 +107,5 @@ test("saved-result Hex preserves status metadata and ignores an absent saved rec
   f.c.renderFuzzerDetailPanes(null);
   assert.equal(f.panes.size, 0);
   f.c.renderFuzzerDetailPanes(record("response", { body_preview: "AAEC", body_encoding: "base64", content_type: "application/octet-stream" }));
-  assert.equal(f.els.fuzzerDetailResponseMeta.textContent, "200 · application/octet-stream");
+  assert.equal(f.els.fuzzerDetailResponseMeta.textContent, "200 OK · application/octet-stream");
 });
