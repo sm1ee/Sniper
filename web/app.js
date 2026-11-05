@@ -4557,7 +4557,6 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
     workspaceSaveConflictPending = false;
     workspaceSaveConflictLatest = null;
     workspaceTabCapNoticeShown = false;
-    workspaceResponseTrimNoticeShown = false;
   }
 }
 
@@ -4577,6 +4576,7 @@ function boundWorkspaceSnapshotForSave(snapshot) {
   // A snapshot smaller than the per-record limit cannot contain a record that
   // breaks it, so the common case still costs one measurement.
   if (totalBytes <= WORKSPACE_SAVE_SAFE_BYTES && totalBytes <= WORKSPACE_SAVE_RECORD_SAFE_BYTES) {
+    workspaceResponseTrimNoticeShown = false;
     return snapshot;
   }
   // Deep clone so we can null response records in place without touching state.
@@ -4627,14 +4627,16 @@ function boundWorkspaceSnapshotForSave(snapshot) {
     dropped = true;
   }
 
+  // The response stays in its tab, so every save leaves it out again: say so
+  // once, and again only after a save had nothing to leave out.
   if (dropped && !workspaceResponseTrimNoticeShown) {
-    workspaceResponseTrimNoticeShown = true;
     showToast(
       "A large replay response was not saved to keep the workspace under its size limit.",
       "warning",
       6000,
     );
   }
+  workspaceResponseTrimNoticeShown = dropped;
   return bounded;
 }
 
