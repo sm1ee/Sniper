@@ -3007,6 +3007,27 @@ function bindEvents() {
       return;
     }
 
+    // Cmd+R on a Fuzzer result sends its request to Replay, as it does in HTTP
+    // history. Not from the template or a field being typed in: there the chord
+    // would not be about the result.
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      event.key.toLowerCase() === "r" &&
+      state.activeTool === "fuzzer" &&
+      fuzzerSelectedTransactionId() &&
+      !event.target?.closest?.("input, textarea, select, #fuzzerRequestCM")
+    ) {
+      event.preventDefault();
+      try {
+        openTransactionRecordInReplay(state._fuzzerDetailRecord);
+      } catch (error) {
+        handleSendActionError(error);
+      }
+      return;
+    }
+
     // Cmd+R on WebSocket tab — send selected frame to WS Replay
     if (
       (event.metaKey || event.ctrlKey) &&
@@ -31149,6 +31170,9 @@ const SHORTCUT_REFERENCE = [
     ["up", "Previous WebSocket frame"],
     ["down", "Next WebSocket frame"],
     ["mod+enter", "Send (WebSocket editor)"],
+  ]],
+  ["Fuzzer", [
+    ["mod+r", "Send the selected result to Replay"],
   ]],
   ["Anywhere", [
     ["mod+shift+f", "Open the Fuzzer, with the selection if there is one"],
