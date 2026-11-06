@@ -134,7 +134,7 @@ test('toggle and direction recover their focus only after authoritative action r
     assert.equal(f.document.activeElement, target);
     assert.deepEqual(target.focusCalls.at(-1), {preventScroll:true});
     assert.equal(f.requests.filter(request => request.options).length, 1, 'focus recovery never retries the action');
-    if (status !== 200) assert.match(f.get('tcpInterceptError').textContent, /outcome may be uncertain/);
+    if (status !== 200) assert.match(f.get('tcpInterceptError').textContent, status === 409 ? /bytes changed/ : /Outcome unknown; not retried/);
   }
 });
 
@@ -202,7 +202,7 @@ test('failed decision restores the same action only while that pending range rem
   await complete(f, [pending], 409);
   assert.equal(f.document.activeElement, f.get('tcpForward'));
   assert.equal(f.get('tcpPendingPicker').value, 'p1');
-  assert.match(f.get('tcpInterceptError').textContent, /state changed/);
+  assert.match(f.get('tcpInterceptError').textContent, /bytes changed/);
 });
 
 test('decision completion never pulls focus from Stream navigation', async () => {
@@ -226,7 +226,7 @@ test('accepted Close keeps focus ownership until delayed terminal detail disable
     const f = fixture(); await ready(f); f.click(tab); f.get('tcpCloseConnection').focus(); f.click('tcpCloseConnection');
     await complete(f, []);
     assert.equal(f.document.activeElement, f.get('tcpCloseConnection'));
-    assert.match(f.get('tcpInterceptNotice').textContent, /Waiting for final state/);
+    assert.match(f.get('tcpInterceptNotice').textContent, /Closing/);
     f.controller.setConnection({...connection, status:'open'});
     assert.equal(f.document.activeElement, f.get('tcpCloseConnection'));
     f.controller.setConnection({...connection, status});
@@ -261,7 +261,7 @@ test('an uncertain Close does not reserve focus after recovery for unrelated lat
   assert.equal(f.document.activeElement, f.get('tcpCloseConnection'));
   f.controller.setConnection({...connection, status:'closed'});
   assert.equal(f.document.activeElement, f.document.body);
-  assert.match(f.get('tcpInterceptError').textContent, /outcome may be uncertain/);
+  assert.match(f.get('tcpInterceptError').textContent, /Outcome unknown; not retried/);
 });
 
 test('accepted forwarding moves action focus to selected read-only bytes without overriding navigation', async () => {

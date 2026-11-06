@@ -28,16 +28,13 @@ function fixture() {
   function move(id) { state.activeSession = { id, name: `Synthetic ${id}` }; context.workspaceStateGeneration += 1; context.renderUpstreamPeerSettings(); }
   return { context, state, els, requests, load, edit, move };
 }
-test('card is independent, default Off, disclosed and absent from the compact Scope strip', () => {
+test('card is independent, default Off, named for what it records and absent from the compact Scope strip', () => {
   const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
   const start = html.indexOf('id="proxySettingsPanel"'), end = html.indexOf('id="replayShell"');
   const section = html.slice(start, end);
-  // Off by default is checked below; the disclosure keeps what is stored, that
-  // it may not be the origin, where it goes, and that turning it off keeps it.
-  assert.match(section, /Upstream socket peer/); assert.match(section, /<span>Record upstream socket peer<\/span>/);
-  assert.match(section, /upstream IP address and port with new HTTP\(S\) exchanges/);
-  assert.match(section, /internal or proxy address rather than the origin/); assert.match(section, /session exports and full-record JSON/);
-  assert.match(section, /stay when this is turned off/);
+  // Off by default is checked below. The label says what is recorded; Settings
+  // carries no paragraph about it.
+  assert.match(section, /id="upstreamPeerHeading">Record the server's IP address</);
   assert.match(section, /id="upstreamPeerStatus" role="status" aria-live="polite"/);
   assert.match(section, /id="upstreamPeerRefresh" type="button">Check status/);
   const saveRuntime = appSource.match(/^async function saveProxySettings\([^]*?^\}/m)[0];
@@ -48,9 +45,11 @@ test('initial, saved Off and editing make no writes; card has own Save and hidde
   const f = fixture(); f.context.renderUpstreamPeerSettings();
   assert.equal(f.els.upstreamPeerEnabled.checked, false); assert.equal(f.els.upstreamPeerEnabled.disabled, true);
   assert.equal(f.requests.length, 0); await f.load(); f.edit();
-  assert.equal(f.requests.length, 1); assert.equal(f.els.upstreamPeerSession.textContent, 'Synthetic session A');
+  assert.equal(f.requests.length, 1);
   assert.equal(f.els.upstreamPeerRefresh.classList.contains('hidden'), true);
-  assert.match(f.els.upstreamPeerStatus.textContent, /Saved setting: Off.*Unsaved changes/);
+  // The switch shows the draft and Save shows it is unsaved; the line stays quiet.
+  assert.equal(f.els.upstreamPeerSave.disabled, false);
+  assert.equal(f.els.upstreamPeerStatus.textContent, '');
 });
 test('explicit Save uses only exact boolean and token, pins active session, and validates acknowledgement', async () => {
   const f = fixture(); await f.load(); f.edit();

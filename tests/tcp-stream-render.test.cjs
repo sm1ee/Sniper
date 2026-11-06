@@ -11,15 +11,17 @@ function fixture(initial = record(), intercept = false) {
     return { value: "", children: [], dataset: {}, listeners: {}, writes: 0,
       get textContent() { return value; }, set textContent(next) { value = next; this.writes++; },
       classList: { toggle() {} }, setAttribute() {}, addEventListener(e, fn) { this.listeners[e] = fn; },
-      append(n) { this.children.push(n); }, replaceChildren() { this.children = []; }, querySelectorAll() { return []; } };
+      append(...n) { this.children.push(...n); }, replaceChildren() { this.children = []; }, querySelectorAll() { return []; } };
   }
+  // The bytes each chunk of the stream shows, joined; the head line is apart.
+  const bytes = () => get("tcpStreamBytes").children.map(block => block.children[1].textContent).join("\n");
   const get = id => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); };
   const document = { getElementById: get, createElement: node };
   let session = "a", detail = initial, pending = [];
-  get("tcpDirection").value = C; get("tcpStateFilter").value = "all";
+  get("tcpDirection").value = C;
   const controller = tcp.createController({ document, sessionId: () => session, readPath: p => p, writePath: p => p, openSettings() {}, intercept,
     request: async path => ({ ok: true, json: async () => structuredClone(path.endsWith("/intercept") ? { enabled: true, direction: "both", revision: 1, pending_count: pending.length } : path.endsWith("/pending") ? { items: pending } : path.endsWith("/status") ? { enabled: false, history_count: 1, history_limit: 256 } : path.endsWith("/connections") ? [{ ...detail, chunks: undefined }] : detail) }) });
-  return { get, controller, pending(next) { pending = next; }, set(next) { detail = next; }, session(next) { session = next; }, direction(next) { get("tcpDirection").value = next; get("tcpDirection").listeners.change(); }, mode(next) { get(next === "hex" ? "tcpHexView" : "tcpTextView").listeners.click(); } };
+  return { get, bytes, controller, pending(next) { pending = next; }, set(next) { detail = next; }, session(next) { session = next; }, direction(next) { get("tcpDirection").value = next; get("tcpDirection").listeners.change(); }, mode(next) { get(next === "hex" ? "tcpHexView" : "tcpTextView").listeners.click(); } };
 }
 test("metadata and opposite direction polls do not decode or replace selected bytes", async () => {
   const f = fixture(), data = record(); let decodes = 0;
@@ -36,34 +38,33 @@ test("metadata and opposite direction polls do not decode or replace selected by
     assert.match(f.get("tcpStreamMeta").textContent, /Partial capture/);
     data.status = "closed"; data.durable = true; f.set(data); await f.controller.refresh();
     assert.equal(decodes, 1); assert.equal(f.get("tcpStreamBytes").writes, writes);
-    assert.match(f.get("tcpStreamTitle").textContent, /closed/);
-    assert.match(f.get("tcpStreamMeta").textContent, /Saved/);
+    assert.doesNotMatch(f.get("tcpStreamMeta").textContent, /Not saved/);
   } finally { global.atob = atob; }
 });
 test("equal-length byte replacements and changed offsets invalidate exact snapshots", async () => {
   const f = fixture(); await f.controller.select("x");
   const data = record(); data.chunks[0] = chunk(C, 0, [67, 68]); f.set(data); await f.controller.refresh();
-  assert.match(f.get("tcpStreamBytes").textContent, /43 44/);
+  assert.match(f.bytes(), /43 44/);
   data.chunks[0].offset = 1; f.set(data); await f.controller.refresh();
-  assert.equal(f.get("tcpStreamBytes").textContent, ""); assert.match(f.get("tcpStreamMeta").textContent, /gap/);
+  assert.equal(f.bytes(), ""); assert.match(f.get("tcpStreamMeta").textContent, /Missing bytes/);
   data.chunks[0].offset = 0; f.set(data); await f.controller.refresh();
-  assert.match(f.get("tcpStreamBytes").textContent, /43 44/);
+  assert.match(f.bytes(), /43 44/);
   data.chunks[0].data_base64 = "!"; f.set(data); await f.controller.refresh();
-  assert.equal(f.get("tcpStreamBytes").textContent, "");
+  assert.equal(f.bytes(), "");
   data.chunks = [chunk(C, 0, [69, 70])]; f.set(data); await f.controller.refresh();
-  assert.match(f.get("tcpStreamBytes").textContent, /45 46/);
+  assert.match(f.bytes(), /45 46/);
 });
 test("direction, mode, empty capture, connection selection and session reset invalidate the view", async () => {
   const f = fixture(); await f.controller.select("x");
-  f.mode("text"); assert.equal(f.get("tcpStreamBytes").textContent, "AB");
-  f.direction(S); assert.match(f.get("tcpStreamBytes").textContent, /No captured bytes/);
-  f.direction(C); assert.equal(f.get("tcpStreamBytes").textContent, "AB");
-  f.mode("hex"); assert.match(f.get("tcpStreamBytes").textContent, /41 42/);
+  f.mode("text"); assert.equal(f.bytes(), "AB");
+  f.direction(S); assert.match(f.get("tcpStreamBytes").textContent, /No bytes captured/);
+  f.direction(C); assert.equal(f.bytes(), "AB");
+  f.mode("hex"); assert.match(f.bytes(), /41 42/);
   f.set({ ...record(), id: "y", chunks: [chunk(C, 0, [71])] }); await f.controller.select("y");
-  assert.match(f.get("tcpStreamBytes").textContent, /47/);
+  assert.match(f.bytes(), /47/);
   f.session("b"); f.controller.reset(); assert.equal(f.get("tcpStreamBytes").textContent, "Select a connection.");
   f.set({ ...record(), id: "y", chunks: [chunk(C, 0, [72])] }); await f.controller.select("y");
-  assert.match(f.get("tcpStreamBytes").textContent, /48/);
+  assert.match(f.bytes(), /48/);
 });
 test("Pending updates remain live while cached captured bytes are untouched", async () => {
   const f = fixture(record(), true); await f.controller.select("x");
@@ -91,9 +92,9 @@ test("oversized snapshot inputs are not retained in the cache", async () => {
   try {
     await f.controller.select("x"); data.client_bytes++; f.set(data); await f.controller.refresh();
     assert.equal(decodes, 2050);
-    assert.match(f.get("tcpStreamBytes").textContent, /No captured bytes/);
+    assert.match(f.get("tcpStreamBytes").textContent, /No bytes captured/);
     data.chunks = [chunk(C, 0, Buffer.alloc(400 * 1024))]; f.set(data); await f.controller.refresh();
-    assert.match(f.get("tcpStreamMeta").textContent, /display limit/);
+    assert.match(f.get("tcpStreamMeta").textContent, /too large/);
     const before = decodes; data.client_bytes++; f.set(data); await f.controller.refresh();
     assert.equal(decodes, before + 1, "oversized encoded bytes must not be retained as a snapshot");
   } finally { global.atob = atob; }
@@ -102,10 +103,10 @@ test("malformed chunk collections clear stale bytes and recover without a cached
   const f = fixture(); await f.controller.select("x");
   for (const chunks of [{ invalid: true }, [null], "invalid"]) {
     f.set({ ...record(), chunks }); await f.controller.refresh();
-    assert.equal(f.get("tcpStreamBytes").textContent, "");
+    assert.equal(f.bytes(), "");
     assert.match(f.get("tcpStreamMeta").textContent, /malformed/);
     f.set(record()); await f.controller.refresh();
-    assert.match(f.get("tcpStreamBytes").textContent, /41 42/);
+    assert.match(f.bytes(), /41 42/);
   }
 });
 test("stream render benchmark", { skip: !process.env.TCP_RENDER_BENCH }, async () => {

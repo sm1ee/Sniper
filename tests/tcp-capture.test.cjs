@@ -12,28 +12,30 @@ test("binary concatenation is directional, byte exact and offset checked", () =>
   assert.deepEqual([...tcp.streamBytes(record,"client_to_server")],[0,255,195,169]);
   assert.deepEqual([...tcp.streamBytes(record,"server_to_client")],[12]);
   record.chunks[2].offset = 3;
-  assert.throws(() => tcp.streamBytes(record,"client_to_server"), /gap/);
+  assert.throws(() => tcp.streamBytes(record,"client_to_server"), /Missing bytes/);
 });
 test("Hex shows original bytes; text is clearly a lossy display projection", () => {
   const bytes = Uint8Array.from([0,255,60,62,27,10]);
   assert.match(tcp.formatHex(bytes),/00 ff 3c 3e 1b 0a/);
   assert.equal(tcp.formatText(bytes),"\\x00�<>\\x1b\n");
 });
-function fixture() {
-  const nodes = new Map(), requests = [], focusCalls = [];
+// A fake node's textContent is its own text only, so the stream is read
+// through its children, as the DOM's textContent would join them.
+const shown = node => [node.textContent, ...node.children.map(shown)].join("");
+function fixture(options = {}) {
+  const nodes = new Map(), requests = [], focusCalls = [], documentListeners = {};
   function node() {
     return { value:"", children:[], dataset:{}, listeners:{}, textContent:"", disabled:false,
       classList:{toggle(){}}, setAttribute(){}, addEventListener(e,fn){this.listeners[e]=fn},
-      append(n){this.children.push(n)}, replaceChildren(){this.children=[]},querySelectorAll(){return []},
+      append(...n){this.children.push(...n)}, replaceChildren(){this.children=[]},querySelectorAll(){return []},
       focus(options){focusCalls.push(options); document.activeElement = this}};
   }
-  const document = {getElementById(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id)}, createElement:node};
+  const document = {getElementById(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id)}, createElement:node, addEventListener(type,fn){documentListeners[type]=fn}};
   let session = "a";
-  document.getElementById("tcpStateFilter").value="all";
   document.getElementById("tcpDirection").value="client_to_server";
   const controller = tcp.createController({document,sessionId:()=>session,readPath:(p,s)=>p+"?session_id="+s,writePath:(p,s)=>p+"?session_id="+s+"&expected_active_session_id="+s,
-    request(path,options){let resolve,reject;const promise=new Promise((r,j)=>{resolve=r;reject=j});requests.push({path,options,reject,resolve(data,status=200){resolve({ok:status===200,status,json:async()=>data,text:async()=>typeof data === "string" ? data : JSON.stringify(data)})}});return promise},openSettings(){}});
-  return {controller,nodes,requests,document,focusCalls,session(id){session=id},get: id=>document.getElementById(id)};
+    request(path,options){let resolve,reject;const promise=new Promise((r,j)=>{resolve=r;reject=j});requests.push({path,options,reject,resolve(data,status=200){resolve({ok:status===200,status,json:async()=>data,text:async()=>typeof data === "string" ? data : JSON.stringify(data)})}});return promise},openSettings(){},...options});
+  return {controller,nodes,requests,document,focusCalls,session(id){session=id},get: id=>document.getElementById(id), keydown: event => documentListeners.keydown?.({preventDefault(){}, ...event})};
 }
 const status = {enabled:false,settings:null,history_count:0,history_limit:256};
 const tick = () => new Promise(r=>setImmediate(r));
@@ -53,7 +55,7 @@ test("selection races cannot replace the newer stream",async()=>{
   const f=fixture(), first=f.controller.select("first"), second=f.controller.select("second");
   f.requests[1].resolve({id:"second",target:"second",status:"closed",durable:true,chunks:[]});await second;
   f.requests[0].resolve({id:"first",target:"first",status:"closed",chunks:[]});await first;
-  assert.equal(f.get("tcpStreamTitle").textContent,"second · closed");
+  assert.equal(f.get("tcpStreamTitle").textContent,"second");
 });
 test("start is explicit, session guarded, duplicate submits blocked and errors persist",async()=>{
   const f=fixture(), read=f.controller.refresh();
@@ -76,8 +78,8 @@ test("partial history and storage errors remain visible",async()=>{
   assert.equal(f.get("tcpStart").disabled,true);
   assert.match(f.get("tcpHistoryStatus").textContent,/storage/);
   const row=f.get("tcpHistoryRows").children[0];
-  assert.equal(row.children[0].children[0].textContent,"<script>");
-  assert.equal(row.children[7].textContent,"Partial · Not saved");
+  assert.equal(row.children[1].textContent,"<script>");
+  assert.equal(row.children[3].textContent,"Closed · partial · not saved");
 });
 test("running listener locks fields; Stop is explicit and retains history",async()=>{
   const f=fixture(), pending=f.controller.refresh();
@@ -96,16 +98,15 @@ test("running listener locks fields; Stop is explicit and retains history",async
 });
 test("invalid or excessive captured bytes fail closed",()=>{
   assert.throws(()=>tcp.streamBytes({chunks:[{direction:"client_to_server",offset:0,data_base64:"%%%"}]},"client_to_server"));
-  assert.throws(()=>tcp.streamBytes({chunks:[{direction:"client_to_server",offset:0,data_base64:Buffer.alloc(262145).toString("base64")}]},"client_to_server"),/limit/);
+  assert.throws(()=>tcp.streamBytes({chunks:[{direction:"client_to_server",offset:0,data_base64:Buffer.alloc(262145).toString("base64")}]},"client_to_server"),/too large/);
 });
 test("newer poll detail wins over older selection detail for the same connection",async()=>{
   const f=fixture(), first=f.controller.select("x"), poll=f.controller.refresh();
   f.requests[1].resolve(status);f.requests[2].resolve([{id:"x",target:"127.0.0.1",status:"open"}]);await tick();
   f.requests[3].resolve({id:"x",target:"127.0.0.1",status:"closed",durable:true,capture_truncated:true,chunks:[{direction:"client_to_server",offset:0,data_base64:"TkVX"}]});await poll;
-  assert.match(f.get("tcpStreamBytes").textContent,/4e 45 57/);
+  assert.match(shown(f.get("tcpStreamBytes")),/4e 45 57/);
   f.requests[0].resolve({id:"x",target:"127.0.0.1",status:"open",durable:false,chunks:[{direction:"client_to_server",offset:0,data_base64:"Tw=="}]});await first;
-  assert.match(f.get("tcpStreamBytes").textContent,/4e 45 57/);
-  assert.match(f.get("tcpStreamTitle").textContent,/closed/);
+  assert.match(shown(f.get("tcpStreamBytes")),/4e 45 57/);
   assert.match(f.get("tcpStreamMeta").textContent,/Partial/);
 });
 test("old detail errors are ignored and current detail failure does not erase listener status",async()=>{
@@ -133,7 +134,7 @@ test("only live stream duration advances; interrupted duration stays unknown", a
     for (const liveDuration of ["10.0 s", "70.0 s"]) {
       const pending = f.controller.refresh(), index = f.requests.length - 2;
       f.requests[index].resolve(status); f.requests[index + 1].resolve(records); await pending;
-      const durations = f.get("tcpHistoryRows").children.map(row => row.children[5].textContent);
+      const durations = f.get("tcpHistoryRows").children.map(row => row.children[6].textContent);
       assert.deepEqual(durations, ["—", "—", "—", "—", liveDuration, liveDuration, "3.0 s"]);
       now += 60000;
     }
@@ -150,8 +151,8 @@ test('connection list marks truncated intercept events partial without losing du
     {...base,id:'live',status:'open',durable:false}
   ]);
   await read;
-  assert.deepEqual(f.get('tcpHistoryRows').children.map(row=>row.children[7].textContent),
-    ['Partial · Saved','Partial · Not saved','Partial · Live · memory']);
+  assert.deepEqual(f.get('tcpHistoryRows').children.map(row=>row.children[3].textContent),
+    ['Closed · partial','Closed · partial · not saved','Open · partial']);
 });
 
 const runningStatus = {...status, enabled:true, settings:{local_port:9000,target_host:"127.0.0.1",target_port:9100}};
@@ -162,12 +163,10 @@ async function pollStatus(f, nextStatus, records = []) {
 test("full history distinguishes listener on from new accepts and retains pending rows without mutations", async () => {
   const f = fixture();
   await pollStatus(f, {...runningStatus,history_count:256}, [{id:"live",target:"127.0.0.1",status:"open",pending_count:2,pending_directions:["client_to_server"],client_bytes:3,server_bytes:0}]);
-  assert.equal(f.get("tcpListenerStatus").textContent,"Listener on · New connections blocked (256/256)");
-  assert.match(f.get("tcpHistoryStatus").textContent,/2 active intercepts/);
-  assert.match(f.get("tcpHistoryRows").children[0].children[2].textContent,/2 active intercepts/);
-  assert.match(f.get("tcpSettingsError").textContent,/Session → New session/);
-  assert.match(f.get("tcpSettingsError").textContent,/Switching sessions closes existing TCP connections; pending bytes are not forwarded/);
-  assert.match(f.get("tcpSettingsError").textContent,/History is retained/);
+  assert.equal(f.get("tcpListenerStatus").textContent,"History full (256/256)");
+  assert.match(f.get("tcpHistoryStatus").textContent,/History full/);
+  assert.match(f.get("tcpHistoryRows").children[0].children[3].textContent,/2 paused/);
+  assert.match(f.get("tcpSettingsError").textContent,/Start a new session/);
   assert.equal(f.get("tcpStop").disabled,false);
   assert.equal(f.get("tcpStart").disabled,true);
   assert.equal(f.requests.length,2);
@@ -176,14 +175,14 @@ test("full history distinguishes listener on from new accepts and retains pendin
 test("normal listener, stopped full history and storage recovery have truthful status", async () => {
   const f = fixture();
   await pollStatus(f, {...runningStatus,history_count:255});
-  assert.equal(f.get("tcpListenerStatus").textContent,"Listening on 127.0.0.1:9000");
+  assert.equal(f.get("tcpListenerStatus").textContent,"Listening");
   assert.equal(f.get("tcpSettingsError").textContent,"");
   await pollStatus(f, {...status,history_count:256});
-  assert.equal(f.get("tcpListenerStatus").textContent,"Listener off · New connections blocked (256/256)");
+  assert.equal(f.get("tcpListenerStatus").textContent,"History full (256/256)");
   assert.equal(f.get("tcpStart").disabled,true);
   assert.equal(f.get("tcpStop").disabled,true);
   await pollStatus(f, {...runningStatus,persistence_error:true});
-  assert.equal(f.get("tcpListenerStatus").textContent,"Listener on · New connections blocked (storage unavailable)");
+  assert.equal(f.get("tcpListenerStatus").textContent,"History storage unavailable");
   await pollStatus(f, runningStatus);
   assert.equal(f.get("tcpSettingsError").textContent,"");
   assert.doesNotMatch(f.get("tcpHistoryStatus").textContent,/blocked|storage/);
@@ -191,7 +190,7 @@ test("normal listener, stopped full history and storage recovery have truthful s
 test("newer rows at cap override a pre-cap status snapshot", async () => {
   const f=fixture();
   await pollStatus(f, {...runningStatus,history_count:255}, Array.from({length:256},(_,i)=>({id:String(i),status:"closed"})));
-  assert.match(f.get("tcpListenerStatus").textContent,/blocked \(256\/256\)/);
+  assert.match(f.get("tcpListenerStatus").textContent,/History full \(256\/256\)/);
 });
 test("session switch clears cap and pending counts and ignores stale full response", async () => {
   const f=fixture();
@@ -209,19 +208,17 @@ test("session switch clears cap and pending counts and ignores stale full respon
 test("empty filtered history does not suggest configuring another listener", async () => {
   const f=fixture();
   await pollStatus(f,{...runningStatus,history_count:256},Array.from({length:256},(_,i)=>({id:String(i),status:"closed"})));
-  f.get("tcpStateFilter").value="live"; f.get("tcpStateFilter").listeners.change();
-  assert.equal(f.get("tcpHistoryRows").children[0].children[0].textContent,"No live TCP connections. Choose All states to view history.");
-  assert.match(f.get("tcpHistoryStatus").textContent,/blocked \(256\/256\)/);
-  await pollStatus(f,runningStatus,[{id:"active",status:"open"}]);
-  f.get("tcpStateFilter").value="closed"; f.get("tcpStateFilter").listeners.change();
-  assert.equal(f.get("tcpHistoryRows").children[0].children[0].textContent,"No closed TCP connections. Choose All states to view history.");
+  f.get("tcpLiveOnly").listeners.click();
+  assert.equal(f.get("tcpHistoryRows").children[0].children[0].textContent,"No live connections");
+  assert.match(f.get("tcpHistoryStatus").textContent,/History full \(256\/256\)/);
+  f.get("tcpLiveOnly").listeners.click();
   await pollStatus(f,status);
-  assert.match(f.get("tcpHistoryRows").children[0].children[0].textContent,/^No TCP connections\./);
+  assert.equal(f.get("tcpHistoryRows").children[0].children[0].textContent,"No TCP connections");
 });
 test("history counts above the cap remain blocked rather than appearing recovered", async () => {
   const f=fixture();
   await pollStatus(f,{...runningStatus,history_count:257});
-  assert.equal(f.get("tcpListenerStatus").textContent,"Listener on · New connections blocked (257/256)");
+  assert.equal(f.get("tcpListenerStatus").textContent,"History full (257/256)");
   assert.equal(f.get("tcpStart").disabled,true);
 });
 test("TCP admission warnings wrap instead of hiding behind an ellipsis", () => {
@@ -256,32 +253,32 @@ test("listener displays actionable bind conflict while leaving Start retry expli
 
 test("failure labels are fixed, contextual and unknown-safe", () => {
   for (const [code, label] of [["resolution_timeout","Name lookup timed out"],["resolution_failed","Name lookup failed"],["connect_timeout","Connection timed out"],["connection_refused","Connection refused"],["connect_failed","Connection failed"],["self_target","Target is this listener"],["relay_failed","Stream interrupted"],["storage_failed","History storage failed"]]) {
-    assert.equal(tcp.statusLabel({status:"failed",failure:code}),"failed · "+label);
-    assert.equal(tcp.statusLabel({status:"stopped",failure:code}),"stopped");
+    assert.equal(tcp.statusLabel({status:"failed",failure:code}),"Failed · "+label);
+    assert.equal(tcp.statusLabel({status:"stopped",failure:code}),"Stopped");
   }
-  for(const failure of [undefined,null,"future_code","<img src=x onerror=secret>","__proto__","constructor"]) assert.equal(tcp.statusLabel({status:"failed",failure}),"failed");
+  for(const failure of [undefined,null,"future_code","<img src=x onerror=secret>","__proto__","constructor"]) assert.equal(tcp.statusLabel({status:"failed",failure}),"Failed");
 });
 test("failure appears in history and detail without exposing unknown strings", async () => {
   const f=fixture(), read=f.controller.refresh();
   f.requests[0].resolve(status); f.requests[1].resolve([{id:"x",target:"loopback",peer:"local",status:"failed",failure:"connection_refused",client_bytes:0,server_bytes:0}]); await read;
-  assert.match(f.get("tcpHistoryRows").children[0].children[2].textContent,/Connection refused/);
+  assert.match(f.get("tcpHistoryRows").children[0].children[3].textContent,/Connection refused/);
   const selected=f.controller.select("x");f.requests[2].resolve({id:"x",target:"loopback",status:"failed",failure:"connection_refused",chunks:[]});await selected;
-  assert.equal(f.get("tcpStreamTitle").textContent,"loopback · failed · Connection refused");
+  assert.equal(f.get("tcpStreamTitle").textContent,"loopback");
 });
 
 test('active cap shows waiting admission, preserves controls and clears after slot frees', async()=>{
   const f=fixture();
   await pollStatus(f,{...runningStatus,active_count:32,active_limit:32});
-  assert.equal(f.get('tcpListenerStatus').textContent,'Listener on · At connection limit (32/32) · New connections wait. Close an unneeded connection to free a slot.');
-  assert.match(f.get('tcpHistoryStatus').textContent,/At connection limit/);
+  assert.equal(f.get('tcpListenerStatus').textContent,'32 of 32 connections; new ones wait');
+  assert.match(f.get('tcpHistoryStatus').textContent,/new ones wait/);
   assert.equal(f.get('tcpSettingsError').textContent,'');
   assert.equal(f.get('tcpStop').disabled,false);
   assert.ok(f.requests.every(r=>!r.options));
   await pollStatus(f,{...runningStatus,active_count:31,active_limit:32});
-  assert.equal(f.get('tcpListenerStatus').textContent,'Listening on 127.0.0.1:9000');
+  assert.equal(f.get('tcpListenerStatus').textContent,'Listening');
   await pollStatus(f,{...runningStatus,active_count:32,active_limit:32,history_count:256});
-  assert.match(f.get('tcpListenerStatus').textContent,/New connections blocked/);
-  assert.doesNotMatch(f.get('tcpListenerStatus').textContent,/connections wait/);
+  assert.match(f.get('tcpListenerStatus').textContent,/History full/);
+  assert.doesNotMatch(f.get('tcpListenerStatus').textContent,/new ones wait/);
   await pollStatus(f,{...status,active_count:32,active_limit:32});
   assert.equal(f.get('tcpListenerStatus').textContent,'Stopped');
 });
@@ -291,7 +288,7 @@ test('session switch clears active cap and rejects late status', async()=>{
   f.session('b');f.controller.reset();await pollStatus(f,status);
   f.requests[index].resolve({...runningStatus,active_count:32,active_limit:32});f.requests[index+1].resolve([]);await poll;
   assert.equal(f.get('tcpListenerStatus').textContent,'Stopped');
-  assert.doesNotMatch(f.get('tcpHistoryStatus').textContent,/connection limit/);
+  assert.doesNotMatch(f.get('tcpHistoryStatus').textContent,/new ones wait/);
 });
 
 
@@ -300,7 +297,7 @@ test("failed stop exposes a retry while off and clears after saving", async () =
   await pollStatus(f, {...status, persistence_error:true, history_count:1}, [{id:"saved-later",status:"stopped",durable:false}]);
   assert.equal(f.get("tcpStop").disabled,false);
   assert.equal(f.get("tcpStop").textContent,"Retry saving");
-  assert.match(f.get("tcpSettingsError").textContent,/Keep Sniper open.*restore storage.*Retry saving/);
+  assert.match(f.get("tcpSettingsError").textContent,/Restore storage, then Retry saving/);
   assert.equal(f.get("tcpStart").disabled,true);
   f.get("tcpStop").listeners.click();
   assert.match(f.requests[2].path,/\/stop\?/);
@@ -336,18 +333,22 @@ test("external successful retry clears only the recovered persistence action err
 });
 
 
-test("polling restores the focused TCP row without changing vertical or horizontal scroll", async () => {
-  const f = fixture();
-  const record = {id:"c1", target:"example.com:9000", status:"open", client_bytes:0, server_bytes:0};
-  const first = f.controller.refresh(); f.requests[0].resolve(status); f.requests[1].resolve([record]); await first;
-  const body = f.get("tcpHistoryRows");
-  body.querySelectorAll = () => body.children.map(row => row.children[0].children[0]);
-  f.document.activeElement = body.querySelectorAll()[0];
-  const poll = f.controller.refresh();
-  f.requests[2].resolve(status); f.requests[3].resolve([{...record, client_bytes:1}]); await poll;
-  assert.deepEqual(f.focusCalls, [{preventScroll:true}]);
-  assert.equal(f.document.activeElement, body.querySelectorAll()[0]);
-  assert.equal(f.document.activeElement.dataset.tcpId, "c1");
+test("↑/↓ move the selection through the rows as shown, and a poll keeps it", async () => {
+  const f = fixture({arrowStep: event => event.step || 0});
+  const rows = [{id:"c2", target:"example.com:9001", status:"open", client_bytes:0, server_bytes:0},
+    {id:"c1", target:"example.com:9000", status:"closed", client_bytes:0, server_bytes:0}];
+  await pollStatus(f, status, rows);
+  assert.deepEqual(f.get("tcpHistoryRows").children.map(row => row.children[0].textContent), ["2", "1"]);
+  const detail = () => f.requests.at(-1).path;
+  f.keydown({step:1}); assert.match(detail(), /connections\/c2\?/);
+  f.keydown({step:1}); assert.match(detail(), /connections\/c1\?/);
+  const count = f.requests.length;
+  f.keydown({step:1}); assert.equal(f.requests.length, count, "no row past the end");
+  f.keydown({step:0}); assert.equal(f.requests.length, count, "a key the app keeps does not move");
+  const poll = f.controller.refresh(), index = f.requests.length - 2;
+  f.requests[index].resolve(status); f.requests[index + 1].resolve(rows); await tick();
+  assert.match(detail(), /connections\/c1\?/, "the poll reads the row still selected");
+  f.requests.at(-1).resolve({...rows[1], chunks: []}); await poll;
 });
 
 const bindConflict = port => `Local port ${port} is already in use. Choose another Local port or stop the listener using it.`;
@@ -369,7 +370,7 @@ test("external matching Start clears a recovered bind error without retrying the
     assert.equal(f.get("tcpSettingsError").textContent, message);
     await pollStatus(f, {...runningStatus, persistence_error:false});
     assert.equal(f.get("tcpSettingsError").textContent, "");
-    assert.equal(f.get("tcpListenerStatus").textContent, "Listening on 127.0.0.1:9000");
+    assert.equal(f.get("tcpListenerStatus").textContent, "Listening");
     assert.equal(f.get("tcpStart").disabled, true);
     assert.equal(f.get("tcpStop").disabled, false);
     for (let i = 0; i < 3; i++) await pollStatus(f, runningStatus);
@@ -448,9 +449,9 @@ test("validation errors replace failed-operation identity and survive running-st
 
 test("clearing a recovered bind failure reveals current storage and capacity warnings", async () => {
   for (const [next, expected] of [
-    [{...runningStatus, persistence_error:true}, /not saved.*Keep Sniper open/],
+    [{...runningStatus, persistence_error:true}, /not saved.*Restore storage/],
     [{...runningStatus, load_error:true}, /storage is unavailable/],
-    [{...runningStatus, history_count:256}, /History full/]
+    [{...runningStatus, history_count:256}, /History is full/]
   ]) {
     const f = fixture(); await failStart(f);
     await pollStatus(f, next);
@@ -551,4 +552,38 @@ test("malformed status hosts cannot match request hostnames through coercion", a
     await pollStatus(f, {...runningStatus, settings:{...runningStatus.settings, target_host:String(host)}});
     assert.equal(f.get("tcpSettingsError").textContent, "");
   }
+});
+
+// Both directions read as one conversation, in the order Sniper read them, as
+// Wireshark's Follow TCP Stream shows a connection.
+test("the stream reads as one conversation in the order it was read", async () => {
+  const chunk = (sequence, direction, offset, text) => ({sequence, direction, offset, at:"2026-01-01T00:00:00.250Z", data_base64:Buffer.from(text).toString("base64")});
+  const record = {id:"x", target:"example.com:9000", status:"closed", durable:true, client_bytes:7, server_bytes:6,
+    chunks:[chunk(3,"client_to_server",4,"GET\n"), chunk(1,"client_to_server",0,"HI\n\n"), chunk(2,"server_to_client",0,"HELLO\n")]};
+  assert.deepEqual(tcp.conversation(record).map(part => [part.direction, Buffer.from(part.bytes).toString()]),
+    [["client_to_server","HI\n\n"],["server_to_client","HELLO\n"],["client_to_server","GET\n"]]);
+  assert.deepEqual(tcp.conversation(record, "server_to_client").map(part => Buffer.from(part.bytes).toString()), ["HELLO\n"]);
+  const f = fixture(); f.get("tcpDirection").value = "both";
+  const selected = f.controller.select("x"); f.requests[0].resolve(record); await selected;
+  const blocks = f.get("tcpStreamBytes").children;
+  assert.deepEqual(blocks.map(block => block.className), ["tcp-chunk tcp-chunk-out", "tcp-chunk tcp-chunk-in", "tcp-chunk tcp-chunk-out"]);
+  assert.match(blocks[0].children[0].textContent, /^→ 4 B · \d\d:\d\d:\d\d\.250$/);
+  assert.match(blocks[1].children[0].textContent, /^← 6 B/);
+  assert.match(blocks[2].children[1].textContent, /^00000004 /, "offsets continue within a direction");
+  assert.equal(f.get("tcpStreamMeta").textContent, "7 B sent · 6 B received");
+});
+
+test("a header click sorts the list, and a second click reverses it", async () => {
+  const f = fixture();
+  const rows = [{id:"a", target:"b.example.com:1", status:"closed", client_bytes:300, server_bytes:0},
+    {id:"b", target:"a.example.com:1", status:"closed", client_bytes:20, server_bytes:0},
+    {id:"c", target:"c.example.com:1", status:"open", client_bytes:1000, server_bytes:0}];
+  await pollStatus(f, status, rows);
+  const click = key => f.get("tcpHistoryHead").listeners.click({target:{closest: selector => selector === "[data-sort]" ? {dataset:{sort:key}} : null}});
+  const order = () => f.get("tcpHistoryRows").children.map(row => row.children[1].textContent);
+  assert.deepEqual(order(), ["b.example.com:1", "a.example.com:1", "c.example.com:1"], "newest first by #");
+  click("client_bytes"); assert.deepEqual(order(), ["a.example.com:1", "b.example.com:1", "c.example.com:1"]);
+  click("client_bytes"); assert.deepEqual(order(), ["c.example.com:1", "b.example.com:1", "a.example.com:1"]);
+  click("target"); assert.deepEqual(order(), ["a.example.com:1", "b.example.com:1", "c.example.com:1"]);
+  f.get("tcpLiveOnly").listeners.click(); assert.deepEqual(order(), ["c.example.com:1"]);
 });

@@ -2014,12 +2014,16 @@ summary {
 }
 
 /* On or off, as a settings switch reads. The state is aria-checked, so what
-   it shows and what it announces cannot disagree. */
-.switch {
+   it shows and what it announces cannot disagree. input.switch-input is the
+   same switch on a checkbox, for forms that read .checked. */
+.switch,
+input.switch-input {
+  appearance: none;
   position: relative;
   flex: 0 0 auto;
   width: 34px;
   height: 20px;
+  margin: 0;
   padding: 0;
   border: 0;
   border-radius: 999px;
@@ -2028,7 +2032,8 @@ summary {
   transition: background 0.15s;
 }
 
-.switch::after {
+.switch::after,
+input.switch-input::after {
   content: "";
   position: absolute;
   top: 2px;
@@ -2041,17 +2046,25 @@ summary {
   transition: transform 0.15s;
 }
 
-.switch[aria-checked="true"] {
+.switch[aria-checked="true"],
+input.switch-input:checked {
   background: var(--point);
 }
 
-.switch[aria-checked="true"]::after {
+.switch[aria-checked="true"]::after,
+input.switch-input:checked::after {
   transform: translateX(14px);
 }
 
-.switch:disabled {
+.switch:disabled,
+input.switch-input:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+input.switch-input:focus-visible {
+  outline: 2px solid var(--point-border);
+  outline-offset: 2px;
 }
 
 .traffic-region {
@@ -8665,17 +8678,105 @@ button.utility-button.replay-tab-add {
 }
 
 /* The cleanup policy owns its form and save boundary, apart from runtime settings. */
-#proxySettingsPanel { overflow: auto; }
-#proxySettingsPanel > .split-panel { height: auto; min-height: 500px; }
-#proxySettingsPanel > .split-panel > .panel-card > .settings-form { overflow: visible; }
-.history-retention-card { flex: 0 0 auto; margin-bottom: 12px; }
-.history-retention-card p { margin: 0; line-height: 1.5; }
-.history-retention-fields { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(150px, 1fr); gap: 12px; margin: 0; padding: 0; border: 0; }
-.history-retention-fields .settings-toggle { grid-column: 1 / -1; }
-.history-retention-warning { color: var(--text); font-weight: 600; }
-.history-retention-error { color: var(--danger, #df596a); }
-.history-retention-error:empty { display: none; }
-@media (max-width: 700px) { .history-retention-fields { grid-template-columns: 1fr; } }
+/* Capture Settings: one column of sections beside a jump list. A row is a
+   label and its control; a section's own switch sits on its title. */
+#proxySettingsPanel.capture-settings {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  padding: 0;
+  background: var(--panel);
+}
+.capture-settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 10px;
+  border-right: 1px solid var(--line);
+}
+.capture-settings-nav button {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.capture-settings-nav button:hover { background: var(--accent-soft); color: var(--text); }
+.capture-settings-body { position: relative; min-height: 0; overflow: auto; padding: 0 32px; }
+.capture-settings-section {
+  display: grid;
+  gap: 12px;
+  max-width: 720px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+.capture-settings-section:last-of-type { border-bottom: 0; }
+.capture-settings-section h2 { margin: 0; font-size: var(--font-md); font-weight: 600; }
+.capture-settings-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.capture-settings-status { color: var(--text-dim); font-size: var(--font-sm); }
+.capture-settings-reveal, .history-retention-card, .upstream-peer-card { display: grid; gap: 12px; }
+.capture-settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 24px;
+  min-height: var(--control-h);
+}
+.capture-settings-stacked { grid-template-columns: minmax(0, 1fr); }
+.capture-settings-label { display: grid; gap: 2px; color: var(--text); }
+.capture-settings-section small { color: var(--text-dim); font-size: var(--font-xs); line-height: 1.45; }
+.capture-settings-section small:empty { display: none; }
+.capture-settings-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.capture-settings-address, .capture-settings-unit { display: inline-flex; align-items: center; gap: 6px; color: var(--text-dim); }
+.capture-settings-address input:first-child { width: 150px; }
+.capture-settings-address input[type="number"], .capture-settings-unit input { width: 80px; }
+#proxySettingsPanel :is(input:not([type="checkbox"]), select, textarea) {
+  min-height: var(--control-h);
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background-color: var(--panel-code);
+  color: var(--text);
+  font: inherit;
+}
+#proxySettingsPanel textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: var(--font-sm); }
+#proxySettingsPanel .capture-settings-stacked > input { width: 100%; }
+#proxySettingsPanel select { padding-right: 28px; }
+#proxySettingsPanel :is(input, select, textarea):focus { outline: none; border-color: var(--point-border); box-shadow: 0 0 0 1px var(--point-soft); }
+#proxySettingsPanel :is(.primary-action, .secondary-action) { min-height: var(--control-h); padding: 0 12px; border-radius: 6px; font-size: var(--font-sm); }
+#proxySettingsPanel .settings-inline-control input { flex: 1; }
+/* A button that has nothing to do is not shown: Save and Cancel appear with
+   an unsaved change, Clear with a saved token, Start and Stop by state. */
+#proxySettingsPanel :is(#historyRetentionSave, #historyRetentionCancel, #upstreamPeerSave, #upstreamPeerCancel, #proxySettingOastClearToken, #tcpStart, #tcpStop):disabled { display: none; }
+.capture-settings-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.capture-settings-actions small { margin-right: auto; }
+.capture-settings-actions:not(:has(button:not(.hidden, :disabled))):has(small:empty) { display: none; }
+.history-retention-fields { display: grid; gap: 12px; margin: 0; padding: 0; border: 0; }
+.capture-settings-section small.history-retention-warning { color: var(--warning); }
+.history-retention-error, .upstream-peer-error { margin: 0; color: var(--danger); }
+.history-retention-error:empty, .upstream-peer-error:empty { display: none; }
+.capture-settings-savebar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 720px;
+  padding: 10px 0 14px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+.capture-settings-savebar span { margin-right: auto; color: var(--text-dim); font-size: var(--font-sm); }
+#proxySettingsPanel .runtime-list { padding: 0; }
+@media (max-width: 760px) {
+  #proxySettingsPanel.capture-settings { grid-template-columns: minmax(0, 1fr); }
+  .capture-settings-nav { display: none; }
+  .capture-settings-body { padding: 0 16px; }
+  .capture-settings-pair { grid-template-columns: 1fr; }
+}
 
 .history-recovered-notes { position: fixed; right: 18px; bottom: 30px; z-index: 1200; width: min(480px, calc(100vw - 36px)); max-height: 55vh; overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--panel-code); color: var(--text); box-shadow: 0 4px 24px #0006; }
 .history-recovered-notes summary { cursor: pointer; font-weight: 600; }
@@ -9047,12 +9148,6 @@ button.utility-button.replay-tab-add {
 .service-map-overlay-source { font-family: var(--mono); overflow-wrap: anywhere; }
 .service-map-body-overlay .service-map-overlay-source { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.upstream-peer-card { flex: 0 0 auto; margin-bottom: 12px; }
-.upstream-peer-card p { margin: 0; line-height: 1.5; }
-.upstream-peer-card .settings-form { gap: 10px; }
-.upstream-peer-card .panel-toolbar { padding-bottom: 10px; }
-.upstream-peer-error { color: var(--danger, #df596a); }
-.upstream-peer-error:empty { display: none; }
 .service-map-socket-peer { border-top: 1px solid var(--line); padding-top: 12px; }
 .service-map-socket-peer p { overflow-wrap: anywhere; }
 
@@ -9690,68 +9785,88 @@ button.utility-button.replay-tab-add {
 /* Preserve native hidden semantics even alongside tab display rules. */
 .replay-fields-tab[hidden] { display: none; }
 
-/* TCP reuses Capture's table and byte-view surfaces. */
-.tcp-workbench { display: grid; grid-template-rows: minmax(150px, 40%) minmax(180px, 1fr); height: 100%; min-height: 0; gap: 6px; }
-.tcp-history, .tcp-stream { min-height: 0; display: flex; flex-direction: column; }
-#tcpHistoryStatus { white-space: normal; overflow-wrap: anywhere; cursor: default; }
+/* TCP: connections over their stream, as WebSocket lays out sessions over
+   frames. The stream reads as a conversation: each read in the order it
+   came, marked by direction, as Wireshark's Follow TCP Stream shows it. */
+#tcpPanel { display: flex; flex-direction: column; }
+.tcp-workbench { flex: 1; min-height: 0; }
+.stack-panel > .tcp-history { flex: 0 0 var(--tcp-list-height, 38%); min-height: 120px; display: flex; flex-direction: column; }
+.stack-panel > .tcp-stream { flex: 1 1 0; min-height: 180px; display: flex; flex-direction: column; min-width: 0; }
 .tcp-history .history-table-shell { flex: 1; min-height: 0; overflow: auto; }
-.tcp-stream .tcp-bytes { flex: 1; min-height: 0; margin: 0; overflow: auto; padding: 12px; white-space: pre; font-family: var(--mono); }
-.tcp-listener-fields { display: grid; grid-template-columns: 160px minmax(160px, 1fr) 140px; gap: 12px; }
-.tcp-error { color: var(--danger); margin: 0; }
-.tcp-error:empty { display: none; }
+/* The shared bar has History's four columns; TCP has a summary and its controls. */
+.tcp-history .filter-bar { grid-template-columns: minmax(0, 1fr) auto; }
+#tcpHistoryStatus { white-space: normal; overflow-wrap: anywhere; cursor: default; }
+.tcp-history .history-table-shell:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.tcp-table { table-layout: fixed; min-width: 760px; }
+.tcp-table th { position: relative; white-space: nowrap; cursor: pointer; }
+.tcp-table .tcp-col-index { width: 52px; }
+.tcp-table .tcp-col-number { width: 96px; }
+.tcp-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#tcpHistoryRows tr { cursor: default; }
 #tcpHistoryRows tr.selected { background: var(--selection); }
-.tcp-row-target { background: none; border: 0; color: inherit; text-align: left; font: inherit; padding: 0; cursor: pointer; }
-#tcpPanel { position: relative; display: flex; flex-direction: column; }
-#tcpPanel .tcp-workbench { flex: 1; height: auto; }
-#tcpHistoryError:not(:empty) { padding: 6px 10px; }
-@media (max-width: 760px) { .tcp-listener-fields { grid-template-columns: 1fr; } }
-
-#tcpStateFilter, #tcpDirection {
-  height: var(--control-h); color: var(--text-soft); background: var(--panel);
-  border: 1px solid var(--line); border-radius: 4px; font: inherit; padding: 0 8px;
+#tcpHistoryRows .tcp-empty { color: var(--text-dim); text-align: center; padding: 18px; }
+.tcp-status::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--line-strong); vertical-align: 1px; }
+.tcp-status-open::before, .tcp-status-connecting::before { background: var(--toggle-run); }
+.tcp-status-failed::before, .tcp-status-interrupted::before { background: var(--danger); }
+.tcp-listener-link { border: 0; background: none; color: var(--text-dim); font: inherit; font-size: var(--font-sm); white-space: nowrap; cursor: pointer; }
+.tcp-listener-link:hover { color: var(--text); text-decoration: underline; }
+.tcp-intercept-control { display: inline-flex; align-items: center; gap: 8px; color: var(--text-soft); font-size: var(--font-sm); }
+#tcpInterceptStatus { color: var(--warning); font-size: var(--font-sm); white-space: nowrap; }
+#tcpInterceptStatus:empty { display: none; }
+#tcpInterceptDirection, #tcpDirection, #tcpPendingPicker {
+  height: var(--control-h); padding: 0 8px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--panel); color: var(--text-soft); font: inherit; max-width: 100%;
 }
-#tcpHistoryRows td { white-space: nowrap; }
-#tcpHistoryRows td:nth-child(7) { font-variant-numeric: tabular-nums; }
-
-/* Interception stays in the selected TCP connection, separate from listener settings. */
-.tcp-intercept-toolbar, .tcp-pending-bar, .tcp-connection-actions { display: flex; align-items: center; gap: 8px; padding: 6px 10px; flex-wrap: wrap; }
-.tcp-intercept-toolbar { border-bottom: 1px solid var(--line); }
-#tcpInterceptStatus, #tcpPendingMeta, #tcpInterceptNotice { color: var(--text-soft); font-size: 12px; }
+.tcp-stream .pane-header { gap: 12px; }
+.tcp-stream-title { flex: 1; min-width: 0; overflow: hidden; color: var(--text-dim); font-size: var(--font-sm); text-overflow: ellipsis; white-space: nowrap; }
+.tcp-stream .tcp-close { min-height: var(--control-h); padding: 0 10px; border-radius: 6px; font-size: var(--font-sm); }
+.tcp-stream .tcp-close:disabled { display: none; }
 .tcp-stream-surface, .tcp-pending-surface { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .tcp-stream-surface[hidden], .tcp-pending-surface[hidden] { display: none; }
-/* Expanded evidence scrolls inside Pending, never over decision controls or Close. */
+/* Expanded original bytes scroll inside Pending, never over Forward or Drop. */
 .tcp-pending-surface { overflow-y: auto; }
-.tcp-pending-surface > .tcp-pending-bar, .tcp-pending-surface > .pane-footer { flex-shrink: 0; }
-#tcpPendingHex { flex: 1; min-height: 80px; resize: none; border: 0; border-block: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 12px; font: 12px/1.7 var(--mono); }
+.tcp-pending-surface > .tcp-pending-bar { flex-shrink: 0; }
+.tcp-conversation { flex: 1 1 0; min-height: 40px; overflow: auto; padding: 10px 12px; color: var(--text-dim); font: var(--font-sm)/1.55 var(--mono); }
+.tcp-conversation:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.tcp-chunk { margin: 0 0 8px; padding: 2px 0 2px 10px; border-left: 2px solid var(--line-strong); color: var(--text); }
+.tcp-chunk-out { border-left-color: var(--info); }
+.tcp-chunk-in { border-left-color: var(--point); }
+.tcp-chunk-head { color: var(--text-dim); font-size: var(--font-xs); }
+.tcp-chunk-out .tcp-chunk-head { color: var(--info); }
+.tcp-chunk-in .tcp-chunk-head { color: var(--point); }
+.tcp-chunk pre { margin: 2px 0 0; font: inherit; white-space: pre; }
+.tcp-intercept-history { flex: 0 0 auto; max-height: 32%; overflow: auto; font: var(--font-xs) var(--mono); }
+.tcp-intercept-history:empty { display: none; }
+.tcp-intercept-history.expanded { flex: 2 1 0; min-height: 100px; max-height: none; }
+.tcp-intercept-history details { padding: 5px 12px; border-top: 1px solid var(--line); }
+.tcp-intercept-history summary { cursor: pointer; color: var(--text-soft); }
+.tcp-event-bytes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.tcp-event-bytes pre { margin: 8px 0; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tcp-event-note { margin: 4px 12px; color: var(--text-dim); }
+#tcpStreamMeta:empty { display: none; }
+.tcp-pending-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 12px; }
+.tcp-pending-bar :is(.primary-action, .secondary-action) { min-height: var(--control-h); padding: 0 12px; border-radius: 6px; font-size: var(--font-sm); }
+#tcpPendingMeta { flex: 1; color: var(--text-dim); font-size: var(--font-sm); }
+#tcpPendingHex { flex: 1; min-height: 80px; padding: 12px; border: 0; border-block: 1px solid var(--line); background: var(--panel-code); color: var(--text); font: var(--font-sm)/1.7 var(--mono); resize: none; }
 #tcpPendingHex:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-#tcpPendingOriginal { flex: 0 0 auto; padding: 5px 12px; border-bottom: 1px solid var(--line); font: 12px var(--mono); }
+#tcpPendingOriginal { flex: 0 0 auto; padding: 5px 12px; border-bottom: 1px solid var(--line); font: var(--font-xs) var(--mono); }
 #tcpPendingOriginal[hidden] { display: none; }
 #tcpPendingOriginal summary { cursor: pointer; color: var(--text-soft); }
 #tcpPendingOriginalHex { max-height: 120px; margin: 8px 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
-#tcpPendingOriginalHex:focus-visible { outline: 1px solid var(--accent); }
-.tcp-pending-spacer, #tcpInterceptNotice { flex: 1; }
-.tcp-connection-actions { border-top: 1px solid var(--line); }
-#tcpInterceptDirection, #tcpPendingPicker { height: var(--control-h); color: var(--text-soft); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; font: inherit; padding: 0 8px; max-width: 100%; }
-#tcpInterceptError:not(:empty) { padding: 6px 10px; }
-.tcp-intercept-history { max-height: 32%; overflow: auto; font: 12px var(--mono); }
-.tcp-intercept-history details { padding: 5px 12px; border-top: 1px solid var(--line); }
-.tcp-intercept-history summary { cursor: pointer; color: var(--text-soft); }
-.tcp-intercept-history pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-
-/* Expanded byte comparisons share the stream area instead of a fixed-height sliver. */
-.tcp-intercept-history.expanded { flex: 2 1 0; min-height: 100px; max-height: none; }
-.tcp-stream-surface > .tcp-bytes { flex: 1 1 0; min-height: 40px; }
-.tcp-event-bytes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
-.tcp-event-bytes pre { margin: 8px 0; line-height: 1.5; }
-.tcp-event-note { margin: 0 0 6px; color: var(--text-soft); font-size: 11px; }
+.tcp-notice, .tcp-error { margin: 0; padding: 6px 12px; font-size: var(--font-sm); }
+.tcp-notice { color: var(--text-dim); }
+.tcp-error { color: var(--danger); }
+.tcp-notice:empty, .tcp-error:empty { display: none; }
 @media (max-width: 680px) { .tcp-event-bytes { grid-template-columns: minmax(0, 1fr); gap: 0; } }
-
-/* Keep endpoint/status columns readable; overflow belongs to the table, not the app. */
-.tcp-workbench { grid-template-columns: minmax(0, 1fr); }
-.tcp-history, .tcp-stream { min-width: 0; }
-.tcp-history .mini-table { min-width: 960px; table-layout: auto; }
-.tcp-history .mini-table th { white-space: nowrap; }
-.tcp-history .history-table-shell:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+/* The listener in Capture Settings: where it listens, an arrow, where it goes. */
+.tcp-listener-form { display: grid; gap: 10px; }
+.tcp-listener-route { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.tcp-listener-field { display: grid; gap: 4px; color: var(--text-dim); font-size: var(--font-xs); }
+#proxySettingsPanel .tcp-listener-field input { width: 90px; }
+#proxySettingsPanel .tcp-listener-host input { width: 220px; }
+.tcp-listener-arrow { padding-bottom: 4px; color: var(--text-dim); }
+.tcp-listener-actions { display: inline-flex; gap: 8px; margin-left: auto; }
+#tcpSettingsError { padding: 0; }
 
 /* Only large Replay Hex payloads need another row; ordinary messages keep their layout. */
 .replay-hex-pager {

@@ -37,29 +37,27 @@ function fixture() {
 test('cleanup section is in Capture Settings with independent native labels and irreversible warning', () => {
   const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
   const section = html.slice(html.indexOf('id="proxySettingsPanel"'), html.indexOf('id="replayShell"'));
-  assert.match(section, /HTTP History automatic cleanup/);
-  assert.match(section, /<fieldset[^>]*aria-labelledby="historyRetentionHeading" aria-describedby="historyRetentionWarning historyRetentionProtection"/);
-  assert.match(section, /deletes the oldest unprotected entries above the limit, now and as history grows/);
-  assert.match(section, /Deleted requests, responses and notes cannot be restored/);
-  assert.match(section, /Entries still being written, and originals that saved Replay tabs use, are kept, so the total can stay above the limit/);
-  assert.match(section, /Unsaved tabs and note edits do not keep an entry/);
+  // One line of warning, because saving deletes what cannot be restored;
+  // the switch and the limit say the rest.
+  assert.match(section, /id="historyRetentionHeading">Delete old HTTP history</);
+  assert.match(section, /<fieldset[^>]*aria-labelledby="historyRetentionHeading" aria-describedby="historyRetentionWarning"/);
+  assert.match(section, /id="historyRetentionWarning"[^>]*>Deleted entries cannot be restored\.</);
   assert.match(section, /id="historyRetentionStatus" role="status" aria-live="polite"/);
-  assert.match(section, /id="historyRetentionCustom"[^>]*aria-describedby="historyRetentionCustomHelp historyRetentionError"/);
+  assert.match(section, /id="historyRetentionCustom"[^>]*aria-describedby="historyRetentionError"/);
   assert.match(section, /id="historyRetentionCancel" type="button"/);
   const settingsSave = appSource.slice(appSource.indexOf('async function saveProxySettings('), appSource.indexOf('function renderProxySettings('));
   assert.doesNotMatch(settingsSave, /await saveHistoryRetentionSettings\(/);
 });
 
-test('initial and saved default Off do not write; session is named', async () => {
+test('initial and saved default Off do not write and say nothing the switch shows', async () => {
   const f = fixture();
   f.context.renderHistoryRetentionSettings();
   assert.equal(f.els.historyRetentionEnabled.checked, false);
   assert.equal(f.els.historyRetentionEnabled.disabled, true);
   assert.equal(f.requests.length, 0);
   await f.load();
-  assert.equal(f.els.historyRetentionSession.textContent, 'Fixture session');
   assert.equal(f.els.historyRetentionSave.disabled, true);
-  assert.match(f.els.historyRetentionStatus.textContent, /Saved policy: Off/);
+  assert.equal(f.els.historyRetentionStatus.textContent, '');
 });
 
 for (const value of ['10000', '50000', '100000', '250000', '1', '4294967295', '12345']) {
@@ -210,7 +208,7 @@ test('a conclusive 400 rejection keeps the draft without claiming unknown or doi
 test('protected soft limits, durability/storage blocking and deferred disk reclamation are distinct statuses', async () => {
   const f = fixture();
   await f.load(snapshot({ mode: 'keep_newest', max_entries: 1 }, TOKEN_A, { protected_count: 2, blocked_reason: 'protected_records', pending: true }));
-  assert.match(f.els.historyRetentionStatus.textContent, /2 protected.*Protected records prevent reaching the target. The limit is soft/);
+  assert.match(f.els.historyRetentionStatus.textContent, /Protected records prevent reaching the target. The limit is soft/);
   await f.load(snapshot({ mode: 'off' }, TOKEN_B, { blocked_reason: 'workspace_durability_uncertain', disk_cleanup_pending: true }));
   assert.match(f.els.historyRetentionStatus.textContent, /saved HTTP tab protection is durable/);
   assert.match(f.els.historyRetentionStatus.textContent, /disk space reclamation is pending/);
@@ -394,7 +392,7 @@ test('uncertain save verified as clean storage error permits one explicit no-op 
   const stored = snapshot({ mode: 'keep_newest', max_entries: 10000 }, TOKEN_B, { blocked_reason: 'persistence_error', pending: true });
   f.requests.at(-1).resolve(response(stored)); await firstSave;
   assert.equal(f.state.historyRetentionSettings.dirty, false);
-  assert.equal(f.els.historyRetentionSave.textContent, 'Retry policy save');
+  assert.equal(f.els.historyRetentionSave.textContent, 'Retry save');
   assert.equal(f.els.historyRetentionSave.disabled, false);
   assert.equal(f.requests.filter((r) => r.options).length, 1);
   const retry = f.context.saveHistoryRetentionSettings(); const request = f.requests.at(-1);
@@ -411,7 +409,7 @@ test('repeated explicit durability save failure stays visible with no automatic 
   const retry = f.context.saveHistoryRetentionSettings(); f.requests.at(-1).resolve(response('storage unavailable', 500)); await tick();
   f.requests.at(-1).resolve(response(stored)); await retry;
   assert.equal(f.requests.filter((r) => r.options).length, 1);
-  assert.equal(f.els.historyRetentionSave.textContent, 'Retry policy save');
+  assert.equal(f.els.historyRetentionSave.textContent, 'Retry save');
   assert.equal(f.els.historyRetentionSave.disabled, false);
   assert.match(f.els.historyRetentionStatus.textContent, /Cleanup paused after a storage error/);
   assert.match(f.els.historyRetentionStatus.textContent, /cleanup may still be blocked/);
@@ -470,6 +468,6 @@ test('global capture/settings information only reports body preview size, never 
   // Execute the actual label assignment from the independent runtime panel.
   const assignment = appSource.match(/^  els\.proxySettingsCaptureCap\.textContent = .*;$/m)[0];
   require('node:vm').runInContext(assignment, context);
-  assert.equal(els.proxySettingsCaptureCap.textContent, '64 KB body preview cap');
+  assert.equal(els.proxySettingsCaptureCap.textContent, '64 KB');
   assert.doesNotMatch(appSource, /configuredTransactionEntryLimit|retainedTransactionsCap/);
 });

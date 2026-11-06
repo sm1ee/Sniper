@@ -4,23 +4,19 @@ const fs = require("node:fs");
 const path = require("node:path");
 const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
 
-test("TCP listener discloses direct routing and rule boundaries before Start", () => {
+// The one routing fact a person cannot see: TCP does not go through the
+// proxy chain. It is read before Start and announced with the form.
+test("TCP listener says it connects directly, before Start", () => {
   const form = html.match(/<form\b[^>]*id="tcpListenerForm"[^>]*>([\s\S]*?)<\/form>/);
   assert.ok(form);
   assert.match(form[0], /aria-describedby="tcpRoutingDisclosure"/);
   const disclosure = form[1].match(/<small id="tcpRoutingDisclosure">([^<]+)<\/small>/);
   assert.ok(disclosure, "disclosure is visible text, not a title or hidden tooltip");
-  assert.match(disclosure[1], /connects directly to the target/);
-  assert.match(disclosure[1], /resolves hostnames locally/);
-  assert.match(disclosure[1], /Proxy chain, Scope and HTTP intercept rules do not apply/);
+  assert.match(disclosure[1], /directly, without the proxy chain/);
   assert.ok(form[1].indexOf('id="tcpRoutingDisclosure"') < form[1].indexOf('id="tcpStart"'));
 });
 
-test("proxy chain description states its protocol boundary and explicit bypass exception", () => {
-  const field = html.match(/<input id="proxyChainUrl"[^>]*\/>\s*<small>([^<]+)<\/small>/);
-  assert.ok(field);
-  assert.match(field[1], /HTTP\(S\), WebSocket and Replay, not TCP listeners/);
-  assert.match(field[1], /Chain failures do not fall back to direct connections/);
-  assert.match(field[1], /bypass hosts connect directly/);
-  assert.doesNotMatch(field[1], /for captured traffic|never goes direct/);
+test("proxy chain fields show only while the chain is on", () => {
+  assert.match(html, /<input class="switch-input" id="proxyChainEnabled"[^>]*data-reveals="proxyChainFields"/);
+  assert.match(html, /<div class="capture-settings-reveal" id="proxyChainFields">[\s\S]*?id="proxyChainUrl"/);
 });

@@ -754,7 +754,6 @@ const els = {
   oastDetailView: document.getElementById("oastDetailView"),
   proxySettingsPanel: document.getElementById("proxySettingsPanel"),
   upstreamPeerSection: document.getElementById("upstreamPeerSection"),
-  upstreamPeerSession: document.getElementById("upstreamPeerSession"),
   upstreamPeerEnabled: document.getElementById("upstreamPeerEnabled"),
   upstreamPeerError: document.getElementById("upstreamPeerError"),
   upstreamPeerStatus: document.getElementById("upstreamPeerStatus"),
@@ -765,8 +764,9 @@ const els = {
   historyRecoveredNotes: document.getElementById("historyRecoveredNotes"),
   historyRecoveredNotesSummary: document.getElementById("historyRecoveredNotesSummary"),
   historyRecoveredNotesList: document.getElementById("historyRecoveredNotesList"),
-  historyRetentionSession: document.getElementById("historyRetentionSession"),
   historyRetentionEnabled: document.getElementById("historyRetentionEnabled"),
+  historyRetentionPresetField: document.getElementById("historyRetentionPresetField"),
+  historyRetentionWarning: document.getElementById("historyRetentionWarning"),
   historyRetentionPreset: document.getElementById("historyRetentionPreset"),
   historyRetentionCustom: document.getElementById("historyRetentionCustom"),
   historyRetentionCustomField: document.getElementById("historyRetentionCustomField"),
@@ -1324,7 +1324,14 @@ function bindEvents() {
     readPath: sessionQueryPath,
     writePath: sessionWritePath,
     request: fetch,
-    openSettings() { setActiveProxyTab("proxy-settings"); renderProxyPanels(); },
+    openSettings() {
+      setActiveProxyTab("proxy-settings");
+      renderProxyPanels();
+      document.getElementById("tcpSettingsSection")?.scrollIntoView({ block: "start" });
+    },
+    arrowStep: tableArrowStep,
+    formatTime: formatTimestamp,
+    formatSize,
   });
 
   initializeTargetWorkspace();
@@ -1351,7 +1358,7 @@ function bindEvents() {
       rawExchange: (record) => ({ request: buildRawRequest(record), response: buildRawResponse(record) }),
     });
   }
-  document.querySelectorAll(".recon-table, .fuzzer-results-table").forEach(bindTableColumnResizers);
+  document.querySelectorAll(".recon-table, .fuzzer-results-table, .tcp-table").forEach(bindTableColumnResizers);
   document.querySelectorAll(".list-detail-resizer").forEach(bindListDetailResizer);
   window.addEventListener("resize", resetLayoutTextareas);
   document.addEventListener("visibilitychange", flushWorkspaceStateBeforeHidden);
@@ -2113,12 +2120,21 @@ function bindEvents() {
         proxySettingsSaveInFlight = false;
         proxySettingsSavePromise = null;
         els.saveProxySettingsButton.disabled = false;
+        syncCaptureSettingsForm();
       });
   });
-  onClickWithProgress(els.reloadProxySettingsButton, () =>
-    loadSettings()
+  onClickWithProgress(els.reloadProxySettingsButton, () => {
+    state.oastTokenClearPending = false;
+    return loadSettings()
       .then(renderProxySettings)
-      .catch((error) => console.error(error)));
+      .catch((error) => console.error(error));
+  });
+  const captureSettings = document.getElementById("proxySettingsPanel");
+  for (const type of ["input", "change"]) captureSettings?.addEventListener(type, syncCaptureSettingsForm);
+  captureSettings?.querySelector(".capture-settings-nav")?.addEventListener("click", (event) => {
+    const target = document.getElementById(event.target.closest("[data-settings-jump]")?.dataset.settingsJump || "");
+    target?.scrollIntoView({ block: "start", behavior: "smooth" });
+  });
   els.upstreamPeerEnabled?.addEventListener("change", editUpstreamPeerSettings);
   els.upstreamPeerSave?.addEventListener("click", saveUpstreamPeerSettings);
   els.upstreamPeerCancel?.addEventListener("click", cancelUpstreamPeerSettings);
@@ -15512,7 +15528,6 @@ function renderUpstreamPeerSettings() {
   const saved = settings.saved;
   const blocked = saved?.status.blocked_reason;
   const retryDurability = blocked === "persistence_uncertain" && !settings.dirty;
-  els.upstreamPeerSession.textContent = state.activeSession?.name || settings.sessionId || "No active session";
   els.upstreamPeerEnabled.checked = settings.draft;
   els.upstreamPeerEnabled.disabled = !saved || blocked === "invalid_configuration";
   els.upstreamPeerError.textContent = settings.error;
@@ -15522,16 +15537,13 @@ function renderUpstreamPeerSettings() {
   els.upstreamPeerCancel.disabled = !saved || (!settings.dirty && !settings.conflict);
   els.upstreamPeerRefresh.classList.toggle("hidden", !(settings.error || settings.uncertain || settings.conflict || settings.readFailed));
   els.upstreamPeerRefresh.disabled = settings.loading || settings.saving;
+  // The switch and its Save button already show the setting and an unsaved
+  // change; the line only speaks when something is wrong.
   const parts = [];
-  if (!saved) parts.push(settings.loading ? "Loading saved setting…" : "Load the saved setting before making changes.");
-  if (saved) {
-    parts.push(`${blocked === "persistence_uncertain" ? "Current setting" : "Saved setting"}: ${saved.enabled ? "On" : "Off"}.`);
-    if (blocked === "persistence_uncertain") parts.push("Storage is unconfirmed. Peer recording is paused until a save succeeds.");
-    else if (blocked === "invalid_configuration") parts.push("The saved configuration is invalid or exhausted. Peer recording is off and this setting cannot be changed here.");
-    else if (blocked === "http_capture_paused") parts.push("HTTP capture is paused, so no new socket peers are being recorded.");
-    else if (saved.status.effective_enabled) parts.push("Recording peers for new captured HTTP(S) exchanges.");
-    if (settings.dirty) parts.push("Unsaved changes.");
-  }
+  if (!saved && !settings.loading) parts.push("Load the saved setting before making changes.");
+  if (blocked === "persistence_uncertain") parts.push("Storage is unconfirmed. Peer recording is paused until a save succeeds.");
+  else if (blocked === "invalid_configuration") parts.push("The saved configuration is invalid or exhausted. Peer recording is off and this setting cannot be changed here.");
+  else if (blocked === "http_capture_paused") parts.push("HTTP capture is paused, so no new socket peers are being recorded.");
   if (settings.readFailed && !settings.message.includes("Check status before saving")) parts.push("Check status before saving.");
   if (settings.message) parts.push(settings.message);
   els.upstreamPeerStatus.textContent = parts.join(" ");
@@ -15762,14 +15774,17 @@ function renderHistoryRetentionSettings() {
   if (!els.historyRetentionSection) return;
   const settings = historyRetentionSettingsState();
   const { draft, saved } = settings;
-  els.historyRetentionSession.textContent = state.activeSession?.name || settings.sessionId || "No active session";
-  els.historyRetentionEnabled.checked = draft.mode === "keep_newest";
+  const off = draft.mode === "off";
+  els.historyRetentionEnabled.checked = !off;
   els.historyRetentionEnabled.disabled = !saved;
   els.historyRetentionPreset.value = draft.preset;
-  els.historyRetentionPreset.disabled = !saved || draft.mode === "off";
+  els.historyRetentionPreset.disabled = !saved || off;
   els.historyRetentionCustom.value = draft.custom;
-  els.historyRetentionCustom.disabled = !saved || draft.mode === "off" || draft.preset !== "custom";
-  els.historyRetentionCustomField.classList.toggle("hidden", draft.preset !== "custom");
+  els.historyRetentionCustom.disabled = !saved || off || draft.preset !== "custom";
+  // The limit and the warning matter only once cleanup is on.
+  els.historyRetentionPresetField?.classList.toggle("hidden", off);
+  els.historyRetentionWarning?.classList.toggle("hidden", off);
+  els.historyRetentionCustomField.classList.toggle("hidden", off || draft.preset !== "custom");
   let invalid = false;
   try { historyRetentionPolicyFromDraft(draft); } catch (_) { invalid = true; }
   els.historyRetentionCustom.setAttribute("aria-invalid", String(invalid));
@@ -15777,21 +15792,21 @@ function renderHistoryRetentionSettings() {
   const retryDurability = saved?.status.blocked_reason === "persistence_error" && !settings.dirty;
   els.historyRetentionSave.disabled = !saved || (!settings.dirty && !retryDurability) || settings.saving || settings.loading || settings.conflict || !!settings.uncertain || invalid;
   els.historyRetentionCancel.disabled = !saved || (!settings.dirty && !settings.conflict);
+  els.historyRetentionRefresh.classList.toggle("hidden", !(settings.error || settings.uncertain || settings.conflict || (!saved && !settings.loading)));
   els.historyRetentionRefresh.disabled = settings.loading || settings.saving;
-  els.historyRetentionSave.textContent = settings.saving ? "Saving…" : retryDurability ? "Retry policy save" : "Save cleanup policy";
+  els.historyRetentionSave.textContent = settings.saving ? "Saving…" : retryDurability ? "Retry save" : "Save";
+  // The switch, the limit and the Save button already show the policy and an
+  // unsaved change; the line only speaks about what they cannot show.
   const parts = [];
-  if (!saved) parts.push(settings.loading ? "Loading saved policy…" : "Load the saved policy before making changes.");
+  if (!saved && !settings.loading) parts.push("Load the saved policy before making changes.");
   if (saved) {
     const status = saved.status;
-    parts.push(`Saved policy: ${saved.policy.mode === "off" ? "Off" : `keep newest ${saved.policy.max_entries.toLocaleString()} total entries`}.`);
-    parts.push(`${status.total_count.toLocaleString()} stored; ${status.protected_count.toLocaleString()} protected.`);
     if (status.pending) parts.push("Cleanup pending.");
     if (status.blocked_reason === "protected_records") parts.push("Protected records prevent reaching the target. The limit is soft.");
     if (status.blocked_reason === "record_identity_conflict") parts.push("Duplicate record IDs prevent further automatic cleanup.");
     if (status.blocked_reason === "workspace_durability_uncertain") parts.push("Cleanup paused until saved HTTP tab protection is durable.");
-    if (status.blocked_reason === "persistence_error") parts.push("Cleanup paused after a storage error. Retry policy save to confirm durability; cleanup may still be blocked.");
+    if (status.blocked_reason === "persistence_error") parts.push("Cleanup paused after a storage error. Retry save to confirm durability; cleanup may still be blocked.");
     if (status.disk_cleanup_pending) parts.push("Deleted records are hidden; disk space reclamation is pending.");
-    if (settings.dirty) parts.push("Unsaved changes.");
   }
   if (settings.message) parts.push(settings.message);
   els.historyRetentionStatus.textContent = parts.join(" ");
@@ -15840,7 +15855,7 @@ function renderProxySettings() {
   els.proxySettingsProxyAddr.textContent = state.settings.proxy_addr;
   els.proxySettingsNextProxyAddr.textContent = startup?.proxy_addr || state.settings.proxy_addr;
   els.proxySettingsUiAddr.textContent = state.settings.ui_addr;
-  els.proxySettingsCaptureCap.textContent = `${formatSize(state.settings.body_preview_bytes)} body preview cap`;
+  els.proxySettingsCaptureCap.textContent = formatSize(state.settings.body_preview_bytes);
   els.proxySettingsBootstrap.textContent = state.settings.certificate.special_host_https;
   // Auto Content-Length (local UI setting, not server-side)
   const aclEl = document.getElementById("proxySettingAutoContentLength");
@@ -15851,15 +15866,60 @@ function renderProxySettings() {
   els.proxySettingsDataDir.textContent = state.settings.data_dir;
   els.proxySettingsStartupPath.textContent = startup?.file_path || state.settings.data_dir;
   els.proxySettingsCertificateName.textContent = `${state.settings.certificate.common_name} · expires ${formatTimestamp(state.settings.certificate.expires_at)}`;
-  els.proxySettingListenerHelp.textContent = startup
-    ? startup.rebound === true
-      ? `Proxy listener is now running on ${startup.active_proxy_addr}.`
-      : startup.rebind_error
-        ? `${startup.rebind_error} Saved ${startup.proxy_addr} for the next launch.`
-        : startup.restart_required
-          ? `Saved ${startup.proxy_addr} for the next launch. Restart Sniper to replace the active listener ${startup.active_proxy_addr}.`
-          : `Proxy listener is running on ${startup.active_proxy_addr}.`
-    : "Changes are saved for the next app start.";
+  // Only what the fields cannot show: a listener still on its old address.
+  els.proxySettingListenerHelp.textContent = startup?.rebind_error
+    ? `${startup.rebind_error} Saved ${startup.proxy_addr} for the next launch.`
+    : startup?.restart_required && startup.rebound !== true
+      ? `Restart Sniper to move the listener from ${startup.active_proxy_addr}.`
+      : "";
+  syncCaptureSettingsForm();
+}
+
+// The proxy form as it stands, in the shape proxySettingsFromRuntime gives,
+// so a form left alone compares equal to what was loaded.
+function proxySettingsFormValues() {
+  const value = (id) => document.getElementById(id)?.value ?? "";
+  const checked = (id) => Boolean(document.getElementById(id)?.checked);
+  const list = (id) => value(id).split("\n").map((line) => line.trim()).filter(Boolean);
+  return {
+    intercept_enabled: checked("proxySettingIntercept"),
+    websocket_capture_enabled: checked("proxySettingWebsocketCapture"),
+    upstream_insecure: checked("proxySettingUpstreamInsecure"),
+    upstream_proxy: {
+      enabled: checked("proxyChainEnabled"),
+      url: value("proxyChainUrl").trim(),
+      username: value("proxyChainUsername"),
+      password: value("proxyChainPassword"),
+    },
+    scope_patterns: list("proxySettingScopePatterns"),
+    passthrough_hosts: list("proxySettingPassthroughHosts"),
+    upstream_bypass_hosts: list("proxyChainBypassHosts"),
+    oast_enabled: checked("proxySettingOastEnabled"),
+    oast_provider: value("proxySettingOastProvider") || "custom",
+    oast_server_url: value("proxySettingOastServerUrl"),
+    oast_polling_interval_secs: Number(value("proxySettingOastInterval").trim()) || 5,
+  };
+}
+
+function proxySettingsDirty() {
+  if (!state.proxySettingsShown) return false;
+  const startup = state.settings?.startup;
+  const listenerMoved = Boolean(startup) && (
+    document.getElementById("proxySettingBindHost")?.value.trim() !== startup.proxy_bind_host
+    || document.getElementById("proxySettingPort")?.value.trim() !== String(startup.proxy_port));
+  return listenerMoved
+    || Boolean(state.oastTokenClearPending)
+    || Boolean(document.getElementById("proxySettingOastToken")?.value.trim())
+    || JSON.stringify(proxySettingsFormValues()) !== JSON.stringify(state.proxySettingsShown);
+}
+
+// A section's fields show only while its switch is on, and Save and Revert
+// only while the form differs from what was loaded.
+function syncCaptureSettingsForm() {
+  for (const toggle of document.querySelectorAll?.("#proxySettingsPanel [data-reveals]") || []) {
+    document.getElementById(toggle.dataset.reveals)?.classList.toggle("hidden", !toggle.checked);
+  }
+  document.getElementById("proxySettingsSaveBar")?.classList.toggle("hidden", !proxySettingsDirty());
 }
 
 // The runtime settings as the Settings form shows them, in the shape

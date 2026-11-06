@@ -7,7 +7,7 @@ const pending = {pending_id:'p1',sequence:1,revision:0,direction:'client_to_serv
 const connection = {id:'c1',status:'open',intercept_events:[]};
 function fixture() {
   const nodes = new Map(), requests = [];
-  function node() {return {value:'',children:[],dataset:{},listeners:{},textContent:'',disabled:false,hidden:false,attributes:{},classList:{toggle(){}},setAttribute(k,v){this.attributes[k]=v},addEventListener(e,f){this.listeners[e]=f},append(n){this.children.push(n)},replaceChildren(){this.children=[]},querySelectorAll(){return []}};}
+  function node() {return {value:'',children:[],dataset:{},listeners:{},textContent:'',disabled:false,hidden:false,attributes:{},classList:{toggle(){}},setAttribute(k,v){this.attributes[k]=v},addEventListener(e,f){this.listeners[e]=f},append(...n){this.children.push(...n)},replaceChildren(){this.children=[]},querySelectorAll(){return []}};}
   const document = {getElementById(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id)},createElement:node};
   let session = 'a';
   const controller = tcp.createInterceptController({document,sessionId:()=>session,readPath:(p,s)=>p+'?session_id='+s,writePath:(p,s)=>p+'?session_id='+s+'&expected_active_session_id='+s,
@@ -31,8 +31,8 @@ test('pending editor uses raw bytes, direction labels, and one explicit revision
   assert.deepEqual(JSON.parse(f.requests[2].options.body),{action:'forward',expected_revision:0,replacement_base64:'QQD/'});
   assert.equal(f.get('tcpDrop').disabled,true);
   f.requests[2].resolve({state:'forwarding'});await tick();
-  assert.match(f.get('tcpInterceptNotice').textContent,/accepted/);
-  assert.doesNotMatch(f.get('tcpInterceptNotice').textContent,/delivered|sent/);
+  // The Stream shows what was written; a forward needs no notice of its own.
+  assert.equal(f.get('tcpInterceptNotice').textContent,'');
   await resolveRefresh(f,[{...pending,pending_id:'p2',sequence:2}]);
   assert.equal(f.get('tcpForward').disabled,true,'next chunk must be explicitly selected after decision');
   assert.equal(f.get('tcpPendingHex').value,'');
@@ -68,24 +68,23 @@ test('polling preserves edited draft, stale selection and session responses cann
 });
 test('failed reads disable mutations and stale decision conflicts do not auto-retry',async()=>{
   const f=fixture();await ready(f);f.get('tcpForward').listeners.click();f.requests[2].resolve({},409);await tick();await resolveRefresh(f,[]);
-  assert.match(f.get('tcpInterceptError').textContent,/state changed/);assert.equal(f.requests.length,5);
+  assert.match(f.get('tcpInterceptError').textContent,/bytes changed/);assert.equal(f.requests.length,5);
   const poll=f.controller.refresh();f.requests[5].resolve(policy);f.requests[6].resolve({},500);await poll;
   assert.equal(f.get('tcpCloseConnection').disabled,true);assert.equal(f.get('tcpForward').disabled,true);
 });
 test('close accepts 204 without claiming closed or persistence; history has original/selected/written',async()=>{
   const f=fixture();await ready(f);f.get('tcpCloseConnection').listeners.click();assert.match(f.requests[2].path,/c1\/close\?/);
   f.requests[2].resolve(null,204);await tick();await resolveRefresh(f,[]);
-  assert.match(f.get('tcpInterceptNotice').textContent,/Close requested/);
+  assert.match(f.get('tcpInterceptNotice').textContent,/Closing/);
   f.controller.setConnection({...connection,status:'closed',intercept_events:[{...pending,sequence:2,state:'dropped',selected_length:0,written_bytes:0,original_offset:2,destination_offset:2},{...pending,pending_id:'first',sequence:1,state:'forwarded',selected_length:3,written_bytes:3,selected_base64:'QQD/',original_offset:0,destination_offset:0}]});
   assert.equal(f.get('tcpCloseConnection').disabled,true);assert.equal(f.get('tcpForward').disabled,true);
-  const rows=f.get('tcpInterceptHistory').children;assert.match(rows[0].children[0].textContent,/#1.*2 original → 3 selected.*3 B written/);
+  const rows=f.get('tcpInterceptHistory').children;assert.match(rows[0].children[0].textContent,/#1.*2 B → 3 B$/);
   assert.match(rows[0].children[1].children[0].textContent,/Original.*\n00 ff/s);
-  assert.match(rows[0].children[1].children[1].textContent,/Selected.*\n41 00 ff/s);
-  assert.match(rows[0].children[2].textContent,/not peer application acknowledged/);
+  assert.match(rows[0].children[1].children[1].textContent,/Sent\n41 00 ff/);
 });
 test('invalid editor cannot send; forwarding state stays read-only; choosing other direction is explicit',async()=>{
   const f=fixture();await ready(f,[pending,{...pending,pending_id:'s1',direction:'server_to_client',state:'forwarding'}]);
-  f.get('tcpPendingHex').value='f';f.get('tcpForward').listeners.click();assert.equal(f.requests.length,2);assert.match(f.get('tcpInterceptError').textContent,/complete hexadecimal/);
+  f.get('tcpPendingHex').value='f';f.get('tcpForward').listeners.click();assert.equal(f.requests.length,2);assert.match(f.get('tcpInterceptError').textContent,/whole hex byte pairs/);
   f.get('tcpPendingPicker').value='s1';f.get('tcpPendingPicker').listeners.change();assert.equal(f.get('tcpForward').disabled,true);assert.match(f.get('tcpForward').textContent,/client/);
 });
 
@@ -98,8 +97,8 @@ test('external resolution never silently selects the following pending bytes', a
   await poll;
   assert.equal(f.get('tcpPendingPicker').value, '');
   assert.equal(f.get('tcpPendingHex').value, '');
-  assert.equal(f.get('tcpPendingMeta').textContent, 'Choose pending bytes to review before forwarding.');
-  assert.equal(f.get('tcpPendingHex').placeholder, 'Choose pending bytes.');
+  assert.equal(f.get('tcpPendingPicker').hidden, false, 'a range left unchosen is chosen in the picker');
+  assert.equal(f.get('tcpPendingHex').placeholder, 'Choose bytes');
   assert.equal(f.get('tcpForward').disabled, true);
   f.get('tcpForward').listeners.click();
   assert.equal(f.requests.length, 4, 'even a stale queued click cannot send replacement bytes');
@@ -120,10 +119,10 @@ test('successful polling clears only transient read errors, retaining unresolved
   assert.equal(f.get('tcpInterceptError').textContent, '');
   f.get('tcpForward').listeners.click(); f.requests[6].resolve({}, 409); await tick();
   f.requests[7].resolve(policy); f.requests[8].resolve({}, 502); await tick();
-  assert.match(f.get('tcpInterceptError').textContent, /state changed/);
+  assert.match(f.get('tcpInterceptError').textContent, /bytes changed/);
   const recoverAgain = f.controller.refresh();
   f.requests[9].resolve(policy); f.requests[10].resolve({items:[pending]}); await recoverAgain;
-  assert.match(f.get('tcpInterceptError').textContent, /state changed/);
+  assert.match(f.get('tcpInterceptError').textContent, /bytes changed/);
   assert.doesNotMatch(f.get('tcpInterceptError').textContent, /502/);
 });
 
@@ -142,30 +141,28 @@ test('expanded history gets flexible space and original/selected byte columns', 
 
 test('empty editor placeholders distinguish no connection, unavailable state, and empty queue', async () => {
   const f = fixture();
-  assert.equal(f.get('tcpPendingHex').placeholder, 'Select a connection.');
+  assert.equal(f.get('tcpPendingHex').placeholder, 'Select a connection');
   f.controller.setConnection(connection);
-  assert.equal(f.get('tcpPendingHex').placeholder, 'Pending state unavailable.');
+  assert.equal(f.get('tcpPendingHex').placeholder, 'Pending bytes unavailable');
   f.requests[0].resolve(policy); f.requests[1].resolve({items:[]}); await tick();
-  assert.equal(f.get('tcpPendingHex').placeholder, 'No pending bytes.');
+  assert.equal(f.get('tcpPendingHex').placeholder, 'No pending bytes');
 });
 
-test('TCP table uses intrinsic columns inside a keyboard-accessible horizontal scroll area', () => {
+test('TCP table scrolls sideways inside a keyboard-accessible area and keeps all its columns', () => {
   const fs = require('node:fs'), path = require('node:path');
   const css = fs.readFileSync(path.join(__dirname, '../web/styles.css'), 'utf8');
   const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
-  assert.match(css, /\.tcp-history \.mini-table \{ min-width: 960px; table-layout: auto; \}/);
-  assert.match(css, /\.tcp-workbench \{ grid-template-columns: minmax\(0, 1fr\); \}/);
-  assert.match(css, /\.tcp-history, \.tcp-stream \{ min-width: 0; \}/);
+  assert.match(css, /\.tcp-table \{ table-layout: fixed; min-width: 760px; \}/);
+  assert.match(css, /\.tcp-history \.history-table-shell \{ flex: 1; min-height: 0; overflow: auto; \}/);
   const panel = html.slice(html.indexOf('id="tcpPanel"'), html.indexOf('id="websocketPanel"'));
-  assert.match(panel, /class="history-table-shell" tabindex="0" aria-label="TCP connections, scroll horizontally for more columns"/);
-  assert.equal((panel.match(/<th>/g) || []).length, 8, 'all original columns remain');
+  assert.match(panel, /class="history-table-shell" tabindex="0" aria-label="TCP connections"/);
+  assert.equal((panel.match(/<th\b/g) || []).length, 8, 'all columns remain');
 });
 
 test('truncated intercept history discloses missing events as well as missing byte previews', async () => {
   const f = fixture(); await ready(f);
   f.controller.setConnection({...connection,intercept_truncated:true,intercept_events:[]});
-  assert.equal(f.get('tcpInterceptHistory').children.at(-1).textContent,
-    'Partial intercept history; some events or byte previews are unavailable.');
+  assert.equal(f.get('tcpInterceptHistory').children.at(-1).textContent, 'Some intercepted bytes are missing.');
 });
 
 test('unedited successful forwarding reuses verified original bytes, never infers through missing metadata or truncation', async () => {
@@ -175,7 +172,7 @@ test('unedited successful forwarding reuses verified original bytes, never infer
     f.controller.setConnection({...connection,intercept_events:[event]});
     return f.get('tcpInterceptHistory').children[0].children[1].children[1].textContent;
   };
-  assert.match(display(original), /Unchanged\n00 ff/);
+  assert.match(display(original), /^Sent\nUnchanged$/);
   for (const change of [
     {preview_truncated:true,original_base64:null},
     {preview_truncated:true}, {original_base64:null}, {edited:undefined},
@@ -184,15 +181,15 @@ test('unedited successful forwarding reuses verified original bytes, never infer
   ]) {
     const rendered = display({...original,...change});
     assert.doesNotMatch(rendered, /Unchanged/);
-    assert.match(rendered, /Selected byte preview unavailable/);
+    assert.match(rendered, /Preview unavailable/);
   }
-  assert.match(display({...original,state:'dropped',selected_length:0,written_bytes:0}), /Dropped; no bytes selected/);
+  assert.match(display({...original,state:'dropped',selected_length:0,written_bytes:0}), /^Sent\nDropped$/);
   assert.match(display({...original,edited:true,selected_base64:'QUI='}), /\n41 42$/);
 });
 
 test('Off distinguishes global paused and forwarding counts without guessing from selected connection', async()=>{
   const f=fixture();await ready(f);
-  for (const [paused,forwarding,expected] of [[0,1,'1 forwarding'],[1,0,'1 paused'],[2,3,'2 paused · 3 forwarding'],[0,0,'0 pending']]) {
+  for (const [paused,forwarding,expected] of [[0,1,'1 forwarding'],[1,0,'1 paused'],[2,3,'2 paused · 3 forwarding'],[0,0,'']]) {
     const poll=f.controller.refresh();
     await resolveRefresh(f, [{...pending,state:'forwarding'}], {...policy,enabled:false,pending_count:paused+forwarding,paused_count:paused,forwarding_count:forwarding});
     await poll;
@@ -212,7 +209,7 @@ test('session reset rejects stale forwarding aggregate', async()=>{
   const poll=f.controller.refresh();const index=f.requests.length-2;
   f.session('b'); f.controller.reset();
   f.requests[index].resolve({...policy,paused_count:0,forwarding_count:9});f.requests[index+1].resolve({items:[{...pending,state:'forwarding'}]});await poll;
-  assert.equal(f.get('tcpInterceptStatus').textContent,'Intercept unavailable');
+  assert.equal(f.get('tcpInterceptStatus').textContent,'');
 });
 
 test('in-flight dropped range remains unresolved until owner removes it', async()=>{
@@ -229,12 +226,12 @@ test('paused age uses received_at, refreshes without replacing the draft or send
   try {
     const f = fixture(), held = {...pending, received_at:'2026-11-04T16:58:00Z'};
     await ready(f, [held]);
-    assert.equal(f.get('tcpPendingMeta').textContent, '2 original bytes · Paused 2m · Not sent');
+    assert.equal(f.get('tcpPendingMeta').textContent, 'Client → Server · 2 B · paused 2m');
     f.get('tcpPendingHex').value = 'aa bb'; f.get('tcpPendingHex').listeners.input();
     now += 60000;
     const poll = f.controller.refresh();
     f.requests.at(-2).resolve(policy); f.requests.at(-1).resolve({items:[held]}); await poll;
-    assert.equal(f.get('tcpPendingMeta').textContent, '2 original bytes · Paused 3m · Not sent');
+    assert.equal(f.get('tcpPendingMeta').textContent, 'Client → Server · 2 B · paused 3m');
     assert.equal(f.get('tcpPendingHex').value, 'aa bb');
     assert.equal(f.requests.filter(r => r.options?.method).length, 0);
   } finally { Date.now = originalNow; }
@@ -243,7 +240,7 @@ test('paused age uses received_at, refreshes without replacing the draft or send
 test('missing, malformed, and future pause timestamps do not invent an age', async () => {
   for (const received_at of [undefined, null, '', 'invalid', 0, '2999-01-01T00:00:00Z']) {
     const f = fixture(); await ready(f, [{...pending, received_at}]);
-    assert.equal(f.get('tcpPendingMeta').textContent, '2 original bytes · Paused — · Not sent');
+    assert.equal(f.get('tcpPendingMeta').textContent, 'Client → Server · 2 B · paused —');
   }
 });
 
@@ -252,27 +249,27 @@ test('pause age formats sub-minute and hour durations', async () => {
   try {
     for (const [received_at, age] of [['2026-11-04T16:59:55Z','5s'], ['2026-11-04T15:55:00Z','1h 5m']]) {
       const f = fixture(); await ready(f, [{...pending, received_at}]);
-      assert.match(f.get('tcpPendingMeta').textContent, new RegExp('Paused ' + age + ' · Not sent'));
+      assert.match(f.get('tcpPendingMeta').textContent, new RegExp('paused ' + age + '$'));
     }
   } finally { Date.now = originalNow; }
 });
 
 test('forwarding, ended and unavailable states never show a stale paused age', async () => {
   const f = fixture(); await ready(f, [{...pending, received_at:'2026-11-04T16:58:00Z', state:'forwarding'}]);
-  assert.match(f.get('tcpPendingMeta').textContent, /Forwarding; delivery not confirmed/);
-  assert.doesNotMatch(f.get('tcpPendingMeta').textContent, /Paused|Not sent/);
+  assert.match(f.get('tcpPendingMeta').textContent, /forwarding$/);
+  assert.doesNotMatch(f.get('tcpPendingMeta').textContent, /paused/);
   f.controller.setConnection({...connection,status:'stopped'});
-  assert.equal(f.get('tcpPendingMeta').textContent, 'Connection ended. No bytes can be forwarded.');
+  assert.equal(f.get('tcpPendingMeta').textContent, 'Connection ended');
   assert.equal(f.get('tcpForward').disabled, true);
   const poll = f.controller.refresh();
   f.requests.at(-2).resolve(policy); f.requests.at(-1).resolve({}, 500); await poll;
-  assert.equal(f.get('tcpPendingMeta').textContent, 'Pending state unavailable.');
+  assert.equal(f.get('tcpPendingMeta').textContent, '');
+  assert.equal(f.get('tcpPendingHex').placeholder, 'Pending bytes unavailable');
 });
 
-test('pause liveness limitation is visible and Close describes both directions and held bytes', () => {
+test('Close says it closes both directions', () => {
   const html = require('node:fs').readFileSync(require('node:path').join(__dirname, '../web/index.html'), 'utf8');
-  assert.match(html, /<footer class="pane-footer">[^<]*Peer disconnects may not be detected while paused\.<\/footer>/);
-  assert.match(html, /id="tcpCloseConnection"[^>]*title="Closes both directions; paused bytes are not forwarded\."[^>]*aria-label="Close connection\. Closes both directions; paused bytes are not forwarded\."/);
+  assert.match(html, /id="tcpCloseConnection"[^>]*title="Close both directions"[^>]*>Close connection</);
 });
 
 test('Close waits through empty pending polls and clears only on authoritative terminal detail', async () => {
@@ -280,11 +277,11 @@ test('Close waits through empty pending polls and clears only on authoritative t
     const f = fixture(); await ready(f);
     f.get('tcpCloseConnection').listeners.click(); f.requests[2].resolve(null, 204);
     await tick(); await resolveRefresh(f, []);
-    assert.match(f.get('tcpInterceptNotice').textContent, /Waiting for final state/);
+    assert.match(f.get('tcpInterceptNotice').textContent, /Closing/);
     f.controller.setConnection({...connection, status:'open', pending_count:0});
-    assert.match(f.get('tcpInterceptNotice').textContent, /Waiting for final state/);
+    assert.match(f.get('tcpInterceptNotice').textContent, /Closing/);
     f.controller.setConnection({...connection, status:'unknown'});
-    assert.match(f.get('tcpInterceptNotice').textContent, /Waiting for final state/);
+    assert.match(f.get('tcpInterceptNotice').textContent, /Closing/);
     f.controller.setConnection({...connection, status, durable:status !== 'failed'});
     assert.equal(f.get('tcpInterceptNotice').textContent, '');
   }
@@ -301,7 +298,7 @@ test('failed pending poll keeps Close waiting and terminal reconciliation preser
   const f = fixture(); await ready(f); f.get('tcpCloseConnection').listeners.click();
   f.requests[2].resolve(null, 204); await tick();
   f.requests[3].resolve(policy); f.requests[4].resolve({}, 500); await tick();
-  assert.match(f.get('tcpInterceptNotice').textContent, /Waiting for final state/);
+  assert.match(f.get('tcpInterceptNotice').textContent, /Closing/);
   const error = f.get('tcpInterceptError').textContent;
   f.controller.setConnection({...connection, status:'stopped'});
   assert.equal(f.get('tcpInterceptNotice').textContent, '');
@@ -311,7 +308,7 @@ test('failed pending poll keeps Close waiting and terminal reconciliation preser
 test('uncertain Close error is retained after terminal detail and never becomes success notice', async () => {
   const f = fixture(); await ready(f); f.get('tcpCloseConnection').listeners.click();
   f.requests[2].resolve({}, 500); await tick(); await resolveRefresh(f, []);
-  const error = f.get('tcpInterceptError').textContent; assert.match(error, /outcome may be uncertain/);
+  const error = f.get('tcpInterceptError').textContent; assert.match(error, /Outcome unknown; not retried/);
   f.controller.setConnection({...connection, status:'stopped'});
   assert.equal(f.get('tcpInterceptError').textContent, error);
   assert.equal(f.get('tcpInterceptNotice').textContent, '');
@@ -383,7 +380,8 @@ test('failed reads and uncertain decisions retain edits until authoritative reso
     assert.equal(f.get('tcpForward').disabled, true);
     const recover = f.controller.refresh(); await resolveRefresh(f, [pending]); await recover;
     assert.equal(f.get('tcpPendingHex').value, 'aa bb');
-    assert.match(f.get('tcpInterceptError').textContent, /outcome may be uncertain/);
+    // A conflict refused the decision; any other failure may have reached the socket.
+    assert.match(f.get('tcpInterceptError').textContent, status === 409 ? /bytes changed/ : /Outcome unknown; not retried/);
     assert.equal(f.requests.filter(r => r.options?.method === 'POST').length, 1);
     const resolved = f.controller.refresh(); await resolveRefresh(f, []); await resolved;
     await selectDraftConnection(f, 'other', []); await selectDraftConnection(f, 'c1');
@@ -432,7 +430,7 @@ test('oversized text is rejected explicitly without truncating or losing an exis
   const f = fixture(); await ready(f); editDraft(f, 'aa');
   editDraft(f, 'bb' + ' '.repeat(65535));
   assert.equal(f.get('tcpPendingHex').value, 'aa');
-  assert.match(f.get('tcpInterceptError').textContent, /not saved.*64 KiB.*previous draft is unchanged/);
+  assert.match(f.get('tcpInterceptError').textContent, /Edit not kept: at most 16 KiB/);
   await selectDraftConnection(f, 'c2'); await selectDraftConnection(f, 'c1');
   assert.equal(f.get('tcpPendingHex').value, 'aa');
   const max = 'ab '.repeat(16384); editDraft(f, max);
@@ -446,7 +444,7 @@ test('draft capacity rejects a new edit visibly and never evicts unsent edits; r
   for (let i = 2; i <= 128; i++) { await selectDraftConnection(f, 'c' + i); editDraft(f, 'aa'); }
   await selectDraftConnection(f, 'overflow'); editDraft(f, 'bb');
   assert.equal(f.get('tcpPendingHex').value, '00 ff');
-  assert.match(f.get('tcpInterceptError').textContent, /not saved.*draft limit.*Existing drafts are unchanged/);
+  assert.match(f.get('tcpInterceptError').textContent, /Edit not kept: too many unsent edits/);
   await selectDraftConnection(f, 'c1'); assert.equal(f.get('tcpPendingHex').value, 'aa');
   f.get('tcpPendingReset').listeners.click();
   await selectDraftConnection(f, 'overflow'); editDraft(f, 'bb');
