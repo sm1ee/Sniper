@@ -1,5 +1,6 @@
 const test = require("node:test"), assert = require("node:assert/strict");
 const { createSession } = require("../web/protobuf-edit.js");
+const wire = require("../web/protobuf-wire.js");
 const b = (...xs) => Uint8Array.from(xs);
 const edit = (source,path,op) => createSession(source).apply(source,path,op);
 const uint = value => ({kind:"unsigned-varint",value});
@@ -39,10 +40,41 @@ test("reject wire mismatch and unsupported guesses", () => {
  assert.throws(()=>edit(b(10,0),[0],{kind:"string",value:"abc"}),/unsupported-operation/);
 });
 test("bad path and explicit LEN traversal errors", () => {
- for(const p of [[],[-1],[0.5],[NaN],Array(65).fill(0)]) assert.throws(()=>edit(b(8,1),p,uint("1")),/invalid-path/);
+ for(const p of [[],[-1],[0.5],[NaN]]) assert.throws(()=>edit(b(8,1),p,uint("1")),/invalid-path/);
+ assert.throws(()=>edit(b(8,1),Array(wire.limits.depth + 2).fill(0),uint("1")),/depth-limit/);
  assert.throws(()=>edit(b(8,1),[2],uint("1")),/field-not-found/);
  assert.throws(()=>edit(b(8,1),[0,0],uint("1")),/not-message/);
  assert.throws(()=>edit(b(10,1,255),[0,0],uint("1")),/truncated-varint/);
+});
+test("all inspected group depths edit with exact untouched bytes and no-op preservation", () => {
+ for(const depth of [0,wire.limits.depth - 1,wire.limits.depth]) {
+  const before=Array(depth).fill([0x8b,0]).flat();
+  const after=[...Array(depth).fill([0x8c,0,0x18,0x87,0]).flat(),0x20,0x85,0];
+  const src=b(...before,0x90,0,0x81,0,...after), path=Array(depth + 1).fill(0);
+  assert.equal(wire.inspect(src).ok,true);
+  assert.deepEqual(edit(src,path,uint("1")),src,"no-op keeps noncanonical tags and values");
+  assert.deepEqual(edit(src,path,uint("16384")),b(...before,0x90,0,0x80,0x80,1,...after));
+ }
+});
+test("explicit LEN and mixed traversal use the same bounded descent count", () => {
+ const wrap=(payload,kind)=>kind === "group" ? b(11,...payload,12) : b(10,...encodeLength(payload.length),...payload);
+ const encodeLength=value=>{const out=[];do{const byte=value & 127;value=Math.floor(value/128);out.push(byte | (value ? 128 : 0));}while(value);return out;};
+ for(const mixed of [false,true]) {
+  const nested=value=>{let payload=b(8,...value);for(let i=0;i<wire.limits.depth;i++) payload=wrap(payload,mixed && i%2 ? "group" : "len");return payload;};
+  const src=nested([1]), path=Array(wire.limits.depth + 1).fill(0);
+  assert.deepEqual(edit(src,path,uint("1")),src);
+  assert.deepEqual(edit(src,path,uint("128")),nested([128,1]));
+  const tooDeep=wrap(src,"len"), session=createSession(tooDeep), before=Uint8Array.from(tooDeep);
+  assert.throws(()=>session.apply(tooDeep,[0,...path],uint("2")),{code:"depth-limit"});
+  assert.deepEqual(tooDeep,before);assert.deepEqual(session.originalBytes(),before);
+  assert.deepEqual(session.apply(tooDeep,[0],raw(src)),before,"depth refusal does not consume the session");
+ }
+});
+test("over-limit groups remain uninspectable and cannot create an edit session", () => {
+ const src=b(...Array(wire.limits.depth + 1).fill(11),8,1,...Array(wire.limits.depth + 1).fill(12)), before=Uint8Array.from(src);
+ const result=wire.inspect(src);
+ assert.equal(result.ok,false);assert.equal(result.error.code,"depth-limit");assert.deepEqual(result.fields,[]);
+ assert.throws(()=>createSession(src),{code:"depth-limit"});assert.deepEqual(src,before);
 });
 test("stale input cannot overwrite raw edits; no session consume on failure", () => {
  const src=b(8,1), session=createSession(src);

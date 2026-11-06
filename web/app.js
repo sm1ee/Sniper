@@ -207,7 +207,7 @@ const FINDINGS_ROW_HEIGHT = 27;
 let measuredFindingsRowHeight = FINDINGS_ROW_HEIGHT;
 const FINDINGS_BUFFER_ROWS = 20;
 const IMPLEMENTED_TOOLS = new Set(["dashboard", "target", "proxy", "map", "fuzzer", "sequence", "replay", "recon", "templates", "tools", "logger"]);
-const IMPLEMENTED_PROXY_TABS = new Set(["intercept", "http-history", "websockets-history", "replace", "findings", "oast", "proxy-settings"]);
+const IMPLEMENTED_PROXY_TABS = new Set(["intercept", "http-history", "websockets-history", "tcp-history", "replace", "findings", "oast", "proxy-settings"]);
 const DECODER_SCRIPT_SOURCES = [
   "/decoder/lib/jquery-1.7.2.min.js",
   "/decoder/lib/cryptojs/components/core-min.js",
@@ -1052,6 +1052,7 @@ const sectionToggles = Array.from(document.querySelectorAll(".section-toggle"));
 let sortHeaders = Array.from(document.querySelectorAll(".sort-header"));
 let historyColumnHandles = Array.from(document.querySelectorAll(".column-resize-handle"));
 
+let tcpCaptureController = null;
 let reconController = null;
 let templatesController = null;
 let targetServiceMapController = null;
@@ -1313,6 +1314,16 @@ function copyReconEndpointUrl(text, label, isCurrent) {
 }
 
 function bindEvents() {
+  tcpCaptureController = window.SniperTcpCapture?.createController({
+    intercept: true,
+    document,
+    sessionId: currentSessionId,
+    readPath: sessionQueryPath,
+    writePath: sessionWritePath,
+    request: fetch,
+    openSettings() { setActiveProxyTab("proxy-settings"); renderProxyPanels(); },
+  });
+
   initializeTargetWorkspace();
   if (window.SniperRecon && els.reconShell) {
     reconController = window.SniperRecon.createController({
@@ -2401,14 +2412,14 @@ function bindEvents() {
     const tab = getActiveReplayTab();
     if (!tab) return;
     const text = els.replayRequestHighlight.innerText || "";
+    if (syncReplayRequestTextFromEditor(text) === false) return;
     if (state._replayLastSnapshot !== null && state._replayLastSnapshot !== text) {
       state._replayUndoStack.push(state._replayLastSnapshot);
       if (state._replayUndoStack.length > 200) state._replayUndoStack.shift();
       state._replayRedoStack.length = 0;
     }
     state._replayLastSnapshot = text;
-    els.replayRequestEditor.value = text;
-    syncReplayRequestTextFromEditor(text);
+    els.replayRequestEditor.value = tab.requestText || text;
     const renderedText = tab.requestText || text;
     // Debounce re-render so syntax highlighting refreshes without losing cursor
     clearTimeout(els.replayRequestHighlight._renderTimer);
@@ -2424,8 +2435,10 @@ function bindEvents() {
       const stack = e.shiftKey ? state._replayRedoStack : state._replayUndoStack;
       const opposite = e.shiftKey ? state._replayUndoStack : state._replayRedoStack;
       if (!stack.length) return;
+      const restored = stack[stack.length - 1];
+      if (!acceptReplayRequestEdit(restored)) return;
       opposite.push(state._replayLastSnapshot || els.replayRequestHighlight.innerText || "");
-      const restored = stack.pop();
+      stack.pop();
       state._replayLastSnapshot = restored;
       let undoHtml = renderCodeHtml(restored, state.replayMessageViews.request, "request");
       els.replayRequestHighlight.innerHTML = undoHtml;
@@ -2493,6 +2506,7 @@ function bindEvents() {
         // Use the existing framing policy; auto-length off may reject a size change.
         const updated = parseEditableRawRequest(next, current.baseRequest);
         next = updated._normalizedRawText || next;
+        if (!acceptReplayRequestEdit(next, current)) throw new Error("The edited request exceeds Replay's save limit. Use a smaller request.");
         setReplayRequestEditorText(next, { preserveSelection: false });
         syncReplayRequestTextFromEditor(next);
       },
@@ -2575,6 +2589,7 @@ function bindEvents() {
     const ver = e.target.value;
     const tab = getActiveReplayTab();
     if (!tab || tab.type === "websocket") return;
+    const previousVersion = tab.httpVersionMode;
     if (renderedHttpReplayDraftOwner?.tab === tab) renderedHttpReplayDraftOwner.preservedVersionDraft = null;
     tab.httpVersionMode = ver || "";
     const cv = getCMView("replayReq");
@@ -2588,6 +2603,11 @@ function bindEvents() {
         : lines[0].replace(/\s+HTTP\/[0-9.]+\s*$/i, "");
       if (ver && !lines[0].match(/HTTP\//i)) lines[0] += ` ${ver}`;
       const newText = lines.join("\n");
+      if (!acceptReplayRequestEdit(newText, tab)) {
+        tab.httpVersionMode = previousVersion;
+        e.target.value = normalizeReplayHttpVersionMode(previousVersion);
+        return;
+      }
       tab.requestText = newText;
       tab.requestBytes = null;
       tab.requestOriginalBytes = null;
@@ -2617,6 +2637,11 @@ function bindEvents() {
         : legacyLines[0].replace(/\s+HTTP\/[0-9.]+\s*$/i, "");
       if (ver && !legacyLines[0].match(/HTTP\//i)) legacyLines[0] += ` ${ver}`;
       const newText = legacyLines.join("\n");
+      if (!acceptReplayRequestEdit(newText, tab)) {
+        tab.httpVersionMode = previousVersion;
+        e.target.value = normalizeReplayHttpVersionMode(previousVersion);
+        return;
+      }
       hl.innerText = newText;
       hl.dispatchEvent(new Event("input"));
       tab.requestText = newText;
@@ -4481,6 +4506,19 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
       if (!(error instanceof WorkspaceStateConflictError)) {
         workspaceSaveDirty = true;
         window.clearTimeout(workspaceSaveTimer);
+        workspaceSaveTimer = null;
+        if (error.workspaceValidation) {
+          // Validation cannot succeed on an unchanged retry. Keep the unsaved
+          // state and close prompt, and retry only after an edit or explicit save.
+          window.clearTimeout(wsTranscriptSaveTimer);
+          wsTranscriptSaveTimer = null;
+          wsTranscriptFirstDirtyAt = 0;
+          // A correction may arrive while the refused POST is in flight. It
+          // still deserves its own save; only unchanged invalid data is stopped.
+          if (workspaceSaveVersion !== version) continue;
+          showToast(`Workspace was not saved: ${error.message} Keep the app open and correct the draft before closing.`, "error", 10000);
+          throw error;
+        }
         workspaceSaveTimer = window.setTimeout(() => {
           workspaceSaveTimer = null;
           flushQueuedWorkspaceStateSave().catch((error) => console.error(error));
@@ -4523,8 +4561,8 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
 // Drop response bodies largest-first, and only as many as needed to get back
 // under the threshold, so a single giant response doesn't cost every other
 // tab's modest response. Requests and metadata are always kept (a response is
-// re-fetchable by re-sending). If requests alone still overflow, history is
-// dropped as a last resort.
+// re-fetchable by re-sending). If requests/history alone still overflow, refuse
+// the save and keep all drafts and history intact.
 function boundWorkspaceSnapshotForSave(snapshot) {
   if (!snapshot || typeof snapshot !== "object") return snapshot;
   const totalBytes = utf8ByteLength(JSON.stringify(snapshot));
@@ -4571,14 +4609,12 @@ function boundWorkspaceSnapshotForSave(snapshot) {
     dropped = true;
   }
 
-  // Last resort: requests/history text alone still overflow. Drop history,
-  // keeping each tab's current request so replay still works.
+  // Responses can be reacquired; request history may contain the only copy of
+  // an edited request. Refuse the save rather than silently discard that work.
   if (utf8ByteLength(JSON.stringify(bounded)) > WORKSPACE_SAVE_SAFE_BYTES) {
-    for (const tab of tabs) {
-      tab.history_entries = [];
-      tab.history_index = null;
-    }
-    dropped = true;
+    const error = new Error("Workspace requests and history exceed the safe save budget. Close unneeded Replay tabs or reduce request sizes. Request history was not removed.");
+    error.workspaceValidation = true;
+    throw error;
   }
 
   if (dropped && !workspaceResponseTrimNoticeShown) {
@@ -4601,6 +4637,15 @@ async function saveWorkspaceState(snapshot = null, options = {}) {
   const sessionId = currentSessionId();
   if (!snapshot) {
     snapshot = snapshotWorkspaceState(options);
+  }
+  for (const tab of snapshot.replay?.tabs || []) {
+    const problem = replayRequestSizeError(tab.request_text, tab.base_request)
+      || (tab.history_entries || []).map(entry => replayRequestSizeError(entry.request_text, entry.request)).find(Boolean);
+    if (problem) {
+      const error = new Error(`Replay ${problem}. Reduce the request size before saving; nothing was truncated.`);
+      error.workspaceValidation = true;
+      throw error;
+    }
   }
   snapshot = boundWorkspaceSnapshotForSave(snapshot);
 
@@ -4630,7 +4675,9 @@ async function saveWorkspaceState(snapshot = null, options = {}) {
         throw new WorkspaceStateConflictError(latest);
       }
     }
-    throw new Error(message);
+    const error = new Error(message);
+    error.workspaceValidation = [400, 413, 422].includes(response.status);
+    throw error;
   }
   const saved = await response.json();
   const activeSessionId = currentSessionId();
@@ -5154,6 +5201,9 @@ function syncReplayDraftsBeforeWorkspaceClose() {
 
 function workspaceUnloadPayload(primarySnapshot) {
   if (workspaceSaveConflictPending) return null;
+  if ((primarySnapshot?.replay?.tabs || []).some(tab =>
+    replayRequestSizeError(tab.request_text, tab.base_request)
+    || (tab.history_entries || []).some(entry => replayRequestSizeError(entry.request_text, entry.request)))) return null;
   const primaryPayload = JSON.stringify(primarySnapshot);
   if (utf8ByteLength(primaryPayload) <= WORKSPACE_UNLOAD_KEEPALIVE_MAX_BYTES) {
     return { payload: primaryPayload, endpoint: "/api/workspace-state" };
@@ -5556,6 +5606,7 @@ async function cleanupWsReplayTabsBeforeStateReset(options = {}) {
 }
 
 function resetSessionScopedUiState() {
+  if (typeof tcpCaptureController !== "undefined") tcpCaptureController?.reset();
   workspaceStateGeneration += 1;
   state._recordClipboardSessionGeneration = (state._recordClipboardSessionGeneration || 0) + 1;
   if (typeof reconController !== "undefined") reconController?.reset();
@@ -8458,6 +8509,7 @@ async function loadTargetSiteMap(forceScopeSync = false, saveContext = null) {
 
 async function pollAuxiliaryData() {
   const tasks = [];
+  if (state.activeTool === "proxy" && ["tcp-history", "proxy-settings"].includes(state.activeProxyTab)) tasks.push(tcpCaptureController?.refresh());
   const now = Date.now();
 
   if (state.activeTool === "proxy" && state.activeProxyTab === "intercept") {
@@ -10025,11 +10077,13 @@ function renderDashboard() {
   };
   const tile = (label, value, note) => `<div class="dashboard-tile"><div class="dashboard-tile-value">${value}</div>`
     + `<div class="dashboard-tile-label">${label}</div>${note ? `<div class="dashboard-tile-note">${note}</div>` : ""}</div>`;
-  const totals = { bytes: 0, requests: 0, websockets: 0, findings: {}, latest: null };
+  const totals = { bytes: 0, requests: 0, websockets: 0, tcp: 0, tcpUnknown: false, findings: {}, latest: null };
   for (const session of state.sessions) {
     totals.bytes += Number(session.storage_bytes) || 0;
     totals.requests += Number(session.request_count) || 0;
     totals.websockets += Number(session.websocket_count) || 0;
+    totals.tcp += Number(session.tcp_connection_count) || 0;
+    totals.tcpUnknown ||= session.tcp_connection_count === null;
     for (const name of SEVERITIES) {
       totals.findings[name] = (totals.findings[name] || 0) + (Number(session.overview?.findings?.[name]) || 0);
     }
@@ -10041,9 +10095,10 @@ function renderDashboard() {
   els.dashboardTiles.innerHTML = sessionCount ? [
     tile("On disk", formatSize(totals.bytes), `${sessionCount} session${sessionCount === 1 ? "" : "s"}`),
     tile("Requests", totals.requests.toLocaleString(),
-      totals.websockets ? `and ${totals.websockets.toLocaleString()} WebSocket session${totals.websockets === 1 ? "" : "s"}` : ""),
+      [totals.websockets ? `and ${totals.websockets.toLocaleString()} WebSocket session${totals.websockets === 1 ? "" : "s"}` : "",
+        totals.tcp || totals.tcpUnknown ? `${totals.tcp.toLocaleString()}${totals.tcpUnknown ? "+" : ""} TCP connections${totals.tcpUnknown ? " · some unavailable" : ""}` : ""].filter(Boolean).join(" · ")),
     tile("Findings", findingTotal.toLocaleString(), severityLine(totals.findings)),
-    tile("Last capture", totals.latest ? escapeHtml(formatTimestamp(totals.latest.at)) : "None yet",
+    tile("Last HTTP capture", totals.latest ? escapeHtml(formatTimestamp(totals.latest.at)) : "None yet",
       totals.latest ? escapeHtml(totals.latest.name) : ""),
   ].join("") : "";
   const largest = Math.max(1, ...state.sessions.map((session) => Number(session.storage_bytes) || 0));
@@ -10077,6 +10132,9 @@ function renderDashboard() {
     section("Scope", scopeBody + excludedBody),
     section("Hosts", list((overview.top_hosts || []).map((entry) => `${escapeHtml(entry.host)} <span class="dashboard-dim">${Number(entry.requests).toLocaleString()}</span>`))),
     section("Marked and kept", list(kept)),
+    section("TCP", current?.tcp_connection_count > 0
+      ? `<p>${Number(current.tcp_connection_count).toLocaleString()} retained connection${current.tcp_connection_count === 1 ? "" : "s"} · Open this session, then Capture → TCP.</p>`
+      : current?.tcp_connection_count === null ? '<p class="dashboard-dim">History count unavailable. Open this session, then Capture → TCP to inspect.</p>' : ""),
     section("Scans", list(scans) + (overview.activity_count > scans.length ? `<p class="dashboard-dim">${more(scans.length, overview.activity_count).trim()} earlier</p>` : "")),
     section("Findings", findingBadges ? `<div class="dashboard-severities">${findingBadges}</div>` : ""),
   ].join("");
@@ -10117,6 +10175,7 @@ function renderDashboard() {
             <td><div class="session-size"><span class="session-size-bar"><span style="width:${Math.max(2, Math.round((Number(session.storage_bytes) || 0) / largest * 100))}%"></span></span>${formatSize(session.storage_bytes)}</div></td>
             <td>${formatCappedCount(session.request_count)}</td>
             <td>${formatCappedCount(session.websocket_count, retainedEntriesCap())}</td>
+            <td title="${session.tcp_connection_count == null ? "TCP count unavailable" : "Retained TCP connections"}">${session.tcp_connection_count == null ? "—" : Number(session.tcp_connection_count).toLocaleString()}</td>
             <td class="dashboard-findings${SEVERITIES.find((name) => session.overview?.findings?.[name]) ? ` severity-text-${SEVERITIES.find((name) => session.overview?.findings?.[name])}` : ""}">${sessionFindingCount(session).toLocaleString()}</td>
             <td>${session.overview?.last_captured_at ? escapeHtml(formatTimestamp(session.overview.last_captured_at)) : "-"}</td>
             <td>${escapeHtml(formatTimestamp(session.created_at))}</td>
@@ -10131,7 +10190,7 @@ function renderDashboard() {
         .join("")
     : `
         <tr class="empty-row">
-          <td colspan="8">No sessions are available yet.</td>
+          <td colspan="9">No sessions are available yet.</td>
         </tr>
       `;
 
@@ -11642,6 +11701,7 @@ function openTransactionRecordInReplay(record) {
     notice: isRequestPreviewTruncated(record) ? buildTruncatedBodyNotice(record, "Replay") : "",
     requestText: buildEditableRawRequest(request),
   });
+  if (!tab) return false;
   state.replayTabs.push(tab);
   state.activeReplayTabId = tab.id;
   setActiveTool("replay");
@@ -12620,6 +12680,8 @@ function renderProxyPanels() {
   const showHistory = state.activeProxyTab === "http-history";
   const showIntercept = state.activeProxyTab === "intercept";
   const showWebsockets = state.activeProxyTab === "websockets-history";
+  document.getElementById("tcpPanel")?.classList.toggle("hidden", state.activeProxyTab !== "tcp-history");
+  if (state.activeTool === "proxy" && ["tcp-history", "proxy-settings"].includes(state.activeProxyTab)) tcpCaptureController?.refresh();
   const showMatchReplace = state.activeProxyTab === "replace";
   const showFindings = state.activeProxyTab === "findings";
   const showOast = state.activeProxyTab === "oast";
@@ -15745,6 +15807,8 @@ function renderReplay(options = {}) {
   if (els.replayEmptyState) els.replayEmptyState.classList.toggle("hidden", !!tab);
 
   if (isWsTab) {
+    syncReplayHexPager("request");
+    syncReplayHexPager("response");
     renderedHttpReplayDraftOwner = null;
     renderWsReplay();
     return;
@@ -15792,13 +15856,17 @@ function renderReplay(options = {}) {
       let binary = "";
       for (const byte of bytes) binary += String.fromCharCode(byte);
       const encoded = btoa(binary);
-      tab.requestText = raw.slice(0, boundary.index + boundary[0].length) + encoded;
-      tab.baseRequest = { ...tab.baseRequest, body: encoded, body_encoding: "base64" };
-      tab.requestBytes = null;
-      tab.requestOriginalBytes = null;
-      tab.protobufEditRevision = (tab.protobufEditRevision || 0) + 1;
-      migratedBinaryDraft = true;
-      scheduleWorkspaceStateSave();
+      const requestText = raw.slice(0, boundary.index + boundary[0].length) + encoded;
+      const baseRequest = { ...tab.baseRequest, body: encoded, body_encoding: "base64" };
+      if (canStoreReplayRequest(requestText, baseRequest, "convert this binary draft to Base64")) {
+        tab.requestText = requestText;
+        tab.baseRequest = baseRequest;
+        tab.requestBytes = null;
+        tab.requestOriginalBytes = null;
+        tab.protobufEditRevision = (tab.protobufEditRevision || 0) + 1;
+        migratedBinaryDraft = true;
+        scheduleWorkspaceStateSave();
+      }
     }
   }
   const previousOwner = getRenderedHttpReplayDraftOwner(tab);
@@ -15817,13 +15885,13 @@ function renderReplay(options = {}) {
     // CM path for all modes
     if (reqMode === "hex") {
       // Hex mode: read-only hex dump view
-      if (!tab.requestBytes) {
+      if (!tab.requestBytes && tab.requestText.length <= 4096) {
         tab.requestBytes = new TextEncoder().encode(tab.requestText);
         tab.requestOriginalBytes = new Uint8Array(tab.requestBytes);
       }
-      const hexText = toHexDumpFromBytes(tab.requestBytes);
+      const hexText = replayRequestHexText(tab);
       updateCodePaneCM("replayReq", els.replayRequestCM, hexText, {
-        mode: "hex", readOnly: true, owner: draftOwner.editorOwner,
+        mode: "hex", readOnly: true, owner: draftOwner.editorOwner, preserveEditableState: true,
       });
       updateReplaySearchPane("request", hexText, { scrollToFirst: !previousOwner });
     } else {
@@ -15834,22 +15902,26 @@ function renderReplay(options = {}) {
         tab.requestOriginalBytes = null;
       }
       updateCodePaneCM("replayReq", els.replayRequestCM, replayRequestEditorText(tab.requestText), {
-        mode: "http", readOnly: false, owner: draftOwner.editorOwner,
+        mode: "http", readOnly: false, owner: draftOwner.editorOwner, preserveEditableState: true,
         onChange: syncReplayRequestTextFromEditor,
       });
       updateReplaySearchPane("request", tab.requestText, { scrollToFirst: !previousOwner });
     }
   } else if (reqMode === "hex") {
     if (els.replayRequestHighlight) els.replayRequestHighlight.removeAttribute("contenteditable");
-    if (!tab.requestBytes) {
+    if (!tab.requestBytes && tab.requestText.length <= 4096) {
       tab.requestBytes = new TextEncoder().encode(tab.requestText);
       tab.requestOriginalBytes = new Uint8Array(tab.requestBytes);
     }
     if (els.replayRequestHighlight) {
-      els.replayRequestHighlight.innerHTML = renderEditableHexHtml(tab.requestBytes, tab.requestOriginalBytes);
-      bindHexByteHandlers(els.replayRequestHighlight, tab);
+      if (tab.baseRequest?.body_encoding === "base64" || !tab.requestBytes || tab.requestBytes.length > 4096) {
+        els.replayRequestHighlight.innerHTML = renderHexHtml(replayRequestHexText(tab));
+      } else {
+        els.replayRequestHighlight.innerHTML = renderEditableHexHtml(tab.requestBytes, tab.requestOriginalBytes);
+        bindHexByteHandlers(els.replayRequestHighlight, tab);
+      }
     }
-    updateReplaySearchPane("request", toHexDumpFromBytes(tab.requestBytes));
+    updateReplaySearchPane("request", replayRequestHexText(tab));
   } else {
     // Legacy non-CM path
     if (tab.requestBytes) {
@@ -15888,7 +15960,7 @@ function renderReplay(options = {}) {
   const respMode = state.replayMessageViews.response;
   let responseText;
   if (respMode === "hex") {
-    responseText = buildMessageHexPresentation("response", tab.responseRecord, rawResponseText);
+    responseText = replayHexPageText("response", tab);
   } else if (respMode === "pretty") {
     responseText = prettyFormat(rawResponseText, tab.responseRecord.response);
   } else {
@@ -16005,42 +16077,30 @@ function replayEditorShowsDraft(shown, draft) {
   return replayRequestTextsEquivalent(shown, draft) || shown === replayRequestEditorText(draft);
 }
 
-function syncReplayRequestTextFromEditor(newText) {
+function syncReplayRequestTextFromEditor(newText, validatedCandidate = null) {
   const activeTab = getActiveReplayTab();
   if (!activeTab || activeTab.type === "websocket") {
     return;
   }
-  // Input synchronization invalidates an earlier capture even after edit-and-revert.
-  if (renderedHttpReplayDraftOwner?.tab === activeTab) renderedHttpReplayDraftOwner.preservedVersionDraft = null;
-  activeTab.protobufEditRevision = (activeTab.protobufEditRevision || 0) + 1;
   const previousText = activeTab.requestText;
   const rendered = replayRequestEditorText(previousText);
   if (rendered !== previousText && newText === rendered) return;
-  // A header-only edit must not adopt CodeMirror's newline normalization
-  // for the body. This also protects old binary drafts classified as UTF-8
-  // across MIME changes, reloads and undo; explicit body edits still win.
-  if (activeTab.baseRequest?.body_encoding !== "base64") {
-    const before = splitRawHttpMessage(previousText);
-    const after = splitRawHttpMessage(newText);
-    if (before.body.replace(/\r\n?/g, "\n") === after.body.replace(/\r\n?/g, "\n")) {
-      const boundary = /\r?\n\r?\n/.exec(newText);
-      if (boundary) newText = newText.slice(0, boundary.index + boundary[0].length) + before.body;
-    }
+  let candidate = validatedCandidate;
+  if (!candidate && !acceptReplayRequestEdit(newText, activeTab, value => { candidate = value; })) {
+    // CodeMirror rejects before dispatch; the legacy editor has already applied
+    // its input, so restore the whole previous draft rather than trim the paste.
+    setReplayRequestEditorText(rendered, { preserveSelection: true });
+    return false;
   }
-  let nextText = newText;
-  let parsed = null;
-  try {
-    parsed = parseEditableRawRequest(
-      newText,
-      activeTab.baseRequest || createDefaultEditableRequest(),
-    );
-    if (parsed._normalizedRawText && parsed._normalizedRawText !== newText) {
-      nextText = parsed._normalizedRawText;
-      setReplayRequestEditorText(nextText, { preserveSelection: true });
-    }
-  } catch (_error) {
-    // Keep partially typed drafts as-is until they are parseable again.
+  const { requestText: nextText, request: parsed } = candidate || replayRequestEditCandidate(activeTab, newText);
+  // Recover an older unsavable base only when the operator explicitly replaces
+  // it with a complete, smaller request. Ordinary edits retain Reset's baseline.
+  if (parsed && replayRequestSizeError("", activeTab.baseRequest)) {
+    activeTab.baseRequest = cloneEditableRequest(parsed);
   }
+  if (renderedHttpReplayDraftOwner?.tab === activeTab) renderedHttpReplayDraftOwner.preservedVersionDraft = null;
+  activeTab.protobufEditRevision = (activeTab.protobufEditRevision || 0) + 1;
+  if (nextText !== newText) setReplayRequestEditorText(nextText, { preserveSelection: true });
   activeTab.requestText = nextText;
   activeTab.httpVersionMode = replayHttpVersionState(parsed, nextText, activeTab.httpVersionMode);
   activeTab.requestBytes = null;
@@ -16198,7 +16258,7 @@ function renderReplayResponseOnly(tab) {
   const respMode = state.replayMessageViews.response;
   let responseText;
   if (respMode === "hex") {
-    responseText = buildMessageHexPresentation("response", tab.responseRecord, rawResponseText);
+    responseText = replayHexPageText("response", tab);
   } else if (respMode === "pretty") {
     responseText = prettyFormat(rawResponseText, tab.responseRecord.response);
   } else {
@@ -16217,6 +16277,187 @@ function renderReplayViewTabs() {
   globalThis.SniperProtobufFields?.sync();
 }
 
+// Index source text in small chunks. Hex pages decode only their own bytes;
+// validation still covers the entire body, including an invalid final quartet.
+function replayHexTextSource(value, encoding = "utf8", strict = false) {
+  const text = String(value || "");
+  const checkpoints = [[0, 0]];
+  if (encoding === "base64") {
+    let digits = 0, padding = 0, last = 0;
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const values = new Int16Array(128).fill(-1);
+    for (let i = 0; i < alphabet.length; i++) values[alphabet.charCodeAt(i)] = i;
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      if (!strict && (code === 9 || code === 10 || code === 12 || code === 13 || code === 32)) continue;
+      if (code === 61) { if (++padding > 2) return null; continue; }
+      const digit = code < 128 ? values[code] : -1;
+      if (digit < 0 || padding) return null;
+      if (digits && digits % 4096 === 0) checkpoints.push([i, digits]);
+      digits++; last = digit;
+    }
+    const remainder = digits % 4;
+    if (remainder === 1 || (padding && (digits + padding) % 4 !== 0)
+      || (strict && (digits + padding) % 4 !== 0)
+      || (strict && ((remainder === 2 && (last & 15)) || (remainder === 3 && (last & 3))))) return null;
+    const length = Math.floor(digits * 6 / 8);
+    return { length, read(start, count) {
+      const out = new Uint8Array(Math.max(0, Math.min(count, length - start)));
+      const firstDigit = Math.floor(start / 3) * 4;
+      const checkpoint = checkpoints[Math.floor(firstDigit / 4096)];
+      let digitIndex = checkpoint[1], bits = 0, buffer = 0, byteIndex = Math.floor(firstDigit / 4) * 3, written = 0;
+      for (let i = checkpoint[0]; i < text.length && written < out.length; i++) {
+        const code = text.charCodeAt(i);
+        const digit = code < 128 ? values[code] : -1;
+        if (digit < 0) continue;
+        if (digitIndex++ < firstDigit) continue;
+        buffer = (buffer << 6) | digit; bits += 6;
+        if (bits >= 8) {
+          bits -= 8;
+          if (byteIndex++ >= start) out[written++] = (buffer >> bits) & 255;
+          buffer &= (1 << bits) - 1;
+        }
+      }
+      return out;
+    } };
+  }
+  let length = 0;
+  for (let i = 0, previous = 0; i < text.length;) {
+    if (i - previous >= 4096) { checkpoints.push([i, length]); previous = i; }
+    const point = text.codePointAt(i);
+    i += point > 0xffff ? 2 : 1;
+    length += point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+  }
+  return { length, read(start, count) {
+    const out = new Uint8Array(Math.max(0, Math.min(count, length - start)));
+    let low = 0, high = checkpoints.length;
+    while (low + 1 < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (checkpoints[mid][1] <= start) low = mid; else high = mid;
+    }
+    let [index, offset] = checkpoints[low];
+    let written = 0;
+    function emit(byte) { if (offset++ >= start && written < out.length) out[written++] = byte; }
+    while (index < text.length && written < out.length) {
+      let point = text.codePointAt(index); index += point > 0xffff ? 2 : 1;
+      if (point >= 0xd800 && point <= 0xdfff) point = 0xfffd;
+      if (point < 0x80) emit(point);
+      else if (point < 0x800) { emit(0xc0 | (point >> 6)); emit(0x80 | (point & 63)); }
+      else if (point < 0x10000) { emit(0xe0 | (point >> 12)); emit(0x80 | ((point >> 6) & 63)); emit(0x80 | (point & 63)); }
+      else { emit(0xf0 | (point >> 18)); emit(0x80 | ((point >> 12) & 63)); emit(0x80 | ((point >> 6) & 63)); emit(0x80 | (point & 63)); }
+    }
+    return out;
+  } };
+}
+
+function replayHexPageText(target, tab) {
+  const pages = replayHexPageText.pages || (replayHexPageText.pages = {});
+  const session = typeof currentSessionId === "function" ? currentSessionId() : null;
+  const generation = typeof workspaceStateGeneration === "number" ? workspaceStateGeneration : 0;
+  const message = target === "response" ? tab.responseRecord?.response : null;
+  const draft = target === "request" ? tab.requestText : message?.body_preview;
+  const encoding = target === "request" ? tab.baseRequest?.body_encoding : message?.body_encoding;
+  const bytes = target === "request" ? tab.requestBytes : null;
+  const record = target === "response" ? tab.responseRecord : null;
+  const head = message ? buildRawResponseHead(record) : "";
+  let page = pages[target];
+  if (!page || page.tab !== tab || page.session !== session || page.generation !== generation
+    || page.draft !== draft || page.encoding !== encoding || page.bytes !== bytes || page.record !== record
+    || page.message !== message || page.head !== head || page.truncated !== !!message?.preview_truncated) {
+    const parts = [];
+    let notice = "";
+    if (target === "request") {
+      const raw = bytes ? new TextDecoder().decode(bytes) : String(draft || "");
+      const boundary = encoding === "base64" && /\r?\n\r?\n/.exec(raw);
+      if (boundary) {
+        const bodyStart = boundary.index + boundary[0].length;
+        parts.push(replayHexTextSource(raw.slice(0, bodyStart)));
+        const body = replayHexTextSource(raw.slice(bodyStart), "base64", true);
+        if (body) parts.push(body);
+        else notice = "\n\n[Invalid Base64 body; decoded bytes unavailable]";
+      } else if (bytes) {
+        parts.push({ length: bytes.length, read: (start, count) => bytes.subarray(start, start + count) });
+      } else parts.push(replayHexTextSource(raw));
+    } else if (message) {
+      parts.push(replayHexTextSource(head));
+      const body = replayHexTextSource(message.body_preview, encoding);
+      if (!body) notice = "\n\n[Invalid base64 preview; body bytes unavailable]";
+      else if (body.length) parts.push(replayHexTextSource("\n\n"), body);
+      if (message.preview_truncated) notice += "\n\n[preview truncated]";
+    } else parts.push(replayHexTextSource(buildRawResponse(record)));
+    page = pages[target] = { tab, session, generation, draft, encoding, bytes, record, message, head, truncated: !!message?.preview_truncated, parts, notice, index: 0,
+      size: 4096, total: parts.reduce((sum, part) => sum + part.length, 0) };
+  }
+  page.index = Math.max(0, Math.min(page.index, Math.max(0, Math.ceil(page.total / page.size) - 1)));
+  const start = page.index * page.size;
+  const output = new Uint8Array(Math.min(page.size, Math.max(0, page.total - start)));
+  let offset = 0, written = 0;
+  for (const part of page.parts) {
+    if (offset + part.length > start && written < output.length) {
+      const chunk = part.read(Math.max(0, start - offset), output.length - written);
+      output.set(chunk, written); written += chunk.length;
+    }
+    offset += part.length;
+  }
+  syncReplayHexPager(target);
+  return toHexDumpFromBytes(output, start) + page.notice;
+}
+
+function syncReplayHexPager(target) {
+  const pages = replayHexPageText.pages;
+  let page = pages?.[target];
+  const mode = typeof state === "object" ? state.replayMessageViews?.[target] : "hex";
+  if (mode !== "hex" || (typeof getActiveReplayTab === "function" && getActiveReplayTab() !== page?.tab)
+    || (page && typeof currentSessionId === "function" && page.session !== currentSessionId())
+    || (page && typeof workspaceStateGeneration === "number" && page.generation !== workspaceStateGeneration)
+    || (target === "response" && !page?.tab.responseRecord)) {
+    if (pages) delete pages[target];
+    page = null;
+  }
+  const root = typeof document === "object" ? document.getElementById?.(`replay${target === "request" ? "Request" : "Response"}HexPager`) : null;
+  if (!root) return;
+  root.hidden = !page || page.total <= page.size;
+  const search = target === "request" ? els.replayRequestSearchInput : els.replayResponseSearchInput;
+  if (search) search.placeholder = root.hidden ? `Search ${target}` : "Search this hex page";
+  if (root.hidden) {
+    const input = root.querySelector("input");
+    input.onchange = null; input.onkeydown = null; input._replayHexPage = null;
+    root.querySelector("[data-hex-previous]").onclick = null;
+    root.querySelector("[data-hex-next]").onclick = null;
+    return;
+  }
+  const totalPages = Math.ceil(page.total / page.size);
+  root.querySelector("[data-hex-range]").textContent = `Bytes ${page.index * page.size + 1}–${Math.min((page.index + 1) * page.size, page.total)} of ${page.total}${page.truncated ? " available" : ""}`;
+  const input = root.querySelector("input");
+  if (document.activeElement !== input || input._replayHexPage !== page || page.forceControlSync) {
+    input.value = String(page.index + 1);
+  }
+  input._replayHexPage = page;
+  page.forceControlSync = false;
+  input.max = String(totalPages);
+  root.querySelector("[data-hex-pages]").textContent = `/ ${totalPages}`;
+  const change = index => {
+    // A queued click or change from a retired tab/session must never repaint its successor.
+    if (replayHexPageText.pages?.[target] !== page || getActiveReplayTab() !== page.tab
+      || currentSessionId() !== page.session || workspaceStateGeneration !== page.generation
+      || (target === "request" && page.tab.requestText !== page.draft)
+      || (target === "response" && page.tab.responseRecord !== page.record)) return;
+    page.index = Number.isFinite(index) ? Math.max(0, Math.min(Math.floor(index), totalPages - 1)) : page.index;
+    page.forceControlSync = true;
+    renderReplayViewContent(target);
+  };
+  const previous = root.querySelector("[data-hex-previous]"), next = root.querySelector("[data-hex-next]");
+  previous.disabled = page.index === 0; next.disabled = page.index === totalPages - 1;
+  previous.onclick = () => change(page.index - 1); next.onclick = () => change(page.index + 1);
+  input.onchange = () => change(Number(input.value) - 1);
+  input.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); change(Number(input.value) - 1); } };
+}
+
+// The page is presentation only. Editing, sending and persistence keep the full draft.
+function replayRequestHexText(tab) {
+  return replayHexPageText("request", tab);
+}
+
 function renderReplayViewContent(target) {
   const tab = getActiveReplayTab();
   if (!tab || tab.type === "websocket") return;
@@ -16226,13 +16467,13 @@ function renderReplayViewContent(target) {
     if (els.replayRequestCM) {
       // CM path for all modes
       if (mode === "hex") {
-        if (!tab.requestBytes) {
+        if (!tab.requestBytes && tab.requestText.length <= 4096) {
           tab.requestBytes = new TextEncoder().encode(tab.requestText);
           tab.requestOriginalBytes = new Uint8Array(tab.requestBytes);
         }
-        const hexText = toHexDumpFromBytes(tab.requestBytes);
+        const hexText = replayRequestHexText(tab);
         updateCodePaneCM("replayReq", els.replayRequestCM, hexText, {
-          mode: "hex", readOnly: true, owner: getRenderedHttpReplayDraftOwner(tab)?.editorOwner,
+          mode: "hex", readOnly: true, owner: getRenderedHttpReplayDraftOwner(tab)?.editorOwner, preserveEditableState: true,
         });
         updateReplaySearchPane("request", hexText);
       } else {
@@ -16245,6 +16486,7 @@ function renderReplayViewContent(target) {
           mode: "http",
           readOnly: false,
           owner: getRenderedHttpReplayDraftOwner(tab)?.editorOwner,
+          preserveEditableState: true,
           onChange: syncReplayRequestTextFromEditor,
         });
         updateReplaySearchPane("request", tab.requestText);
@@ -16253,15 +16495,19 @@ function renderReplayViewContent(target) {
       // Legacy non-CM path
       if (mode === "hex") {
         if (els.replayRequestHighlight) els.replayRequestHighlight.removeAttribute("contenteditable");
-        if (!tab.requestBytes) {
+        if (!tab.requestBytes && tab.requestText.length <= 4096) {
           tab.requestBytes = new TextEncoder().encode(tab.requestText);
           tab.requestOriginalBytes = new Uint8Array(tab.requestBytes);
         }
         if (els.replayRequestHighlight) {
-          els.replayRequestHighlight.innerHTML = renderEditableHexHtml(tab.requestBytes, tab.requestOriginalBytes);
-          bindHexByteHandlers(els.replayRequestHighlight, tab);
+          if (tab.baseRequest?.body_encoding === "base64" || !tab.requestBytes || tab.requestBytes.length > 4096) {
+            els.replayRequestHighlight.innerHTML = renderHexHtml(replayRequestHexText(tab));
+          } else {
+            els.replayRequestHighlight.innerHTML = renderEditableHexHtml(tab.requestBytes, tab.requestOriginalBytes);
+            bindHexByteHandlers(els.replayRequestHighlight, tab);
+          }
         }
-        updateReplaySearchPane("request", toHexDumpFromBytes(tab.requestBytes));
+        updateReplaySearchPane("request", replayRequestHexText(tab));
       } else {
         if (tab.requestBytes) {
           tab.requestText = new TextDecoder().decode(tab.requestBytes);
@@ -16287,7 +16533,7 @@ function renderReplayViewContent(target) {
     const rawText = buildRawResponse(tab.responseRecord);
     let displayText;
     if (mode === "hex") {
-      displayText = buildMessageHexPresentation("response", tab.responseRecord, rawText);
+      displayText = replayHexPageText("response", tab);
     } else if (mode === "pretty") {
       displayText = prettyFormat(rawText, tab.responseRecord.response);
     } else {
@@ -16299,6 +16545,7 @@ function renderReplayViewContent(target) {
 }
 
 function updateReplaySearchPane(target, text, options = {}) {
+  syncReplayHexPager(target);
   const isRequest = target === "request";
   const scrollToFirst = options.scrollToFirst !== false;
   const query = state.replayMessageSearch[target];
@@ -21468,6 +21715,7 @@ async function sendReplay() {
       throw new Error("Cannot send Replay because the request body is preview-truncated. Edit the body or reopen it from the original capture.");
     }
     requestText = request._normalizedRawText || replayReqText;
+    if (!canStoreReplayRequest(requestText, request, "send this request from Replay")) return;
     if (requestText !== replayReqText) {
       tab.requestText = requestText;
       setReplayRequestEditorText(replayRequestEditorText(requestText), { preserveSelection: true });
@@ -21893,13 +22141,15 @@ async function followRedirect() {
     preview_truncated: false,
   };
 
+  const requestText = buildEditableRawRequest(newRequest);
+  if (!canStoreReplayRequest(requestText, newRequest, "follow this redirect in Replay")) return;
+
   // Update tab target
   tab.targetScheme = newScheme;
   tab.targetHost = newHost;
   tab.targetPort = newPort;
 
   // Build raw request text and set in editor
-  const requestText = buildEditableRawRequest(newRequest);
   tab.requestText = requestText;
   tab.baseRequest = cloneEditableRequest(newRequest);
   // A Hex view caches bytes separately; carrying them across the redirect would
@@ -22049,6 +22299,7 @@ function appendUnsentReplayDraft(seed, isCurrent, action) {
   if (!preserveActiveHttpReplayDraftBeforeSessionChange(action)) return false;
   if (!isCurrent()) return false;
   const tab = createReplayTab(seed);
+  if (!tab) return false;
   state.replayTabs.push(tab);
   state.activeReplayTabId = tab.id;
   setActiveTool("replay");
@@ -22072,6 +22323,7 @@ function openReconEndpointInReplay(endpoint, sourceIsCurrent = () => false) {
 function openBlankReplayTab() {
   if (!preserveActiveHttpReplayDraftBeforeNavigation(getActiveReplayTab(), "opening a new tab")) return;
   const tab = createReplayTab();
+  if (!tab) return false;
   state.replayTabs.push(tab);
   state.activeReplayTabId = tab.id;
   setActiveTool("replay");
@@ -22152,16 +22404,75 @@ function duplicateActiveReplayTab() {
     historyIndex: normalizeRepeaterHistoryIndex(tab.historyIndex, historyEntries.length),
   });
 
+  if (!duplicate) return;
   state.replayTabs.push(duplicate);
   state.activeReplayTabId = duplicate.id;
   scheduleWorkspaceStateSave();
   renderReplay();
 }
 
+// Match the independent UTF-8 text and serialized EditableRequest caps in
+// src/api.rs. Measure the stored form, including Base64, JSON escaping and
+// default fields; the decoded body size alone is not a persistence limit.
+function replayRequestSizeError(requestText, request) {
+  const limit = 2 * 1024 * 1024;
+  const bytes = text => new TextEncoder().encode(text).length;
+  if (bytes(String(requestText ?? "")) > limit) return "request text exceeds 2 MiB (2,097,152 UTF-8 bytes)";
+  if (request) {
+    const stored = {
+      scheme: request.scheme, host: request.host, method: request.method, path: request.path,
+      headers: (request.headers || []).map(header => ({ name: header.name || "", value: header.value || "" })),
+      body: request.body || "", body_encoding: request.body_encoding || "utf8",
+      preview_truncated: !!request.preview_truncated,
+    };
+    if (bytes(JSON.stringify(stored)) > limit) return "stored request exceeds 2 MiB (including headers, JSON escaping and Base64)";
+  }
+  return "";
+}
+
+function canStoreReplayRequest(requestText, request, action = "apply this edit") {
+  const problem = replayRequestSizeError(requestText, request);
+  if (!problem) return true;
+  showToast(`Cannot ${action}: ${problem}. Nothing was truncated. The original source and previous draft are unchanged; use a smaller request.`, "error", 8000);
+  return false;
+}
+
+function replayRequestEditCandidate(tab, newText) {
+  // Preserve body bytes when only headers changed in a newline-normalizing editor.
+  if (tab.baseRequest?.body_encoding !== "base64") {
+    const before = splitRawHttpMessage(tab.requestText);
+    const after = splitRawHttpMessage(newText);
+    if (before.body.replace(/\r\n?/g, "\n") === after.body.replace(/\r\n?/g, "\n")) {
+      const boundary = /\r?\n\r?\n/.exec(newText);
+      if (boundary) newText = newText.slice(0, boundary.index + boundary[0].length) + before.body;
+    }
+  }
+  let request = null;
+  try {
+    request = parseEditableRawRequest(newText, tab.baseRequest || createDefaultEditableRequest());
+  } catch (_error) {
+    // Partially typed requests remain valid drafts; their saved base is unchanged.
+  }
+  return { request, requestText: request?._normalizedRawText || newText };
+}
+
+function acceptReplayRequestEdit(text, tab = getActiveReplayTab(), acceptedCandidate = null) {
+  if (!tab || tab.type === "websocket" || replayEditorShowsDraft(text, tab.requestText)) return true;
+  if (!canStoreReplayRequest(text, null)) return false;
+  const candidate = replayRequestEditCandidate(tab, text);
+  if (!canStoreReplayRequest(candidate.requestText, candidate.request || tab.baseRequest)) return false;
+  if (acceptedCandidate) acceptedCandidate(candidate);
+  return true;
+}
+
 function createReplayTab(seed = {}) {
-  state.replayTabSequence += 1;
   const baseRequest = seed.baseRequest ? cloneEditableRequest(seed.baseRequest) : createDefaultEditableRequest();
   const requestText = seed.requestText ?? buildEditableRawRequest(baseRequest);
+  if (!canStoreReplayRequest(requestText, baseRequest, "open this request in Replay")) return null;
+  for (const entry of seed.historyEntries || []) {
+    if (!canStoreReplayRequest(entry.requestText, entry.request, "copy this Replay history")) return null;
+  }
+  state.replayTabSequence += 1;
   const target = authorityToTargetState(baseRequest.host, baseRequest.scheme);
   const normalizedTarget = normalizeRepeaterTargetInput(
     seed.targetHost ?? target.host,
@@ -22847,7 +23158,12 @@ function preserveActiveHttpReplayDraftBeforeNavigation(tab, action) {
 
   // Preserve supported edits before the shared editor displays another tab,
   // without re-rendering or parsing partially typed text into a different draft.
+  if (textChanged && !acceptReplayRequestEdit(requestText, tab)) return false;
   if (textChanged) {
+    if (replayRequestSizeError("", tab.baseRequest)) {
+      const candidate = replayRequestEditCandidate(tab, requestText);
+      if (candidate.request) tab.baseRequest = cloneEditableRequest(candidate.request);
+    }
     tab.requestText = requestText;
     tab.httpVersionMode = replayHttpVersionState(null, requestText, tab.httpVersionMode);
     tab.requestBytes = null;
@@ -22931,6 +23247,13 @@ async function closeRepeaterTab(id, pendingRename = null) {
     if (generation !== workspaceStateGeneration || sessionId !== currentSessionId()) return;
     if (isTooManyReplayTabsError(error)) {
       // Keep the close: it is progress back under the limit.
+      return;
+    }
+    if (error.workspaceValidation) {
+      // A local/server validation rejection is known not to have committed.
+      // Keep this requested close so multiple oversized tabs can be removed,
+      // without an incorrect uncertain-commit barrier preventing recovery.
+      showToast("Tab closed locally, but the workspace is still unsaved. Close more unneeded tabs or correct oversized drafts before closing the app.", "error", 10000);
       return;
     }
     // A failed POST may already have reached disk. Preserve newer local/remote
@@ -26665,7 +26988,7 @@ function toHexDump(text) {
   return rows.join("\n") || "00000000";
 }
 
-function toHexDumpFromBytes(bytes) {
+function toHexDumpFromBytes(bytes, startOffset = 0) {
   const rows = [];
   for (let offset = 0; offset < bytes.length; offset += 16) {
     const chunk = Array.from(bytes.slice(offset, offset + 16));
@@ -26675,7 +26998,7 @@ function toHexDumpFromBytes(bytes) {
     const ascii = chunk
       .map((value) => (value >= 32 && value <= 126 ? String.fromCharCode(value) : "."))
       .join("");
-    rows.push(`${offset.toString(16).padStart(8, "0")}  ${hex} ${ascii}`);
+    rows.push(`${(startOffset + offset).toString(16).padStart(8, "0")}  ${hex} ${ascii}`);
   }
   return rows.join("\n") || "00000000";
 }
@@ -30945,6 +31268,7 @@ function runInterceptMenuAction(action, interceptId, clipboardOwner = createReco
           sourceTransactionId: null,
           requestText: buildEditableRawRequest(request),
         });
+        if (!tab) return;
         state.replayTabs.push(tab);
         state.activeReplayTabId = tab.id;
         setActiveTool("replay");
@@ -31848,7 +32172,9 @@ function changeReplayMethod(newMethod, tabId = state.activeReplayTabId) {
     ? cv.getContent()
     : (isActiveTab && els.replayRequestEditor ? els.replayRequestEditor.value : tab.requestText) || "";
   const text = replayEditorShowsDraft(shown, tab.requestText) ? tab.requestText || "" : shown;
-  tab.requestText = requestTextWithMethod(text, newMethod);
+  const nextText = requestTextWithMethod(text, newMethod);
+  if (!acceptReplayRequestEdit(nextText, tab)) return;
+  tab.requestText = nextText;
   clearReplayResponseForDraftChange(tab);
   syncReplayRequestEditorForTab(tab);
   scheduleWorkspaceStateSave();
@@ -32864,7 +33190,14 @@ function applyCurlImport() {
     showToast(result.error, "error");
     return;
   }
+  const request = {
+    scheme: result.scheme, host: result.host, method: result.method, path: result.path,
+    headers: normalizedHeaders(result.headers), body: result.body,
+    body_encoding: "utf8", preview_truncated: false,
+  };
+  if (!canStoreReplayRequest(result.requestText, request, "import this cURL request")) return;
   const tab = createReplayTab();
+  if (!tab) return;
   tab.httpVersionMode = normalizeReplayHttpVersion(result.httpVersion || "");
   const target = normalizeRepeaterTargetInput(result.host, result.port || "", result.scheme || "https");
   tab.requestText = result.requestText;
@@ -32886,6 +33219,7 @@ function applyCurlImport() {
     body_encoding: "utf8",
     preview_truncated: false,
   };
+  if (!tab) return false;
   state.replayTabs.push(tab);
   state.activeReplayTabId = tab.id;
   setActiveTool("replay");
@@ -32916,13 +33250,9 @@ function initReplayContextMenu() {
 
       if (action === "toggle-body") {
         const text = tab.requestText || "";
-        if (text.includes("\n\n")) {
-          // Remove body
-          tab.requestText = text.split("\n\n")[0];
-        } else {
-          // Add empty body section
-          tab.requestText = text + "\n\n";
-        }
+        const nextText = text.includes("\n\n") ? text.split("\n\n")[0] : text + "\n\n";
+        if (!acceptReplayRequestEdit(nextText, tab)) return;
+        tab.requestText = nextText;
         clearReplayResponseForDraftChange(tab);
         syncReplayRequestEditorForTab(tab);
         scheduleWorkspaceStateSave();
@@ -32975,7 +33305,9 @@ function setReplayHeader(name, value, tabId = state.activeReplayTabId) {
     lines.push(`${name}: ${value}`);
   }
 
-  tab.requestText = lines.join("\n") + body;
+  const nextText = lines.join("\n") + body;
+  if (!acceptReplayRequestEdit(nextText, tab)) return;
+  tab.requestText = nextText;
   clearReplayResponseForDraftChange(tab);
   syncReplayRequestEditorForTab(tab);
   scheduleWorkspaceStateSave();
@@ -33506,13 +33838,55 @@ const cmProgrammaticViews = new WeakSet();
 
 /** Add an update listener to a CM EditorView; returns a dispose function. */
 function addCMUpdateListener(view, callback) {
+  const isReplay = typeof syncReplayRequestTextFromEditor === "function" && callback === syncReplayRequestTextFromEditor;
+  let validated = null;
+  // This is a one-transaction handoff, not a cache of edits. Snapshot the fields
+  // used by parsing/validation without copying/serializing the large body again.
+  const identity = () => {
+    const tab = getActiveReplayTab(), base = tab?.baseRequest;
+    const currentView = getCMView("replayReq");
+    return [currentView, currentView?.view, currentView?._owner, currentView?._container, tab, tab?.id, tab?.type, tab?.requestText, tab?.protobufEditRevision,
+      base, base?.scheme, base?.host, base?.method, base?.path, base?.body,
+      base?.body_preview, base?.body_encoding, base?.preview_truncated,
+      JSON.stringify(base?.headers || []), currentSessionId(), workspaceStateGeneration,
+      state.replayMessageViews.request, renderedHttpReplayDraftOwner,
+      !!document.getElementById("proxySettingAutoContentLength")?.checked];
+  };
   const listener = CM.EditorView.updateListener.of((update) => {
+    const pending = validated;
+    validated = null;
     if (update.docChanged && !cmProgrammaticViews.has(update.view)) {
-      callback(update.state.doc.toString());
+      if (isReplay && getCMView("replayReq")?.view !== update.view) return;
+      let candidate = null;
+      // Other transaction filters/listeners can change the document or owner.
+      // Reuse only the exact transaction and unchanged model; otherwise perform
+      // the normal validation in the callback. Multi-transaction updates fall back.
+      if (isReplay && pending && update.transactions?.length === 1
+          && update.transactions[0].startState === pending.startState
+          && update.state.doc === pending.doc) {
+        const now = identity();
+        if (now.length === pending.identity.length && now.every((value, index) => value === pending.identity[index])) {
+          candidate = pending.candidate;
+        }
+      }
+      callback(update.state.doc.toString(), candidate);
     }
   });
-  view.dispatch({ effects: CM.StateEffect.appendConfig.of(listener) });
-  return () => {}; // CM does not support removing extensions, but the view will be destroyed
+  const extensions = [listener];
+  if (isReplay) {
+    extensions.push(CM.EditorState.transactionFilter.of(transaction => {
+      validated = null;
+      const currentView = getCMView("replayReq")?.view;
+      if (!transaction.docChanged || cmProgrammaticViews.has(currentView)) return transaction;
+      const before = identity();
+      const accepted = acceptReplayRequestEdit(transaction.newDoc.toString(), getActiveReplayTab(), candidate => {
+        validated = { startState: transaction.startState, doc: transaction.newDoc, identity: before, candidate };
+      });
+      return accepted ? transaction : [];
+    }));
+  }
+  view.dispatch({ effects: CM.StateEffect.appendConfig.of(extensions) });
+  return () => { validated = null; }; // The containing view owns these extensions.
 }
 
 const CM_SEARCH_DECORATION_LIMIT = 5000;
@@ -34023,11 +34397,11 @@ const packetEvidenceField = CM.StateField.define({
 });
 
 class SniperCodeView {
-  constructor(container, options = {}) {
+  constructor(container, options = {}, editorState = null) {
     this._options = options;
     this._searchNavIndex = -1;
     this.view = new CM.EditorView({
-      state: CM.EditorState.create({
+      state: editorState || CM.EditorState.create({
         // Initial content is a baseline, not an undoable edit from an empty pane.
         doc: options.content || "",
         extensions: [...createBaseExtensions(options), searchDecoField, changedDecoField, packetEvidenceField],
@@ -34145,6 +34519,17 @@ function updateCodePaneCM(key, container, text, options = {}) {
   const mode = options.mode || "http"; // "http" | "hex" | "diff"
   const editable = options.readOnly === false;
   let restoreFocus = false;
+  let suspendedEditableState = null;
+  const previous = _cmViews[key];
+  // A read-only presentation may suspend the current editor, never a different
+  // request or session. Keep just one state, not a cache of previously visited tabs.
+  if (options.preserveEditableState && options.owner != null && previous
+    && previous._owner === options.owner && previous._container === container) {
+    suspendedEditableState = previous._editable ? {
+      state: previous.view.state, mode: previous._hlMode,
+      onChange: previous._onChange, wired: previous._onChangeWired,
+    } : previous._suspendedEditableState;
+  }
   // Undo history belongs to one document owner. Tab/session replacement must
   // retire it even when the new document has the same text or persisted ID.
   if (_cmViews[key] && (_cmViews[key]._hlMode !== mode || !!_cmViews[key]._editable !== editable
@@ -34156,21 +34541,32 @@ function updateCodePaneCM(key, container, text, options = {}) {
   }
   if (!_cmViews[key]) {
     const cmOpts = { content: text || "" };
+    // Restore only an unchanged document. Edits or replacement while inspecting
+    // another presentation must not resurrect an obsolete draft or listener.
+    const restoreState = editable && suspendedEditableState?.mode === mode
+      && suspendedEditableState.onChange === options.onChange
+      && suspendedEditableState.state.doc.toString() === (text || "").replace(/\r\n?/g, "\n");
     cmOpts.readOnly = !editable;
     if (mode === "http") cmOpts.httpHighlight = true;
     else if (mode === "hex") cmOpts.hexHighlight = true;
     else if (mode === "diff") cmOpts.diffHighlight = true;
     if (options.placeholder) cmOpts.placeholder = options.placeholder;
     if (options.payloadHighlight) cmOpts.payloadHighlight = true;
-    _cmViews[key] = new SniperCodeView(container, cmOpts);
+    _cmViews[key] = new SniperCodeView(container, cmOpts, restoreState ? suspendedEditableState.state : null);
     _cmViews[key]._hlMode = mode;
     _cmViews[key]._editable = editable;
     _cmViews[key]._owner = options.owner;
     _cmViews[key]._container = container;
+    if (restoreState) {
+      _cmViews[key]._onChangeWired = suspendedEditableState.wired;
+      _cmViews[key]._onChange = suspendedEditableState.onChange;
+    }
   }
   const cv = _cmViews[key];
+  cv._suspendedEditableState = editable ? null : suspendedEditableState;
   if (editable && options.onChange && !cv._onChangeWired) {
     cv._onChangeDispose = addCMUpdateListener(cv.view, options.onChange);
+    cv._onChange = options.onChange;
     cv._onChangeWired = true;
   }
   cv.setContent(text || "");

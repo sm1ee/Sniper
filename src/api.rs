@@ -356,11 +356,32 @@ fn write_remote_ui_token_file(path: &std::path::Path, auth_url: &str) -> Result<
 
 fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessControl) -> Router {
     Router::new()
+        .route("/api/tcp/status", get(tcp_status))
+        .route("/api/tcp/start", post(tcp_start))
+        .route("/api/tcp/stop", post(tcp_stop))
+        .route("/api/tcp/connections", get(tcp_connections))
+        .route("/api/tcp/connections/:id", get(tcp_connection))
+        .route(
+            "/api/tcp/intercept",
+            get(tcp_intercept_policy)
+                .put(tcp_intercept_set_policy)
+                .layer(axum::extract::DefaultBodyLimit::max(24 * 1024)),
+        )
+        .route(
+            "/api/tcp/connections/:id/pending",
+            get(tcp_intercept_pending),
+        )
+        .route(
+            "/api/tcp/connections/:id/pending/:pending_id/decision",
+            post(tcp_intercept_decide).layer(axum::extract::DefaultBodyLimit::max(24 * 1024)),
+        )
+        .route("/api/tcp/connections/:id/close", post(tcp_close_connection))
         .route("/", get(index))
         .route("/decoder", get(decoder_index))
         .route("/decoder/", get(decoder_index))
         .route("/decoder/*path", get(decoder_asset))
         .route("/app.js", get(app_js))
+        .route("/tcp-capture.js", get(tcp_capture_js))
         .route("/fuzzer-workflow.js", get(fuzzer_workflow_js))
         .route("/grpc-envelope.js", get(grpc_envelope_js))
         .route("/cbor-reader.js", get(cbor_reader_js))
@@ -3202,7 +3223,9 @@ async fn rename_session(
 
 fn session_operation_error_response(error: anyhow::Error) -> Response {
     let message = error.to_string();
-    let status = if message.contains("was not found") {
+    let status = if error.is::<crate::tcp_capture::TcpPersistenceError>() {
+        StatusCode::INTERNAL_SERVER_ERROR
+    } else if message.contains("was not found") {
         StatusCode::NOT_FOUND
     } else if message.contains("cannot delete the active session")
         || message.contains("live captures are active")
@@ -9368,6 +9391,13 @@ async fn app_js() -> Response {
     )
 }
 
+async fn tcp_capture_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/tcp-capture.js"),
+    )
+}
+
 async fn fuzzer_workflow_js() -> Response {
     asset_response(
         "application/javascript; charset=utf-8",
@@ -9376,7 +9406,10 @@ async fn fuzzer_workflow_js() -> Response {
 }
 
 async fn msgpack_reader_js() -> Response {
-    asset_response("application/javascript", include_str!("../web/msgpack-reader.js"))
+    asset_response(
+        "application/javascript",
+        include_str!("../web/msgpack-reader.js"),
+    )
 }
 
 async fn protobuf_wire_js() -> Response {
@@ -27367,17 +27400,381 @@ mod web_assets {
 }
 
 async fn msgpack_editor_js() -> Response {
-    asset_response("application/javascript", include_str!("../web/msgpack-editor.js"))
+    asset_response(
+        "application/javascript",
+        include_str!("../web/msgpack-editor.js"),
+    )
 }
 
 async fn grpc_envelope_js() -> Response {
-    asset_response("application/javascript", include_str!("../web/grpc-envelope.js"))
+    asset_response(
+        "application/javascript",
+        include_str!("../web/grpc-envelope.js"),
+    )
 }
 
 async fn cbor_reader_js() -> Response {
-    asset_response("application/javascript", include_str!("../web/cbor-reader.js"))
+    asset_response(
+        "application/javascript",
+        include_str!("../web/cbor-reader.js"),
+    )
 }
 
 async fn cbor_editor_js() -> Response {
-    asset_response("application/javascript", include_str!("../web/cbor-editor.js"))
+    asset_response(
+        "application/javascript",
+        include_str!("../web/cbor-editor.js"),
+    )
+}
+
+// These routes inherit the same access-control middleware as the HTTP API.
+async fn tcp_status(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionScopedQuery>,
+) -> Result<Json<crate::tcp_capture::TcpStatus>, Response> {
+    let session = resolve_read_session_for_optional_id(&state, query.session_id).await?;
+    Ok(Json(session.tcp_capture.status().await))
+}
+async fn tcp_start(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionWriteQuery>,
+    Json(settings): Json<crate::tcp_capture::TcpSettings>,
+) -> Result<Json<crate::tcp_capture::TcpStatus>, (StatusCode, String)> {
+    state
+        .configure_tcp_capture(
+            Some(settings),
+            query.session_id,
+            query.expected_active_session_id,
+        )
+        .await
+        .map(Json)
+        .map_err(tcp_configuration_error)
+}
+async fn tcp_stop(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionWriteQuery>,
+) -> Result<Json<crate::tcp_capture::TcpStatus>, (StatusCode, String)> {
+    state
+        .configure_tcp_capture(None, query.session_id, query.expected_active_session_id)
+        .await
+        .map(Json)
+        .map_err(tcp_configuration_error)
+}
+fn tcp_configuration_error(error: anyhow::Error) -> (StatusCode, String) {
+    let message = error.to_string();
+    let status = if error.is::<crate::tcp_capture::TcpPersistenceError>() {
+        StatusCode::INTERNAL_SERVER_ERROR
+    } else if message == "TCP capture cannot start while Sniper is shutting down" {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if message.starts_with("active session changed") {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    (status, message)
+}
+async fn tcp_connections(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionScopedQuery>,
+) -> Result<Json<Vec<crate::tcp_capture::TcpConnection>>, Response> {
+    let session = resolve_read_session_for_optional_id(&state, query.session_id).await?;
+    Ok(Json(session.tcp_capture.summaries().await))
+}
+async fn tcp_connection(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<SessionScopedQuery>,
+) -> Result<Json<crate::tcp_capture::TcpConnection>, Response> {
+    let session = resolve_read_session_for_optional_id(&state, query.session_id).await?;
+    session
+        .tcp_capture
+        .detail(id)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Saved TCP detail could not be read. History requires recovery.",
+            )
+                .into_response()
+        })?
+        .map(Json)
+        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())
+}
+
+async fn tcp_intercept_policy(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionScopedQuery>,
+) -> Result<Json<crate::tcp_capture::InterceptPolicy>, Response> {
+    let session = resolve_read_session_for_optional_id(&state, query.session_id).await?;
+    Ok(Json(session.tcp_capture.policy()))
+}
+
+async fn tcp_intercept_set_policy(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionWriteQuery>,
+    Json(update): Json<crate::tcp_capture::PolicyUpdate>,
+) -> Result<Json<crate::tcp_capture::InterceptPolicy>, (StatusCode, String)> {
+    state
+        .configure_tcp_intercept(update, query.session_id, query.expected_active_session_id)
+        .await
+        .map(Json)
+        .map_err(tcp_intercept_error)
+}
+
+async fn tcp_intercept_pending(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<SessionScopedQuery>,
+) -> Result<Json<crate::tcp_capture::PendingResponse>, Response> {
+    let session = resolve_read_session_for_optional_id(&state, query.session_id).await?;
+    session
+        .tcp_capture
+        .pending(id)
+        .map(Json)
+        .map_err(|error| tcp_intercept_error(error).into_response())
+}
+
+async fn tcp_intercept_decide(
+    State(state): State<Arc<AppState>>,
+    Path((id, pending_id)): Path<(Uuid, Uuid)>,
+    Query(query): Query<SessionWriteQuery>,
+    Json(decision): Json<crate::tcp_capture::DecisionRequest>,
+) -> Result<(StatusCode, Json<crate::tcp_capture::DecisionReceipt>), (StatusCode, String)> {
+    state
+        .decide_tcp_intercept(
+            id,
+            pending_id,
+            decision,
+            query.session_id,
+            query.expected_active_session_id,
+        )
+        .await
+        .map(|receipt| (StatusCode::ACCEPTED, Json(receipt)))
+        .map_err(tcp_intercept_error)
+}
+
+async fn tcp_close_connection(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<SessionWriteQuery>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    state
+        .close_tcp_connection(id, query.session_id, query.expected_active_session_id)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(tcp_intercept_error)
+}
+
+fn tcp_intercept_error(error: crate::tcp_capture::InterceptError) -> (StatusCode, String) {
+    use crate::tcp_capture::InterceptError;
+    let status = match &error {
+        InterceptError::BadRequest(_) => StatusCode::BAD_REQUEST,
+        InterceptError::Conflict(_) => StatusCode::CONFLICT,
+        InterceptError::NotFound(_) => StatusCode::NOT_FOUND,
+        InterceptError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+    };
+    (status, error.to_string())
+}
+
+#[cfg(test)]
+mod tcp_asset_tests {
+    #[tokio::test]
+    async fn tcp_capture_asset_has_javascript_type_and_exact_embedded_bytes() {
+        let response = super::tcp_capture_js().await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/javascript; charset=utf-8"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), include_bytes!("../web/tcp-capture.js"));
+    }
+}
+
+#[cfg(test)]
+mod tcp_intercept_api_tests {
+    use super::*;
+    use hyper::service::Service;
+
+    fn state() -> (Arc<AppState>, PathBuf) {
+        let path = std::env::temp_dir().join(format!("sniper-tcp-api-{}", Uuid::new_v4()));
+        let state = AppState::new(crate::config::AppConfig {
+            proxy_addr: "127.0.0.1:0".parse().unwrap(),
+            ui_addr: "127.0.0.1:0".parse().unwrap(),
+            max_entries: 32,
+            max_transaction_entries: 32,
+            body_preview_bytes: 4096,
+            data_dir: path.clone(),
+        })
+        .unwrap();
+        (Arc::new(state), path)
+    }
+
+    async fn request(app: Router, method: &str, uri: &str, body: &str) -> Response {
+        let service = hyper_util::service::TowerToHyperService::new(app);
+        service
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn tcp_intercept_routes_validate_revision_session_and_body_limits() {
+        let (state, path) = state();
+        let app = router(state.clone());
+        let policy = r#"{"enabled":true,"direction":"both","expected_revision":0}"#;
+        assert_eq!(
+            request(app.clone(), "PUT", "/api/tcp/intercept", policy)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            request(app.clone(), "PUT", "/api/tcp/intercept", policy)
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let stale = Uuid::new_v4();
+        let conn = Uuid::new_v4();
+        let ticket = Uuid::new_v4();
+        for field in ["session_id", "expected_active_session_id"] {
+            for (method, route, body) in [
+                ("PUT", "/api/tcp/intercept".into(), policy),
+                ("POST", format!("/api/tcp/connections/{conn}/close"), ""),
+                (
+                    "POST",
+                    format!("/api/tcp/connections/{conn}/pending/{ticket}/decision"),
+                    r#"{"action":"forward","expected_revision":0}"#,
+                ),
+            ] {
+                assert_eq!(
+                    request(
+                        app.clone(),
+                        method,
+                        &format!("{route}?{field}={stale}"),
+                        body
+                    )
+                    .await
+                    .status(),
+                    StatusCode::CONFLICT
+                );
+            }
+        }
+        for route in [
+            "/api/tcp/intercept".to_owned(),
+            format!("/api/tcp/connections/{conn}/pending/{ticket}/decision"),
+        ] {
+            let method = if route.ends_with("decision") {
+                "POST"
+            } else {
+                "PUT"
+            };
+            assert_eq!(
+                request(app.clone(), method, &route, &" ".repeat(24 * 1024 + 1))
+                    .await
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+            assert_eq!(
+                request(app.clone(), method, &route, "{").await.status(),
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                request(app.clone(), method, &route, "{}").await.status(),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        }
+        assert_eq!(
+            request(
+                app.clone(),
+                "GET",
+                &format!("/api/tcp/connections/{conn}/pending"),
+                ""
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(
+                app,
+                "POST",
+                &format!("/api/tcp/connections/{conn}/close"),
+                ""
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        drop(state);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn tcp_intercept_routes_require_remote_authentication() {
+        let (state, path) = state();
+        let access = UiAccessControl {
+            remote: Some(Arc::new(RemoteUiAuth::new())),
+            same_host_ips: Arc::new(HashSet::new()),
+        };
+        let app = router_with_access_control(state.clone(), access);
+        let id = Uuid::new_v4();
+        for (method, route) in [
+            ("GET", "/api/tcp/intercept".to_owned()),
+            ("PUT", "/api/tcp/intercept".to_owned()),
+            ("GET", format!("/api/tcp/connections/{id}/pending")),
+            (
+                "POST",
+                format!("/api/tcp/connections/{id}/pending/{id}/decision"),
+            ),
+            ("POST", format!("/api/tcp/connections/{id}/close")),
+        ] {
+            assert_eq!(
+                request(app.clone(), method, &route, "{}").await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        drop(state);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn tcp_persistence_and_shutdown_errors_are_server_failures() {
+        let error = crate::tcp_capture::TcpPersistenceError { pending_records: 2 };
+        assert_eq!(
+            tcp_configuration_error(error.into()).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            tcp_configuration_error(anyhow::anyhow!(
+                "TCP capture cannot start while Sniper is shutting down"
+            ))
+            .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn tcp_intercept_errors_map_to_distinct_http_statuses() {
+        use crate::tcp_capture::InterceptError::*;
+        for (error, expected) in [
+            (BadRequest("x".into()), 400),
+            (Conflict("x".into()), 409),
+            (NotFound("x".into()), 404),
+            (TooLarge("x".into()), 413),
+        ] {
+            assert_eq!(tcp_intercept_error(error).0.as_u16(), expected);
+        }
+    }
 }

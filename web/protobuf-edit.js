@@ -29,8 +29,10 @@
     function apply(current, path, operation) {
       if(consumed) error("session-consumed");
       if(!(current instanceof Uint8Array) || !equal(current,snapshot)) error("stale-source");
-      if(!Array.isArray(path) || !path.length || path.length > wire.limits.depth ||
-        path.some(i => !Number.isSafeInteger(i) || i < 0)) error("invalid-path");
+      if(!Array.isArray(path) || !path.length) error("invalid-path");
+      // Root fields have one index but depth zero, matching wire inspection.
+      if(path.length - 1 > wire.limits.depth) error("depth-limit");
+      if(path.some(i => !Number.isSafeInteger(i) || i < 0)) error("invalid-path");
       if(!operation || typeof operation !== "object") error("invalid-operation");
       // Parse fresh from private bytes. Never trust UI-owned field offsets/types.
       function change(bytes, level) {

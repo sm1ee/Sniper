@@ -17,7 +17,8 @@ function setup({ rendered = true } = {}) {
     configurable: true, set(value) { this.innerText = value; },
   });
   for (const name of [
-    'renderReplay', 'retireFindingActionProgress', 'applyWorkspaceState', 'createSession', 'activateSessionById',
+    'replayHexTextSource', 'replayHexPageText', 'syncReplayHexPager',
+    'renderReplay', 'replayRequestHexText', 'retireFindingActionProgress', 'applyWorkspaceState', 'createSession', 'activateSessionById',
     'reloadSessionWorkspace', 'resetSessionScopedUiState', 'renderReplayClearedState',
     'renderReplayRequestHighlight', 'renderToolPanels', 'applyReplayTargetFields',
     'setReplayTargetInputValidity', 'startHexByteEdit', 'syncReplayRequestTextFromEditor',
@@ -1103,11 +1104,12 @@ for (const operation of ['create', 'activate']) {
 function useOwnedDomEditor(f, kind) {
   if (kind === 'CodeMirror') {
     let listener;
-    const view = { dispatch: update => { listener = update.effects; } };
-    const editor = { text: f.old.requestText, getContent() { return this.text; }, setContent(text) { this.text = text; } };
+    const view = { dispatch: update => { listener = Array.isArray(update.effects) ? update.effects[0] : update.effects; } };
+    const editor = { view, text: f.old.requestText, getContent() { return this.text; }, setContent(text) { this.text = text; } };
     f.els.replayRequestCM = {}; f.context.getCMView = () => editor;
     f.context.updateCodePaneCM = (_, __, text) => { editor.text = text; };
     f.context.CM = { EditorView: { updateListener: { of: callback => callback } },
+      EditorState: { transactionFilter: { of: () => null } },
       StateEffect: { appendConfig: { of: callback => callback } } };
     f.context.cmProgrammaticViews = new WeakSet();
     vm.runInContext(source('addCMUpdateListener'), f.context);

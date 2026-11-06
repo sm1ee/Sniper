@@ -11,6 +11,14 @@ const appSource = fs.readFileSync(path.join(__dirname, "../web/app.js"), "utf8")
 // make API requests. Top-level functions in this file end at column zero.
 function loadFunctions(names, globals = {}) {
   const context = vm.createContext({ console, ...globals });
+  const hexCallers = ["replayRequestHexText", "renderReplay", "renderReplayResponseOnly", "renderReplayViewContent", "updateReplaySearchPane"];
+  if (names.some(name => hexCallers.includes(name))) {
+    names = [...new Set([...names, "replayHexTextSource", "replayHexPageText", "syncReplayHexPager"])];
+  }
+  const replaySizeCallers = ["createReplayTab", "applyCurlImport", "syncReplayRequestTextFromEditor", "preserveActiveHttpReplayDraftBeforeNavigation", "renderReplay", "changeReplayMethod", "setReplayHeader", "saveWorkspaceState"];
+  if (names.some(name => replaySizeCallers.includes(name))) {
+    names = [...new Set([...names, "replayRequestSizeError", "canStoreReplayRequest", "replayRequestEditCandidate", "acceptReplayRequestEdit"])];
+  }
   for (const name of names) {
     assert.match(name, /^[A-Za-z_$][\w$]*$/);
     const match = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, "m"));

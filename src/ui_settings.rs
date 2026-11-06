@@ -49,6 +49,7 @@ const ACTIVE_PROXY_TAB_OPTIONS: &[&str] = &[
     "intercept",
     "http-history",
     "websockets-history",
+    "tcp-history",
     "replace",
     "findings",
     "oast",

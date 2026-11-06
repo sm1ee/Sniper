@@ -95,8 +95,9 @@
                     <th data-sort-key="storage_bytes" aria-sort="none"><button class="session-sort-button" type="button">Size</button></th>
                     <th data-sort-key="request_count" aria-sort="none"><button class="session-sort-button" type="button">Requests</button></th>
                     <th data-sort-key="websocket_count" aria-sort="none"><button class="session-sort-button" type="button">WebSockets</button></th>
+                    <th data-sort-key="tcp_connection_count" aria-sort="none"><button class="session-sort-button" type="button">TCP</button></th>
                     <th data-sort-key="finding_count" aria-sort="none"><button class="session-sort-button" type="button">Findings</button></th>
-                    <th data-sort-key="last_captured_at" aria-sort="none"><button class="session-sort-button" type="button">Last capture</button></th>
+                    <th data-sort-key="last_captured_at" aria-sort="none"><button class="session-sort-button" type="button">Last HTTP capture</button></th>
                     <th data-sort-key="created_at" aria-sort="descending"><button class="session-sort-button" type="button">Created</button></th>
                     <th>Action</th>
                   </tr>
@@ -113,6 +114,7 @@
             <button class="sub-tab" data-proxy-tab="intercept">Intercept</button>
             <button class="sub-tab active" data-proxy-tab="http-history">HTTP</button>
             <button class="sub-tab" data-proxy-tab="websockets-history">Web Socket</button>
+            <button class="sub-tab" data-proxy-tab="tcp-history">TCP</button>
             <button class="sub-tab" data-proxy-tab="replace">Replace</button>
             <button class="sub-tab" data-proxy-tab="findings">Findings <span class="findings-badge hidden" id="findingsBadge"></span></button>
             <button class="sub-tab" data-proxy-tab="oast">OAST <span class="findings-badge hidden" id="oastBadge"></span></button>
@@ -364,6 +366,52 @@
                 </footer>
               </section>
             </div>
+          </section>
+
+          <section class="proxy-panel hidden" id="tcpPanel">
+            <div class="tcp-intercept-toolbar">
+              <button class="secondary-action" id="tcpInterceptToggle" type="button" aria-pressed="false" disabled>Intercept off</button>
+              <select id="tcpInterceptDirection" aria-label="Intercept TCP direction" disabled><option value="both">Both directions</option><option value="client_to_server">Client → Server</option><option value="server_to_client">Server → Client</option></select>
+              <span id="tcpInterceptStatus" role="status"></span>
+            </div>
+            <div class="tcp-workbench">
+              <section class="panel-card tcp-history">
+                <div class="filter-bar">
+                  <span class="filter-summary" id="tcpHistoryStatus" role="status">No TCP connections.</span>
+                  <div class="filter-actions">
+                    <select id="tcpStateFilter" aria-label="Filter TCP connections"><option value="all">All states</option><option value="live">Live</option><option value="closed">Closed</option></select>
+                    <button class="secondary-action" id="tcpOpenSettings" type="button">Listener settings</button>
+                  </div>
+                </div>
+                <div class="history-table-shell" tabindex="0" aria-label="TCP connections, scroll horizontally for more columns">
+                  <table class="mini-table"><thead><tr><th>Target</th><th>Client</th><th>Status</th><th>Sent</th><th>Received</th><th>Duration</th><th>Started</th><th>Capture</th></tr></thead><tbody id="tcpHistoryRows"></tbody></table>
+                </div>
+              </section>
+              <section class="panel-card tcp-stream">
+                <header class="pane-header">
+                  <div class="view-tabs"><button class="view-tab active" id="tcpStreamTab" type="button" aria-pressed="true">Stream</button><button class="view-tab" id="tcpPendingTab" type="button" aria-pressed="false">Pending</button><strong id="tcpStreamTitle">Stream</strong></div>
+                  <div class="view-tabs">
+                    <select id="tcpDirection" aria-label="TCP stream direction"><option value="client_to_server">Client → Server</option><option value="server_to_client">Server → Client</option></select>
+                    <button class="view-tab active" id="tcpHexView" type="button" aria-pressed="true">Hex</button>
+                    <button class="view-tab" id="tcpTextView" type="button" aria-pressed="false">Text</button>
+                  </div>
+                </header>
+                <div id="tcpStreamSurface" class="tcp-stream-surface"><pre class="simple-code-view tcp-bytes" id="tcpStreamBytes" tabindex="0" aria-label="Captured TCP bytes">Select a connection.</pre>
+                <footer class="pane-footer" id="tcpStreamMeta">Read-only capture. TCP chunks are not protocol messages.</footer>
+                  <div id="tcpInterceptHistory" class="tcp-intercept-history"></div>
+                </div>
+                <div id="tcpPendingSurface" class="tcp-pending-surface" hidden>
+                  <div class="tcp-pending-bar"><select id="tcpPendingPicker" aria-label="Pending TCP bytes" disabled></select><span id="tcpPendingMeta"></span></div>
+                  <textarea id="tcpPendingHex" aria-label="Pending raw hexadecimal bytes" spellcheck="false" autocomplete="off" autocapitalize="off" disabled placeholder="No pending bytes."></textarea>
+                  <details id="tcpPendingOriginal" hidden><summary>Original bytes</summary><pre id="tcpPendingOriginalHex" tabindex="0" aria-label="Original raw hexadecimal bytes"></pre></details>
+                  <div class="tcp-pending-bar"><button id="tcpPendingReset" class="secondary-action" type="button" disabled>Reset bytes</button><span class="tcp-pending-spacer"></span><button id="tcpDrop" class="secondary-action" type="button" disabled>Drop bytes</button><button id="tcpForward" class="primary-action" type="button" disabled>Forward</button></div>
+                  <footer class="pane-footer">Raw TCP bytes, not protocol messages. Off leaves pending bytes paused. Peer disconnects may not be detected while paused.</footer>
+                </div>
+                <div class="tcp-connection-actions"><span id="tcpInterceptNotice" role="status"></span><button id="tcpCloseConnection" title="Closes both directions; paused bytes are not forwarded." aria-label="Close connection. Closes both directions; paused bytes are not forwarded." type="button" class="secondary-action" disabled>Close connection</button></div>
+                <p id="tcpInterceptError" class="tcp-error" role="alert"></p>
+              </section>
+            </div>
+            <p id="tcpHistoryError" class="tcp-error" role="alert"></p>
           </section>
 
           <section class="proxy-panel hidden" id="websocketPanel">
@@ -739,6 +787,22 @@
           </section>
 
           <section class="proxy-panel hidden" id="proxySettingsPanel">
+            <section class="panel-card" id="tcpSettingsSection" aria-labelledby="tcpSettingsHeading">
+              <header class="panel-toolbar"><h2 id="tcpSettingsHeading">TCP listener</h2><span id="tcpListenerStatus" role="status">Loading…</span></header>
+              <form class="settings-form" id="tcpListenerForm" aria-describedby="tcpRoutingDisclosure">
+                <div class="tcp-listener-fields">
+                  <label class="settings-field"><span>Listen on 127.0.0.1</span><input id="tcpLocalPort" type="number" min="1" max="65535" step="1" value="9000" required aria-label="TCP listen port" /></label>
+                  <label class="settings-field"><span>Target host</span><input id="tcpTargetHost" type="text" placeholder="127.0.0.1" autocomplete="off" spellcheck="false" required /></label>
+                  <label class="settings-field"><span>Target port</span><input id="tcpTargetPort" type="number" min="1" max="65535" step="1" required /></label>
+                </div>
+                <small>Fixed target, plain TCP relay. TLS stays encrypted. Target connects when a client connects. Stop before changing ports.</small>
+                <small id="tcpRoutingDisclosure">TCP connects directly to the target and resolves hostnames locally. Proxy chain, Scope and HTTP intercept rules do not apply.</small>
+                <p id="tcpSettingsError" class="tcp-error" role="alert"></p>
+                <div class="toolbar-actions"><button class="primary-action" id="tcpStart" type="submit" disabled>Start listener</button><button class="secondary-action" id="tcpStop" type="button" disabled>Stop listener</button></div>
+                <small>Stopping closes live connections and keeps history. Listeners stay off after a restart or session switch.</small>
+              </form>
+            </section>
+
             <section class="panel-card upstream-peer-card" id="upstreamPeerSection" aria-labelledby="upstreamPeerHeading">
               <header class="panel-toolbar">
                 <div><h2 id="upstreamPeerHeading">Upstream socket peer</h2><p>Current session: <strong id="upstreamPeerSession">Loading…</strong></p></div>
@@ -804,7 +868,7 @@
                   <label class="settings-field">
                     <span>Upstream proxy address</span>
                     <input id="proxyChainUrl" type="text" placeholder="http://127.0.0.1:8081 or socks5h://127.0.0.1:1080" autocomplete="off" spellcheck="false" />
-                    <small>HTTP or SOCKS5, for captured traffic and Replay. SOCKS5 resolves names on the proxy, and a failed connection never goes direct.</small>
+                    <small>HTTP or SOCKS5, for HTTP(S), WebSocket and Replay, not TCP listeners. SOCKS5 resolves names on the proxy. Chain failures do not fall back to direct connections; bypass hosts connect directly.</small>
                   </label>
                   <label class="settings-field">
                     <span>Proxy username (optional)</span>
@@ -975,13 +1039,20 @@
                 <h2>Request</h2>
                 <div class="view-tabs">
                   <button class="replay-view-tab active" data-replay-target="request" data-replay-view="pretty">Pretty</button>
-                  <button class="replay-view-tab" data-replay-target="request" data-replay-view="raw">Raw</button>
-                  <button class="replay-view-tab" data-replay-target="request" data-replay-view="hex">Hex</button>
+                  <button class="replay-view-tab" data-replay-target="request" data-replay-view="raw" title="Edit request text; binary bodies are Base64-encoded">Raw</button>
+                  <button class="replay-view-tab" data-replay-target="request" data-replay-view="hex" title="Request headers and decoded body bytes; reconstructed headers, not a wire transcript. Binary Hex is read-only.">Hex</button>
                   <button class="replay-fields-tab" hidden data-fields-target="request" title="Inspect Protobuf, MessagePack, CBOR or gRPC fields">Fields</button>
                 </div>
               </header>
               <div class="editor-panel">
                 <div id="replayRequestCM" class="cm-container" data-editor-label="Replay request" style="height:100%"></div>
+              </div>
+              <div id="replayRequestHexPager" class="replay-hex-pager" hidden aria-label="Request hex pages">
+                <span data-hex-range></span>
+                <button type="button" data-hex-previous aria-label="Previous request hex page">‹</button>
+                <input type="number" min="1" step="1" aria-label="Request hex page" />
+                <span data-hex-pages></span>
+                <button type="button" data-hex-next aria-label="Next request hex page">›</button>
               </div>
               <footer class="pane-footer">
                 <label class="pane-search">
@@ -998,7 +1069,7 @@
                 <div class="view-tabs">
                   <button class="replay-view-tab active" data-replay-target="response" data-replay-view="pretty">Pretty</button>
                   <button class="replay-view-tab" data-replay-target="response" data-replay-view="raw">Raw</button>
-                  <button class="replay-view-tab" data-replay-target="response" data-replay-view="hex">Hex</button>
+                  <button class="replay-view-tab" data-replay-target="response" data-replay-view="hex" title="Response headers and decoded body bytes; reconstructed headers, not a wire transcript">Hex</button>
                   <button class="replay-fields-tab" hidden data-fields-target="response" title="Inspect Protobuf, MessagePack, CBOR or gRPC fields">Fields</button>
                   <button class="replay-view-tab" data-replay-target="response" data-replay-view="render" title="The page as a browser draws it, sandboxed: no scripts, forms, navigation or network">Render</button>
                 </div>
@@ -1007,6 +1078,13 @@
                 <div id="replayResponseCM" class="cm-container" data-editor-label="Replay response"></div>
               </div>
               <div id="replayResponseRenderView" class="render-view hidden"></div>
+              <div id="replayResponseHexPager" class="replay-hex-pager" hidden aria-label="Response hex pages">
+                <span data-hex-range></span>
+                <button type="button" data-hex-previous aria-label="Previous response hex page">‹</button>
+                <input type="number" min="1" step="1" aria-label="Response hex page" />
+                <span data-hex-pages></span>
+                <button type="button" data-hex-next aria-label="Next response hex page">›</button>
+              </div>
               <footer class="pane-footer">
                 <label class="pane-search">
                   <input id="replayResponseSearchInput" type="search" aria-label="Search Replay response" placeholder="Search response" />
@@ -2279,6 +2357,7 @@
     <script src="/protobuf-wire.js" defer></script>
     <script src="/protobuf-edit.js" defer></script>
     <script src="/protobuf-fields.js" defer></script>
+    <script src="/tcp-capture.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

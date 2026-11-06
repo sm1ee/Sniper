@@ -105,6 +105,9 @@ pub struct AppState {
     active_session: Arc<RwLock<Arc<SessionContext>>>,
     app_version_cache: Arc<RwLock<Option<CachedAppVersionInfo>>>,
     update_in_progress: Arc<AtomicBool>,
+    /// Checked under session_activation_lock so no TCP listener can start after
+    /// shutdown takes its final snapshot, including on existing API keep-alives.
+    tcp_shutdown: Arc<AtomicBool>,
     /// The currently active proxy listener address (mutable — updated on rebind).
     pub active_proxy_addr: Arc<RwLock<SocketAddr>>,
     /// The currently bound UI listener address (mutable because port 0 is resolved at bind time).
@@ -212,6 +215,7 @@ impl AppState {
             active_session: Arc::new(RwLock::new(active_session)),
             app_version_cache: Arc::new(RwLock::new(None)),
             update_in_progress: Arc::new(AtomicBool::new(false)),
+            tcp_shutdown: Arc::new(AtomicBool::new(false)),
             active_proxy_addr: Arc::new(RwLock::new(active_proxy_addr)),
             active_ui_addr: Arc::new(RwLock::new(active_ui_addr)),
             remote_ui_exposed: Arc::new(AtomicBool::new(!active_ui_addr.ip().is_loopback())),
@@ -312,6 +316,99 @@ impl AppState {
         }
     }
 
+    pub async fn configure_tcp_capture(
+        &self,
+        settings: Option<crate::tcp_capture::TcpSettings>,
+        session_id: Option<uuid::Uuid>,
+        expected_active_session_id: Option<uuid::Uuid>,
+    ) -> Result<crate::tcp_capture::TcpStatus> {
+        let _guard = self.session_activation_lock.lock().await;
+        let session = self.session().await;
+        anyhow::ensure!(
+            session_id.map(|id| id == session.id()).unwrap_or(true)
+                && expected_active_session_id
+                    .map(|id| id == session.id())
+                    .unwrap_or(true),
+            "active session changed; reload TCP settings"
+        );
+        if let Some(settings) = settings {
+            anyhow::ensure!(
+                !self.tcp_shutdown.load(Ordering::Acquire),
+                "TCP capture cannot start while Sniper is shutting down"
+            );
+            session.tcp_capture.start(settings).await?;
+        } else {
+            session.tcp_capture.stop().await?;
+        }
+        Ok(session.tcp_capture.status().await)
+    }
+
+    // Keep the activation guard through owner acknowledgement, so a decision
+    // cannot cross a committed session switch. The owner never waits on socket
+    // writes before acknowledging a decision.
+    pub async fn configure_tcp_intercept(
+        &self,
+        update: crate::tcp_capture::PolicyUpdate,
+        session_id: Option<uuid::Uuid>,
+        expected_active_session_id: Option<uuid::Uuid>,
+    ) -> std::result::Result<crate::tcp_capture::InterceptPolicy, crate::tcp_capture::InterceptError>
+    {
+        let _guard = self.session_activation_lock.lock().await;
+        let session = self
+            .checked_tcp_write_session(session_id, expected_active_session_id)
+            .await?;
+        session.tcp_capture.set_policy(update)
+    }
+
+    pub async fn decide_tcp_intercept(
+        &self,
+        connection_id: uuid::Uuid,
+        pending_id: uuid::Uuid,
+        decision: crate::tcp_capture::DecisionRequest,
+        session_id: Option<uuid::Uuid>,
+        expected_active_session_id: Option<uuid::Uuid>,
+    ) -> std::result::Result<crate::tcp_capture::DecisionReceipt, crate::tcp_capture::InterceptError>
+    {
+        let _guard = self.session_activation_lock.lock().await;
+        let session = self
+            .checked_tcp_write_session(session_id, expected_active_session_id)
+            .await?;
+        session
+            .tcp_capture
+            .decide(connection_id, pending_id, decision)
+            .await
+    }
+
+    pub async fn close_tcp_connection(
+        &self,
+        connection_id: uuid::Uuid,
+        session_id: Option<uuid::Uuid>,
+        expected_active_session_id: Option<uuid::Uuid>,
+    ) -> std::result::Result<(), crate::tcp_capture::InterceptError> {
+        let _guard = self.session_activation_lock.lock().await;
+        let session = self
+            .checked_tcp_write_session(session_id, expected_active_session_id)
+            .await?;
+        session.tcp_capture.close(connection_id)
+    }
+
+    // The caller must hold session_activation_lock until its mutation finishes.
+    async fn checked_tcp_write_session(
+        &self,
+        session_id: Option<uuid::Uuid>,
+        expected_active_session_id: Option<uuid::Uuid>,
+    ) -> std::result::Result<Arc<SessionContext>, crate::tcp_capture::InterceptError> {
+        let session = self.session().await;
+        if session_id.is_some_and(|id| id != session.id())
+            || expected_active_session_id.is_some_and(|id| id != session.id())
+        {
+            return Err(crate::tcp_capture::InterceptError::Conflict(
+                "active session changed; reload TCP settings".into(),
+            ));
+        }
+        Ok(session)
+    }
+
     pub async fn session(&self) -> Arc<SessionContext> {
         let session = self.active_session.read().await.clone();
         self.start_history_retention_worker(&session);
@@ -404,7 +501,7 @@ impl AppState {
         let session = active_session.clone();
         let owner = crate::proxy::remember_active_proxy_session_owner(
             session.id(),
-            crate::proxy::PROXY_WORK_REPLAY,
+            crate::proxy::PROXY_WORK_HTTP_REQUEST,
         );
         (session, owner)
     }
@@ -555,21 +652,43 @@ impl AppState {
             if let Some(session) = loaded.get(&listing.summary.id) {
                 apply_live_session_counts(&mut listing.summary, session_live_counts(session).await);
                 listing.overview = session.overview().await;
+                listing.tcp_connection_count = session.tcp_capture.connection_count();
             }
         }
-        let dirs: Vec<std::path::PathBuf> = listings
+        let dirs: Vec<(std::path::PathBuf, bool)> = listings
             .iter()
-            .map(|listing| std::path::PathBuf::from(&listing.summary.storage_path))
+            .map(|listing| {
+                (
+                    std::path::PathBuf::from(&listing.summary.storage_path),
+                    loaded.contains_key(&listing.summary.id),
+                )
+            })
             .collect();
         if let Ok(sizes) = tokio::task::spawn_blocking(move || {
+            let mut tcp_budget = crate::tcp_capture::SUMMARY_READ_BUDGET;
             dirs.iter()
-                .map(|dir| crate::session::directory_bytes(dir))
+                .map(|(dir, loaded)| {
+                    (
+                        crate::session::directory_bytes(dir),
+                        if *loaded {
+                            None
+                        } else {
+                            crate::tcp_capture::stored_connection_count(
+                                &dir.join("tcp-history"),
+                                &mut tcp_budget,
+                            )
+                        },
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .await
         {
-            for (listing, bytes) in listings.iter_mut().zip(sizes) {
+            for (listing, (bytes, tcp_count)) in listings.iter_mut().zip(sizes) {
                 listing.storage_bytes = bytes;
+                if !loaded.contains_key(&listing.summary.id) {
+                    listing.tcp_connection_count = tcp_count;
+                }
             }
         }
         listings
@@ -871,7 +990,19 @@ impl AppState {
                     Ok(Ok(commit)) => {
                         session.replace_metadata(commit.metadata.clone());
                         let current_id = current.id();
+                        let mut finalization_error = commit.finalization_error;
                         if current_id != id {
+                            // Only stop after activation committed, inside its
+                            // cancellation-independent owner, not during preflight.
+                            if let Err(error) = current.tcp_capture.stop().await {
+                                // Activation already committed. Keep both contexts
+                                // owned, reconcile the active pointer, and report
+                                // the unsaved old captures rather than hiding them.
+                                finalization_error = Some(match finalization_error {
+                                    Some(previous) => anyhow::Error::new(error).context(previous),
+                                    None => error.into(),
+                                });
+                            }
                             let dropped_requests = current.intercepts.drop_all().await;
                             let dropped_responses = current.response_intercepts.drop_all().await;
                             if dropped_requests > 0 || dropped_responses > 0 {
@@ -889,7 +1020,7 @@ impl AppState {
                         SessionActivationOutcome::Replaced {
                             summary: session
                                 .summary(commit.metadata.id == state.sessions.active_session_id()),
-                            finalization_error: commit.finalization_error,
+                            finalization_error,
                         }
                     }
                     Ok(Err(error)) => {
@@ -1040,10 +1171,52 @@ impl AppState {
         self.sessions.session_storage_path(id)
     }
 
+    pub(crate) async fn stop_tcp_captures_for_shutdown(
+        &self,
+    ) -> Result<(), crate::tcp_capture::TcpPersistenceError> {
+        let _activation_guard = self.session_activation_lock.lock().await;
+        self.tcp_shutdown.store(true, Ordering::Release);
+        let mut contexts: Vec<_> = self
+            .session_contexts
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect();
+        let active = self.session().await;
+        if !contexts.iter().any(|session| session.id() == active.id()) {
+            contexts.push(active);
+        }
+        let mut pending_records = 0;
+        // Attempt every cached session even if one fails. Switched-away captures
+        // must neither be forgotten nor prevent healthy sessions from saving.
+        for session in contexts {
+            let operation_lock = self.session_operation_lock(session.id()).await;
+            let _operation_guard = operation_lock.lock_owned().await;
+            // Deletion can run through an existing API connection while shutdown
+            // retries. Never recreate storage for a session it already removed.
+            if self.sessions.contains_session(session.id()) {
+                if let Err(error) = session.tcp_capture.stop().await {
+                    pending_records += error.pending_records;
+                }
+            }
+        }
+        if pending_records == 0 {
+            Ok(())
+        } else {
+            Err(crate::tcp_capture::TcpPersistenceError { pending_records })
+        }
+    }
+
+    pub fn cancel_tcp_shutdown(&self) {
+        self.tcp_shutdown.store(false, Ordering::Release);
+    }
+
     /// Stop every cached session's Recon and Template Scan jobs before
     /// shutdown. A switched-away session may still own a job, so persisting
     /// only the active one loses it.
     pub async fn stop_background_jobs(&self) -> Result<()> {
+        self.stop_tcp_captures_for_shutdown().await?;
         let mut contexts: Vec<_> = self
             .session_contexts
             .lock()
@@ -1649,6 +1822,7 @@ impl AppState {
         artifact_guard.clear_detach_targets();
 
         if let Err(error) = self.prepare_for_self_update_shutdown().await {
+            self.cancel_tcp_shutdown();
             cleanup_update_artifacts(&[], &tmp_dir).await;
             return Err(error);
         }
@@ -1713,6 +1887,7 @@ impl AppState {
     }
 
     async fn restore_proxy_after_self_update_prepare_failure(self: &Arc<Self>) {
+        self.cancel_tcp_shutdown();
         let proxy_addr = self.get_active_proxy_addr().await;
         match crate::proxy::rebind_proxy(Arc::clone(self), proxy_addr).await {
             Ok(()) => {
@@ -4433,6 +4608,106 @@ mod tests {
         })
         .unwrap();
         (data_dir, state)
+    }
+
+    #[tokio::test]
+    async fn tcp_shutdown_waits_for_inactive_session_operation_guard() {
+        let (data_dir, state) = activation_commit_test_state();
+        let old = state.session().await;
+        let target = state
+            .sessions
+            .create_session(Some("TCP shutdown lock".into()))
+            .unwrap();
+        state.activate_session(target.id).await.unwrap();
+        let operation_lock = state.session_operation_lock(old.id()).await;
+        let operation_guard = operation_lock.lock_owned().await;
+        let copy = state.clone();
+        let mut shutdown = tokio::spawn(async move { copy.stop_tcp_captures_for_shutdown().await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut shutdown)
+                .await
+                .is_err()
+        );
+        drop(operation_guard);
+        tokio::time::timeout(std::time::Duration::from_secs(3), shutdown)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn tcp_shutdown_gate_serializes_with_start_and_can_be_cancelled() {
+        let (data_dir, state) = activation_commit_test_state();
+        let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let settings = crate::tcp_capture::TcpSettings {
+            local_port: reservation.local_addr().unwrap().port(),
+            target_host: "127.0.0.1".into(),
+            target_port: 1,
+        };
+        drop(reservation);
+        let (_start, stop) = tokio::join!(
+            state.configure_tcp_capture(Some(settings.clone()), None, None),
+            state.stop_background_jobs()
+        );
+        stop.unwrap();
+        assert!(!state.session().await.tcp_capture.status().await.enabled);
+        let error = state
+            .configure_tcp_capture(Some(settings.clone()), None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "TCP capture cannot start while Sniper is shutting down"
+        );
+        state.configure_tcp_capture(None, None, None).await.unwrap();
+        state.cancel_tcp_shutdown();
+        state
+            .configure_tcp_capture(Some(settings), None, None)
+            .await
+            .unwrap();
+        state.configure_tcp_capture(None, None, None).await.unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn tcp_listener_survives_failed_activation_but_stops_after_commit() {
+        let (data_dir, state) = activation_commit_test_state();
+        let original = state.session().await;
+        let target = state
+            .sessions
+            .create_session(Some("TCP target".to_owned()))
+            .unwrap();
+        let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        state
+            .configure_tcp_capture(
+                Some(crate::tcp_capture::TcpSettings {
+                    local_port: port,
+                    target_host: "127.0.0.1".into(),
+                    target_port: 1,
+                }),
+                Some(original.id()),
+                Some(original.id()),
+            )
+            .await
+            .unwrap();
+        assert!(state
+            .configure_tcp_capture(None, Some(target.id), Some(original.id()))
+            .await
+            .is_err());
+        assert!(original.tcp_capture.status().await.enabled);
+        state
+            .sessions
+            .fail_next_activation(crate::session::SessionActivationFault::BeforeReplacement);
+        assert!(state.activate_session(target.id).await.is_err());
+        assert_eq!(state.session().await.id(), original.id());
+        assert!(original.tcp_capture.status().await.enabled);
+        state.activate_session(target.id).await.unwrap();
+        assert!(!original.tcp_capture.status().await.enabled);
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     fn activation_commit_fault(after: bool) -> crate::session::SessionActivationFault {
