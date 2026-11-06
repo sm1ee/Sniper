@@ -121,6 +121,9 @@ pub struct SessionListing {
     pub summary: SessionSummary,
     pub overview: SessionOverview,
     pub storage_bytes: u64,
+    /// Retained TCP records, or unknown if their storage cannot be summarized.
+    #[serde(default)]
+    pub tcp_connection_count: Option<usize>,
 }
 
 /// Findings counted by severity.
@@ -616,6 +619,7 @@ fn wait_snapshot_gate(gate: &mut Option<SnapshotTestGate>, phase: SnapshotTestPh
 }
 
 pub struct SessionContext {
+    pub tcp_capture: Arc<crate::tcp_capture::TcpCapture>,
     pub(crate) upstream_peer_settings: crate::upstream_peer_settings::SessionPeerSettingsState,
     pub(crate) history_retention: crate::history_retention::SessionRetentionState,
     retention_writable: bool,
@@ -762,6 +766,9 @@ impl SessionContext {
             store.mark_retention_compaction_pending(transaction_event_sequence);
         }
         Self {
+            tcp_capture: Arc::new(crate::tcp_capture::TcpCapture::load(
+                storage_dir.join("tcp-history"),
+            )),
             upstream_peer_settings: Default::default(),
             history_retention: Default::default(),
             retention_writable: enable_journal,
@@ -2030,6 +2037,7 @@ impl SessionRegistry {
                 ),
                 overview: metadata.overview.clone(),
                 storage_bytes: 0,
+                tcp_connection_count: None,
             })
             .collect::<Vec<_>>();
         sessions.sort_by_key(|session| std::cmp::Reverse(session.summary.last_opened_at));

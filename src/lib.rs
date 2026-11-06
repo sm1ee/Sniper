@@ -50,6 +50,7 @@ pub mod special_host;
 pub mod state;
 pub mod store;
 pub mod target;
+pub mod tcp_capture;
 pub mod templates;
 pub mod ui_settings;
 pub mod upstream_peer_settings;
@@ -171,10 +172,32 @@ fn combine_api_and_shutdown_results(
 }
 
 async fn run_api_until_shutdown(state: Arc<AppState>) -> Result<()> {
+    let api = api::run_api(state.clone());
+    tokio::pin!(api);
     tokio::select! {
-        result = api::run_api(state) => result,
-        () = wait_for_shutdown_signal() => {
-            Ok(())
+        result = &mut api => return result,
+        () = wait_for_shutdown_signal() => {}
+    }
+    // Keep the API available for inspecting retained captures while storage is
+    // unavailable. The shutdown admission gate rejects new TCP starts.
+    tokio::select! {
+        result = &mut api => result,
+        () = wait_for_tcp_capture_persistence(&state) => Ok(())
+    }
+}
+
+async fn wait_for_tcp_capture_persistence(state: &AppState) {
+    let mut reported = false;
+    loop {
+        match state.stop_tcp_captures_for_shutdown().await {
+            Ok(()) => return,
+            Err(error) => {
+                if !reported {
+                    warn!(%error, "shutdown blocked; retaining TCP captures and retrying storage every second");
+                    reported = true;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
         }
     }
 }
@@ -222,6 +245,8 @@ async fn shutdown_headless_runtime(
     state: &AppState,
     oast_task: tokio::task::JoinHandle<()>,
 ) -> Result<()> {
+    // Also covers API-server failure instead of an explicit shutdown signal.
+    wait_for_tcp_capture_persistence(state).await;
     state.stop_background_jobs().await?;
     oast_task.abort();
     if let Err(error) = oast_task.await {

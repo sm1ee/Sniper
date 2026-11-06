@@ -5163,7 +5163,7 @@ button.utility-button.replay-tab-add {
    Narrow windows scroll this table inside its existing history-table-shell. */
 .history-table.session-table {
   width: 100%;
-  min-width: 1140px;
+  min-width: 1204px;
 }
 
 .session-table thead th {
@@ -5173,10 +5173,11 @@ button.utility-button.replay-tab-add {
 .session-table thead th:nth-child(2) { width: 136px; }
 .session-table thead th:nth-child(3) { width: 88px; }
 .session-table thead th:nth-child(4) { width: 104px; }
-.session-table thead th:nth-child(5) { width: 80px; }
-.session-table thead th:nth-child(6),
-.session-table thead th:nth-child(7) { width: 160px; }
-.session-table thead th:nth-child(8) { width: 180px; }
+.session-table thead th:nth-child(5) { width: 64px; }
+.session-table thead th:nth-child(6) { width: 80px; }
+.session-table thead th:nth-child(7),
+.session-table thead th:nth-child(8) { width: 160px; }
+.session-table thead th:nth-child(9) { width: 180px; }
 
 .session-table thead th[data-sort-key] {
   cursor: pointer;
@@ -9663,6 +9664,7 @@ button.utility-button.replay-tab-add {
 .replay-fields-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .protobuf-fields-open > .editor-panel,
 .protobuf-fields-open > .render-view,
+.protobuf-fields-open > .replay-hex-pager,
 .protobuf-fields-open > .pane-footer { display: none !important; }
 .protobuf-fields-view { flex: 1; min-height: 0; overflow: auto; padding: 6px 12px; font-family: var(--mono); }
 .protobuf-fields-view[hidden] { display: none; }
@@ -9687,3 +9689,94 @@ button.utility-button.replay-tab-add {
 
 /* Preserve native hidden semantics even alongside tab display rules. */
 .replay-fields-tab[hidden] { display: none; }
+
+/* TCP reuses Capture's table and byte-view surfaces. */
+.tcp-workbench { display: grid; grid-template-rows: minmax(150px, 40%) minmax(180px, 1fr); height: 100%; min-height: 0; gap: 6px; }
+.tcp-history, .tcp-stream { min-height: 0; display: flex; flex-direction: column; }
+#tcpHistoryStatus { white-space: normal; overflow-wrap: anywhere; cursor: default; }
+.tcp-history .history-table-shell { flex: 1; min-height: 0; overflow: auto; }
+.tcp-stream .tcp-bytes { flex: 1; min-height: 0; margin: 0; overflow: auto; padding: 12px; white-space: pre; font-family: var(--mono); }
+.tcp-listener-fields { display: grid; grid-template-columns: 160px minmax(160px, 1fr) 140px; gap: 12px; }
+.tcp-error { color: var(--danger); margin: 0; }
+.tcp-error:empty { display: none; }
+#tcpHistoryRows tr.selected { background: var(--selection); }
+.tcp-row-target { background: none; border: 0; color: inherit; text-align: left; font: inherit; padding: 0; cursor: pointer; }
+#tcpPanel { position: relative; display: flex; flex-direction: column; }
+#tcpPanel .tcp-workbench { flex: 1; height: auto; }
+#tcpHistoryError:not(:empty) { padding: 6px 10px; }
+@media (max-width: 760px) { .tcp-listener-fields { grid-template-columns: 1fr; } }
+
+#tcpStateFilter, #tcpDirection {
+  height: var(--control-h); color: var(--text-soft); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 4px; font: inherit; padding: 0 8px;
+}
+#tcpHistoryRows td { white-space: nowrap; }
+#tcpHistoryRows td:nth-child(7) { font-variant-numeric: tabular-nums; }
+
+/* Interception stays in the selected TCP connection, separate from listener settings. */
+.tcp-intercept-toolbar, .tcp-pending-bar, .tcp-connection-actions { display: flex; align-items: center; gap: 8px; padding: 6px 10px; flex-wrap: wrap; }
+.tcp-intercept-toolbar { border-bottom: 1px solid var(--line); }
+#tcpInterceptStatus, #tcpPendingMeta, #tcpInterceptNotice { color: var(--text-soft); font-size: 12px; }
+.tcp-stream-surface, .tcp-pending-surface { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.tcp-stream-surface[hidden], .tcp-pending-surface[hidden] { display: none; }
+/* Expanded evidence scrolls inside Pending, never over decision controls or Close. */
+.tcp-pending-surface { overflow-y: auto; }
+.tcp-pending-surface > .tcp-pending-bar, .tcp-pending-surface > .pane-footer { flex-shrink: 0; }
+#tcpPendingHex { flex: 1; min-height: 80px; resize: none; border: 0; border-block: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 12px; font: 12px/1.7 var(--mono); }
+#tcpPendingHex:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+#tcpPendingOriginal { flex: 0 0 auto; padding: 5px 12px; border-bottom: 1px solid var(--line); font: 12px var(--mono); }
+#tcpPendingOriginal[hidden] { display: none; }
+#tcpPendingOriginal summary { cursor: pointer; color: var(--text-soft); }
+#tcpPendingOriginalHex { max-height: 120px; margin: 8px 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+#tcpPendingOriginalHex:focus-visible { outline: 1px solid var(--accent); }
+.tcp-pending-spacer, #tcpInterceptNotice { flex: 1; }
+.tcp-connection-actions { border-top: 1px solid var(--line); }
+#tcpInterceptDirection, #tcpPendingPicker { height: var(--control-h); color: var(--text-soft); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; font: inherit; padding: 0 8px; max-width: 100%; }
+#tcpInterceptError:not(:empty) { padding: 6px 10px; }
+.tcp-intercept-history { max-height: 32%; overflow: auto; font: 12px var(--mono); }
+.tcp-intercept-history details { padding: 5px 12px; border-top: 1px solid var(--line); }
+.tcp-intercept-history summary { cursor: pointer; color: var(--text-soft); }
+.tcp-intercept-history pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Expanded byte comparisons share the stream area instead of a fixed-height sliver. */
+.tcp-intercept-history.expanded { flex: 2 1 0; min-height: 100px; max-height: none; }
+.tcp-stream-surface > .tcp-bytes { flex: 1 1 0; min-height: 40px; }
+.tcp-event-bytes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.tcp-event-bytes pre { margin: 8px 0; line-height: 1.5; }
+.tcp-event-note { margin: 0 0 6px; color: var(--text-soft); font-size: 11px; }
+@media (max-width: 680px) { .tcp-event-bytes { grid-template-columns: minmax(0, 1fr); gap: 0; } }
+
+/* Keep endpoint/status columns readable; overflow belongs to the table, not the app. */
+.tcp-workbench { grid-template-columns: minmax(0, 1fr); }
+.tcp-history, .tcp-stream { min-width: 0; }
+.tcp-history .mini-table { min-width: 960px; table-layout: auto; }
+.tcp-history .mini-table th { white-space: nowrap; }
+.tcp-history .history-table-shell:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+/* Only large Replay Hex payloads need another row; ordinary messages keep their layout. */
+.replay-hex-pager {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 14px;
+  border-top: 1px solid var(--line);
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+}
+.replay-hex-pager[hidden] { display: none; }
+.replay-hex-pager [data-hex-range] { margin-right: auto; }
+.replay-hex-pager :is(input, button) {
+  min-height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-code);
+  color: var(--text-soft);
+  font: inherit;
+}
+.replay-hex-pager input { width: 64px; min-width: 0; padding: 2px 4px; text-align: center; }
+.replay-hex-pager button { min-width: 24px; padding: 2px 6px; cursor: pointer; }
+.replay-hex-pager button:hover:not(:disabled) { background: var(--panel-soft); color: var(--text); }
+.replay-hex-pager button:disabled { color: var(--text-dim); opacity: 0.5; cursor: default; }
+.replay-hex-pager :is(input, button):focus-visible { outline: 2px solid var(--point); outline-offset: 1px; }

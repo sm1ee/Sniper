@@ -65,3 +65,23 @@ test('CBOR actual Replay apply preserves framing undo and stale guards',()=>{
  assert.throws(()=>f.provider().applyFields(s,Uint8Array.from([1])),/stale-source/);
  const g=fixture(false,'cbor');assert.throws(()=>g.provider().applyFields({...g.snapshot(),format:'cbor'},Uint8Array.from([0x62,97,98])),/Content-Length/);
 });
+
+for (const format of ['protobuf', 'msgpack', 'cbor']) {
+ test(`${format} Fields apply remains undoable after repeated Hex and Raw visits`, () => {
+  const f=fixture(true, format==='protobuf'?false:format==='msgpack'?true:'cbor');
+  const before=f.a.requestText;
+  const bytes=format==='protobuf'?[8,128,1]:format==='msgpack'?[0xa2,97,98]:[0x62,97,98];
+  f.provider().applyFields({...f.snapshot(),format},Uint8Array.from(bytes));
+  const after=f.a.requestText;
+  for(let i=0;i<3;i++) {
+   f.state.replayMessageViews.request='hex';f.context.renderReplayViewContent('request');
+   assert.equal(f.cv()._editable,false);assert.equal(f.undo(),false);
+   f.render();
+   f.state.replayMessageViews.request='raw';f.context.renderReplayViewContent('request');
+   assert.equal(f.cv().getContent(),after);
+   assert.equal(f.undo(),true);assert.equal(f.a.requestText,before);
+   assert.equal(f.a.baseRequest.body_encoding,'base64');
+   assert.equal(f.undo(),false);assert.equal(f.redo(),true);assert.equal(f.a.requestText,after);
+  }
+ });
+}

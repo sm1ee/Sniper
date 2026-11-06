@@ -42,7 +42,7 @@ function editorFixture() {
         const transaction = specs[0]?.startState ? specs[0] : this.state.update(...specs);
         this.transactions.push(transaction); this.state = transaction.state;
         for (const listener of this.state.facet(CM.EditorView.updateListener)) {
-          listener({ view: this, state: this.state, docChanged: transaction.docChanged });
+          listener({ view: this, state: this.state, transactions: [transaction], docChanged: transaction.docChanged });
         }
       };
       f.views.push(this);
@@ -72,7 +72,8 @@ function editorFixture() {
   for (const name of [
     "createBaseExtensions", "addCMUpdateListener", "normalizeSearchClasses", "normalizeSearchEffectValue",
     "forEachCodeSearchMatch", "buildSearchDecorations", "buildChangedLineDecorations", "buildSearchMeta",
-    "updateCodePaneCM", "getCMView", "renderReplay", "renderReplayViewContent", "renderReplayViewTabs", "shownResponseView", "responseRenders",
+    "replayHexTextSource", "replayHexPageText", "syncReplayHexPager",
+    "updateCodePaneCM", "getCMView", "renderReplay", "replayRequestHexText", "renderReplayViewContent", "renderReplayViewTabs", "shownResponseView", "responseRenders",
     "renderReplayClearedState", "syncReplayToolbar", "updateReplaySearchPane", "toHexDumpFromBytes",
     "syncReplayRequestTextFromEditor", "clearReplayResponseForDraftChange", "setReplayTargetInputValidity",
     "parseEditableRawRequest", "splitRawHttpMessage", "parseReplayHttpVersionToken", "headerValue",

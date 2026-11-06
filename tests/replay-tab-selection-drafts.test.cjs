@@ -319,15 +319,20 @@ test('ordinary CodeMirror document changes synchronously retain a partial raw dr
   const f = setup(); let updateListener;
   f.context.CM = {
     EditorView: { updateListener: { of: callback => callback } },
+      EditorState: { transactionFilter: { of: () => null } },
     StateEffect: { appendConfig: { of: listener => listener } },
   };
   f.context.cmProgrammaticViews = new WeakSet();
-  const view = { dispatch: update => { updateListener = update.effects; } };
+  const view = { dispatch: update => { updateListener = Array.isArray(update.effects) ? update.effects[0] : update.effects; } };
+  // Production Replay registers its live editor before wiring listeners.
+  const originalGetCMView = f.context.getCMView;
+  f.context.getCMView = () => ({ view });
   vm.runInContext(source('addCMUpdateListener'), f.context);
   f.context.addCMUpdateListener(view, f.context.syncReplayRequestTextFromEditor);
   f.els.replayRequestHighlight.innerText = 'GET /cm-partial HTT';
   updateListener({ docChanged: true, view, state: { doc: { toString: () => 'GET /cm-partial HTT' } } });
   assert.equal(f.a.requestText, 'GET /cm-partial HTT');
+  f.context.getCMView = originalGetCMView;
   f.click(f.b.id); f.click(f.a.id);
   assert.equal(f.els.replayRequestEditor.value, 'GET /cm-partial HTT');
 });

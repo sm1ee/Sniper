@@ -115,6 +115,33 @@ test('request apply explicitly edits one occurrence; stale revision and response
  assert.equal(responseCell.children.length,0);
  delete global.document;
 });
+test('Fields applies the deepest supported group scalar and clearly rejects over-limit groups', () => {
+ global.SniperProtobufEdit=require('../web/protobuf-edit.js');
+ const card=node(),button=node('button');button.dataset.fieldsTarget='request';button.card=card;
+ global.document={querySelectorAll:()=>[button],createElement:node};
+ const nested=(depth,value)=>Buffer.from([...Array(depth).fill(11),8,value,...Array(depth).fill(12)]);
+ const owner={};let revision=0,applied=0;
+ let message={body:nested(wire.limits.depth,1).toString('base64'),body_encoding:'base64',headers:[{name:'Content-Type',value:'application/protobuf'}]};
+ const model=inspect(message),leaf=model.rows.at(-1);
+ assert.equal(leaf.depth,wire.limits.depth);assert.equal(leaf.path.length,wire.limits.depth + 1);
+ fields.init(()=>({owner,revision,requestText:message.body,editable:true,request:()=>message,applyFields(snapshot,bytes){
+  assert.equal(snapshot.revision,revision);message={...message,body:Buffer.from(bytes).toString('base64')};revision++;applied++;
+ }}));
+ try {
+  button.click();const view=card.children[0];
+  const cell=()=>view.children[1].children[1].children.at(-1).children[2];
+  cell().children[0].click();const form=cell().children[0];
+  form.children[0].children[0].value='2';form.children[1].click();
+  assert.equal(applied,1);assert.equal(form.children[3].textContent,'');
+  assert.deepEqual(Buffer.from(message.body,'base64'),nested(wire.limits.depth,2));
+  assert.equal(inspect(message).rows.at(-1).unsigned,'2');
+  message={...message,body:nested(wire.limits.depth + 1,1).toString('base64')};revision++;
+  const before=JSON.stringify(message);fields.sync();
+  assert.match(view.children[1].textContent,/depth-limit.*Raw and Hex are unchanged/);
+  assert.equal(view.children.length,2,'no partial table or edit control is offered');
+  assert.equal(applied,1);assert.equal(JSON.stringify(message),before);
+ } finally { delete global.document; }
+});
 test('edit asset and app source guard ownership revision and framing before applying',()=>{
  const app=fs.readFileSync(path.join(__dirname,'../web/app.js'),'utf8');
  assert.match(app,/current !== snapshot.owner/);assert.match(app,/current.protobufEditRevision/);assert.match(app,/current.requestText !== snapshot.requestText/);

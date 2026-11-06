@@ -28,6 +28,7 @@ function tabFixture() {
   let loads = 0;
   const state = { activeProxyTab: "findings" };
   const context = loadFunctions(["renderProxyPanels"], {
+    document: { getElementById(id) { assert.equal(id, "tcpPanel"); return null; } },
     els, state, proxyTabs: [], sanitizeActiveProxyTab: value => value,
     loadFindings() { loads++; }, applySavedWebsocketPaneWidth() {}, renderMatchReplaceRules() {},
   });

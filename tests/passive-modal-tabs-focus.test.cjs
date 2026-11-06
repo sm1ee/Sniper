@@ -22,7 +22,10 @@ function classList(initial = "") {
 }
 
 function tabFixture() {
-  const document = { activeElement: null };
+  const document = {
+    activeElement: null,
+    getElementById(id) { assert.equal(id, "tcpPanel"); return null; },
+  };
   const saved = [], loads = [];
   function node(dataset = {}, classes = "") {
     const handlers = new Map(), attrs = new Map();

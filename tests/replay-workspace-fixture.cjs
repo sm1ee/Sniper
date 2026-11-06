@@ -4,6 +4,8 @@ const vm = require("node:vm");
 const { appSource, loadFunctions } = require("./frontend-test-helpers.cjs");
 const plain = value => JSON.parse(JSON.stringify(value));
 const functions = [
+  "splitRawHttpMessage", "parseEditableRawRequest", "parseReplayHttpVersionToken", "headerValue", "editableRequestBodyLength", "decodedBase64Length", "validateRawHttpBodyFraming",
+  "replayRequestSizeError", "canStoreReplayRequest", "replayRequestEditCandidate", "acceptReplayRequestEdit",
   "adoptExternalWorkspace", "replayTabHasUncommittedEditorState", "adoptExternalReplayResult",
   "readFuzzerWorkspace", "applyFuzzerWorkspace", "snapshotFuzzerWorkspace", "fuzzerWorkspaceChanged",
   "fuzzerWorkspaceAttackRecordId",

@@ -107,12 +107,12 @@ test('long session names stay within the cell with a full-name tooltip', () => {
 
 test('Session column budgets leave room for names and both actions without changing other tables', () => {
   const css = fs.readFileSync(path.join(__dirname, '../web/styles.css'), 'utf8');
-  assert.match(css, /\.history-table\.session-table \{\s*width: 100%;\s*min-width: 1140px;/);
+  assert.match(css, /\.history-table\.session-table \{\s*width: 100%;\s*min-width: 1204px;/);
   assert.match(css, /\.session-table thead th \{\s*box-sizing: border-box;/);
-  for (const [column, width] of [[2, 136], [3, 88], [4, 104], [5, 80], [8, 180]]) {
+  for (const [column, width] of [[2, 136], [3, 88], [4, 104], [5, 64], [6, 80], [9, 180]]) {
     assert.ok(css.includes(`.session-table thead th:nth-child(${column}) { width: ${width}px; }`));
   }
-  assert.match(css, /\.session-table thead th:nth-child\(6\),\s*\.session-table thead th:nth-child\(7\) \{ width: 160px; \}/);
+  assert.match(css, /\.session-table thead th:nth-child\(7\),\s*\.session-table thead th:nth-child\(8\) \{ width: 160px; \}/);
   assert.doesNotMatch(css, /\.session-table thead th:nth-child\(1\)\s*\{[^}]*width:/);
   assert.match(css, /\.history-table-shell \{[^}]*overflow: auto;/);
 });

@@ -1,0 +1,3797 @@
+//! Opt-in, fixed-destination TCP capture. Read chunks are not protocol messages.
+//! Interception is opt-in; read ranges are not application messages. No TLS termination.
+mod history_io;
+use history_io::HistoryDirectory;
+
+use base64::{engine::general_purpose::STANDARD, Engine};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap,
+    net::{Ipv4Addr, Ipv6Addr},
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::{watch, Mutex},
+    task::{JoinHandle, JoinSet},
+};
+use uuid::Uuid;
+
+pub const MAX_CONNECTIONS: usize = 256;
+pub const MAX_ACTIVE: usize = 32;
+pub const MAX_CAPTURE_BYTES: usize = 256 * 1024;
+pub const MAX_CHUNKS: usize = 1024;
+const MAX_RECORD_FILE_BYTES: u64 = 3 * 1024 * 1024;
+// Leave room for crash leftovers without allowing an unbounded directory scan.
+const MAX_HISTORY_DIRECTORY_ENTRIES: usize = 4 * MAX_CONNECTIONS;
+pub const MAX_PENDING_BYTES: usize = 16 * 1024;
+const MAX_EVENT_BYTES: usize = 256 * 1024;
+const MAX_EVENTS: usize = 1024;
+// A target is a validated 253-byte host plus a colon and a five-digit port.
+const MAX_TARGET_BYTES: usize = 259;
+const MAX_PEER_BYTES: usize = 128;
+const MAX_STATUS_BYTES: usize = 16;
+const MAX_CHUNK_BASE64_BYTES: usize = 4 * MAX_CAPTURE_BYTES.div_ceil(3);
+const MAX_EVENT_BASE64_BYTES: usize = 4 * MAX_PENDING_BYTES.div_ceil(3);
+
+fn bounded_string<'de, D: serde::Deserializer<'de>, const LIMIT: usize>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    struct Visitor<const LIMIT: usize>;
+    impl<'de, const LIMIT: usize> serde::de::Visitor<'de> for Visitor<LIMIT> {
+        type Value = String;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(formatter, "a string no longer than {LIMIT} bytes")
+        }
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<String, E> {
+            if value.len() > LIMIT {
+                return Err(E::custom("TCP history string limit exceeded"));
+            }
+            Ok(value.to_owned())
+        }
+        fn visit_string<E: serde::de::Error>(self, value: String) -> Result<String, E> {
+            if value.len() > LIMIT {
+                return Err(E::custom("TCP history string limit exceeded"));
+            }
+            Ok(value)
+        }
+    }
+    deserializer.deserialize_string(Visitor::<LIMIT>)
+}
+
+fn bounded_optional_string<'de, D: serde::Deserializer<'de>, const LIMIT: usize>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    struct Visitor<const LIMIT: usize>;
+    impl<'de, const LIMIT: usize> serde::de::Visitor<'de> for Visitor<LIMIT> {
+        type Value = Option<String>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an optional bounded string")
+        }
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+            bounded_string::<D, LIMIT>(d).map(Some)
+        }
+    }
+    deserializer.deserialize_option(Visitor::<LIMIT>)
+}
+
+fn bounded_vec<'de, D, T, const LIMIT: usize>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Visitor<T, const LIMIT: usize>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>, const LIMIT: usize> serde::de::Visitor<'de> for Visitor<T, LIMIT> {
+        type Value = Vec<T>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(formatter, "no more than {LIMIT} TCP history entries")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut entries = Vec::new();
+            while entries.len() < LIMIT {
+                match seq.next_element()? {
+                    Some(entry) => entries.push(entry),
+                    None => return Ok(entries),
+                }
+            }
+            if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(serde::de::Error::custom("TCP history entry limit exceeded"));
+            }
+            Ok(entries)
+        }
+    }
+    deserializer.deserialize_seq(Visitor::<T, LIMIT>(std::marker::PhantomData))
+}
+/// Shared by one Session listing request, including all inactive sessions.
+pub const SUMMARY_READ_BUDGET: u64 = 32 * 1024 * 1024;
+const SUMMARY_CACHE_ENTRIES: usize = 4096;
+const SUMMARY_DIRECTORY_CACHE_ENTRIES: usize = 128;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SummaryFingerprint {
+    bytes: u64,
+    modified: std::time::SystemTime,
+    created: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+impl SummaryFingerprint {
+    fn read(metadata: &std::fs::Metadata) -> Option<Self> {
+        if !metadata.is_file() {
+            return None;
+        }
+        Some(Self {
+            bytes: metadata.len(),
+            modified: metadata.modified().ok()?,
+            created: metadata.created().ok(),
+            #[cfg(unix)]
+            identity: {
+                use std::os::unix::fs::MetadataExt;
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            },
+        })
+    }
+}
+#[derive(Default)]
+struct SummaryCache {
+    clock: u64,
+    files: BTreeMap<PathBuf, (SummaryFingerprint, bool, u64)>,
+    directories: BTreeMap<PathBuf, (Vec<(PathBuf, SummaryFingerprint)>, usize, u64)>,
+}
+
+// write_json replaces the .json extension with .tmp-<UUID> before rename.
+// Only its exact canonical UUID spelling is reserved; arbitrary non-JSON files
+// still indicate a history problem. Callers must also reject non-regular files.
+fn is_history_temporary_path(path: &std::path::Path) -> bool {
+    let canonical_uuid =
+        |value: &str| Uuid::parse_str(value).is_ok_and(|id| id.to_string() == value);
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .is_some_and(canonical_uuid)
+        && path
+            .extension()
+            .and_then(|value| value.to_str())
+            .and_then(|value| value.strip_prefix("tmp-"))
+            .is_some_and(canonical_uuid)
+}
+
+/// Count record envelopes without allocating previews. None is unknown, not empty.
+/// Completed counts have a separate bounded cache so file-cache churn does not
+/// immediately make an already summarized directory unknown again.
+/// Payload semantics remain the full loader's responsibility when a session opens.
+pub fn stored_connection_count(directory: &std::path::Path, budget: &mut u64) -> Option<usize> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<SummaryCache>> = std::sync::OnceLock::new();
+    let mut cache = CACHE.get_or_init(Default::default).lock().ok()?;
+    stored_connection_count_cached(directory, budget, &mut cache, SUMMARY_CACHE_ENTRIES)
+}
+
+fn stored_connection_count_cached(
+    directory: &std::path::Path,
+    budget: &mut u64,
+    cache: &mut SummaryCache,
+    file_capacity: usize,
+) -> Option<usize> {
+    #[derive(Deserialize)]
+    struct Header {
+        id: Uuid,
+        started_at: DateTime<Utc>,
+        #[serde(deserialize_with = "bounded_string::<_, MAX_STATUS_BYTES>")]
+        status: String,
+        #[serde(
+            default,
+            deserialize_with = "bounded_optional_string::<_, MAX_PEER_BYTES>"
+        )]
+        peer: Option<String>,
+        #[serde(
+            default,
+            deserialize_with = "bounded_optional_string::<_, MAX_TARGET_BYTES>"
+        )]
+        target: Option<String>,
+    }
+    let root = match HistoryDirectory::open(directory) {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(0),
+        Err(_) => return None,
+    };
+    let mut entries = Vec::new();
+    for (index, entry) in root
+        .entries()
+        .ok()?
+        .take(MAX_HISTORY_DIRECTORY_ENTRIES + 1)
+        .enumerate()
+    {
+        if index == MAX_HISTORY_DIRECTORY_ENTRIES {
+            return None;
+        }
+        let path = entry.ok()?.path();
+        if is_history_temporary_path(&path) {
+            if !root.is_regular_entry(path.file_name()?).ok()? {
+                return None;
+            }
+            continue;
+        }
+        let file = root.open_file(path.file_name()?).ok()?;
+        let fingerprint = SummaryFingerprint::read(&file.metadata().ok()?)?;
+        if entries.len() == MAX_CONNECTIONS
+            || path.extension().and_then(|value| value.to_str()) != Some("json")
+            || fingerprint.bytes > MAX_RECORD_FILE_BYTES
+        {
+            return None;
+        }
+        entries.push((path, fingerprint));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    cache.clock = cache.clock.saturating_add(1);
+    let clock = cache.clock;
+    // On platforms without change-time/file identity, do not reuse content
+    // validation solely from size/mtime: replacing a file could preserve both.
+    #[cfg(unix)]
+    if let Some((signature, count, touched)) = cache.directories.get_mut(directory) {
+        if *signature == entries {
+            *touched = clock;
+            root.check_current().ok()?;
+            return Some(*count);
+        }
+    }
+    cache.directories.remove(directory);
+    let mut complete = true;
+    for (path, fingerprint) in &entries {
+        #[cfg(unix)]
+        if let Some((saved, valid, touched)) = cache.files.get_mut(path) {
+            if saved == fingerprint {
+                *touched = clock;
+                if !*valid {
+                    return None;
+                }
+                continue;
+            }
+        }
+        if fingerprint.bytes > *budget {
+            complete = false;
+            continue;
+        }
+        *budget -= fingerprint.bytes;
+        let file = root.open_file(path.file_name()?).ok()?;
+        if SummaryFingerprint::read(&file.metadata().ok()?)?.ne(fingerprint) {
+            return None;
+        }
+        // IgnoredAny streams base64 strings without materializing TcpChunks.
+        // Limit to stat size so a concurrently growing file cannot exceed budget.
+        let reader = std::io::Read::take(file, fingerprint.bytes);
+        let header: Result<Header, _> = serde_json::from_reader(std::io::BufReader::new(reader));
+        let valid = header.is_ok_and(|header| {
+            let _ = (header.started_at, header.peer, header.target);
+            path.file_stem().and_then(|value| value.to_str())
+                == Some(header.id.to_string().as_str())
+                && [
+                    "connecting",
+                    "open",
+                    "closed",
+                    "failed",
+                    "stopped",
+                    "interrupted",
+                ]
+                .contains(&header.status.as_str())
+        });
+        if SummaryFingerprint::read(&root.open_file(path.file_name()?).ok()?.metadata().ok()?)?
+            .ne(fingerprint)
+        {
+            return None;
+        }
+        if cache.files.len() >= file_capacity && !cache.files.contains_key(path) {
+            if let Some(oldest) = cache
+                .files
+                .iter()
+                .min_by_key(|(_, entry)| entry.2)
+                .map(|(path, _)| path.clone())
+            {
+                cache.files.remove(&oldest);
+            }
+        }
+        cache
+            .files
+            .insert(path.clone(), (fingerprint.clone(), valid, clock));
+        if !valid {
+            return None;
+        }
+    }
+    if !complete {
+        return None;
+    }
+    if cache.directories.len() >= SUMMARY_DIRECTORY_CACHE_ENTRIES {
+        if let Some(oldest) = cache
+            .directories
+            .iter()
+            .min_by_key(|(_, entry)| entry.2)
+            .map(|(path, _)| path.clone())
+        {
+            cache.directories.remove(&oldest);
+        }
+    }
+    root.check_current().ok()?;
+    let count = entries.len();
+    cache
+        .directories
+        .insert(directory.to_path_buf(), (entries, count, clock));
+    Some(count)
+}
+
+fn event_schema_version() -> u8 {
+    1
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyDirection {
+    Both,
+    ClientToServer,
+    ServerToClient,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct InterceptPolicy {
+    pub enabled: bool,
+    pub direction: PolicyDirection,
+    pub revision: u64,
+    /// All unresolved ranges, including approved ranges still forwarding.
+    pub pending_count: usize,
+    pub paused_count: usize,
+    pub forwarding_count: usize,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyUpdate {
+    pub enabled: bool,
+    pub direction: PolicyDirection,
+    pub expected_revision: u64,
+}
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionAction {
+    Forward,
+    Drop,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionRequest {
+    pub action: DecisionAction,
+    pub replacement_base64: Option<String>,
+    pub expected_revision: u64,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct DecisionReceipt {
+    pub pending_id: Uuid,
+    pub state: String,
+}
+#[derive(Debug)]
+pub enum InterceptError {
+    BadRequest(String),
+    Conflict(String),
+    NotFound(String),
+    TooLarge(String),
+}
+impl std::fmt::Display for InterceptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadRequest(s) | Self::Conflict(s) | Self::NotFound(s) | Self::TooLarge(s) => {
+                f.write_str(s)
+            }
+        }
+    }
+}
+impl std::error::Error for InterceptError {}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InterceptEvent {
+    pub pending_id: Uuid,
+    pub direction: Direction,
+    pub sequence: u64,
+    pub revision: u64,
+    pub received_at: DateTime<Utc>,
+    pub decided_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub original_offset: u64,
+    pub destination_offset: u64,
+    pub original_length: usize,
+    #[serde(
+        default,
+        deserialize_with = "bounded_optional_string::<_, MAX_EVENT_BASE64_BYTES>"
+    )]
+    pub original_base64: Option<String>,
+    pub selected_length: usize,
+    pub edited: bool,
+    #[serde(
+        default,
+        deserialize_with = "bounded_optional_string::<_, MAX_EVENT_BASE64_BYTES>"
+    )]
+    pub selected_base64: Option<String>,
+    pub written_bytes: usize,
+    #[serde(deserialize_with = "bounded_string::<_, MAX_STATUS_BYTES>")]
+    pub state: String,
+    pub preview_truncated: bool,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct PendingResponse {
+    pub connection_id: Uuid,
+    pub items: Vec<InterceptEvent>,
+}
+struct SubmittedDecision {
+    request: DecisionRequest,
+    selected: Option<Vec<u8>>,
+    ack: tokio::sync::oneshot::Sender<Result<DecisionReceipt, InterceptError>>,
+}
+struct PendingRange {
+    connection_id: Uuid,
+    event: InterceptEvent,
+    original: Vec<u8>,
+    selected: Option<Arc<[u8]>>,
+    sender: tokio::sync::mpsc::Sender<SubmittedDecision>,
+}
+struct InterceptRuntime {
+    policy: InterceptPolicy,
+    pending: BTreeMap<Uuid, PendingRange>,
+    connections: BTreeMap<Uuid, watch::Sender<bool>>,
+}
+impl InterceptRuntime {
+    fn policy_snapshot(&self) -> InterceptPolicy {
+        let mut policy = self.policy.clone();
+        policy.pending_count = self.pending.len();
+        policy.paused_count = self
+            .pending
+            .values()
+            .filter(|p| p.event.state == "pending")
+            .count();
+        policy.forwarding_count = self
+            .pending
+            .values()
+            .filter(|p| p.event.state == "forwarding")
+            .count();
+        policy
+    }
+}
+
+impl Default for InterceptRuntime {
+    fn default() -> Self {
+        Self {
+            policy: InterceptPolicy {
+                enabled: false,
+                direction: PolicyDirection::Both,
+                revision: 0,
+                pending_count: 0,
+                paused_count: 0,
+                forwarding_count: 0,
+            },
+            pending: BTreeMap::new(),
+            connections: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TcpSettings {
+    pub local_port: u16,
+    pub target_host: String,
+    pub target_port: u16,
+}
+impl TcpSettings {
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.local_port != 0 && self.target_port != 0,
+            "ports must be 1–65535"
+        );
+        anyhow::ensure!(
+            !self.target_host.is_empty()
+                && self.target_host.len() <= 253
+                && !self
+                    .target_host
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control() || "/?#@".contains(c)),
+            "invalid target host"
+        );
+        self.normalized_host()?;
+        Ok(())
+    }
+    fn normalized_host(&self) -> anyhow::Result<String> {
+        let host = self.target_host.as_str();
+        if host.contains([':', '[', ']']) {
+            let address = host
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(host);
+            let ip = address.parse::<Ipv6Addr>().map_err(|_| {
+                anyhow::anyhow!(
+                    "Enter a hostname or IP address without a port; use Target port separately."
+                )
+            })?;
+            return Ok(ip.to_string());
+        }
+        Ok(host.to_owned())
+    }
+    fn target_label(&self) -> String {
+        if self.target_host.contains(':') {
+            format!("[{}]:{}", self.target_host, self.target_port)
+        } else {
+            format!("{}:{}", self.target_host, self.target_port)
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    ClientToServer,
+    ServerToClient,
+}
+fn direction_index(direction: Direction) -> usize {
+    match direction {
+        Direction::ClientToServer => 0,
+        Direction::ServerToClient => 1,
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TcpChunk {
+    pub sequence: usize,
+    pub at: DateTime<Utc>,
+    pub direction: Direction,
+    pub offset: u64,
+    #[serde(deserialize_with = "bounded_string::<_, MAX_CHUNK_BASE64_BYTES>")]
+    pub data_base64: String,
+}
+/// Persist codes only: OS errors can contain private hostnames or resolver details.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TcpFailure {
+    ResolutionTimeout,
+    ResolutionFailed,
+    ConnectTimeout,
+    ConnectionRefused,
+    ConnectFailed,
+    SelfTarget,
+    RelayFailed,
+    StorageFailed,
+    #[serde(other)]
+    Unknown,
+}
+async fn connection_stage<T>(
+    future: impl std::future::Future<Output = std::io::Result<T>>,
+    budget: Duration,
+    resolving: bool,
+) -> Result<T, TcpFailure> {
+    match tokio::time::timeout(budget, future).await {
+        Err(_) => Err(if resolving {
+            TcpFailure::ResolutionTimeout
+        } else {
+            TcpFailure::ConnectTimeout
+        }),
+        Ok(Err(error)) => Err(if error.kind() == std::io::ErrorKind::TimedOut {
+            if resolving {
+                TcpFailure::ResolutionTimeout
+            } else {
+                TcpFailure::ConnectTimeout
+            }
+        } else if resolving {
+            TcpFailure::ResolutionFailed
+        } else if error.kind() == std::io::ErrorKind::ConnectionRefused {
+            TcpFailure::ConnectionRefused
+        } else {
+            TcpFailure::ConnectFailed
+        }),
+        Ok(Ok(value)) => Ok(value),
+    }
+}
+async fn connection_outcome(
+    future: impl std::future::Future<Output = Result<(), TcpFailure>>,
+    stop: &mut watch::Receiver<bool>,
+    closed: &mut watch::Receiver<bool>,
+) -> (&'static str, Option<TcpFailure>) {
+    tokio::select! {
+        biased;
+        _ = wait_stop(stop) => ("stopped", None),
+        _ = wait_stop(closed) => ("stopped", None),
+        result = future => match result {
+            Ok(()) => ("closed", None),
+            Err(failure) => ("failed", Some(failure)),
+        },
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TcpConnection {
+    pub id: Uuid,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    #[serde(deserialize_with = "bounded_string::<_, MAX_PEER_BYTES>")]
+    pub peer: String,
+    #[serde(deserialize_with = "bounded_string::<_, MAX_TARGET_BYTES>")]
+    pub target: String,
+    #[serde(deserialize_with = "bounded_string::<_, MAX_STATUS_BYTES>")]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<TcpFailure>,
+    pub client_bytes: u64,
+    pub server_bytes: u64,
+    pub captured_bytes: usize,
+    pub capture_truncated: bool,
+    /// True only after a terminal record was atomically persisted.
+    pub durable: bool,
+    #[serde(deserialize_with = "bounded_vec::<_, _, MAX_CHUNKS>")]
+    pub chunks: Vec<TcpChunk>,
+    #[serde(default)]
+    pub client_received_bytes: u64,
+    #[serde(default)]
+    pub server_received_bytes: u64,
+    #[serde(default, deserialize_with = "bounded_vec::<_, _, MAX_EVENTS>")]
+    pub intercept_events: Vec<InterceptEvent>,
+    #[serde(default)]
+    pub intercept_captured_bytes: usize,
+    #[serde(default)]
+    pub intercept_truncated: bool,
+    #[serde(default)]
+    pub intercept_event_count: u64,
+    #[serde(default = "event_schema_version")]
+    pub intercept_schema_version: u8,
+    #[serde(default)]
+    pub pending_count: usize,
+    #[serde(default, deserialize_with = "bounded_vec::<_, _, 2>")]
+    pub pending_directions: Vec<Direction>,
+}
+impl TcpConnection {
+    fn release_durable_payload(&mut self) {
+        // Live, interrupted and failed-to-persist captures may exist only here.
+        // Release capacity as well as contents, and never write this summary to disk.
+        if self.durable && self.ended_at.is_some() {
+            self.chunks = Vec::new();
+            self.intercept_events = Vec::new();
+        }
+    }
+}
+/// Validate one record at a time; payloads never remain in the session cache.
+fn read_stored_connection(path: &std::path::Path) -> anyhow::Result<TcpConnection> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("missing history directory"))?;
+    let root = HistoryDirectory::open(directory)?;
+    read_stored_connection_in(&root, path)
+}
+
+fn read_stored_connection_in(
+    root: &HistoryDirectory,
+    path: &std::path::Path,
+) -> anyhow::Result<TcpConnection> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("missing history filename"))?;
+    let file = root.open_file(name)?;
+    let fingerprint = SummaryFingerprint::read(&file.metadata()?)
+        .ok_or_else(|| anyhow::anyhow!("unexpected history entry"))?;
+    anyhow::ensure!(
+        fingerprint.bytes <= MAX_RECORD_FILE_BYTES,
+        "history record too large"
+    );
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(file, MAX_RECORD_FILE_BYTES + 1),
+        &mut bytes,
+    )?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= MAX_RECORD_FILE_BYTES,
+        "history record too large"
+    );
+    anyhow::ensure!(
+        SummaryFingerprint::read(&root.open_file(name)?.metadata()?).as_ref() == Some(&fingerprint),
+        "history record changed while reading"
+    );
+    root.check_current()?;
+    let mut record: TcpConnection = serde_json::from_slice(&bytes)?;
+    anyhow::ensure!(
+        path.file_stem().and_then(|s| s.to_str()) == Some(record.id.to_string().as_str()),
+        "history id mismatch"
+    );
+    anyhow::ensure!(
+        [
+            "connecting",
+            "open",
+            "closed",
+            "failed",
+            "stopped",
+            "interrupted"
+        ]
+        .contains(&record.status.as_str()),
+        "invalid history status"
+    );
+    let terminal = ["closed", "failed", "stopped"].contains(&record.status.as_str());
+    anyhow::ensure!(
+        terminal == record.ended_at.is_some()
+            && (!record.durable || terminal)
+            && (record.failure.is_none() || record.status == "failed"),
+        "inconsistent history lifecycle"
+    );
+    anyhow::ensure!(
+        !record.peer.is_empty()
+            && !record.target.is_empty()
+            && !record
+                .peer
+                .chars()
+                .chain(record.target.chars())
+                .any(|c| c.is_whitespace() || c.is_control())
+            && record.pending_count <= 2
+            && record.pending_count == record.pending_directions.len()
+            && (record.pending_directions.len() < 2
+                || record.pending_directions[0] != record.pending_directions[1]),
+        "invalid history metadata"
+    );
+    anyhow::ensure!(
+        record.chunks.len() <= MAX_CHUNKS && record.captured_bytes <= MAX_CAPTURE_BYTES,
+        "history limits exceeded"
+    );
+    let mut total = 0;
+    let mut captured = [0u64; 2];
+    for (sequence, chunk) in record.chunks.iter().enumerate() {
+        anyhow::ensure!(
+            chunk.data_base64.len() <= 4 * MAX_CAPTURE_BYTES.div_ceil(3),
+            "oversized chunk"
+        );
+        let length = STANDARD.decode(&chunk.data_base64)?.len();
+        let direction = direction_index(chunk.direction);
+        anyhow::ensure!(
+            length != 0 && chunk.sequence == sequence && chunk.offset == captured[direction],
+            "invalid history chunk sequence or offset"
+        );
+        captured[direction] = captured[direction]
+            .checked_add(length as u64)
+            .ok_or_else(|| anyhow::anyhow!("history offset overflow"))?;
+        total += length;
+        anyhow::ensure!(total <= MAX_CAPTURE_BYTES, "oversized capture");
+    }
+    anyhow::ensure!(
+        total == record.captured_bytes,
+        "history byte count mismatch"
+    );
+    for (captured, forwarded) in captured
+        .into_iter()
+        .zip([record.client_bytes, record.server_bytes])
+    {
+        anyhow::ensure!(
+            captured <= forwarded && (record.capture_truncated || captured == forwarded),
+            "history forwarded byte count mismatch"
+        );
+    }
+    anyhow::ensure!(
+        record.intercept_events.len() <= MAX_EVENTS
+            && record.intercept_captured_bytes <= MAX_EVENT_BYTES,
+        "intercept history limits exceeded"
+    );
+    anyhow::ensure!(
+        record.intercept_schema_version == 1
+            && record.intercept_event_count >= record.intercept_events.len() as u64
+            && (record.intercept_truncated
+                || record.intercept_event_count == record.intercept_events.len() as u64)
+            && u128::from(record.intercept_event_count)
+                <= u128::from(record.client_received_bytes)
+                    + u128::from(record.server_received_bytes),
+        "unsupported or corrupt intercept schema"
+    );
+    let mut event_bytes = 0;
+    let mut sequences = std::collections::BTreeSet::new();
+    let mut pending_ids = std::collections::BTreeSet::new();
+    for event in &record.intercept_events {
+        let direction = direction_index(event.direction);
+        let received = [record.client_received_bytes, record.server_received_bytes][direction];
+        let forwarded = [record.client_bytes, record.server_bytes][direction];
+        anyhow::ensure!(
+            event.sequence < record.intercept_event_count
+                && sequences.insert(event.sequence)
+                && pending_ids.insert(event.pending_id)
+                && event
+                    .original_offset
+                    .checked_add(event.original_length as u64)
+                    .is_some_and(|end| end <= received)
+                && event
+                    .destination_offset
+                    .checked_add(event.written_bytes as u64)
+                    .is_some_and(|end| end <= forwarded),
+            "invalid intercept sequence or offset"
+        );
+        anyhow::ensure!(
+            event.ended_at.is_some()
+                && event.revision == if event.decided_at.is_some() { 2 } else { 1 }
+                && (!["forwarded", "dropped"].contains(&event.state.as_str())
+                    || event.decided_at.is_some()),
+            "invalid intercept lifecycle"
+        );
+        anyhow::ensure!(
+            event.original_length > 0
+                && event.original_length <= MAX_PENDING_BYTES
+                && event.selected_length <= MAX_PENDING_BYTES
+                && event.written_bytes <= event.selected_length,
+            "invalid intercept lengths"
+        );
+        anyhow::ensure!(
+            ["forwarded", "dropped", "cancelled", "failed"].contains(&event.state.as_str()),
+            "invalid terminal intercept outcome"
+        );
+        anyhow::ensure!(
+            event.state != "forwarded" || event.written_bytes == event.selected_length,
+            "incomplete forwarded event"
+        );
+        anyhow::ensure!(
+            event.state != "dropped" || (event.written_bytes == 0 && event.selected_length == 0),
+            "invalid dropped event"
+        );
+        anyhow::ensure!(
+            (event.edited || event.selected_base64.is_none())
+                && (event.edited
+                    || event.state == "dropped"
+                    || event.selected_length == event.original_length),
+            "invalid selected intercept range"
+        );
+        anyhow::ensure!(
+            !event.edited || event.preview_truncated || event.selected_base64.is_some(),
+            "missing edited preview"
+        );
+        for (encoded, length) in [
+            (&event.original_base64, event.original_length),
+            (&event.selected_base64, event.selected_length),
+        ] {
+            if let Some(encoded) = encoded {
+                anyhow::ensure!(
+                    encoded.len() <= 4 * MAX_PENDING_BYTES.div_ceil(3),
+                    "oversized intercept field"
+                );
+                let decoded = STANDARD.decode(encoded)?;
+                anyhow::ensure!(decoded.len() == length, "intercept byte count mismatch");
+                event_bytes += decoded.len();
+                anyhow::ensure!(
+                    event_bytes <= MAX_EVENT_BYTES,
+                    "oversized intercept history"
+                );
+            }
+        }
+        anyhow::ensure!(
+            event.preview_truncated || event.original_base64.is_some(),
+            "missing original preview"
+        );
+    }
+    let mut ordered: Vec<_> = record.intercept_events.iter().collect();
+    ordered.sort_by_key(|event| event.sequence);
+    let mut original_ends = [0u64; 2];
+    let mut destination_ends = [0u64; 2];
+    for event in ordered {
+        let direction = direction_index(event.direction);
+        anyhow::ensure!(
+            event.original_offset >= original_ends[direction]
+                && event.destination_offset >= destination_ends[direction],
+            "overlapping intercept ranges"
+        );
+        // Both additions were checked above before retaining any metadata.
+        original_ends[direction] = event.original_offset + event.original_length as u64;
+        destination_ends[direction] = event.destination_offset + event.written_bytes as u64;
+    }
+    anyhow::ensure!(
+        event_bytes == record.intercept_captured_bytes,
+        "intercept capture count mismatch"
+    );
+    record.pending_count = 0;
+    record.pending_directions.clear();
+    if record.ended_at.is_none() {
+        record.status = "interrupted".into();
+        record.failure = None;
+        record.intercept_truncated = true;
+        record.capture_truncated = true;
+        record.durable = false;
+    }
+    Ok(record)
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TcpStatus {
+    pub enabled: bool,
+    pub settings: Option<TcpSettings>,
+    pub history_count: usize,
+    pub history_limit: usize,
+    pub active_count: usize,
+    pub active_limit: usize,
+    pub load_error: bool,
+    pub persistence_error: bool,
+}
+/// Captures remain owned in memory until an explicit retry saves every record.
+#[derive(Debug)]
+pub struct TcpPersistenceError {
+    pub pending_records: usize,
+}
+impl std::fmt::Display for TcpPersistenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TCP capture stopped, but {} connection record(s) are not saved. Keep Sniper open, restore storage, then retry saving.", self.pending_records)
+    }
+}
+impl std::error::Error for TcpPersistenceError {}
+
+#[derive(Default)]
+struct History {
+    records: BTreeMap<Uuid, TcpConnection>,
+    load_error: bool,
+    persistence_error: bool,
+}
+struct Running {
+    settings: TcpSettings,
+    stop: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+pub struct TcpCapture {
+    directory: PathBuf,
+    history: Arc<std::sync::Mutex<History>>,
+    running: Mutex<Option<Running>>,
+    active_count: AtomicUsize,
+    intercept: std::sync::Mutex<InterceptRuntime>,
+}
+impl TcpCapture {
+    pub fn policy(&self) -> InterceptPolicy {
+        let runtime = self.intercept.lock().unwrap();
+        runtime.policy_snapshot()
+    }
+    pub fn set_policy(&self, update: PolicyUpdate) -> Result<InterceptPolicy, InterceptError> {
+        let mut runtime = self.intercept.lock().unwrap();
+        if runtime.policy.revision != update.expected_revision {
+            return Err(InterceptError::Conflict("intercept policy changed".into()));
+        }
+        let revision = runtime
+            .policy
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| InterceptError::Conflict("policy revision exhausted".into()))?;
+        runtime.policy = InterceptPolicy {
+            enabled: update.enabled,
+            direction: update.direction,
+            revision,
+            pending_count: 0,
+            paused_count: 0,
+            forwarding_count: 0,
+        };
+        Ok(runtime.policy_snapshot())
+    }
+    pub fn pending(&self, id: Uuid) -> Result<PendingResponse, InterceptError> {
+        let runtime = self.intercept.lock().unwrap();
+        if !self.history.lock().unwrap().records.contains_key(&id) {
+            return Err(InterceptError::NotFound("unknown connection".into()));
+        }
+        let mut items: Vec<_> = runtime
+            .pending
+            .values()
+            .filter(|p| p.connection_id == id)
+            .map(|p| {
+                let mut event = p.event.clone();
+                event.original_base64 = Some(STANDARD.encode(&p.original));
+                event.selected_base64 = p.selected.as_ref().map(|bytes| STANDARD.encode(bytes));
+                event
+            })
+            .collect();
+        items.sort_by_key(|p| p.sequence);
+        Ok(PendingResponse {
+            connection_id: id,
+            items,
+        })
+    }
+    pub fn close(&self, id: Uuid) -> Result<(), InterceptError> {
+        let runtime = self.intercept.lock().unwrap();
+        match runtime.connections.get(&id) {
+            Some(stop) => {
+                let _ = stop.send(true);
+                Ok(())
+            }
+            None => {
+                if self.history.lock().unwrap().records.contains_key(&id) {
+                    Err(InterceptError::Conflict("connection is closed".into()))
+                } else {
+                    Err(InterceptError::NotFound("unknown connection".into()))
+                }
+            }
+        }
+    }
+    pub async fn decide(
+        &self,
+        id: Uuid,
+        pending_id: Uuid,
+        request: DecisionRequest,
+    ) -> Result<DecisionReceipt, InterceptError> {
+        let selected = match (&request.action, &request.replacement_base64) {
+            (DecisionAction::Drop, Some(_)) => {
+                return Err(InterceptError::BadRequest(
+                    "Drop cannot include replacement".into(),
+                ))
+            }
+            (DecisionAction::Forward, Some(encoded)) => {
+                if encoded.len() > MAX_PENDING_BYTES.div_ceil(3) * 4 {
+                    return Err(InterceptError::TooLarge(
+                        "replacement exceeds 16 KiB".into(),
+                    ));
+                }
+                let bytes = STANDARD
+                    .decode(encoded)
+                    .map_err(|_| InterceptError::BadRequest("invalid standard base64".into()))?;
+                if bytes.is_empty() {
+                    return Err(InterceptError::BadRequest(
+                        "use Drop for an empty replacement".into(),
+                    ));
+                }
+                if bytes.len() > MAX_PENDING_BYTES {
+                    return Err(InterceptError::TooLarge(
+                        "replacement exceeds 16 KiB".into(),
+                    ));
+                }
+                Some(bytes)
+            }
+            _ => None,
+        };
+        let (ack, receiver) = tokio::sync::oneshot::channel();
+        {
+            let runtime = self.intercept.lock().unwrap();
+            if !self.history.lock().unwrap().records.contains_key(&id) {
+                return Err(InterceptError::NotFound("unknown connection".into()));
+            }
+            let pending = runtime
+                .pending
+                .get(&pending_id)
+                .filter(|p| p.connection_id == id)
+                .ok_or_else(|| InterceptError::Conflict("range no longer pending".into()))?;
+            if pending.event.state != "pending"
+                || pending.event.revision != request.expected_revision
+            {
+                return Err(InterceptError::Conflict("range changed".into()));
+            }
+            pending
+                .sender
+                .try_send(SubmittedDecision {
+                    request,
+                    selected,
+                    ack,
+                })
+                .map_err(|_| {
+                    InterceptError::Conflict("decision busy or connection closed".into())
+                })?;
+        }
+        receiver
+            .await
+            .map_err(|_| InterceptError::Conflict("connection closed before acceptance".into()))?
+    }
+    fn admit(
+        &self,
+        id: Uuid,
+        direction: Direction,
+        bytes: &[u8],
+    ) -> Option<(Uuid, tokio::sync::mpsc::Receiver<SubmittedDecision>)> {
+        // This lock is the policy/read admission linearization point. Off does not
+        // mutate already-admitted ranges. Never hold it across an await.
+        let mut runtime = self.intercept.lock().unwrap();
+        let mut history = self.history.lock().unwrap();
+        let record = history.records.get_mut(&id)?;
+        let received = match direction {
+            Direction::ClientToServer => &mut record.client_received_bytes,
+            Direction::ServerToClient => &mut record.server_received_bytes,
+        };
+        let original_offset = *received;
+        *received += bytes.len() as u64;
+        if !runtime.policy.enabled
+            || !matches!(
+                (runtime.policy.direction, direction),
+                (PolicyDirection::Both, _)
+                    | (PolicyDirection::ClientToServer, Direction::ClientToServer)
+                    | (PolicyDirection::ServerToClient, Direction::ServerToClient)
+            )
+        {
+            return None;
+        }
+        let pending_id = Uuid::new_v4();
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let sequence = record.intercept_event_count;
+        record.intercept_event_count += 1;
+        let event = InterceptEvent {
+            pending_id,
+            direction,
+            sequence,
+            revision: 0,
+            received_at: Utc::now(),
+            decided_at: None,
+            ended_at: None,
+            original_offset,
+            destination_offset: match direction {
+                Direction::ClientToServer => record.client_bytes,
+                Direction::ServerToClient => record.server_bytes,
+            },
+            original_length: bytes.len(),
+            original_base64: None,
+            selected_length: bytes.len(),
+            edited: false,
+            selected_base64: None,
+            written_bytes: 0,
+            state: "pending".into(),
+            preview_truncated: false,
+        };
+        runtime.pending.insert(
+            pending_id,
+            PendingRange {
+                connection_id: id,
+                event,
+                original: bytes.to_vec(),
+                selected: None,
+                sender,
+            },
+        );
+        Some((pending_id, receiver))
+    }
+    fn end_range(&self, pending_id: Uuid, state: &str) {
+        let pending = self.intercept.lock().unwrap().pending.remove(&pending_id);
+        let Some(mut pending) = pending else {
+            return;
+        };
+        pending.event.state = state.into();
+        pending.event.ended_at = Some(Utc::now());
+        pending.event.revision += 1;
+        let mut history = self.history.lock().unwrap();
+        let Some(record) = history.records.get_mut(&pending.connection_id) else {
+            return;
+        };
+        if record.intercept_events.len() >= MAX_EVENTS {
+            record.intercept_truncated = true;
+            return;
+        }
+        let size =
+            pending.original.len() + pending.selected.as_ref().map_or(0, |bytes| bytes.len());
+        if size > MAX_EVENT_BYTES - record.intercept_captured_bytes {
+            pending.event.original_base64 = None;
+            pending.event.selected_base64 = None;
+            pending.event.preview_truncated = true;
+            record.intercept_truncated = true;
+        } else {
+            pending.event.original_base64 = Some(STANDARD.encode(&pending.original));
+            pending.event.selected_base64 = pending
+                .selected
+                .as_ref()
+                .map(|bytes| STANDARD.encode(bytes));
+            record.intercept_captured_bytes += size;
+        }
+        record.intercept_events.push(pending.event);
+    }
+
+    /// Called during ordinary session loading, not from a proxy runtime task.
+    pub fn load(directory: PathBuf) -> Self {
+        let mut history = History::default();
+        match HistoryDirectory::open(&directory) {
+            Ok(root) => {
+                if let Ok(entries) = root.entries() {
+                    for (index, entry) in
+                        entries.take(MAX_HISTORY_DIRECTORY_ENTRIES + 1).enumerate()
+                    {
+                        if index == MAX_HISTORY_DIRECTORY_ENTRIES {
+                            history.load_error = true;
+                            break;
+                        }
+                        let result = (|| -> anyhow::Result<Option<TcpConnection>> {
+                            let entry = entry?;
+                            let path = entry.path();
+                            if is_history_temporary_path(&path) {
+                                anyhow::ensure!(
+                                    root.is_regular_entry(&entry.file_name())?,
+                                    "unexpected history entry"
+                                );
+                                // A crash before rename never published this version. Keep
+                                // the file untouched and trust only the durable .json record.
+                                return Ok(None);
+                            }
+                            anyhow::ensure!(
+                                path.extension().and_then(|s| s.to_str()) == Some("json"),
+                                "unexpected history file"
+                            );
+                            read_stored_connection_in(&root, &path).map(Some)
+                        })();
+                        match result {
+                            Ok(Some(mut record)) if history.records.len() < MAX_CONNECTIONS => {
+                                record.release_durable_payload();
+                                history.records.insert(record.id, record);
+                            }
+                            Ok(None) => {}
+                            _ => {
+                                history.load_error = true;
+                            }
+                        }
+                    }
+                } else {
+                    history.load_error = true;
+                }
+                if root.check_current().is_err() {
+                    history.load_error = true;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                history.load_error = true;
+            }
+        }
+        Self {
+            directory,
+            history: Arc::new(std::sync::Mutex::new(history)),
+            running: Mutex::new(None),
+            active_count: AtomicUsize::new(0),
+            intercept: std::sync::Mutex::new(InterceptRuntime::default()),
+        }
+    }
+    pub async fn status(&self) -> TcpStatus {
+        let running = self.running.lock().await;
+        let history = self.history.lock().unwrap();
+        TcpStatus {
+            enabled: running
+                .as_ref()
+                .map(|r| !r.task.is_finished())
+                .unwrap_or(false),
+            settings: running.as_ref().map(|r| r.settings.clone()),
+            history_count: history.records.len(),
+            history_limit: MAX_CONNECTIONS,
+            active_count: self.active_count.load(Ordering::Relaxed),
+            active_limit: MAX_ACTIVE,
+            load_error: history.load_error,
+            persistence_error: history.persistence_error,
+        }
+    }
+    #[cfg(test)]
+    async fn records(&self) -> Vec<TcpConnection> {
+        let ids: Vec<_> = self
+            .history
+            .lock()
+            .unwrap()
+            .records
+            .keys()
+            .copied()
+            .collect();
+        let mut records = Vec::new();
+        for id in ids {
+            if let Some(record) = self.detail(id).await.expect("read saved TCP test record") {
+                records.push(record);
+            }
+        }
+        records.sort_by_key(|r| std::cmp::Reverse(r.started_at));
+        records
+    }
+    pub fn connection_count(&self) -> Option<usize> {
+        let history = self.history.lock().unwrap();
+        (!history.load_error).then_some(history.records.len())
+    }
+
+    pub async fn summaries(&self) -> Vec<TcpConnection> {
+        let runtime = self.intercept.lock().unwrap();
+        let history = self.history.lock().unwrap();
+        let mut records: Vec<_> = history
+            .records
+            .values()
+            .map(|r| TcpConnection {
+                id: r.id,
+                started_at: r.started_at,
+                ended_at: r.ended_at,
+                peer: r.peer.clone(),
+                target: r.target.clone(),
+                status: r.status.clone(),
+                failure: r.failure,
+                client_bytes: r.client_bytes,
+                server_bytes: r.server_bytes,
+                captured_bytes: r.captured_bytes,
+                capture_truncated: r.capture_truncated,
+                durable: r.durable,
+                chunks: vec![],
+                client_received_bytes: r.client_received_bytes,
+                server_received_bytes: r.server_received_bytes,
+                intercept_events: vec![],
+                intercept_captured_bytes: r.intercept_captured_bytes,
+                intercept_truncated: r.intercept_truncated,
+                intercept_event_count: r.intercept_event_count,
+                intercept_schema_version: r.intercept_schema_version,
+                pending_count: runtime
+                    .pending
+                    .values()
+                    .filter(|p| p.connection_id == r.id)
+                    .count(),
+                pending_directions: runtime
+                    .pending
+                    .values()
+                    .filter(|p| p.connection_id == r.id)
+                    .map(|p| p.event.direction)
+                    .collect(),
+            })
+            .collect();
+        records.sort_by_key(|r| std::cmp::Reverse(r.started_at));
+        records
+    }
+    pub async fn detail(&self, id: Uuid) -> anyhow::Result<Option<TcpConnection>> {
+        let record = {
+            let runtime = self.intercept.lock().unwrap();
+            let history = self.history.lock().unwrap();
+            let Some(mut record) = history.records.get(&id).cloned() else {
+                return Ok(None);
+            };
+            record.pending_directions = runtime
+                .pending
+                .values()
+                .filter(|p| p.connection_id == id)
+                .map(|p| p.event.direction)
+                .collect();
+            record.pending_count = record.pending_directions.len();
+            record
+        };
+        if !record.durable || record.ended_at.is_none() {
+            return Ok(Some(record));
+        }
+        let path = self.directory.join(format!("{id}.json"));
+        // No retained payload cache: inactive summaries and repeated detail reads
+        // cannot accumulate captures across the shared SessionContext caches.
+        // Do not hold either runtime lock while waiting for filesystem work.
+        let result = tokio::task::spawn_blocking(move || {
+            let mut loaded = read_stored_connection(&path)?;
+            let chunks = std::mem::take(&mut loaded.chunks);
+            let events = std::mem::take(&mut loaded.intercept_events);
+            anyhow::ensure!(
+                serde_json::to_value(&loaded)? == serde_json::to_value(&record)?,
+                "stored TCP record changed"
+            );
+            loaded.chunks = chunks;
+            loaded.intercept_events = events;
+            Ok(loaded)
+        })
+        .await;
+        match result {
+            Ok(Ok(record)) => Ok(Some(record)),
+            _ => {
+                self.history.lock().unwrap().load_error = true;
+                anyhow::bail!("Saved TCP detail could not be read. History requires recovery.")
+            }
+        }
+    }
+    pub async fn start(self: &Arc<Self>, mut settings: TcpSettings) -> anyhow::Result<()> {
+        settings.validate()?;
+        settings.target_host = settings.normalized_host()?;
+        let mut running = self.running.lock().await;
+        // A listener can exit on accept failure without an explicit stop. Reap
+        // only a completed owner, under the same lock used for start/stop, so
+        // concurrent starts cannot overlap or detach an in-flight shutdown.
+        if running
+            .as_ref()
+            .map(|worker| worker.task.is_finished())
+            .unwrap_or(false)
+        {
+            *running = None;
+        }
+        anyhow::ensure!(
+            running.is_none(),
+            "disable TCP capture before changing its listener"
+        );
+        {
+            let history = self.history.lock().unwrap();
+            anyhow::ensure!(
+                !history.load_error && !history.persistence_error,
+                "TCP history requires recovery before capture can start"
+            );
+            anyhow::ensure!(
+                history.records.len() < MAX_CONNECTIONS,
+                "TCP history is full; use a new session"
+            );
+        }
+        if let Err(error) = HistoryDirectory::open(&self.directory) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                self.history.lock().unwrap().load_error = true;
+                anyhow::bail!("TCP history requires recovery before capture can start");
+            }
+        }
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, settings.local_port)).await.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AddrInUse {
+                anyhow::anyhow!("Local port {} is already in use. Choose another Local port or stop the listener using it.", settings.local_port)
+            } else {
+                anyhow::anyhow!("Could not bind local port {}. Check the port and local permissions.", settings.local_port)
+            }
+        })?;
+        let (stop, receiver) = watch::channel(false);
+        let capture = self.clone();
+        let worker_settings = settings.clone();
+        let task = tokio::spawn(async move {
+            capture.serve(listener, worker_settings, receiver).await;
+        });
+        *running = Some(Running {
+            settings,
+            stop,
+            task,
+        });
+        Ok(())
+    }
+    /// Stops admission, cancels both directions, and waits for final persistence.
+    pub async fn stop(&self) -> Result<(), TcpPersistenceError> {
+        let mut running = self.running.lock().await;
+        if let Some(worker) = running.as_mut() {
+            let _ = worker.stop.send(true);
+            // Preserve ownership if this caller is cancelled while joining. A
+            // subsequent stop/session switch must still await the same worker.
+            let _ = (&mut worker.task).await;
+        }
+        *running = None;
+        // Keep start/stop serialized through the retry. Terminal records are
+        // immutable, so cancellation can only cause the same bytes to be saved
+        // again, never an older snapshot to overwrite a newer one.
+        self.retry_terminal_records().await
+    }
+    async fn retry_terminal_records(&self) -> Result<(), TcpPersistenceError> {
+        let ids: Vec<_> = self
+            .history
+            .lock()
+            .unwrap()
+            .records
+            .values()
+            .filter(|record| record.ended_at.is_some() && !record.durable)
+            .map(|record| record.id)
+            .collect();
+        // Clone one payload at a time rather than doubling a full history's
+        // memory while retrying a storage outage.
+        for id in ids {
+            let mut record = self.history.lock().unwrap().records[&id].clone();
+            record.durable = true;
+            if self.persist(&record).await {
+                if let Some(saved) = self.history.lock().unwrap().records.get_mut(&record.id) {
+                    saved.durable = true;
+                    saved.release_durable_payload();
+                }
+            }
+        }
+        let mut history = self.history.lock().unwrap();
+        let pending_records = history
+            .records
+            .values()
+            .filter(|record| record.ended_at.is_some() && !record.durable)
+            .count();
+        history.persistence_error = pending_records != 0;
+        if pending_records == 0 {
+            Ok(())
+        } else {
+            Err(TcpPersistenceError { pending_records })
+        }
+    }
+    async fn persist(&self, record: &TcpConnection) -> bool {
+        let directory = self.directory.clone();
+        let record = record.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let root = HistoryDirectory::create(&directory)?;
+            root.write_json(
+                std::ffi::OsStr::new(&format!("{}.json", record.id)),
+                &record,
+            )
+        })
+        .await;
+        if matches!(result, Ok(Ok(()))) {
+            true
+        } else {
+            self.history.lock().unwrap().persistence_error = true;
+            false
+        }
+    }
+    async fn serve(
+        self: Arc<Self>,
+        listener: TcpListener,
+        settings: TcpSettings,
+        mut stop: watch::Receiver<bool>,
+    ) {
+        let mut tasks = JoinSet::new();
+        let (children_stop, children_receiver) = watch::channel(false);
+        loop {
+            // Count occupied admission slots, including tasks finishing persistence.
+            self.active_count.store(tasks.len(), Ordering::Relaxed);
+            tokio::select! {
+                biased;
+                _ = stop.changed() => break,
+                Some(_) = tasks.join_next(), if !tasks.is_empty() => {},
+                accepted = listener.accept(), if tasks.len() < MAX_ACTIVE => {
+                    let Ok((client, peer)) = accepted else { break; };
+                    let mut runtime = self.intercept.lock().unwrap();
+                    let mut history = self.history.lock().unwrap();
+                    if history.records.len() >= MAX_CONNECTIONS || history.persistence_error || history.load_error { drop(client); continue; }
+                    let record = TcpConnection { id: Uuid::new_v4(), started_at: Utc::now(), ended_at: None, peer: peer.to_string(), target: settings.target_label(), status: "connecting".into(), failure: None, client_bytes: 0, server_bytes: 0, captured_bytes: 0, capture_truncated: false, durable: false, chunks: vec![], client_received_bytes:0, server_received_bytes:0, intercept_events:vec![], intercept_captured_bytes:0, intercept_truncated:false, intercept_event_count:0, intercept_schema_version:1, pending_count:0,pending_directions:vec![] };
+                    let (close, closed)=watch::channel(false);
+                    runtime.connections.insert(record.id,close);
+                    history.records.insert(record.id, record.clone());
+                    drop(history);
+                    drop(runtime);
+                    let capture = self.clone();
+                    let settings = settings.clone();
+                    let stop = children_receiver.clone();
+                    tasks.spawn(async move { capture.connection(client, record, settings, stop, closed).await; });
+                }
+            }
+        }
+        drop(listener);
+        let _ = children_stop.send(true);
+        // Dropping the sender is also cancellation; no detached relay tasks remain.
+        while tasks.join_next().await.is_some() {
+            self.active_count.store(tasks.len(), Ordering::Relaxed);
+        }
+        self.active_count.store(0, Ordering::Relaxed);
+    }
+    async fn connection(
+        self: Arc<Self>,
+        client: TcpStream,
+        record: TcpConnection,
+        settings: TcpSettings,
+        mut stop: watch::Receiver<bool>,
+        mut closed: watch::Receiver<bool>,
+    ) {
+        let id = record.id;
+        // Persist admission before forwarding: a crash leaves an explicit interrupted record.
+        if !self.persist(&record).await {
+            self.finish(id, "failed", Some(TcpFailure::StorageFailed))
+                .await;
+            return;
+        }
+        let result = connection_outcome(
+            async {
+                let addresses: Vec<_> = connection_stage(
+                    tokio::net::lookup_host((settings.target_host.as_str(), settings.target_port)),
+                    Duration::from_secs(10),
+                    true,
+                )
+                .await?
+                .collect();
+                if addresses.is_empty() {
+                    return Err(TcpFailure::ResolutionFailed);
+                }
+                if addresses
+                    .iter()
+                    .any(|a| is_loopback(a.ip()) && a.port() == settings.local_port)
+                {
+                    return Err(TcpFailure::SelfTarget);
+                }
+                let upstream = connection_stage(
+                    TcpStream::connect(addresses.as_slice()),
+                    Duration::from_secs(10),
+                    false,
+                )
+                .await?;
+                // A self-target would recursively fill the connection budget.
+                let local = client.local_addr().map_err(|_| TcpFailure::ConnectFailed)?;
+                if upstream
+                    .peer_addr()
+                    .map_err(|_| TcpFailure::ConnectFailed)?
+                    == local
+                {
+                    return Err(TcpFailure::SelfTarget);
+                }
+                if let Some(r) = self.history.lock().unwrap().records.get_mut(&id) {
+                    r.status = "open".into();
+                }
+                let (client_read, client_write) = client.into_split();
+                let (server_read, server_write) = upstream.into_split();
+                tokio::try_join!(
+                    self.pump(id, Direction::ClientToServer, client_read, server_write),
+                    self.pump(id, Direction::ServerToClient, server_read, client_write)
+                )
+                .map_err(|_| TcpFailure::RelayFailed)?;
+                Ok::<(), TcpFailure>(())
+            },
+            &mut stop,
+            &mut closed,
+        )
+        .await;
+        self.finish(id, result.0, result.1).await;
+    }
+    async fn finish(&self, id: Uuid, status: &str, failure: Option<TcpFailure>) {
+        let tickets: Vec<_> = {
+            let mut runtime = self.intercept.lock().unwrap();
+            runtime.connections.remove(&id);
+            runtime
+                .pending
+                .iter()
+                .filter(|(_, p)| p.connection_id == id)
+                .map(|(k, _)| *k)
+                .collect()
+        };
+        for ticket in tickets {
+            self.end_range(
+                ticket,
+                if status == "failed" {
+                    "failed"
+                } else {
+                    "cancelled"
+                },
+            );
+        }
+        let Ok(Some(complete_record)) = self.detail(id).await else {
+            return;
+        };
+        let record = {
+            let mut history = self.history.lock().unwrap();
+            let Some(record) = history.records.get_mut(&id) else {
+                return;
+            };
+            *record = complete_record;
+            record.status = status.into();
+            record.failure = if status == "failed" { failure } else { None };
+            record.ended_at = Some(Utc::now());
+            record.durable = false;
+            let mut durable_record = record.clone();
+            durable_record.durable = true;
+            durable_record
+        };
+        let persisted = self.persist(&record).await;
+        if let Some(record) = self.history.lock().unwrap().records.get_mut(&id) {
+            record.durable = persisted;
+            record.release_durable_payload();
+        }
+    }
+    async fn pump<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+        &self,
+        id: Uuid,
+        direction: Direction,
+        mut reader: R,
+        mut writer: W,
+    ) -> std::io::Result<()> {
+        let mut buffer = [0u8; 16 * 1024];
+        loop {
+            let count = reader.read(&mut buffer).await?;
+            if count == 0 {
+                writer.shutdown().await?;
+                return Ok(());
+            }
+            let admitted = self.admit(id, direction, &buffer[..count]);
+            let mut selected: Option<Arc<[u8]>> = None;
+            let mut ticket = None;
+            if let Some((pending_id, mut decisions)) = admitted {
+                ticket = Some(pending_id);
+                let Some(decision) = decisions.recv().await else {
+                    return Err(std::io::ErrorKind::ConnectionAborted.into());
+                };
+                let receipt = {
+                    let mut runtime = self.intercept.lock().unwrap();
+                    let pending = runtime
+                        .pending
+                        .get_mut(&pending_id)
+                        .expect("owner retains admitted range");
+                    pending.event.decided_at = Some(Utc::now());
+                    pending.event.revision += 1;
+                    match decision.request.action {
+                        DecisionAction::Drop => {
+                            pending.event.state = "dropped".into();
+                            pending.event.selected_length = 0;
+                        }
+                        DecisionAction::Forward => {
+                            pending.event.state = "forwarding".into();
+                            pending.selected = decision.selected.map(Arc::from);
+                            pending.event.edited = pending.selected.is_some();
+                            if let Some(bytes) = &pending.selected {
+                                pending.event.selected_length = bytes.len();
+                            }
+                            selected = pending.selected.clone();
+                        }
+                    }
+                    DecisionReceipt {
+                        pending_id,
+                        state: pending.event.state.clone(),
+                    }
+                };
+                let _ = decision.ack.send(Ok(receipt));
+                if matches!(decision.request.action, DecisionAction::Drop) {
+                    self.end_range(pending_id, "dropped");
+                    continue;
+                }
+            }
+            let bytes = selected.as_deref().unwrap_or(&buffer[..count]);
+            let mut offset = 0;
+            while offset < bytes.len() {
+                let written = writer.write(&bytes[offset..]).await?;
+                if written == 0 {
+                    return Err(std::io::ErrorKind::WriteZero.into());
+                }
+                self.capture(id, direction, &bytes[offset..offset + written]);
+                if let Some(ticket) = ticket {
+                    if let Some(p) = self.intercept.lock().unwrap().pending.get_mut(&ticket) {
+                        p.event.written_bytes += written;
+                    }
+                }
+                offset += written;
+            }
+            if let Some(ticket) = ticket {
+                self.end_range(ticket, "forwarded");
+            }
+        }
+    }
+    fn capture(&self, id: Uuid, direction: Direction, bytes: &[u8]) {
+        let mut history = self.history.lock().unwrap();
+        let Some(record) = history.records.get_mut(&id) else {
+            return;
+        };
+        let offset = match direction {
+            Direction::ClientToServer => {
+                let n = record.client_bytes;
+                record.client_bytes += bytes.len() as u64;
+                n
+            }
+            Direction::ServerToClient => {
+                let n = record.server_bytes;
+                record.server_bytes += bytes.len() as u64;
+                n
+            }
+        };
+        let kept = if record.chunks.len() < MAX_CHUNKS {
+            bytes.len().min(MAX_CAPTURE_BYTES - record.captured_bytes)
+        } else {
+            0
+        };
+        if kept != bytes.len() {
+            record.capture_truncated = true;
+        }
+        if kept > 0 {
+            record.chunks.push(TcpChunk {
+                sequence: record.chunks.len(),
+                at: Utc::now(),
+                direction,
+                offset,
+                data_base64: STANDARD.encode(&bytes[..kept]),
+            });
+            record.captured_bytes += kept;
+        }
+    }
+}
+fn is_loopback(ip: std::net::IpAddr) -> bool {
+    ip.is_loopback()
+        || match ip {
+            std::net::IpAddr::V6(ip) => ip.to_ipv4().map(|ip| ip.is_loopback()).unwrap_or(false),
+            std::net::IpAddr::V4(_) => false,
+        }
+}
+async fn wait_stop(receiver: &mut watch::Receiver<bool>) {
+    if *receiver.borrow() {
+        return;
+    }
+    let _ = receiver.changed().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn stored_connection_count(directory: &std::path::Path) -> Option<usize> {
+        let mut budget = SUMMARY_READ_BUDGET;
+        super::stored_connection_count(directory, &mut budget)
+    }
+    fn temporary() -> Arc<TcpCapture> {
+        Arc::new(TcpCapture::load(
+            std::env::temp_dir().join(format!("sniper-tcp-{}", Uuid::new_v4())),
+        ))
+    }
+    fn record() -> TcpConnection {
+        TcpConnection {
+            id: Uuid::new_v4(),
+            started_at: Utc::now(),
+            ended_at: None,
+            peer: "127.0.0.1:1".into(),
+            target: "127.0.0.1:2".into(),
+            status: "open".into(),
+            failure: None,
+            client_bytes: 0,
+            server_bytes: 0,
+            captured_bytes: 0,
+            capture_truncated: false,
+            durable: false,
+            chunks: vec![],
+            client_received_bytes: 0,
+            server_received_bytes: 0,
+            intercept_events: vec![],
+            intercept_captured_bytes: 0,
+            intercept_truncated: false,
+            intercept_event_count: 0,
+            intercept_schema_version: 1,
+            pending_count: 0,
+            pending_directions: vec![],
+        }
+    }
+    fn resident_preview_bytes(capture: &TcpCapture) -> usize {
+        capture
+            .history
+            .lock()
+            .unwrap()
+            .records
+            .values()
+            .map(|record| {
+                record
+                    .chunks
+                    .iter()
+                    .map(|chunk| chunk.data_base64.len())
+                    .sum::<usize>()
+                    + record
+                        .intercept_events
+                        .iter()
+                        .map(|event| {
+                            event.original_base64.as_ref().map_or(0, String::len)
+                                + event.selected_base64.as_ref().map_or(0, String::len)
+                        })
+                        .sum::<usize>()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn atomic_write_temp_names_require_two_canonical_uuids() {
+        let id = Uuid::new_v4();
+        let suffix = Uuid::parse_str("01234567-89ab-4cde-8f01-23456789abcd").unwrap();
+        assert!(is_history_temporary_path(std::path::Path::new(&format!(
+            "{id}.tmp-{suffix}"
+        ))));
+        for name in [
+            format!("{id}.json"),
+            format!("{id}.json.tmp-{suffix}"),
+            format!("{id}.tmp-invalid"),
+            format!("invalid.tmp-{suffix}"),
+            format!("{id}.tmp-{suffix}.json"),
+            format!("{}.tmp-{suffix}", id.simple()),
+            format!("{id}.tmp-{}", suffix.simple()),
+            format!("{id}.tmp-{}", suffix.to_string().to_uppercase()),
+        ] {
+            assert!(
+                !is_history_temporary_path(std::path::Path::new(&name)),
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn orphan_atomic_writes_preserve_durable_history_and_allow_start() {
+        let capture = temporary();
+        let initial = record();
+        let id = initial.id;
+        capture.history.lock().unwrap().records.insert(id, initial);
+        capture.capture(id, Direction::ClientToServer, &[0, 255, 13, 10]);
+        capture.finish(id, "closed", None).await;
+        let path = capture.directory.join(format!("{id}.json"));
+        let durable = std::fs::read(&path).unwrap();
+        let temp = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
+        std::fs::write(&temp, b"{unfinished").unwrap();
+        let unpublished = record();
+        let unpublished_path =
+            capture
+                .directory
+                .join(format!("{}.tmp-{}", unpublished.id, Uuid::new_v4()));
+        let unpublished_bytes = serde_json::to_vec(&unpublished).unwrap();
+        std::fs::write(&unpublished_path, &unpublished_bytes).unwrap();
+        let loaded = Arc::new(TcpCapture::load(capture.directory.clone()));
+        assert!(!loaded.status().await.load_error);
+        assert_eq!(loaded.connection_count(), Some(1));
+        assert_eq!(stored_connection_count(&capture.directory), Some(1));
+        assert!(loaded.detail(unpublished.id).await.unwrap().is_none());
+        assert_eq!(
+            serde_json::to_value(loaded.detail(id).await.unwrap().unwrap()).unwrap(),
+            serde_json::to_value(capture.detail(id).await.unwrap().unwrap()).unwrap()
+        );
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let local_port = listener.local_addr().unwrap().port();
+        drop(listener);
+        loaded
+            .start(TcpSettings {
+                local_port,
+                target_host: "127.0.0.1".into(),
+                target_port: 9,
+            })
+            .await
+            .unwrap();
+        assert!(loaded.status().await.enabled);
+        loaded.stop().await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), durable);
+        assert_eq!(std::fs::read(&temp).unwrap(), b"{unfinished");
+        assert_eq!(std::fs::read(&unpublished_path).unwrap(), unpublished_bytes);
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_atomic_write_orphan_cannot_promote_admission_snapshot() {
+        let capture = temporary();
+        let admission = record();
+        let id = admission.id;
+        let path = capture.directory.join(format!("{id}.json"));
+        crate::session::write_json(&path, &admission).unwrap();
+        let admission_bytes = std::fs::read(&path).unwrap();
+        capture
+            .history
+            .lock()
+            .unwrap()
+            .records
+            .insert(id, admission);
+        capture.capture(id, Direction::ClientToServer, b"unpublished terminal bytes");
+        let mut terminal = capture.detail(id).await.unwrap().unwrap();
+        terminal.ended_at = Some(Utc::now());
+        terminal.status = "closed".into();
+        terminal.durable = true;
+        let temp = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
+        let terminal_bytes = serde_json::to_vec(&terminal).unwrap();
+        std::fs::write(&temp, &terminal_bytes).unwrap();
+        let loaded = TcpCapture::load(capture.directory.clone());
+        assert!(!loaded.status().await.load_error);
+        assert_eq!(loaded.connection_count(), Some(1));
+        assert_eq!(stored_connection_count(&capture.directory), Some(1));
+        let recovered = loaded.detail(id).await.unwrap().unwrap();
+        assert_eq!(recovered.status, "interrupted");
+        assert!(recovered.ended_at.is_none());
+        assert!(!recovered.durable);
+        assert!(recovered.capture_truncated);
+        assert!(recovered.intercept_truncated);
+        assert_eq!(recovered.client_bytes, 0);
+        assert_eq!(recovered.captured_bytes, 0);
+        assert!(recovered.chunks.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), admission_bytes);
+        assert_eq!(std::fs::read(&temp).unwrap(), terminal_bytes);
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn orphan_atomic_writes_do_not_hide_corrupt_records() {
+        let capture = temporary();
+        let valid = record();
+        let id = valid.id;
+        crate::session::write_json(&capture.directory.join(format!("{id}.json")), &valid).unwrap();
+        let corrupt = record();
+        let path = capture.directory.join(format!("{}.json", corrupt.id));
+        std::fs::write(&path, b"broken durable record").unwrap();
+        let temp = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
+        std::fs::write(&temp, serde_json::to_vec(&corrupt).unwrap()).unwrap();
+        let loaded = Arc::new(TcpCapture::load(capture.directory.clone()));
+        assert!(loaded.status().await.load_error);
+        assert!(loaded.detail(id).await.unwrap().is_some());
+        assert!(loaded.detail(corrupt.id).await.unwrap().is_none());
+        assert_eq!(loaded.connection_count(), None);
+        assert_eq!(stored_connection_count(&capture.directory), None);
+        assert!(loaded
+            .start(TcpSettings {
+                local_port: 12345,
+                target_host: "127.0.0.1".into(),
+                target_port: 9,
+            })
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("requires recovery"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"broken durable record");
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unexpected_history_files_and_temp_directories_still_fail_closed() {
+        for name in [
+            "unrelated.txt".to_string(),
+            format!("{}.tmp-invalid", Uuid::new_v4()),
+            format!("invalid.tmp-{}", Uuid::new_v4()),
+            format!("{}.json.tmp-{}", Uuid::new_v4(), Uuid::new_v4()),
+        ] {
+            let capture = temporary();
+            std::fs::create_dir_all(&capture.directory).unwrap();
+            std::fs::write(capture.directory.join(name), b"unpublished").unwrap();
+            assert!(
+                TcpCapture::load(capture.directory.clone())
+                    .status()
+                    .await
+                    .load_error
+            );
+            assert_eq!(stored_connection_count(&capture.directory), None);
+            std::fs::remove_dir_all(&capture.directory).unwrap();
+        }
+        let capture = temporary();
+        let temp = capture
+            .directory
+            .join(format!("{}.tmp-{}", Uuid::new_v4(), Uuid::new_v4()));
+        std::fs::create_dir_all(temp).unwrap();
+        assert!(
+            TcpCapture::load(capture.directory.clone())
+                .status()
+                .await
+                .load_error
+        );
+        assert_eq!(stored_connection_count(&capture.directory), None);
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn orphan_atomic_write_symlinks_still_fail_closed() {
+        let capture = temporary();
+        std::fs::create_dir_all(&capture.directory).unwrap();
+        let temp = capture
+            .directory
+            .join(format!("{}.tmp-{}", Uuid::new_v4(), Uuid::new_v4()));
+        std::os::unix::fs::symlink("missing-target", &temp).unwrap();
+        assert!(
+            TcpCapture::load(capture.directory.clone())
+                .status()
+                .await
+                .load_error
+        );
+        assert_eq!(stored_connection_count(&capture.directory), None);
+        assert!(std::fs::symlink_metadata(temp).unwrap().is_symlink());
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn orphan_atomic_writes_do_not_consume_record_capacity() {
+        let capture = temporary();
+        for _ in 0..MAX_CONNECTIONS {
+            let record = record();
+            let path = capture.directory.join(format!("{}.json", record.id));
+            crate::session::write_json(&path, &record).unwrap();
+            std::fs::write(
+                path.with_extension(format!("tmp-{}", Uuid::new_v4())),
+                b"partial",
+            )
+            .unwrap();
+        }
+        let loaded = TcpCapture::load(capture.directory.clone());
+        assert!(!loaded.status().await.load_error);
+        assert_eq!(loaded.connection_count(), Some(MAX_CONNECTIONS));
+        assert_eq!(
+            stored_connection_count(&capture.directory),
+            Some(MAX_CONNECTIONS)
+        );
+        let extra = record();
+        crate::session::write_json(
+            &capture.directory.join(format!("{}.json", extra.id)),
+            &extra,
+        )
+        .unwrap();
+        assert!(
+            TcpCapture::load(capture.directory.clone())
+                .status()
+                .await
+                .load_error
+        );
+        assert_eq!(stored_connection_count(&capture.directory), None);
+        assert_eq!(
+            std::fs::read_dir(&capture.directory).unwrap().count(),
+            2 * MAX_CONNECTIONS + 1
+        );
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn orphan_atomic_write_directory_scans_remain_bounded() {
+        let capture = temporary();
+        std::fs::create_dir_all(&capture.directory).unwrap();
+        for _ in 0..MAX_HISTORY_DIRECTORY_ENTRIES {
+            let temp = capture
+                .directory
+                .join(format!("{}.tmp-{}", Uuid::new_v4(), Uuid::new_v4()));
+            std::fs::write(temp, b"partial").unwrap();
+        }
+        assert_eq!(
+            TcpCapture::load(capture.directory.clone()).connection_count(),
+            Some(0)
+        );
+        assert_eq!(stored_connection_count(&capture.directory), Some(0));
+        let temp = capture
+            .directory
+            .join(format!("{}.tmp-{}", Uuid::new_v4(), Uuid::new_v4()));
+        std::fs::write(temp, b"partial").unwrap();
+        assert!(
+            TcpCapture::load(capture.directory.clone())
+                .status()
+                .await
+                .load_error
+        );
+        assert_eq!(stored_connection_count(&capture.directory), None);
+        assert_eq!(
+            std::fs::read_dir(&capture.directory).unwrap().count(),
+            MAX_HISTORY_DIRECTORY_ENTRIES + 1
+        );
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn retry_success_releases_complete_payload_and_keeps_detail_readable() {
+        let (capture, id) = setup_intercept();
+        capture.capture(id, Direction::ClientToServer, &[0, 255, 128, 13, 10]);
+        let (ticket, _receiver) = capture
+            .admit(id, Direction::ServerToClient, &[255, 0, 254])
+            .unwrap();
+        capture.end_range(ticket, "cancelled");
+        std::fs::write(&capture.directory, b"storage unavailable").unwrap();
+        capture.finish(id, "stopped", None).await;
+        assert!(capture.stop().await.is_err());
+        let before = capture.detail(id).await.unwrap().unwrap();
+        assert!(!before.durable);
+        assert!(!before.chunks.is_empty());
+        assert!(!before.intercept_events.is_empty());
+        assert!(resident_preview_bytes(&capture) > 0);
+        std::fs::remove_file(&capture.directory).unwrap();
+        capture.stop().await.unwrap();
+        assert_eq!(resident_preview_bytes(&capture), 0);
+        let actual = capture.detail(id).await.unwrap().unwrap();
+        let mut expected = before;
+        expected.durable = true;
+        assert_eq!(
+            serde_json::to_value(&actual).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert!(!capture.status().await.load_error);
+        assert!(!capture.status().await.persistence_error);
+        let reloaded = TcpCapture::load(capture.directory.clone());
+        assert_eq!(resident_preview_bytes(&reloaded), 0);
+        assert_eq!(
+            serde_json::to_value(reloaded.detail(id).await.unwrap().unwrap()).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+    #[tokio::test]
+    async fn durable_payloads_are_released_and_detail_reads_do_not_retain_them() {
+        let mut sessions = Vec::new();
+        for _ in 0..3 {
+            let capture = temporary();
+            let mut expected = Vec::new();
+            for _ in 0..4 {
+                let record = record();
+                let id = record.id;
+                capture.history.lock().unwrap().records.insert(id, record);
+                capture.capture(id, Direction::ClientToServer, &vec![255; MAX_CAPTURE_BYTES]);
+                assert!(resident_preview_bytes(&capture) >= MAX_CAPTURE_BYTES);
+                capture.finish(id, "closed", None).await;
+                assert_eq!(resident_preview_bytes(&capture), 0);
+                let detail = capture.detail(id).await.unwrap().unwrap();
+                assert_eq!(
+                    STANDARD.decode(&detail.chunks[0].data_base64).unwrap(),
+                    vec![255; MAX_CAPTURE_BYTES]
+                );
+                let path = capture.directory.join(format!("{id}.json"));
+                let disk = std::fs::read(&path).unwrap();
+                assert_eq!(
+                    serde_json::to_value(&detail).unwrap(),
+                    serde_json::from_slice::<serde_json::Value>(&disk).unwrap()
+                );
+                expected.push((id, disk));
+            }
+            let reloaded = TcpCapture::load(capture.directory.clone());
+            assert_eq!(resident_preview_bytes(&reloaded), 0);
+            assert_eq!(reloaded.connection_count(), Some(4));
+            for (id, original_disk) in expected {
+                for _ in 0..3 {
+                    let detail = reloaded.detail(id).await.unwrap().unwrap();
+                    assert_eq!(
+                        serde_json::to_value(&detail).unwrap(),
+                        serde_json::from_slice::<serde_json::Value>(&original_disk).unwrap()
+                    );
+                    assert_eq!(resident_preview_bytes(&reloaded), 0);
+                }
+                assert_eq!(
+                    std::fs::read(capture.directory.join(format!("{id}.json"))).unwrap(),
+                    original_disk
+                );
+            }
+            sessions.push((capture, reloaded));
+        }
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|(a, b)| resident_preview_bytes(a) + resident_preview_bytes(b))
+                .sum::<usize>(),
+            0
+        );
+        for (capture, _) in sessions {
+            std::fs::remove_dir_all(&capture.directory).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_persistence_pins_payload_until_success_and_never_saves_a_summary() {
+        let capture = temporary();
+        let record = record();
+        let id = record.id;
+        capture.history.lock().unwrap().records.insert(id, record);
+        capture.capture(id, Direction::ServerToClient, &[0, 255, 128, 13, 10]);
+        std::fs::write(&capture.directory, b"storage unavailable").unwrap();
+        capture.finish(id, "closed", None).await;
+        let failed = capture.detail(id).await.unwrap().unwrap();
+        assert!(!failed.durable);
+        assert!(failed.ended_at.is_some());
+        assert_eq!(
+            resident_preview_bytes(&capture),
+            failed.chunks[0].data_base64.len()
+        );
+        assert_eq!(
+            STANDARD.decode(&failed.chunks[0].data_base64).unwrap(),
+            [0, 255, 128, 13, 10]
+        );
+        std::fs::remove_file(&capture.directory).unwrap();
+        capture.finish(id, "closed", None).await;
+        assert_eq!(resident_preview_bytes(&capture), 0);
+        // Finalizing an already durable record must hydrate, never overwrite it
+        // with the metadata-only in-memory representation.
+        capture.finish(id, "stopped", None).await;
+        let reloaded = TcpCapture::load(capture.directory.clone());
+        let recovered = reloaded.detail(id).await.unwrap().unwrap();
+        assert!(recovered.durable);
+        assert_eq!(
+            recovered.chunks[0].data_base64,
+            failed.chunks[0].data_base64
+        );
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_interrupted_and_nondurable_records_keep_payloads_resident() {
+        let capture = temporary();
+        let mut record = record();
+        let id = record.id;
+        capture
+            .history
+            .lock()
+            .unwrap()
+            .records
+            .insert(id, record.clone());
+        capture.capture(id, Direction::ClientToServer, &[0, 255, 127]);
+        record = capture.detail(id).await.unwrap().unwrap();
+        assert_eq!(resident_preview_bytes(&capture), 4);
+        assert!(capture.persist(&record).await);
+        let interrupted = TcpCapture::load(capture.directory.clone());
+        let restored = interrupted.detail(id).await.unwrap().unwrap();
+        assert_eq!(restored.status, "interrupted");
+        assert_eq!(resident_preview_bytes(&interrupted), 4);
+        assert_eq!(restored.chunks[0].data_base64, record.chunks[0].data_base64);
+        record.ended_at = Some(Utc::now());
+        record.status = "closed".into();
+        assert!(!record.durable);
+        assert!(capture.persist(&record).await);
+        let nondurable = TcpCapture::load(capture.directory.clone());
+        assert_eq!(resident_preview_bytes(&nondurable), 4);
+        assert_eq!(
+            nondurable.detail(id).await.unwrap().unwrap().chunks[0].data_base64,
+            record.chunks[0].data_base64
+        );
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unreadable_or_changed_saved_details_fail_explicitly_without_losing_summaries() {
+        for fault in ["missing", "corrupt", "oversized", "changed"] {
+            let capture = temporary();
+            let record = record();
+            let id = record.id;
+            capture.history.lock().unwrap().records.insert(id, record);
+            capture.capture(id, Direction::ClientToServer, &[0, 255]);
+            capture.finish(id, "closed", None).await;
+            let path = capture.directory.join(format!("{id}.json"));
+            match fault {
+                "missing" => std::fs::remove_file(&path).unwrap(),
+                "corrupt" => std::fs::write(&path, b"not json").unwrap(),
+                "oversized" => std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_len(MAX_RECORD_FILE_BYTES + 1)
+                    .unwrap(),
+                "changed" => {
+                    let mut saved = read_stored_connection(&path).unwrap();
+                    saved.status = "stopped".into();
+                    crate::session::write_json(&path, &saved).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(capture.detail(id).await.is_err(), "{fault}");
+            assert!(capture.status().await.load_error, "{fault}");
+            assert_eq!(capture.summaries().await.len(), 1);
+            assert_eq!(capture.summaries().await[0].captured_bytes, 2);
+            assert_eq!(resident_preview_bytes(&capture), 0);
+            assert!(capture.detail(Uuid::new_v4()).await.unwrap().is_none());
+            std::fs::remove_dir_all(&capture.directory).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn tcp_failed_terminal_save_retries_without_a_listener_and_survives_reload() {
+        let capture = temporary();
+        let initial = record();
+        let id = initial.id;
+        assert!(capture.persist(&initial).await);
+        capture.history.lock().unwrap().records.insert(id, initial);
+        capture.capture(id, Direction::ClientToServer, &[0, 255, 42]);
+        let held = capture.directory.with_extension("held");
+        std::fs::rename(&capture.directory, &held).unwrap();
+        std::fs::write(&capture.directory, b"storage unavailable").unwrap();
+        capture.finish(id, "stopped", None).await;
+        for _ in 0..2 {
+            assert_eq!(capture.stop().await.unwrap_err().pending_records, 1);
+            assert!(capture.status().await.persistence_error);
+            assert!(!capture.detail(id).await.unwrap().unwrap().durable);
+        }
+        let failed = capture.detail(id).await.unwrap().unwrap();
+        assert_eq!(failed.client_bytes, 3);
+        assert_eq!(failed.chunks[0].data_base64, "AP8q");
+        std::fs::remove_file(&capture.directory).unwrap();
+        std::fs::rename(&held, &capture.directory).unwrap();
+        capture.stop().await.unwrap();
+        assert!(!capture.status().await.persistence_error);
+        let saved = capture.detail(id).await.unwrap().unwrap();
+        assert!(saved.durable);
+        assert_eq!(saved.ended_at, failed.ended_at);
+        assert_eq!(saved.chunks[0].data_base64, failed.chunks[0].data_base64);
+        let loaded = TcpCapture::load(capture.directory.clone());
+        assert_eq!(
+            serde_json::to_value(loaded.detail(id).await.unwrap().unwrap()).unwrap(),
+            serde_json::to_value(saved).unwrap()
+        );
+        capture.stop().await.unwrap();
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_retry_attempts_every_record_and_clears_error_only_after_all_save() {
+        let capture = temporary();
+        let mut ids = vec![];
+        std::fs::write(&capture.directory, b"storage unavailable").unwrap();
+        for _ in 0..3 {
+            let initial = record();
+            let id = initial.id;
+            ids.push(id);
+            capture.history.lock().unwrap().records.insert(id, initial);
+            capture.capture(id, Direction::ServerToClient, b"retained");
+            capture.finish(id, "stopped", None).await;
+        }
+        std::fs::remove_file(&capture.directory).unwrap();
+        std::fs::create_dir(&capture.directory).unwrap();
+        let blocked = capture.directory.join(format!("{}.json", ids[0]));
+        std::fs::create_dir(&blocked).unwrap();
+        assert_eq!(capture.stop().await.unwrap_err().pending_records, 1);
+        assert!(capture.status().await.persistence_error);
+        for id in &ids[1..] {
+            assert!(capture.detail(*id).await.unwrap().unwrap().durable);
+        }
+        std::fs::remove_dir(&blocked).unwrap();
+        capture.stop().await.unwrap();
+        assert!(!capture.status().await.persistence_error);
+        let loaded = TcpCapture::load(capture.directory.clone());
+        assert!(loaded
+            .records()
+            .await
+            .iter()
+            .all(|record| record.durable && record.server_bytes == 8));
+        assert_eq!(loaded.records().await.len(), 3);
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_retry_does_not_claim_crash_interrupted_records_are_complete() {
+        let capture = temporary();
+        let initial = record();
+        let id = initial.id;
+        assert!(capture.persist(&initial).await);
+        let loaded = TcpCapture::load(capture.directory.clone());
+        loaded.stop().await.unwrap();
+        let interrupted = loaded.detail(id).await.unwrap().unwrap();
+        assert_eq!(interrupted.status, "interrupted");
+        assert!(!interrupted.durable);
+        assert!(interrupted.ended_at.is_none());
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn loopback_self_target_and_storage_failure_do_not_forward() {
+        for storage_failure in [false, true] {
+            let capture = temporary();
+            if storage_failure {
+                std::fs::write(&capture.directory, b"not a directory").unwrap();
+            }
+            let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let settings = TcpSettings {
+                local_port: address.port(),
+                target_host: "127.0.0.1".into(),
+                target_port: if storage_failure {
+                    upstream.local_addr().unwrap().port()
+                } else {
+                    address.port()
+                },
+            };
+            let (stop, rx) = watch::channel(false);
+            let copy = capture.clone();
+            let relay = tokio::spawn(async move { copy.serve(listener, settings, rx).await });
+            let mut client = TcpStream::connect(address).await.unwrap();
+            let mut bytes = vec![];
+            let _ = tokio::time::timeout(Duration::from_secs(3), client.read_to_end(&mut bytes))
+                .await
+                .unwrap();
+            stop.send(true).unwrap();
+            relay.await.unwrap();
+            let rows = capture.records().await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].status, "failed");
+            assert_eq!(
+                rows[0].failure,
+                Some(if storage_failure {
+                    TcpFailure::StorageFailed
+                } else {
+                    TcpFailure::SelfTarget
+                })
+            );
+            assert_eq!(rows[0].client_bytes, 0);
+            assert_eq!(rows[0].durable, !storage_failure);
+            assert_eq!(capture.status().await.persistence_error, storage_failure);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), upstream.accept())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+    #[test]
+    fn failure_codes_are_optional_and_forward_compatible() {
+        let mut json = serde_json::to_value(record()).unwrap();
+        assert!(json.get("failure").is_none());
+        assert_eq!(
+            serde_json::from_value::<TcpConnection>(json.clone())
+                .unwrap()
+                .failure,
+            None
+        );
+        json["failure"] = serde_json::json!("future_private_error");
+        let future = serde_json::from_value::<TcpConnection>(json).unwrap();
+        assert_eq!(future.failure, Some(TcpFailure::Unknown));
+        assert!(!serde_json::to_string(&future)
+            .unwrap()
+            .contains("future_private_error"));
+    }
+    #[tokio::test]
+    async fn simulated_stage_failures_are_safe_and_cancellable() {
+        use std::io::{Error, ErrorKind};
+        for (resolving, kind, expected) in [
+            (true, ErrorKind::Other, TcpFailure::ResolutionFailed),
+            (true, ErrorKind::TimedOut, TcpFailure::ResolutionTimeout),
+            (false, ErrorKind::TimedOut, TcpFailure::ConnectTimeout),
+            (
+                false,
+                ErrorKind::ConnectionRefused,
+                TcpFailure::ConnectionRefused,
+            ),
+            (false, ErrorKind::Other, TcpFailure::ConnectFailed),
+        ] {
+            let future = async { Err::<(), _>(Error::new(kind, "secret-host-and-token")) };
+            assert_eq!(
+                connection_stage(future, Duration::from_secs(1), resolving).await,
+                Err(expected)
+            );
+        }
+        for (resolving, expected) in [
+            (true, TcpFailure::ResolutionTimeout),
+            (false, TcpFailure::ConnectTimeout),
+        ] {
+            assert_eq!(
+                connection_stage(
+                    std::future::pending::<std::io::Result<()>>(),
+                    Duration::ZERO,
+                    resolving
+                )
+                .await,
+                Err(expected)
+            );
+            for explicit_close in [false, true] {
+                let (sender, mut stop) = watch::channel(false);
+                let (closer, mut closed) = watch::channel(false);
+                let (began, started) = tokio::sync::oneshot::channel();
+                let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+                impl Drop for DropFlag {
+                    fn drop(&mut self) {
+                        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                let guard = DropFlag(ended.clone());
+                let task = tokio::spawn(async move {
+                    connection_outcome(
+                        async move {
+                            let _guard = guard;
+                            let _ = began.send(());
+                            connection_stage(
+                                std::future::pending::<std::io::Result<()>>(),
+                                Duration::from_secs(10),
+                                resolving,
+                            )
+                            .await
+                        },
+                        &mut stop,
+                        &mut closed,
+                    )
+                    .await
+                });
+                started.await.unwrap();
+                if explicit_close {
+                    closer.send(true).unwrap();
+                } else {
+                    sender.send(true).unwrap();
+                }
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(1), task)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    ("stopped", None)
+                );
+                assert!(ended.load(std::sync::atomic::Ordering::SeqCst));
+            }
+        }
+    }
+    #[tokio::test]
+    async fn failure_survives_summary_disk_reload_and_stop_clears_it() {
+        let capture = temporary();
+        let record = record();
+        let id = record.id;
+        capture.history.lock().unwrap().records.insert(id, record);
+        capture
+            .finish(id, "failed", Some(TcpFailure::ConnectionRefused))
+            .await;
+        assert_eq!(
+            capture.summaries().await[0].failure,
+            Some(TcpFailure::ConnectionRefused)
+        );
+        let loaded = TcpCapture::load(capture.directory.clone());
+        assert_eq!(
+            loaded.records().await[0].failure,
+            Some(TcpFailure::ConnectionRefused)
+        );
+        assert!(loaded.records().await[0].durable);
+        capture
+            .finish(id, "stopped", Some(TcpFailure::RelayFailed))
+            .await;
+        assert_eq!(capture.detail(id).await.unwrap().unwrap().failure, None);
+        assert_eq!(
+            TcpCapture::load(capture.directory.clone()).records().await[0].failure,
+            None
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn completed_directory_counts_survive_file_cache_churn() {
+        let mut cache = SummaryCache::default();
+        let mut directories = Vec::new();
+        let mut largest = 0;
+        for _ in 0..5 {
+            let capture = temporary();
+            std::fs::create_dir_all(&capture.directory).unwrap();
+            for _ in 0..3 {
+                let record = record();
+                let path = capture.directory.join(format!("{}.json", record.id));
+                crate::session::write_json(&path, &record).unwrap();
+                largest = largest.max(std::fs::metadata(path).unwrap().len());
+            }
+            directories.push(capture.directory.clone());
+        }
+        // More files than the file cache and less budget than all sessions.
+        // Completed directories must not compete with partially scanned files.
+        let mut counts = Vec::new();
+        for _ in 0..15 {
+            let mut budget = largest * 2;
+            counts = directories
+                .iter()
+                .map(|directory| {
+                    stored_connection_count_cached(directory, &mut budget, &mut cache, 4)
+                })
+                .collect();
+        }
+        assert_eq!(counts, vec![Some(3); 5]);
+        let mut budget = 0;
+        for directory in &directories {
+            assert_eq!(
+                stored_connection_count_cached(directory, &mut budget, &mut cache, 4),
+                Some(3)
+            );
+        }
+        assert!(cache.files.len() <= 4);
+        for directory in directories {
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_same_size_and_mtime_invalidates_cached_count() {
+        let capture = temporary();
+        std::fs::create_dir_all(&capture.directory).unwrap();
+        let record = record();
+        let path = capture.directory.join(format!("{}.json", record.id));
+        crate::session::write_json(&path, &record).unwrap();
+        assert_eq!(stored_connection_count(&capture.directory), Some(1));
+        let original = std::fs::read_to_string(&path).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let replacement = capture.directory.with_extension("replacement");
+        let corrupt = original.replace("\"open\"", "\"oops\"");
+        assert_ne!(corrupt, original);
+        assert_eq!(corrupt.len(), original.len());
+        std::fs::write(&replacement, corrupt).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert_eq!(stored_connection_count(&capture.directory), None);
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stored_count_budget_resumes_and_cache_invalidates_after_change() {
+        let capture = temporary();
+        std::fs::create_dir_all(&capture.directory).unwrap();
+        let mut total = 0;
+        for _ in 0..3 {
+            let record = record();
+            let path = capture.directory.join(format!("{}.json", record.id));
+            crate::session::write_json(&path, &record).unwrap();
+            total += std::fs::metadata(path).unwrap().len();
+        }
+        assert_eq!(
+            super::stored_connection_count(&capture.directory, &mut 0),
+            None
+        );
+        assert_eq!(
+            super::stored_connection_count(&capture.directory, &mut (total / 2)),
+            None
+        );
+        assert_eq!(
+            super::stored_connection_count(&capture.directory, &mut total),
+            Some(3)
+        );
+        assert_eq!(
+            super::stored_connection_count(&capture.directory, &mut 0),
+            Some(3)
+        );
+        let path = std::fs::read_dir(&capture.directory)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::write(&path, "corrupt").unwrap();
+        assert_eq!(stored_connection_count(&capture.directory), None);
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[test]
+    fn stored_counts_stream_headers_and_do_not_change_history() {
+        let capture = temporary();
+        assert_eq!(stored_connection_count(&capture.directory), Some(0));
+        std::fs::create_dir_all(&capture.directory).unwrap();
+        let record = record();
+        let path = capture.directory.join(format!("{}.json", record.id));
+        crate::session::write_json(&path, &record).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(stored_connection_count(&capture.directory), Some(1));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        // A preview can be skipped without constructing any TcpChunk values.
+        let mut json = serde_json::to_value(&record).unwrap();
+        json["chunks"] = serde_json::json!([{"data_base64": "A".repeat(350_000)}]);
+        crate::session::write_json(&path, &json).unwrap();
+        assert_eq!(stored_connection_count(&capture.directory), Some(1));
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[test]
+    fn stored_count_reports_unknown_for_corruption_or_oversize() {
+        let capture = temporary();
+        std::fs::create_dir_all(&capture.directory).unwrap();
+        let record = record();
+        let path = capture.directory.join(format!("{}.json", record.id));
+        for content in [
+            "not json".to_string(),
+            "{}".to_string(),
+            serde_json::json!({"id": Uuid::new_v4(), "started_at": Utc::now(), "status": "open"})
+                .to_string(),
+        ] {
+            std::fs::write(&path, content).unwrap();
+            assert_eq!(stored_connection_count(&capture.directory), None);
+        }
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_RECORD_FILE_BYTES + 1).unwrap();
+        assert_eq!(stored_connection_count(&capture.directory), None);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(stored_connection_count(&capture.directory), None);
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[test]
+    fn stored_count_limits_directory_work_and_preserves_records() {
+        let capture = temporary();
+        std::fs::create_dir_all(&capture.directory).unwrap();
+        for _ in 0..MAX_CONNECTIONS {
+            let record = record();
+            crate::session::write_json(
+                &capture.directory.join(format!("{}.json", record.id)),
+                &record,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            stored_connection_count(&capture.directory),
+            Some(MAX_CONNECTIONS)
+        );
+        let record = record();
+        crate::session::write_json(
+            &capture.directory.join(format!("{}.json", record.id)),
+            &record,
+        )
+        .unwrap();
+        assert_eq!(stored_connection_count(&capture.directory), None);
+        assert_eq!(
+            std::fs::read_dir(&capture.directory).unwrap().count(),
+            MAX_CONNECTIONS + 1
+        );
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+
+    #[test]
+    fn live_count_includes_open_records_and_marks_failed_load_unknown() {
+        let capture = temporary();
+        assert_eq!(capture.connection_count(), Some(0));
+        let record = record();
+        capture
+            .history
+            .lock()
+            .unwrap()
+            .records
+            .insert(record.id, record);
+        assert_eq!(capture.connection_count(), Some(1));
+        capture.history.lock().unwrap().load_error = true;
+        assert_eq!(capture.connection_count(), None);
+    }
+
+    #[tokio::test]
+    async fn capture_caps_preserve_total_offsets_and_binary() {
+        let capture = temporary();
+        let record = record();
+        let id = record.id;
+        capture.history.lock().unwrap().records.insert(id, record);
+        capture.capture(id, Direction::ClientToServer, &[0, 255, 13, 10]);
+        capture.capture(id, Direction::ClientToServer, &vec![7; MAX_CAPTURE_BYTES]);
+        capture.capture(id, Direction::ServerToClient, &[8, 9]);
+        let records = capture.records().await;
+        let record = &records[0];
+        assert_eq!(record.client_bytes, MAX_CAPTURE_BYTES as u64 + 4);
+        assert_eq!(record.server_bytes, 2);
+        assert_eq!(record.captured_bytes, MAX_CAPTURE_BYTES);
+        assert!(record.capture_truncated);
+        assert_eq!(
+            STANDARD.decode(&record.chunks[0].data_base64).unwrap(),
+            [0, 255, 13, 10]
+        );
+        assert_eq!(record.chunks[1].offset, 4);
+    }
+    #[tokio::test]
+    async fn pump_preserves_half_close_and_large_binary_stream() {
+        let capture = temporary();
+        let record = record();
+        let id = record.id;
+        capture.history.lock().unwrap().records.insert(id, record);
+        // Small duplex buffers force partial writes and backpressure.
+        let (mut sender, input) = tokio::io::duplex(31);
+        let (output, mut receiver) = tokio::io::duplex(17);
+        let copy = capture.clone();
+        let pump = tokio::spawn(async move {
+            copy.pump(id, Direction::ClientToServer, input, output)
+                .await
+                .unwrap();
+        });
+        let payload: Vec<u8> = (0..500_000).map(|n| (n % 256) as u8).collect();
+        let expected = payload.clone();
+        let sending = tokio::spawn(async move {
+            for part in payload.chunks(73) {
+                sender.write_all(part).await.unwrap();
+            }
+            sender.shutdown().await.unwrap();
+        });
+        let mut received = vec![];
+        receiver.read_to_end(&mut received).await.unwrap();
+        sending.await.unwrap();
+        pump.await.unwrap();
+        assert_eq!(received, expected);
+        assert_eq!(capture.records().await[0].client_bytes, 500_000);
+    }
+    #[tokio::test]
+    async fn terminal_history_survives_reload_and_live_history_is_interrupted() {
+        let capture = temporary();
+        let record = record();
+        let id = record.id;
+        capture
+            .history
+            .lock()
+            .unwrap()
+            .records
+            .insert(id, record.clone());
+        assert!(capture.persist(&record).await);
+        let reload = TcpCapture::load(capture.directory.clone());
+        assert_eq!(reload.records().await[0].status, "interrupted");
+        assert!(reload.records().await[0].capture_truncated);
+        // Recovery must not invent a shutdown timestamp (or a live duration).
+        assert!(reload.records().await[0].ended_at.is_none());
+        capture.capture(id, Direction::ServerToClient, &[0, 128]);
+        capture.finish(id, "closed", None).await;
+        let reload = TcpCapture::load(capture.directory.clone());
+        let records = reload.records().await;
+        assert_eq!(records[0].status, "closed");
+        assert!(records[0].durable);
+        assert_eq!(
+            STANDARD.decode(&records[0].chunks[0].data_base64).unwrap(),
+            [0, 128]
+        );
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+    #[tokio::test]
+    async fn full_history_never_evicts_existing_records() {
+        let capture = temporary();
+        for _ in 0..MAX_CONNECTIONS {
+            let record = record();
+            capture
+                .history
+                .lock()
+                .unwrap()
+                .records
+                .insert(record.id, record);
+        }
+        let settings = TcpSettings {
+            local_port: 19999,
+            target_host: "127.0.0.1".into(),
+            target_port: 19998,
+        };
+        assert!(capture.start(settings).await.is_err());
+        assert_eq!(capture.records().await.len(), MAX_CONNECTIONS);
+    }
+    #[tokio::test]
+    async fn stopped_receiver_is_immediately_observed() {
+        let (sender, mut receiver) = watch::channel(false);
+        sender.send(true).unwrap();
+        tokio::time::timeout(Duration::from_millis(100), wait_stop(&mut receiver))
+            .await
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn loopback_relay_keeps_response_after_client_half_close() {
+        let capture = temporary();
+        let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let target_port = upstream.local_addr().unwrap().port();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let settings = TcpSettings {
+            local_port: address.port(),
+            target_host: "127.0.0.1".into(),
+            target_port,
+        };
+        let (stop, receiver) = watch::channel(false);
+        let copy = capture.clone();
+        let relay = tokio::spawn(async move {
+            copy.serve(listener, settings, receiver).await;
+        });
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = upstream.accept().await.unwrap();
+            let mut request = vec![];
+            socket.read_to_end(&mut request).await.unwrap();
+            assert_eq!(request, [0, 255, 13, 10]);
+            tokio::task::yield_now().await;
+            socket.write_all(&[128, 0, 9]).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(&[0, 255]).await.unwrap();
+        client.write_all(&[13, 10]).await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut response = vec![];
+        tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response, [128, 0, 9]);
+        server.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if capture
+                    .records()
+                    .await
+                    .iter()
+                    .any(|r| r.status == "closed" && r.durable)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        stop.send(true).unwrap();
+        relay.await.unwrap();
+        let records = capture.records().await;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].client_bytes, 4);
+        assert_eq!(records[0].server_bytes, 3);
+        std::fs::remove_dir_all(&capture.directory).unwrap();
+    }
+    #[test]
+    fn mapped_loopback_is_rejected_as_a_self_target() {
+        for ip in ["127.0.0.1", "::1", "::ffff:127.0.0.1"] {
+            assert!(is_loopback(ip.parse().unwrap()));
+        }
+        assert!(!is_loopback("192.0.2.1".parse().unwrap()));
+    }
+    #[tokio::test]
+    async fn cancelled_stop_retains_the_join_owner() {
+        let capture = temporary();
+        let (release, blocked) = tokio::sync::oneshot::channel::<()>();
+        let (stop, _receiver) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            let _ = blocked.await;
+        });
+        *capture.running.lock().await = Some(Running {
+            settings: TcpSettings {
+                local_port: 19999,
+                target_host: "127.0.0.1".into(),
+                target_port: 19998,
+            },
+            stop,
+            task,
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), capture.stop())
+                .await
+                .is_err()
+        );
+        assert!(capture.running.lock().await.is_some());
+        release.send(()).unwrap();
+        capture.stop().await.unwrap();
+        assert!(capture.running.lock().await.is_none());
+    }
+    #[tokio::test]
+    async fn completed_listener_can_restart_but_concurrent_starts_cannot_overlap() {
+        let capture = temporary();
+        let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let settings = TcpSettings {
+            local_port: port,
+            target_host: "127.0.0.1".into(),
+            target_port: 1,
+        };
+        let (stop, _receiver) = watch::channel(false);
+        // Model the completed owner left behind when serve exits on accept failure.
+        let task = tokio::spawn(async {});
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        *capture.running.lock().await = Some(Running {
+            settings: settings.clone(),
+            stop,
+            task,
+        });
+        assert!(!capture.status().await.enabled);
+        let (first, second) =
+            tokio::join!(capture.start(settings.clone()), capture.start(settings));
+        assert_ne!(first.is_ok(), second.is_ok());
+        assert!(capture.status().await.enabled);
+        capture.stop().await.unwrap();
+        assert!(capture.running.lock().await.is_none());
+    }
+    #[tokio::test]
+    async fn start_does_not_reap_an_unfinished_worker_after_cancelled_stop() {
+        let capture = temporary();
+        let settings = TcpSettings {
+            local_port: 19999,
+            target_host: "127.0.0.1".into(),
+            target_port: 19998,
+        };
+        let (release, blocked) = tokio::sync::oneshot::channel::<()>();
+        let (stop, _receiver) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            let _ = blocked.await;
+        });
+        *capture.running.lock().await = Some(Running {
+            settings: settings.clone(),
+            stop,
+            task,
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), capture.stop())
+                .await
+                .is_err()
+        );
+        assert!(capture.start(settings).await.is_err());
+        assert!(capture.running.lock().await.is_some());
+        release.send(()).unwrap();
+        capture.stop().await.unwrap();
+        assert!(capture.running.lock().await.is_none());
+    }
+    #[test]
+    fn listener_host_syntax_and_labels() {
+        for host in ["::1", "[::1]", "[0:0:0:0:0:0:0:1]"] {
+            let mut settings = TcpSettings {
+                local_port: 9000,
+                target_host: host.into(),
+                target_port: 9100,
+            };
+            settings.validate().unwrap();
+            settings.target_host = settings.normalized_host().unwrap();
+            assert_eq!(settings.target_host, "::1");
+            assert_eq!(settings.target_label(), "[::1]:9100");
+        }
+        for host in [
+            "localhost:1234",
+            "127.0.0.1:80",
+            "[::1]:80",
+            "[localhost]",
+            "[::1",
+            "::1]",
+            "[[::1]]",
+            "fe80::1%eth0",
+        ] {
+            let settings = TcpSettings {
+                local_port: 9000,
+                target_host: host.into(),
+                target_port: 9100,
+            };
+            assert!(settings.validate().is_err(), "{host}");
+        }
+    }
+    #[tokio::test]
+    async fn active_admission_status_counts_slots_and_queues_extra_connection() {
+        let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let target_port = upstream.local_addr().unwrap().port();
+        let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let local_port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let capture = temporary();
+        enable(&capture);
+        assert_eq!(capture.status().await.active_count, 0);
+        capture
+            .start(TcpSettings {
+                local_port,
+                target_host: "127.0.0.1".into(),
+                target_port,
+            })
+            .await
+            .unwrap();
+        let mut clients = vec![];
+        let mut servers = vec![];
+        for _ in 0..MAX_ACTIVE {
+            let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, local_port))
+                .await
+                .unwrap();
+            client.write_all(b"held").await.unwrap();
+            clients.push(client);
+            servers.push(
+                tokio::time::timeout(Duration::from_secs(3), upstream.accept())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .0,
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while capture.policy().paused_count != MAX_ACTIVE {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let status = capture.status().await;
+        assert_eq!(
+            (status.active_count, status.active_limit),
+            (MAX_ACTIVE, MAX_ACTIVE)
+        );
+        let mut extra = TcpStream::connect((Ipv4Addr::LOCALHOST, local_port))
+            .await
+            .unwrap();
+        extra.write_all(b"queued").await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), upstream.accept())
+                .await
+                .is_err()
+        );
+        assert_eq!(capture.records().await.len(), MAX_ACTIVE);
+        let first = capture.records().await[0].id;
+        capture.close(first).unwrap();
+        servers.push(
+            tokio::time::timeout(Duration::from_secs(3), upstream.accept())
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+        );
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while capture.records().await.len() != MAX_ACTIVE + 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(capture.status().await.active_count, MAX_ACTIVE);
+        capture.stop().await.unwrap();
+        assert_eq!(capture.status().await.active_count, 0);
+        assert_eq!(capture.policy().pending_count, 0);
+        assert!(capture.records().await.iter().all(|r| r.client_bytes == 0));
+        // Reloaded/session-local runtime starts with no occupied slots or policy state.
+        let loaded = TcpCapture::load(capture.directory.clone());
+        assert_eq!(loaded.status().await.active_count, 0);
+        assert_eq!(loaded.policy().forwarding_count, 0);
+    }
+    #[tokio::test]
+    async fn occupied_listener_port_is_actionable_and_does_not_start() {
+        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let local_port = occupied.local_addr().unwrap().port();
+        let capture = temporary();
+        let error = capture
+            .start(TcpSettings {
+                local_port,
+                target_host: "127.0.0.1".into(),
+                target_port: 1,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), format!("Local port {local_port} is already in use. Choose another Local port or stop the listener using it."));
+        assert!(capture.running.lock().await.is_none());
+    }
+    #[tokio::test]
+    async fn bracketed_ipv6_start_relays_actual_loopback_bytes() {
+        let upstream = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap();
+        let target_port = upstream.local_addr().unwrap().port();
+        let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let local_port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let capture = temporary();
+        capture
+            .start(TcpSettings {
+                local_port,
+                target_host: "[::1]".into(),
+                target_port,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            capture
+                .running
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .settings
+                .target_host,
+            "::1"
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = upstream.accept().await.unwrap();
+            let mut bytes = [0; 3];
+            socket.read_exact(&mut bytes).await.unwrap();
+            socket.write_all(&bytes).await.unwrap();
+        });
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, local_port))
+            .await
+            .unwrap();
+        client.write_all(&[0, 255, 42]).await.unwrap();
+        let mut bytes = [0; 3];
+        tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes, [0, 255, 42]);
+        server.await.unwrap();
+        capture.stop().await.unwrap();
+        assert_eq!(
+            capture.records().await[0].target,
+            format!("[::1]:{target_port}")
+        );
+    }
+    #[test]
+    fn rejects_invalid_ports_and_hosts() {
+        assert!(TcpSettings {
+            local_port: 0,
+            target_host: "127.0.0.1".into(),
+            target_port: 12
+        }
+        .validate()
+        .is_err());
+        assert!(TcpSettings {
+            local_port: 12,
+            target_host: "http://example.com".into(),
+            target_port: 12
+        }
+        .validate()
+        .is_err());
+    }
+    fn enable(capture: &TcpCapture) {
+        capture
+            .set_policy(PolicyUpdate {
+                enabled: true,
+                direction: PolicyDirection::Both,
+                expected_revision: 0,
+            })
+            .unwrap();
+    }
+    async fn wait_pending(capture: &TcpCapture, id: Uuid, n: usize) -> Vec<InterceptEvent> {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let items = capture.pending(id).unwrap().items;
+                if items.len() == n {
+                    return items;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    async fn wait_written(capture: &TcpCapture, id: Uuid, n: usize) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if capture
+                    .pending(id)
+                    .unwrap()
+                    .items
+                    .first()
+                    .map(|p| p.written_bytes)
+                    == Some(n)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    fn setup_intercept() -> (Arc<TcpCapture>, Uuid) {
+        let capture = temporary();
+        let record = record();
+        let id = record.id;
+        capture.history.lock().unwrap().records.insert(id, record);
+        enable(&capture);
+        (capture, id)
+    }
+    #[tokio::test]
+    async fn intercept_holds_binary_and_forwards_edited_bytes_only_once() {
+        let (capture, id) = setup_intercept();
+        let (mut client, input) = tokio::io::duplex(128);
+        let (output, mut server) = tokio::io::duplex(128);
+        let copy = capture.clone();
+        let pump = tokio::spawn(async move {
+            copy.pump(id, Direction::ClientToServer, input, output)
+                .await
+        });
+        client.write_all(&[0, 255, 13, 10, 128]).await.unwrap();
+        let item = wait_pending(&capture, id, 1).await.remove(0);
+        assert_eq!(
+            STANDARD.decode(item.original_base64.unwrap()).unwrap(),
+            [0, 255, 13, 10, 128]
+        );
+        let mut byte = [0];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), server.read(&mut byte))
+                .await
+                .is_err()
+        );
+        assert_eq!(capture.detail(id).await.unwrap().unwrap().client_bytes, 0);
+        let edited = [254, 0, 10, 13, 1];
+        let result = capture
+            .decide(
+                id,
+                item.pending_id,
+                DecisionRequest {
+                    action: DecisionAction::Forward,
+                    replacement_base64: Some(STANDARD.encode(edited)),
+                    expected_revision: 0,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.state, "forwarding");
+        let duplicate = capture
+            .decide(
+                id,
+                item.pending_id,
+                DecisionRequest {
+                    action: DecisionAction::Forward,
+                    replacement_base64: None,
+                    expected_revision: 0,
+                },
+            )
+            .await;
+        assert!(matches!(duplicate, Err(InterceptError::Conflict(_))));
+        client.shutdown().await.unwrap();
+        let mut bytes = vec![];
+        server.read_to_end(&mut bytes).await.unwrap();
+        pump.await.unwrap().unwrap();
+        assert_eq!(bytes, edited);
+        assert!(resident_preview_bytes(&capture) > 0);
+        capture.finish(id, "closed", None).await;
+        assert_eq!(resident_preview_bytes(&capture), 0);
+        let record = capture.detail(id).await.unwrap().unwrap();
+        assert_eq!(record.client_received_bytes, 5);
+        assert_eq!(record.client_bytes, 5);
+        assert_eq!(record.intercept_events[0].state, "forwarded");
+        assert_eq!(record.intercept_events[0].written_bytes, 5);
+        let loaded = TcpCapture::load(capture.directory.clone());
+        let saved = loaded.detail(id).await.unwrap().unwrap();
+        assert_eq!(resident_preview_bytes(&loaded), 0);
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap(),
+            serde_json::to_value(&record).unwrap()
+        );
+        assert!(!loaded.status().await.load_error);
+        assert_eq!(
+            saved.intercept_events[0].selected_base64,
+            Some(STANDARD.encode(edited))
+        );
+        assert!(!loaded.policy().enabled);
+    }
+    #[tokio::test]
+    async fn intercept_off_does_not_release_pending_and_drop_allows_next_read() {
+        let (capture, id) = setup_intercept();
+        let (mut client, input) = tokio::io::duplex(128);
+        let (output, mut server) = tokio::io::duplex(128);
+        let copy = capture.clone();
+        let pump = tokio::spawn(async move {
+            copy.pump(id, Direction::ClientToServer, input, output)
+                .await
+        });
+        client.write_all(b"drop").await.unwrap();
+        let item = wait_pending(&capture, id, 1).await.remove(0);
+        capture
+            .set_policy(PolicyUpdate {
+                enabled: false,
+                direction: PolicyDirection::Both,
+                expected_revision: 1,
+            })
+            .unwrap();
+        assert_eq!(capture.policy().pending_count, 1);
+        assert_eq!(capture.policy().paused_count, 1);
+        assert_eq!(capture.policy().forwarding_count, 0);
+        let mut byte = [0];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), server.read(&mut byte))
+                .await
+                .is_err()
+        );
+        capture
+            .decide(
+                id,
+                item.pending_id,
+                DecisionRequest {
+                    action: DecisionAction::Drop,
+                    replacement_base64: None,
+                    expected_revision: 0,
+                },
+            )
+            .await
+            .unwrap();
+        client.write_all(b"next").await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut bytes = vec![];
+        server.read_to_end(&mut bytes).await.unwrap();
+        pump.await.unwrap().unwrap();
+        assert_eq!(bytes, b"next");
+        let record = capture.detail(id).await.unwrap().unwrap();
+        assert_eq!(record.client_received_bytes, 8);
+        assert_eq!(record.client_bytes, 4);
+        assert_eq!(record.intercept_events[0].state, "dropped");
+        assert_eq!(record.intercept_events[0].written_bytes, 0);
+    }
+    #[tokio::test]
+    async fn intercepted_partial_write_cancellation_keeps_exact_prefix_and_original() {
+        let (capture, id) = setup_intercept();
+        let (mut client, input) = tokio::io::duplex(128);
+        let (output, _server) = tokio::io::duplex(3);
+        let copy = capture.clone();
+        let pump = tokio::spawn(async move {
+            copy.pump(id, Direction::ClientToServer, input, output)
+                .await
+        });
+        client.write_all(b"original").await.unwrap();
+        let item = wait_pending(&capture, id, 1).await.remove(0);
+        capture
+            .decide(
+                id,
+                item.pending_id,
+                DecisionRequest {
+                    action: DecisionAction::Forward,
+                    replacement_base64: Some(STANDARD.encode(b"replacement")),
+                    expected_revision: 0,
+                },
+            )
+            .await
+            .unwrap();
+        wait_written(&capture, id, 3).await;
+        let policy = capture
+            .set_policy(PolicyUpdate {
+                enabled: false,
+                direction: PolicyDirection::Both,
+                expected_revision: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            (
+                policy.pending_count,
+                policy.paused_count,
+                policy.forwarding_count
+            ),
+            (1, 0, 1)
+        );
+        assert_eq!(capture.policy().forwarding_count, 1);
+        pump.abort();
+        let _ = pump.await;
+        capture.finish(id, "stopped", None).await;
+        let record = capture.detail(id).await.unwrap().unwrap();
+        assert_eq!(record.client_bytes, 3);
+        assert_eq!(
+            STANDARD.decode(&record.chunks[0].data_base64).unwrap(),
+            b"rep"
+        );
+        let event = &record.intercept_events[0];
+        assert_eq!(event.state, "cancelled");
+        assert_eq!(event.written_bytes, 3);
+        assert_eq!(event.selected_length, 11);
+        assert_eq!(event.original_base64, Some(STANDARD.encode(b"original")));
+        assert_eq!(capture.policy().pending_count, 0);
+    }
+    #[tokio::test]
+    async fn dropped_decision_response_does_not_undo_owner_acceptance() {
+        let (capture, id) = setup_intercept();
+        let (mut client, input) = tokio::io::duplex(128);
+        let (output, mut server) = tokio::io::duplex(128);
+        let copy = capture.clone();
+        let pump = tokio::spawn(async move {
+            copy.pump(id, Direction::ClientToServer, input, output)
+                .await
+        });
+        client.write_all(b"once").await.unwrap();
+        let item = wait_pending(&capture, id, 1).await.remove(0);
+        // Submit exactly like an HTTP handler then drop its response receiver.
+        let (ack, receiver) = tokio::sync::oneshot::channel();
+        capture.intercept.lock().unwrap().pending[&item.pending_id]
+            .sender
+            .try_send(SubmittedDecision {
+                request: DecisionRequest {
+                    action: DecisionAction::Forward,
+                    replacement_base64: None,
+                    expected_revision: 0,
+                },
+                selected: None,
+                ack,
+            })
+            .unwrap();
+        drop(receiver);
+        client.shutdown().await.unwrap();
+        let mut bytes = vec![];
+        server.read_to_end(&mut bytes).await.unwrap();
+        pump.await.unwrap().unwrap();
+        assert_eq!(bytes, b"once");
+        assert_eq!(
+            capture
+                .detail(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .intercept_events
+                .len(),
+            1
+        );
+    }
+    #[tokio::test]
+    async fn intercept_validates_revisions_and_replacement_before_queueing() {
+        let (capture, id) = setup_intercept();
+        let (ticket, _rx) = capture
+            .admit(id, Direction::ClientToServer, b"test")
+            .unwrap();
+        assert!(capture
+            .set_policy(PolicyUpdate {
+                enabled: false,
+                direction: PolicyDirection::Both,
+                expected_revision: 0
+            })
+            .is_err());
+        for (action, replacement, revision) in [
+            (DecisionAction::Forward, Some("".into()), 0),
+            (DecisionAction::Forward, Some("@@".into()), 0),
+            (DecisionAction::Drop, Some("dA==".into()), 0),
+            (DecisionAction::Forward, None, 1),
+            (
+                DecisionAction::Forward,
+                Some(STANDARD.encode(vec![0; MAX_PENDING_BYTES + 1])),
+                0,
+            ),
+        ] {
+            assert!(capture
+                .decide(
+                    id,
+                    ticket,
+                    DecisionRequest {
+                        action,
+                        replacement_base64: replacement,
+                        expected_revision: revision
+                    }
+                )
+                .await
+                .is_err());
+        }
+        assert_eq!(capture.pending(id).unwrap().items[0].state, "pending");
+    }
+    #[tokio::test]
+    async fn intercept_history_cap_and_corrupt_load_fail_closed() {
+        let (capture, id) = setup_intercept();
+        for _ in 0..MAX_EVENTS + 2 {
+            let (ticket, _rx) = capture
+                .admit(id, Direction::ClientToServer, &vec![1; MAX_PENDING_BYTES])
+                .unwrap();
+            capture.end_range(ticket, "cancelled");
+        }
+        capture.finish(id, "closed", None).await;
+        let record = capture.detail(id).await.unwrap().unwrap();
+        assert_eq!(record.intercept_events.len(), MAX_EVENTS);
+        assert_eq!(record.intercept_captured_bytes, MAX_EVENT_BYTES);
+        assert!(record.intercept_truncated);
+        assert_eq!(record.intercept_event_count, (MAX_EVENTS + 2) as u64);
+        let loaded = TcpCapture::load(capture.directory.clone());
+        assert!(!loaded.status().await.load_error);
+        let mut corrupt = record;
+        corrupt.intercept_events[0].written_bytes = MAX_PENDING_BYTES + 1;
+        crate::session::write_json(&capture.directory.join(format!("{id}.json")), &corrupt)
+            .unwrap();
+        assert!(
+            TcpCapture::load(capture.directory.clone())
+                .status()
+                .await
+                .load_error
+        );
+    }
+    #[tokio::test]
+    async fn loopback_intercept_full_duplex_half_close_and_direction_changes() {
+        let capture = temporary();
+        enable(&capture);
+        let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let settings = TcpSettings {
+            local_port: address.port(),
+            target_host: "127.0.0.1".into(),
+            target_port: upstream.local_addr().unwrap().port(),
+        };
+        let (stop, rx) = watch::channel(false);
+        let copy = capture.clone();
+        let relay = tokio::spawn(async move { copy.serve(listener, settings, rx).await });
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let (mut server, _) = upstream.accept().await.unwrap();
+        client.write_all(b"client").await.unwrap();
+        server.write_all(b"server").await.unwrap();
+        client.shutdown().await.unwrap();
+        let id = capture.records().await[0].id;
+        let items = wait_pending(&capture, id, 2).await;
+        assert_eq!(capture.policy().pending_count, 2);
+        capture
+            .set_policy(PolicyUpdate {
+                enabled: true,
+                direction: PolicyDirection::ServerToClient,
+                expected_revision: 1,
+            })
+            .unwrap();
+        // Direction changes cannot release either already-held range.
+        assert_eq!(capture.pending(id).unwrap().items.len(), 2);
+        for item in items {
+            capture
+                .decide(
+                    id,
+                    item.pending_id,
+                    DecisionRequest {
+                        action: if item.direction == Direction::ClientToServer {
+                            DecisionAction::Forward
+                        } else {
+                            DecisionAction::Drop
+                        },
+                        replacement_base64: None,
+                        expected_revision: 0,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let mut received = vec![];
+        tokio::time::timeout(Duration::from_secs(3), server.read_to_end(&mut received))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, b"client");
+        server.write_all(b"reply").await.unwrap();
+        server.shutdown().await.unwrap();
+        let item = wait_pending(&capture, id, 1).await.remove(0);
+        assert_eq!(item.direction, Direction::ServerToClient);
+        capture
+            .decide(
+                id,
+                item.pending_id,
+                DecisionRequest {
+                    action: DecisionAction::Forward,
+                    replacement_base64: None,
+                    expected_revision: 0,
+                },
+            )
+            .await
+            .unwrap();
+        let mut response = vec![];
+        tokio::time::timeout(Duration::from_secs(3), client.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response, b"reply");
+        stop.send(true).unwrap();
+        relay.await.unwrap();
+        let record = capture.detail(id).await.unwrap().unwrap();
+        assert_eq!(record.client_bytes, 6);
+        assert_eq!(record.server_bytes, 5);
+        assert_eq!(record.server_received_bytes, 11);
+        assert_eq!(record.intercept_events.len(), 3);
+        assert_eq!(capture.policy().pending_count, 0);
+    }
+    #[tokio::test]
+    async fn loopback_close_and_stop_drain_pending_without_forwarding() {
+        for explicit_close in [false, true] {
+            let capture = temporary();
+            enable(&capture);
+            let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let settings = TcpSettings {
+                local_port: address.port(),
+                target_host: "127.0.0.1".into(),
+                target_port: upstream.local_addr().unwrap().port(),
+            };
+            let (stop, rx) = watch::channel(false);
+            let copy = capture.clone();
+            let relay = tokio::spawn(async move { copy.serve(listener, settings, rx).await });
+            let mut client = TcpStream::connect(address).await.unwrap();
+            let (mut server, _) = upstream.accept().await.unwrap();
+            client.write_all(b"held").await.unwrap();
+            server.write_all(b"also held").await.unwrap();
+            let id = capture.records().await[0].id;
+            wait_pending(&capture, id, 2).await;
+            if explicit_close {
+                capture.close(id).unwrap();
+            } else {
+                stop.send(true).unwrap();
+            }
+            let mut bytes = vec![];
+            tokio::time::timeout(Duration::from_secs(3), server.read_to_end(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(bytes.is_empty());
+            let _ = stop.send(true);
+            relay.await.unwrap();
+            let record = capture.detail(id).await.unwrap().unwrap();
+            assert_eq!(record.client_bytes, 0);
+            assert_eq!(record.server_bytes, 0);
+            assert_eq!(record.status, "stopped");
+            assert_eq!(record.failure, None);
+            assert_eq!(record.intercept_events.len(), 2);
+            assert!(record
+                .intercept_events
+                .iter()
+                .all(|e| e.state == "cancelled" && e.written_bytes == 0));
+            assert_eq!(capture.policy().pending_count, 0);
+            assert!(capture.intercept.lock().unwrap().connections.is_empty());
+            assert!(record.durable);
+        }
+    }
+    #[tokio::test]
+    async fn intercept_offsets_follow_received_and_delivered_independently_with_duplicate_race() {
+        let (capture, id) = setup_intercept();
+        let (mut client, input) = tokio::io::duplex(128);
+        let (output, mut server) = tokio::io::duplex(128);
+        let copy = capture.clone();
+        let pump = tokio::spawn(async move {
+            copy.pump(id, Direction::ClientToServer, input, output)
+                .await
+        });
+        for (input, action, replacement) in [
+            (
+                &b"abc"[..],
+                DecisionAction::Forward,
+                Some(STANDARD.encode(b"12345")),
+            ),
+            (&b"drop"[..], DecisionAction::Drop, None),
+        ] {
+            client.write_all(input).await.unwrap();
+            let item = wait_pending(&capture, id, 1).await.remove(0);
+            capture
+                .decide(
+                    id,
+                    item.pending_id,
+                    DecisionRequest {
+                        action,
+                        replacement_base64: replacement,
+                        expected_revision: 0,
+                    },
+                )
+                .await
+                .unwrap();
+            wait_pending(&capture, id, 0).await;
+        }
+        client.write_all(b"z").await.unwrap();
+        let item = wait_pending(&capture, id, 1).await.remove(0);
+        let request = || DecisionRequest {
+            action: DecisionAction::Forward,
+            replacement_base64: None,
+            expected_revision: 0,
+        };
+        let (a, b) = tokio::join!(
+            capture.decide(id, item.pending_id, request()),
+            capture.decide(id, item.pending_id, request())
+        );
+        assert_ne!(a.is_ok(), b.is_ok());
+        client.shutdown().await.unwrap();
+        let mut bytes = vec![];
+        server.read_to_end(&mut bytes).await.unwrap();
+        pump.await.unwrap().unwrap();
+        assert_eq!(bytes, b"12345z");
+        let record = capture.detail(id).await.unwrap().unwrap();
+        assert_eq!(
+            record
+                .intercept_events
+                .iter()
+                .map(|e| (e.original_offset, e.destination_offset, e.written_bytes))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, 5), (3, 5, 0), (7, 5, 1)]
+        );
+    }
+    #[tokio::test]
+    async fn intercepted_write_error_retains_successful_prefix() {
+        let (capture, id) = setup_intercept();
+        let (mut client, input) = tokio::io::duplex(128);
+        let (output, server) = tokio::io::duplex(3);
+        let copy = capture.clone();
+        let pump = tokio::spawn(async move {
+            copy.pump(id, Direction::ClientToServer, input, output)
+                .await
+        });
+        client.write_all(b"abcdef").await.unwrap();
+        let item = wait_pending(&capture, id, 1).await.remove(0);
+        capture
+            .decide(
+                id,
+                item.pending_id,
+                DecisionRequest {
+                    action: DecisionAction::Forward,
+                    replacement_base64: None,
+                    expected_revision: 0,
+                },
+            )
+            .await
+            .unwrap();
+        wait_written(&capture, id, 3).await;
+        drop(server);
+        assert!(pump.await.unwrap().is_err());
+        capture
+            .finish(id, "failed", Some(TcpFailure::RelayFailed))
+            .await;
+        let record = capture.detail(id).await.unwrap().unwrap();
+        assert_eq!(record.failure, Some(TcpFailure::RelayFailed));
+        assert_eq!(record.client_bytes, 3);
+        assert_eq!(record.intercept_events[0].written_bytes, 3);
+        assert_eq!(record.intercept_events[0].state, "failed");
+        assert_eq!(record.intercept_events[0].selected_length, 6);
+    }
+}
+
+#[cfg(test)]
+mod restore_tests;

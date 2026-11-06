@@ -819,6 +819,17 @@ fn persist_desktop_session_state(
     runtime: &tokio::runtime::Runtime,
     state: &AppState,
 ) -> Result<()> {
+    let result = persist_desktop_session_state_inner(runtime, state);
+    if result.is_err() {
+        state.cancel_tcp_shutdown();
+    }
+    result
+}
+
+fn persist_desktop_session_state_inner(
+    runtime: &tokio::runtime::Runtime,
+    state: &AppState,
+) -> Result<()> {
     runtime.block_on(state.stop_background_jobs())?;
     let relay_result = runtime
         .block_on(proxy::close_live_websocket_relays(
@@ -1677,6 +1688,83 @@ mod tests {
 
         assert!(error.contains("flush failed"));
         assert!(error.contains("active failed"));
+    }
+
+    #[test]
+    fn desktop_persist_blocks_on_tcp_failure_and_reopens_start_after_recovery() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let root =
+            std::env::temp_dir().join(format!("sniper-desktop-tcp-retry-{}", uuid::Uuid::new_v4()));
+        let state = AppState::new(AppConfig {
+            proxy_addr: "127.0.0.1:0".parse().unwrap(),
+            ui_addr: "127.0.0.1:0".parse().unwrap(),
+            max_entries: 32,
+            max_transaction_entries: 32,
+            body_preview_bytes: 4096,
+            data_dir: root.clone(),
+        })
+        .unwrap();
+        let (client, server, settings, directory) = runtime.block_on(async {
+            let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let settings = sniper::tcp_capture::TcpSettings {
+                local_port: probe.local_addr().unwrap().port(),
+                target_host: "127.0.0.1".into(),
+                target_port: upstream.local_addr().unwrap().port(),
+            };
+            drop(probe);
+            state
+                .configure_tcp_capture(Some(settings.clone()), None, None)
+                .await
+                .unwrap();
+            let mut client = tokio::net::TcpStream::connect((
+                std::net::Ipv4Addr::LOCALHOST,
+                settings.local_port,
+            ))
+            .await
+            .unwrap();
+            let (mut server, _) = upstream.accept().await.unwrap();
+            client.write_all(b"saved-later").await.unwrap();
+            let mut bytes = [0; 11];
+            server.read_exact(&mut bytes).await.unwrap();
+            let session = state.session().await;
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while session.tcp_capture.summaries().await[0].client_bytes != 11 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            (
+                client,
+                server,
+                settings,
+                session.storage_dir().join("tcp-history"),
+            )
+        });
+        let held = directory.with_extension("held");
+        std::fs::rename(&directory, &held).unwrap();
+        std::fs::write(&directory, b"storage unavailable").unwrap();
+        let error = persist_desktop_session_state(&runtime, &state).unwrap_err();
+        assert!(error.is::<sniper::tcp_capture::TcpPersistenceError>());
+        std::fs::remove_file(&directory).unwrap();
+        std::fs::rename(&held, &directory).unwrap();
+        runtime.block_on(async {
+            state.configure_tcp_capture(None, None, None).await.unwrap();
+            // A blocked close must not leave the continuing desktop in shutdown.
+            state
+                .configure_tcp_capture(Some(settings), None, None)
+                .await
+                .unwrap();
+            state.configure_tcp_capture(None, None, None).await.unwrap();
+            assert!(state.session().await.tcp_capture.summaries().await[0].durable);
+        });
+        drop((client, server));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

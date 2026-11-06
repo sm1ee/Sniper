@@ -99,9 +99,11 @@ test("only the six named work-pane surfaces share a flat medium-radius treatment
     "#templatesShell > .templates-side",
     "#templatesShell > .templates-list",
   ];
-  const start = css.indexOf(selectors[0]);
-  const block = css.slice(start, css.indexOf("}", start) + 1);
-  assert.equal(block,`${selectors.join(",\n")} {\n  background: var(--panel);\n  border-radius: var(--radius-md);\n}`);
+  // Inspect this rule, not the rest of the file: unrelated feature styles may follow.
+  const blocks = [...css.matchAll(/^#matchReplacePanel > \.split-panel > \.panel-card,\n[^}]*\}/gm)];
+  assert.equal(blocks.length, 1, "the shared work-pane rule must appear exactly once");
+  const block = blocks[0][0];
+  assert.equal(block.trim(), `${selectors.join(",\n")} {\n  background: var(--panel);\n  border-radius: var(--radius-md);\n}`);
   assert.match(css, /--radius-md: 10px;/);
   assert.match(css, /--radius-lg: 16px;/);
   assert.match(rule(".templates-side .panel-card"), /border-radius: 0; background: none;/);
