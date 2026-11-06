@@ -85,9 +85,11 @@ test("the drop anchor follows the pointer across wrapped lines", () => {
 
 test("the drop row splits stacked rows by height and a side pin zone by width", () => {
   const rows = [];
-  const { replayTabDropRow } = loadFunctions(["replayTabDropRow"], {
-    els: { replayTabStrip: { querySelectorAll: () => rows } },
+  const context = loadFunctions(["replayTabDropRow", "replayTabById"], {
+    state: { replayTabs: [] }, els: { replayTabStrip: { querySelectorAll: () => rows } },
   });
+  vmSet(context, "replayTabDragId", null);
+  const { replayTabDropRow } = context;
   const [pinned, tabs] = [element("pinned", null), element("tabs", null)];
   const layout = (pinnedBox, tabsBox) => {
     pinned.getBoundingClientRect = () => pinnedBox;
@@ -119,7 +121,7 @@ test("pinned tabs render on their own row, which renders empty when nothing is p
   });
   context.renderReplayTabs();
   const rows = markup.match(/<div class="replay-tab-list[^"]*" data-replay-tab-row="(\w+)"[^>]*>/g);
-  assert.equal(rows.length, 2);
+  assert.equal(rows.length, 3);
   const [pinnedRow, tabRow] = markup.split('data-replay-tab-row="tabs"');
   assert.match(pinnedRow, /data-replay-tab-id="p"/);
   assert.doesNotMatch(pinnedRow, /data-replay-tab-id="a"/);
@@ -153,7 +155,7 @@ test("with every tab pinned, the pinned row shares its line with + and the gear"
   context.renderReplayTabs();
   assert.ok(!classes.has("all-pinned"), "no tabs at all");
   const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8");
-  assert.match(css, /\.replay-tab-rows\.all-pinned > \.replay-tab-list-pinned \{[^}]*flex: 0 1 auto;/);
+  assert.match(css, /\.replay-tab-rows\.all-pinned > \.replay-tab-list-pinned,[^{]*\{[^}]*flex: 0 1 auto;/);
 });
 
 // Selecting a tab rebuilt the rows, which came back scrolled to their start,

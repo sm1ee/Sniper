@@ -35,7 +35,7 @@ function fixture() {
     hideFuzzerDetailPanel(){}, showToast(message){assert.fail(message);},
   });
   for(const name of ['renderFuzzer','renderFuzzerPayloadsEditor','renderFuzzerSetup','renderFuzzerPayloadImportStatus',
-    'escapeHtml','fuzzerRequestTextForAction','parseFuzzerRequestTemplate','fuzzerSetupNode','fuzzerSetupPreflight','fuzzerPayloadCount',
+    'escapeHtml','fuzzerRequestTextForAction','parseFuzzerRequestTemplate','fuzzerSetupNode','fuzzerSetupPreflight','fuzzerRunControls','fuzzerPayloadCount',
     'splitFuzzerPayloadLines','fuzzerTransportState','renderFuzzerTransport','setFuzzerTransport',
     'updateFuzzerRequestText','updateFuzzerPayloadsText','markFuzzerDraftChanged','scheduleFuzzerSetupRender',
     'decodedBase64Length','httpRequestAuthoritiesEquivalent','normalizeHttpRequestAuthority','normalizeFuzzerTargetOverride','normalizeFuzzerTargetAuthority','fuzzerRequestAuthorityFromText',

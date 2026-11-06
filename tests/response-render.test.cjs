@@ -34,6 +34,69 @@ test("each reason for not rendering is explained", () => {
   assert.match(responseRenderModel(html({ body_preview: "" })).note, /no body/);
 });
 
+test("a body Render cannot draw, such as a PDF, is offered as a download instead", () => {
+  const pdf = { content_type: "application/pdf", body_encoding: "base64", body_preview: "JVBERi0xLjQ=" };
+  assert.equal(responseRenderModel(pdf).download, true);
+  assert.match(responseRenderModel(pdf).note, /application\/pdf/);
+  assert.equal(responseRenderModel(html({ body_encoding: "base64" })).download, true);
+  assert.equal(responseRenderModel({ ...pdf, body_preview: "" }).download, undefined, "nothing to save");
+  assert.equal(responseRenderModel(html()).download, undefined);
+});
+
+test("a download is named from Content-Disposition, then the URL, and never names a path", () => {
+  const { downloadFileName } = loadFunctions(["downloadFileName", "normalizedHeaders", "headerNameEquals"], { URL });
+  const response = (disposition, type = "application/pdf") => ({
+    content_type: type, headers: disposition ? [{ name: "Content-Disposition", value: disposition }] : [],
+  });
+  assert.equal(downloadFileName(response('attachment; filename="Q3 report.pdf"'), "https://www.example.com/files/x"), "Q3_report.pdf");
+  assert.equal(downloadFileName(response("attachment; filename*=UTF-8''%EB%B3%B4%EA%B3%A0%EC%84%9C.pdf"), ""), "보고서.pdf");
+  assert.equal(downloadFileName(response(""), "https://www.example.com/files/report.pdf?v=2"), "report.pdf");
+  assert.equal(downloadFileName(response('attachment; filename="../../etc/passwd"'), ""), "passwd");
+  assert.equal(downloadFileName(response("", "application/pdf"), "https://www.example.com/"), "response.pdf");
+  assert.equal(downloadFileName(response("", "application/octet-stream"), "https://www.example.com/"), "response.bin");
+  assert.equal(downloadFileName(response('attachment; filename=".hidden"'), ""), "hidden");
+});
+
+test("in the desktop app Download stays busy until the save ends, a cancel included", async () => {
+  const toasts = [];
+  const clicks = [];
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+  const c = loadFunctions(["downloadResponseBody", "reportDesktopDownload"], {
+    pendingDesktopDownload: null, clearTimeout, Blob,
+    // The blob URL is freed a minute later; that timer must not hold the run open.
+    setTimeout: (fn, ms) => { const timer = setTimeout(fn, ms); timer.unref(); return timer; },
+    window: { ipc: { postMessage() {} } },
+    showToast: (...args) => toasts.push(args),
+    messageBodyBytes: () => new Uint8Array([37, 80, 68, 70]),
+    downloadFileName: () => "report.pdf",
+    URL: { createObjectURL: () => "blob:x", revokeObjectURL() {} },
+    document: {
+      createElement: () => ({ click() { clicks.push(this.download); }, remove() {} }),
+      body: { appendChild() {} },
+    },
+  });
+  let settled = false;
+  c.downloadResponseBody({}, "").then(() => { settled = true; });
+  await tick();
+  assert.deepEqual(clicks, ["report.pdf"]);
+  assert.equal(settled, false, "still saving");
+  c.reportDesktopDownload({ place: null, ok: false });
+  await tick();
+  assert.equal(settled, true);
+  assert.deepEqual(toasts, [], "a cancel in the save panel says nothing");
+});
+
+test("the desktop app's download report says where the file went", () => {
+  const toasts = [];
+  const { reportDesktopDownload } = loadFunctions(["reportDesktopDownload"], { pendingDesktopDownload: null, showToast: (...args) => toasts.push(args) });
+  reportDesktopDownload({ place: "~/Downloads/report.pdf", ok: true });
+  reportDesktopDownload({ place: "~/Downloads/report.pdf", ok: false });
+  assert.equal(toasts[0][0], "Saved to ~/Downloads/report.pdf");
+  assert.ok(toasts[0][2] >= 5000, "long enough to read the path");
+  assert.equal(toasts[1][0], "Could not save ~/Downloads/report.pdf.");
+  assert.equal(toasts[1][1], "error");
+});
+
 test("an image response is shown, as Burp's Render tab does", () => {
   const png = responseRenderModel({ content_type: "image/png", body_encoding: "base64", body_preview: "iVBORw0KGgo=", preview_truncated: true });
   assert.deepEqual(png, { image: "data:image/png;base64,iVBORw0KGgo=", truncated: true });

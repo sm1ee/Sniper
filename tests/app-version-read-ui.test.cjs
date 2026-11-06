@@ -102,7 +102,7 @@ function fixture() {
     "renderViewTabs", "renderSortHeaders", "renderProxySettings", "renderIntercepts", "renderWebsocketSessions",
     "renderReplay", "renderDashboard", "renderEventLog", "renderMatchReplaceRules", "renderTarget", "renderFuzzer",
     "normalizeWorkbenchStackHeight", "initCliPathOnboarding", "applyDisplaySettingsState", "renderShortcutReference",
-    "mountBrowserLaunchers", "installBrowserMenuDismissal", "bindCliPathControls",
+    "mountBrowserLaunchers", "installBrowserMenuDismissal", "bindCliPathControls", "bindVulndataControls", "loadVulndataStatus",
     "wireReplayHistorySwipe", "wireTabIndicator",
   ]) globals[name] = () => { calls.push(name); return Promise.resolve(); };
 

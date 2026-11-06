@@ -45,7 +45,7 @@ function fixture() {
   const context = loadFunctions(functions, {
     compareLoadGeneration: 0,
     document, els, displaySettingsPreviewActive: false, displaySettingsEditedControls: new Set(), displaySettingsReturnFocus: null, activeConfirmDialog: null,
-    hydrateDisplaySettingsForm() {}, renderShortcutReference() {}, selectSettingsTab() {},
+    hydrateDisplaySettingsForm() {}, renderShortcutReference() {}, loadVulndataStatus() {}, selectSettingsTab() {},
     applyDisplaySettingsState: () => applied.push("saved"),
     saveDisplaySettingsFromForm: () => writes.push("settings"),
     applyFilterSettings: () => writes.push("filters"), closeFilterModal() {}, closeCertificateModal() {}, closeCurlImportModal() {},

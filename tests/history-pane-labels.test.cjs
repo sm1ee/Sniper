@@ -46,7 +46,7 @@ function setup() {
     recordPageUrl: () => "https://example.com/",
     renderResponsePreview() {},
   });
-  for (const name of ["createPacketViewerController", "getHistoryPacketViewer", "renderMessagePanes"])
+  for (const name of ["shownResponseView", "responseRenders", "createPacketViewerController", "getHistoryPacketViewer", "renderMessagePanes"])
     vm.runInContext(source(name), f.context);
   f.captureView = side => f.context.getCMView(side);
   f.name = side => f.captureView(side).view.contentDOM.getAttribute("aria-label");

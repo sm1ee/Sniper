@@ -36,7 +36,7 @@ function fixture(area, side, text, query) {
     CM_DEFAULT_SEARCH_CLASSES: { hit: "tok-search-hit", active: "tok-search-active" },
     cmProgrammaticViews: new WeakSet(),
     _cmViews: views,
-    _replayResponseCMMode: "http",
+    _replayResponseCMMode: "http", getActiveReplayTab: () => null,
     state,
     els: {
       requestSearchMeta: meta, responseSearchMeta: meta,

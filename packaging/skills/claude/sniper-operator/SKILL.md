@@ -200,7 +200,8 @@ sniper-cli call capture.http.clear --input '{"session_id":"<session-uuid>"}' --y
 ### Existing intercept rules and saved labels
 
 - `capture.intercept_rule.update` patches a rule by UUID, and `capture.intercept_rule.set_enabled` sets its `enabled` boolean. Both accept `session_id`. Omitted fields keep their values. An empty `host_pattern` or `path_pattern` clears that matcher; `method_filter: []` or `--clear-methods` clears the methods, and repeated `--method` replaces them. A missing rule ID fails without creating a rule. Neither changes the runtime intercept switch or forwards queued traffic.
-- A label-only `replay.update` sets `custom_label` on a saved HTTP or WebSocket tab and changes nothing else. `label: ""` clears it; whitespace collapses and the limit is 80 characters. Request and target inputs stay HTTP-only. It sends no traffic.
+- A label-only `replay.update` sets `custom_label` on a saved HTTP or WebSocket tab and changes no other input. `label: ""` clears it; whitespace collapses and the limit is 80 characters. Request and target inputs stay HTTP-only. It sends no traffic.
+- The person sees what you do in Replay. Tabs you open or duplicate sit on a blue row of their own under your name (`opened_by`); a change you make to a tab they opened sets `changed_by`, a blue dot until they select the tab. The name is `SNIPER_ACTOR` when set, `Claude` under Claude Code, else `CLI`; outside Claude Code, run `SNIPER_ACTOR=<your name> sniper-cli ...`, for example `SNIPER_ACTOR=Codex`.
 - Prefer an explicit session UUID, and reread the saved state after a conflict or uncertain response. They do not use `saved.v1` receipts.
 
 ## Common commands
@@ -229,6 +230,7 @@ sniper-cli replay send --tab-id <tab-id> --dry-run
 sniper-cli fuzzer set-template --transaction-id <uuid> --dry-run
 sniper-cli fuzzer set-payloads --file payloads.txt --dry-run
 sniper-cli fuzzer run --attack-type sniper --dry-run
+sniper-cli fuzzer run --delay 200-800 --stop-on-match 'Welcome' --dry-run
 sniper-cli fuzzer stop --id <uuid> --dry-run
 sniper-cli capture intercept on --dry-run
 sniper-cli capture intercept list
@@ -251,6 +253,8 @@ sniper-cli --output compact templates scan preview --target <origin> --severity 
 sniper-cli templates scan start --target <origin> --severity high,critical --yes
 sniper-cli --output compact templates scan get --id <scan-id>
 sniper-cli templates scan stop --id <scan-id> --yes
+sniper-cli --output compact vulndata status
+sniper-cli --output compact vulndata lookup --product jquery --version 3.4.1
 sniper-cli skills install --claude --dry-run
 ```
 
@@ -264,6 +268,7 @@ On every launch the desktop app overwrites this skill in the default skill folde
 - Do not switch sessions silently before changing scope, Replay state or queued-request decisions.
 - Read `capture http get`, `replay list` or `capture web-socket get` before you assume anything about stored request state.
 - `templates library download` contacts GitHub; ask the user before you run it with `--yes`. `--main` takes main's newest commit: templates not released yet, with no checksum. A downloaded library then updates itself once a day; run `templates library auto-update --enabled false` only when the user asks. Turned-on templates check only captured traffic of in-scope hosts and never send requests; their findings appear under category `nuclei`.
+- Known-vulnerability findings (category `known_cve`) come from a library's version string alone. Report them as leads to confirm, never as confirmed vulnerabilities. Sniper fetches their data once a day; `vulndata update` contacts raw.githubusercontent.com, www.cisa.gov and epss.empiricalsecurity.com, so run it only when the user asks.
 - `templates scan start` sends requests to the targets. Run `templates scan preview` first, show the user what it will send, and start it with `--yes` only when they agree. Never add `--allow-risk` on your own. Its findings are `nuclei:<template-id>`. Every exchange joins HTTP history unless `--history matched`; `--on` sends the templates turned on.
 - `templates auto set --enabled true` makes Sniper send the templates turned on for it to every new host the proxy captures in Scope or on its list. Turn it on, add hosts or turn templates on for it only when the user asks; say what it will send to first.
 - Out-of-band templates (`{{interactsh-url}}`) make the target call the session's Interactsh server. When the preview reports `oast_unavailable`, tell the user those templates need one in `capture oast`; do not configure an OAST server on your own.

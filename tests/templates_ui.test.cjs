@@ -431,7 +431,7 @@ test("the auto scan's toggle is a switch", () => {
   const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
   assert.match(html, /<button class="switch" id="templatesAutoToggle" type="button" role="switch" aria-checked="false" aria-label="Auto scan" disabled><\/button>/);
   const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
-  assert.match(css, /\.switch\[aria-checked="true"\]::after \{[^}]*transform: translateX/);
+  assert.match(css, /\.switch\[aria-checked="true"\]::after[^{]*\{[^}]*transform: translateX/);
 });
 
 // A pager with no other page to turn to is noise beside the count.

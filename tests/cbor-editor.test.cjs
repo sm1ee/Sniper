@@ -1,0 +1,15 @@
+const test=require('node:test'),a=require('node:assert/strict'),E=require('../web/cbor-editor'),R=require('../web/cbor-reader');
+const b=s=>Uint8Array.from(Buffer.from(s.replace(/ /g,''),'hex'));
+const change=(s,path,edit)=>{const x=b(s);return E.session(x).apply(x,path,edit)};
+const integer=value=>({kind:'integer',value:String(value)}),bytes=s=>({kind:'bytes',value:b(s)});
+test('integer widths preserve nonminimal representation',()=>{a.deepEqual(change('1801',[],integer(7)),b('1807'));a.throws(()=>change('01',[],integer(24)),{code:'width-range'});a.deepEqual(change('3800',[],integer(-256)),b('38ff'));a.throws(()=>change('00',[],integer(-1)),{code:'type-range'});});
+test('64 bit exact',()=>{a.equal(R.inspect(change('1b0000000000000000',[],integer('18446744073709551615'))).value.value,'18446744073709551615');a.equal(R.inspect(change('3b0000000000000000',[],integer('-18446744073709551616'))).value.value,'-18446744073709551616');});
+test('duplicate keys untouched targeted value only',()=>{a.deepEqual(change('a2616101616102',[{kind:'value',index:1}],integer(7)),b('a2616101616107'));a.throws(()=>change('a10102',[{kind:'key',index:0}],integer(3)),{code:'invalid-path'});});
+test('indefinite containers and tags preserve surroundings',()=>{a.deepEqual(change('9fd864bf0102ffff',[{kind:'item',index:0},{kind:'tagged'},{kind:'value',index:0}],integer(7)),b('9fd864bf0107ffff'));});
+test('string length change header width unchanged',()=>{a.deepEqual(change('82616102',[{kind:'item',index:0}],bytes('6162')),b('8262616202'));a.deepEqual(change('780161',[],bytes('6162')),b('78026162'));a.throws(()=>change('6161',[],bytes('ff')),{code:'invalid-utf8'});});
+test('indefinite string or chunk editing disallowed',()=>{a.throws(()=>change('7f6161ff',[],bytes('62')),{code:'unsupported-edit'});a.throws(()=>change('7f6161ff',[{kind:'chunk',index:0}],bytes('62')),{code:'invalid-path'});});
+test('unsupported types',()=>{for(const s of ['f6','f90000','d80101','80'])a.throws(()=>change(s,[],integer(1)),{code:'unsupported-edit'});a.deepEqual(change('f4',[],{kind:'boolean',value:true}),b('f5'));});
+test('stale and single use',()=>{const x=b('01'),s=E.session(x);a.throws(()=>s.apply(b('02'),[],integer(3)),{code:'stale-source'});a.deepEqual(s.apply(x,[],integer(3)),b('03'));a.throws(()=>s.apply(x,[],integer(4)),{code:'session-used'});});
+test('snapshot owned, input not mutated',()=>{const x=b('1801'),s=E.session(x);x[1]=8;a.throws(()=>s.apply(x,[],integer(3)),{code:'stale-source'});const old=b('1801');s.apply(old,[],integer(3));a.deepEqual(old,b('1801'));});
+test('bounds and failure retry',()=>{const x=b('5800'),s=E.session(x);a.throws(()=>s.apply(x,[],{kind:'bytes',value:new Uint8Array(256)}),{code:'width-range'});a.equal(s.apply(x,[],bytes('01')).length,3);a.throws(()=>change('590000',[],{kind:'bytes',value:new Uint8Array(65537)}),{code:'byte-limit'});});
+test('1000 integer edits',()=>{for(let i=0;i<1000;i++)a.equal(R.inspect(change('190000',[],integer(i))).value.value,String(i));});

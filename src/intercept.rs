@@ -230,6 +230,15 @@ impl InterceptQueue {
             .unwrap_or(InterceptResolution::Drop(record.request))
     }
 
+    /// Remove only entries whose consumer has already been cancelled. Unlike
+    /// drop_all, this cannot release a live request or response during preflight.
+    pub(crate) async fn discard_cancelled(&self) {
+        self.queue
+            .lock()
+            .await
+            .retain(|entry| !entry.responder.is_closed());
+    }
+
     pub async fn list(&self) -> Vec<InterceptSummary> {
         self.queue
             .lock()
@@ -407,6 +416,15 @@ impl ResponseInterceptQueue {
         receiver.await.unwrap_or(ResponseInterceptResolution::Drop)
     }
 
+    /// Remove only entries whose consumer has already been cancelled. Unlike
+    /// drop_all, this cannot release a live request or response during preflight.
+    pub(crate) async fn discard_cancelled(&self) {
+        self.queue
+            .lock()
+            .await
+            .retain(|entry| !entry.responder.is_closed());
+    }
+
     pub async fn list(&self) -> Vec<ResponseInterceptSummary> {
         self.queue
             .lock()
@@ -540,6 +558,92 @@ mod tests {
     // An empty rule list has to answer the same for both directions. It used to
     // hold every request and no response, which reads as "response intercept is
     // broken" — the Response Queue simply never fills and nothing explains why.
+    #[tokio::test]
+    async fn discard_cancelled_request_intercepts_keeps_live_consumers_held() {
+        let queue = InterceptQueue::new();
+        let mut live = None;
+        let mut live_id = None;
+        for cancelled in [true, false] {
+            let (sender, receiver) = oneshot::channel();
+            let id = Uuid::new_v4();
+            queue.queue.lock().await.push_back(PendingIntercept {
+                record: InterceptRecord {
+                    id,
+                    started_at: Utc::now(),
+                    peer_addr: "127.0.0.1:1".into(),
+                    request: request(),
+                    is_websocket: false,
+                },
+                responder: sender,
+            });
+            if cancelled {
+                drop(receiver);
+            } else {
+                live = Some(receiver);
+                live_id = Some(id);
+            }
+        }
+        queue.discard_cancelled().await;
+        let remaining = queue.list().await;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, live_id.unwrap());
+        let mut live = live.unwrap();
+        assert!(matches!(
+            live.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        queue.drop_all().await;
+        assert!(matches!(live.await.unwrap(), InterceptResolution::Drop(_)));
+    }
+
+    #[tokio::test]
+    async fn discard_cancelled_response_intercepts_keeps_live_consumers_held() {
+        let queue = ResponseInterceptQueue::new();
+        let mut live = None;
+        let mut live_id = None;
+        for cancelled in [true, false] {
+            let (sender, receiver) = oneshot::channel();
+            let id = Uuid::new_v4();
+            queue
+                .queue
+                .lock()
+                .await
+                .push_back(PendingResponseIntercept {
+                    record: ResponseInterceptRecord {
+                        id,
+                        started_at: Utc::now(),
+                        scheme: "http".into(),
+                        host: "example.com".into(),
+                        method: "GET".into(),
+                        path: "/".into(),
+                        status: 200,
+                        response: response(),
+                    },
+                    responder: sender,
+                });
+            if cancelled {
+                drop(receiver);
+            } else {
+                live = Some(receiver);
+                live_id = Some(id);
+            }
+        }
+        queue.discard_cancelled().await;
+        let remaining = queue.list().await;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, live_id.unwrap());
+        let mut live = live.unwrap();
+        assert!(matches!(
+            live.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        queue.drop_all().await;
+        assert!(matches!(
+            live.await.unwrap(),
+            ResponseInterceptResolution::Drop
+        ));
+    }
+
     #[tokio::test]
     async fn an_empty_rule_list_intercepts_responses_like_requests() {
         let store = InterceptRuleStore::new();

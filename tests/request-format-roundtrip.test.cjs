@@ -19,7 +19,7 @@ const c = loadFunctions([
   'headerValue', 'normalizedHeaders', 'headerNameEquals', 'editableRequestBodyLength', 'validateRawHttpBodyFraming',
   'replayRequestToFormat', 'replayRequestToCurl', 'replayExportBlockedReason', 'getReplayExportTarget',
   'deriveRepeaterRequest', 'getRepeaterTargetConfig', 'cloneEditableRequest',
-  'recordToFormat', 'historyRequestExportBlockedReason', 'buildRawRequest', 'buildRawRequestHead', 'renderBody', 'mergeHeaders',
+  'recordToFormat', 'historyRequestExportBlockedReason', 'buildRawRequest', 'buildRawRequestHead', 'renderBody', 'safeDecodeBase64', 'mergeHeaders',
 ], {
   URL, TextEncoder, TextDecoder, document: { getElementById: () => null },
   HTTP_METHOD_TOKEN_RE: /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/,

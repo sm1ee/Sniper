@@ -981,6 +981,15 @@ code {
 .secondary-action:hover {
   border-color: var(--line-strong);
   background: rgba(255, 255, 255, 0.06);
+  /* A wash of the text colour, so a light theme shows it too: white on white
+     did not. */
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+}
+
+/* Anything that can be pressed says so under the pointer. */
+button:not(:disabled),
+summary {
+  cursor: pointer;
 }
 
 .status-pill {
@@ -1023,6 +1032,7 @@ code {
 .replay-view-tab:hover {
   color: var(--text);
   background: rgba(255, 255, 255, 0.04);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
 }
 
 /* The active tab is gold text over a thin gold line on the strip's edge: one
@@ -2004,12 +2014,16 @@ code {
 }
 
 /* On or off, as a settings switch reads. The state is aria-checked, so what
-   it shows and what it announces cannot disagree. */
-.switch {
+   it shows and what it announces cannot disagree. input.switch-input is the
+   same switch on a checkbox, for forms that read .checked. */
+.switch,
+input.switch-input {
+  appearance: none;
   position: relative;
   flex: 0 0 auto;
   width: 34px;
   height: 20px;
+  margin: 0;
   padding: 0;
   border: 0;
   border-radius: 999px;
@@ -2018,7 +2032,8 @@ code {
   transition: background 0.15s;
 }
 
-.switch::after {
+.switch::after,
+input.switch-input::after {
   content: "";
   position: absolute;
   top: 2px;
@@ -2031,17 +2046,25 @@ code {
   transition: transform 0.15s;
 }
 
-.switch[aria-checked="true"] {
+.switch[aria-checked="true"],
+input.switch-input:checked {
   background: var(--point);
 }
 
-.switch[aria-checked="true"]::after {
+.switch[aria-checked="true"]::after,
+input.switch-input:checked::after {
   transform: translateX(14px);
 }
 
-.switch:disabled {
+.switch:disabled,
+input.switch-input:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+input.switch-input:focus-visible {
+  outline: 2px solid var(--point-border);
+  outline-offset: 2px;
 }
 
 .traffic-region {
@@ -2542,7 +2565,7 @@ code {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 40px;
+  min-height: 32px;
   padding: 0 10px;
   border-bottom: 1px solid var(--line);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, transparent 100%);
@@ -2569,7 +2592,7 @@ code {
 
 .view-tab,
 .replay-view-tab {
-  padding: 6px 10px;
+  padding: 4px 10px;
 }
 
 /* ── Diff view ─────────────────────────────────────── */
@@ -3138,6 +3161,11 @@ body.pane-resizing-y {
   padding: 14px;
   color: var(--text-soft);
   line-height: 1.6;
+}
+
+.render-download {
+  align-self: flex-start;
+  margin: 0 14px 14px;
 }
 
 .render-banner {
@@ -3821,6 +3849,19 @@ body.pane-resizing-y {
 
 .fuzzer-attack-options .fuzzer-concurrency-field input {
   width: 64px;
+}
+
+.fuzzer-attack-options .fuzzer-delay-field input {
+  width: 96px;
+}
+
+.fuzzer-stop-options {
+  align-items: end;
+}
+
+/* The result whose response stopped the attack. */
+.fuzzer-result-matched > td:first-child {
+  box-shadow: inset 3px 0 0 var(--point);
 }
 
 .fuzzer-check {
@@ -4726,20 +4767,37 @@ body.pane-resizing-y {
   display: contents;
 }
 
-.replay-tab-list-pinned {
+.replay-tab-list-pinned,
+.replay-tab-list-agent {
   flex: 1 0 100%;
   width: auto;
 }
 
-.replay-tab-list-pinned:empty {
+.replay-tab-list-pinned:empty,
+.replay-tab-list-agent:empty {
   display: none;
 }
 
-/* Every tab is pinned (see renderReplayTabs): the pinned row keeps the line
-   with + and the gear, and the empty tab row beside it is where a dragged tab
-   goes to be unpinned. */
-.replay-tab-rows.all-pinned > .replay-tab-list-pinned {
+/* No tab row to start the last line (see renderReplayTabs): the row above it
+   keeps the line with + and the gear, and the empty tab row beside it is where
+   a dragged tab goes to be unpinned, or taken from an agent. */
+.replay-tab-rows.all-pinned > .replay-tab-list-pinned,
+.replay-tab-rows.agent-last > .replay-tab-list-agent {
   flex: 0 1 auto;
+}
+
+/* While an agent's tab is dragged its row stays up, at the height it has with
+   a tab in it, so it can go back and nothing below it moves. */
+.replay-tab-rows.agent-drag > .replay-tab-list-agent {
+  display: flex;
+  min-width: 96px;
+  min-height: 32px;
+}
+
+/* The pin zone below opens at the head of the tabs' own line, so the agent's
+   row stays the line above it. */
+.replay-tab-rows.pin-zone > .replay-tab-list-agent {
+  order: -1;
 }
 
 /* While a tab is dragged the pinned row stays up as a drop target, even when
@@ -4780,7 +4838,8 @@ body.pane-resizing-y {
   padding-bottom: 0;
 }
 
-.replay-tab-rows.wrap > .replay-tab-list-pinned {
+.replay-tab-rows.wrap > .replay-tab-list-pinned,
+.replay-tab-rows.wrap > .replay-tab-list-agent {
   max-height: 78px;
 }
 
@@ -4867,6 +4926,17 @@ body.pane-resizing-y {
   color: var(--text);
 }
 
+/* Under the pointer a tab lightens over whatever its row's colour is, and its
+   × shows it is a button of its own. */
+.replay-tab:not(.active):hover {
+  box-shadow: inset 0 0 0 100px color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.replay-tab-close:hover {
+  border-radius: 0 7px 7px 0;
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
 .replay-tab-close {
   width: 24px;
   height: 24px;
@@ -4875,12 +4945,12 @@ body.pane-resizing-y {
   line-height: 1;
 }
 
+/* The pin sits before the name as the name of who opened a tab does: as far
+   from the tab's edge, and with no line after it. */
 .replay-tab-pin-btn {
-  width: 22px;
   height: 22px;
-  padding: 0;
+  padding: 0 0 0 8px;
   border: none;
-  border-right: 1px solid rgba(255, 255, 255, 0.06);
   background: transparent;
   cursor: pointer;
   font-size: 11px;
@@ -4897,14 +4967,10 @@ body.pane-resizing-y {
   opacity: 1;
 }
 
+/* Not selected, a tab has no pin button: an invisible one would sit before its
+   name as empty space. Select it to pin it, or drag it to the pinned row. */
 .replay-tab-pin-btn.idle {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.replay-tab:hover .replay-tab-pin-btn.idle {
-  opacity: 0.3;
-  pointer-events: auto;
+  display: none;
 }
 
 .replay-tab-pin-icon {
@@ -4930,6 +4996,53 @@ body.pane-resizing-y {
 .replay-tab.pinned.active .replay-tab-button,
 .replay-tab.pinned.active .replay-tab-close {
   color: #f0e0e0;
+}
+
+/* The tabs sniper-cli opened are blue the way pinned ones are red. */
+.replay-tab.agent {
+  border-color: rgba(70, 130, 210, 0.5);
+  background: rgba(70, 130, 210, 0.1);
+}
+
+.replay-tab.agent .replay-tab-button,
+.replay-tab.agent .replay-tab-close {
+  color: var(--info);
+}
+
+.replay-tab.agent.active {
+  border-color: rgba(70, 130, 210, 0.8);
+  background: rgba(70, 130, 210, 0.22);
+}
+
+.replay-tab.agent.active .replay-tab-button,
+.replay-tab.agent.active .replay-tab-close {
+  color: var(--text);
+}
+
+/* Who opened the tab, before its name. The name keeps the room it has on any
+   other tab. */
+.replay-tab.agent .replay-tab-button {
+  max-width: 240px;
+}
+
+.replay-tab-button[data-actor]::before {
+  content: attr(data-actor);
+  margin-right: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(70, 130, 210, 0.22);
+  color: var(--info);
+  font-size: var(--font-2xs);
+}
+
+/* A tab of the person's that sniper-cli changed since they last looked at it. */
+.replay-tab-agent-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: rgb(70, 130, 210);
 }
 
 .replay-tab-add {
@@ -5063,7 +5176,7 @@ button.utility-button.replay-tab-add {
    Narrow windows scroll this table inside its existing history-table-shell. */
 .history-table.session-table {
   width: 100%;
-  min-width: 1140px;
+  min-width: 1204px;
 }
 
 .session-table thead th {
@@ -5073,10 +5186,11 @@ button.utility-button.replay-tab-add {
 .session-table thead th:nth-child(2) { width: 136px; }
 .session-table thead th:nth-child(3) { width: 88px; }
 .session-table thead th:nth-child(4) { width: 104px; }
-.session-table thead th:nth-child(5) { width: 80px; }
-.session-table thead th:nth-child(6),
-.session-table thead th:nth-child(7) { width: 160px; }
-.session-table thead th:nth-child(8) { width: 180px; }
+.session-table thead th:nth-child(5) { width: 64px; }
+.session-table thead th:nth-child(6) { width: 80px; }
+.session-table thead th:nth-child(7),
+.session-table thead th:nth-child(8) { width: 160px; }
+.session-table thead th:nth-child(9) { width: 180px; }
 
 .session-table thead th[data-sort-key] {
   cursor: pointer;
@@ -5842,6 +5956,25 @@ button.utility-button.replay-tab-add {
   min-width: 0;
 }
 
+.findings-desc-more {
+  min-width: 0;
+}
+
+.findings-desc-summary {
+  cursor: pointer;
+}
+
+.findings-desc-rest {
+  white-space: pre-line;
+  max-height: 40vh;
+  overflow: auto;
+  margin-top: 4px;
+}
+
+.findings-detail-desc:has(.findings-desc-more[open]) {
+  align-items: flex-start;
+}
+
 .findings-detail-panes {
   display: flex;
   flex: 1;
@@ -6013,6 +6146,20 @@ button.utility-button.replay-tab-add {
 
 .replay-target-error:empty { display: none; }
 
+/* The fields read as what they are (HTTPS, a host, 443, HTTP/1.1), so their
+   names are left to screen readers. */
+.replay-target-bar .compact-field > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .replay-target-bar input[aria-invalid="true"] {
   border-color: var(--danger);
 }
@@ -6153,7 +6300,10 @@ button.utility-button.replay-tab-add {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   min-height: 0;
   height: 100%;
-  padding: 14px;
+  /* The messages are the work here: as little frame around them as keeps
+     the two cards apart. */
+  padding: 6px;
+  gap: 6px;
   grid-auto-rows: minmax(0, 1fr);
   align-items: stretch;
   align-content: stretch;
@@ -6163,11 +6313,23 @@ button.utility-button.replay-tab-add {
   align-items: center;
 }
 
+/* One line of title and view tabs, as tall as the other panes' headers; both
+   classes, so a short window's taller panel toolbars leave it alone. */
+.panel-toolbar.replay-panel-toolbar {
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+.replay-panel-toolbar p {
+  margin: 0;
+}
+
 .replay-workbench > .panel-card {
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 0;
   min-width: 0;
   width: 100%;
+  border-radius: var(--radius-md);
 }
 
 .replay-workbench .editor-panel,
@@ -6443,6 +6605,11 @@ button.utility-button.replay-tab-add {
   background: var(--point-soft);
   color: var(--text);
   font-weight: 700;
+}
+
+.primary-action:hover {
+  border-color: var(--point);
+  background: color-mix(in srgb, var(--point) 34%, transparent);
 }
 
 .danger-action {
@@ -6925,7 +7092,7 @@ button.utility-button.replay-tab-add {
 
 @media (max-width: 1240px) {
   /* Stacked panes need more height; see the wrapped tab row cap above. */
-  .replay-tab-rows.wrap > .replay-tab-list:not(.replay-tab-list-pinned) {
+  .replay-tab-rows.wrap > .replay-tab-list:not(.replay-tab-list-pinned):not(.replay-tab-list-agent) {
     max-height: max(78px, calc(100vh - 805px));
   }
 
@@ -7240,10 +7407,6 @@ button.utility-button.replay-tab-add {
   .filter-bar {
     gap: 8px;
     padding: 9px 10px;
-  }
-
-  .pane-header {
-    min-height: 40px;
   }
 
   .pane-footer {
@@ -8515,17 +8678,105 @@ button.utility-button.replay-tab-add {
 }
 
 /* The cleanup policy owns its form and save boundary, apart from runtime settings. */
-#proxySettingsPanel { overflow: auto; }
-#proxySettingsPanel > .split-panel { height: auto; min-height: 500px; }
-#proxySettingsPanel > .split-panel > .panel-card > .settings-form { overflow: visible; }
-.history-retention-card { flex: 0 0 auto; margin-bottom: 12px; }
-.history-retention-card p { margin: 0; line-height: 1.5; }
-.history-retention-fields { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(150px, 1fr); gap: 12px; margin: 0; padding: 0; border: 0; }
-.history-retention-fields .settings-toggle { grid-column: 1 / -1; }
-.history-retention-warning { color: var(--text); font-weight: 600; }
-.history-retention-error { color: var(--danger, #df596a); }
-.history-retention-error:empty { display: none; }
-@media (max-width: 700px) { .history-retention-fields { grid-template-columns: 1fr; } }
+/* Capture Settings: one column of sections beside a jump list. A row is a
+   label and its control; a section's own switch sits on its title. */
+#proxySettingsPanel.capture-settings {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  padding: 0;
+  background: var(--panel);
+}
+.capture-settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 10px;
+  border-right: 1px solid var(--line);
+}
+.capture-settings-nav button {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.capture-settings-nav button:hover { background: var(--accent-soft); color: var(--text); }
+.capture-settings-body { position: relative; min-height: 0; overflow: auto; padding: 0 32px; }
+.capture-settings-section {
+  display: grid;
+  gap: 12px;
+  max-width: 720px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+.capture-settings-section:last-of-type { border-bottom: 0; }
+.capture-settings-section h2 { margin: 0; font-size: var(--font-md); font-weight: 600; }
+.capture-settings-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.capture-settings-status { color: var(--text-dim); font-size: var(--font-sm); }
+.capture-settings-reveal, .history-retention-card, .upstream-peer-card { display: grid; gap: 12px; }
+.capture-settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 24px;
+  min-height: var(--control-h);
+}
+.capture-settings-stacked { grid-template-columns: minmax(0, 1fr); }
+.capture-settings-label { display: grid; gap: 2px; color: var(--text); }
+.capture-settings-section small { color: var(--text-dim); font-size: var(--font-xs); line-height: 1.45; }
+.capture-settings-section small:empty { display: none; }
+.capture-settings-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.capture-settings-address, .capture-settings-unit { display: inline-flex; align-items: center; gap: 6px; color: var(--text-dim); }
+.capture-settings-address input:first-child { width: 150px; }
+.capture-settings-address input[type="number"], .capture-settings-unit input { width: 80px; }
+#proxySettingsPanel :is(input:not([type="checkbox"]), select, textarea) {
+  min-height: var(--control-h);
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background-color: var(--panel-code);
+  color: var(--text);
+  font: inherit;
+}
+#proxySettingsPanel textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: var(--font-sm); }
+#proxySettingsPanel .capture-settings-stacked > input { width: 100%; }
+#proxySettingsPanel select { padding-right: 28px; }
+#proxySettingsPanel :is(input, select, textarea):focus { outline: none; border-color: var(--point-border); box-shadow: 0 0 0 1px var(--point-soft); }
+#proxySettingsPanel :is(.primary-action, .secondary-action) { min-height: var(--control-h); padding: 0 12px; border-radius: 6px; font-size: var(--font-sm); }
+#proxySettingsPanel .settings-inline-control input { flex: 1; }
+/* A button that has nothing to do is not shown: Save and Cancel appear with
+   an unsaved change, Clear with a saved token, Start and Stop by state. */
+#proxySettingsPanel :is(#historyRetentionSave, #historyRetentionCancel, #upstreamPeerSave, #upstreamPeerCancel, #proxySettingOastClearToken, #tcpStart, #tcpStop):disabled { display: none; }
+.capture-settings-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.capture-settings-actions small { margin-right: auto; }
+.capture-settings-actions:not(:has(button:not(.hidden, :disabled))):has(small:empty) { display: none; }
+.history-retention-fields { display: grid; gap: 12px; margin: 0; padding: 0; border: 0; }
+.capture-settings-section small.history-retention-warning { color: var(--warning); }
+.history-retention-error, .upstream-peer-error { margin: 0; color: var(--danger); }
+.history-retention-error:empty, .upstream-peer-error:empty { display: none; }
+.capture-settings-savebar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 720px;
+  padding: 10px 0 14px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+.capture-settings-savebar span { margin-right: auto; color: var(--text-dim); font-size: var(--font-sm); }
+#proxySettingsPanel .runtime-list { padding: 0; }
+@media (max-width: 760px) {
+  #proxySettingsPanel.capture-settings { grid-template-columns: minmax(0, 1fr); }
+  .capture-settings-nav { display: none; }
+  .capture-settings-body { padding: 0 16px; }
+  .capture-settings-pair { grid-template-columns: 1fr; }
+}
 
 .history-recovered-notes { position: fixed; right: 18px; bottom: 30px; z-index: 1200; width: min(480px, calc(100vw - 36px)); max-height: 55vh; overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--panel-code); color: var(--text); box-shadow: 0 4px 24px #0006; }
 .history-recovered-notes summary { cursor: pointer; font-weight: 600; }
@@ -8573,13 +8824,22 @@ button.utility-button.replay-tab-add {
 .service-map-product-filter-panel p { margin: 8px 0 0; overflow-wrap: anywhere; }
 .service-map-products > span { min-width: 0; flex: 0 1 auto; }
 .service-map-products > .service-map-products-more { flex: 0 0 auto; }
-/* The products +N stands for, and what ⚠ and the lock name, show on hover (+N on
-   keyboard focus too): the desktop app's web view shows no title tooltip.
-   Placed against the card, below it, so the clipped chip row does not cut the
-   list off. */
-.service-map-products-more:hover::after, .service-map-exposure:hover::after, .service-map-auth:hover::after, .service-map-card:focus-visible .service-map-products-more::after { content: attr(data-more); position: absolute; z-index: 3; left: 52px; top: calc(100% - 6px); min-width: 120px; max-width: 220px; padding: 6px 9px; white-space: pre-line; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--panel-elevated); color: var(--text); font-size: var(--font-xs); line-height: 1.6; text-align: left; box-shadow: 0 4px 18px rgba(0,0,0,.25); pointer-events: none; }
+/* What +N stands for, what ⚠ and the lock name, and a badge's advisories open
+   on hover (+N on keyboard focus too): the desktop app's web view shows no
+   title tooltip. createMorePopup in service-map.js places it on the page,
+   outside the map's clipping layer. */
+.service-map-more { position: fixed; z-index: 30; min-width: 120px; max-width: 260px; padding: 6px 9px; white-space: pre-line; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--panel-elevated); color: var(--text); font-size: var(--font-xs); line-height: 1.6; text-align: left; box-shadow: 0 4px 18px rgba(0,0,0,.25); pointer-events: none; }
+.service-map-more[hidden] { display: none; }
 .service-map-products > .service-map-exposure { flex: 0 0 auto; color: var(--danger); border-color: var(--danger); }
 .service-map-products > .service-map-auth { flex: 0 0 auto; color: var(--token-url-color); }
+.service-map-advisories, .service-map-kev { margin-left: 5px; padding: 0 4px; border: 1px solid var(--line-strong); border-radius: 4px; font-size: var(--font-xs); white-space: nowrap; }
+.service-map-advisories { color: var(--text-secondary); }
+.service-map-kev { margin-left: 3px; color: var(--danger); border-color: var(--danger); }
+/* In a crowded row the name gives way, never the count or KEV; a short line
+   keeps their borders inside the row's fixed height. */
+.service-map-products > .service-map-known { display: inline-flex; align-items: center; }
+.service-map-known-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.service-map-known > .service-map-advisories, .service-map-known > .service-map-kev { flex: none; line-height: 1.2; }
 .service-map-api-auth { flex: 0 0 auto; margin-left: 6px; color: var(--token-url-color); font-size: var(--font-xs); white-space: nowrap; }
 .service-map-product-icon { width: 1em; height: 1em; margin-right: 2px; vertical-align: -0.12em; }
 .service-map-mark svg { width: 15px; height: 15px; }
@@ -8819,6 +9079,9 @@ button.utility-button.replay-tab-add {
 .service-map-endpoint-summary p { color: var(--text-dim); font-size: var(--font-xs); }
 .service-map-references { padding-left: 16px; color: var(--text-soft); font-size: var(--font-xs); line-height: 1.7; overflow-wrap: anywhere; }
 .service-map-references span { display: block; color: var(--text-dim); }
+/* A badge sits on its product's line, not on a dim line of its own. */
+.service-map-references .service-map-advisories, .service-map-references .service-map-kev { display: inline-block; color: var(--text-secondary); }
+.service-map-references .service-map-kev { color: var(--danger); }
 .service-map-api-catalog { overflow: auto; padding: 18px; }
 .service-map-catalog-header { display: flex; align-items: flex-start; gap: 18px; justify-content: space-between; margin-bottom: 18px; }
 .service-map-catalog-header h3 { margin: 0; }
@@ -8885,12 +9148,6 @@ button.utility-button.replay-tab-add {
 .service-map-overlay-source { font-family: var(--mono); overflow-wrap: anywhere; }
 .service-map-body-overlay .service-map-overlay-source { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.upstream-peer-card { flex: 0 0 auto; margin-bottom: 12px; }
-.upstream-peer-card p { margin: 0; line-height: 1.5; }
-.upstream-peer-card .settings-form { gap: 10px; }
-.upstream-peer-card .panel-toolbar { padding-bottom: 10px; }
-.upstream-peer-error { color: var(--danger, #df596a); }
-.upstream-peer-error:empty { display: none; }
 .service-map-socket-peer { border-top: 1px solid var(--line); padding-top: 12px; }
 .service-map-socket-peer p { overflow-wrap: anywhere; }
 
@@ -9115,6 +9372,12 @@ button.utility-button.replay-tab-add {
 .templates-version strong { font-family: var(--mono); font-weight: 600; }
 .templates-update { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .templates-update .switch { margin-left: auto; }
+.vulndata-update { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.vulndata-update .switch { margin-left: auto; }
+.vulndata-sources { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
+.vulndata-sources li { display: grid; gap: 1px; min-width: 0; }
+.vulndata-facts { color: var(--text-soft); font-size: var(--font-xs); overflow-wrap: anywhere; }
+.vulndata-error { color: var(--danger); font-size: var(--font-xs); overflow-wrap: anywhere; }
 .templates-auto-fields { display: grid; grid-template-columns: minmax(0, 1fr) 84px; gap: 10px; align-items: start; }
 .templates-options[open] > summary { margin-bottom: 10px; }
 .templates-limits { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -9489,3 +9752,146 @@ button.utility-button.replay-tab-add {
   background: var(--panel);
   border-radius: var(--radius-md);
 }
+
+/* Fields is an inspection overlay; hiding the editor preserves its draft/history. */
+.replay-fields-tab { background: transparent; border: 0; color: var(--text-soft); padding: 6px 9px; cursor: pointer; }
+.replay-fields-tab.active { color: var(--accent); box-shadow: inset 0 -2px var(--accent); }
+.replay-fields-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.protobuf-fields-open > .editor-panel,
+.protobuf-fields-open > .render-view,
+.protobuf-fields-open > .replay-hex-pager,
+.protobuf-fields-open > .pane-footer { display: none !important; }
+.protobuf-fields-view { flex: 1; min-height: 0; overflow: auto; padding: 6px 12px; font-family: var(--mono); }
+.protobuf-fields-view[hidden] { display: none; }
+.protobuf-fields-view p { color: var(--text-soft); margin: 0 0 12px; }
+.protobuf-fields-view table { width: 100%; border-collapse: collapse; }
+.protobuf-fields-view th, .protobuf-fields-view td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.protobuf-fields-view button { margin: 12px 8px 0 0; }
+
+.protobuf-fields-summary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px; padding: 2px 8px 6px; color: var(--text-soft); }
+
+.protobuf-field-edit { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.protobuf-field-edit label { display: flex; flex-direction: column; gap: 4px; }
+.protobuf-field-edit input { min-width: 160px; max-width: 100%; font-family: var(--mono); }
+.protobuf-field-edit [role="alert"] { flex-basis: 100%; }
+.protobuf-fields-view td > button { float: right; margin: 0 0 0 8px; padding: 2px 6px; min-width: 32px; min-height: 24px; line-height: 18px; font: inherit; background: transparent; border: 1px solid var(--line); border-radius: 3px; color: var(--text-soft); cursor: pointer; }
+.protobuf-fields-view td > button:hover { color: var(--text); border-color: var(--text-soft); }
+.protobuf-field-edit button { margin: 0; min-height: 24px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; color: var(--text); font: inherit; padding: 3px 6px; cursor: pointer; }
+.protobuf-field-edit input { background: var(--panel); color: var(--text); border: 1px solid var(--line); padding: 3px 6px; }
+.protobuf-fields-view button:focus-visible, .protobuf-field-edit input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.protobuf-fields-summary select, .protobuf-fields-summary .grpc-message-picker { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 2px 6px; min-height: 24px; }
+.protobuf-fields-summary select:focus-visible, .protobuf-fields-summary .grpc-message-picker:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Preserve native hidden semantics even alongside tab display rules. */
+.replay-fields-tab[hidden] { display: none; }
+
+/* TCP: connections over their stream, as WebSocket lays out sessions over
+   frames. The stream reads as a conversation: each read in the order it
+   came, marked by direction, as Wireshark's Follow TCP Stream shows it. */
+#tcpPanel { display: flex; flex-direction: column; }
+.tcp-workbench { flex: 1; min-height: 0; }
+.stack-panel > .tcp-history { flex: 0 0 var(--tcp-list-height, 38%); min-height: 120px; display: flex; flex-direction: column; }
+.stack-panel > .tcp-stream { flex: 1 1 0; min-height: 180px; display: flex; flex-direction: column; min-width: 0; }
+.tcp-history .history-table-shell { flex: 1; min-height: 0; overflow: auto; }
+/* The shared bar has History's four columns; TCP has a summary and its controls. */
+.tcp-history .filter-bar { grid-template-columns: minmax(0, 1fr) auto; }
+#tcpHistoryStatus { white-space: normal; overflow-wrap: anywhere; cursor: default; }
+.tcp-history .history-table-shell:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.tcp-table { table-layout: fixed; min-width: 760px; }
+.tcp-table th { position: relative; white-space: nowrap; cursor: pointer; }
+.tcp-table .tcp-col-index { width: 52px; }
+.tcp-table .tcp-col-number { width: 96px; }
+.tcp-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#tcpHistoryRows tr { cursor: default; }
+#tcpHistoryRows tr.selected { background: var(--selection); }
+#tcpHistoryRows .tcp-empty { color: var(--text-dim); text-align: center; padding: 18px; }
+.tcp-status::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--line-strong); vertical-align: 1px; }
+.tcp-status-open::before, .tcp-status-connecting::before { background: var(--toggle-run); }
+.tcp-status-failed::before, .tcp-status-interrupted::before { background: var(--danger); }
+.tcp-listener-link { border: 0; background: none; color: var(--text-dim); font: inherit; font-size: var(--font-sm); white-space: nowrap; cursor: pointer; }
+.tcp-listener-link:hover { color: var(--text); text-decoration: underline; }
+.tcp-intercept-control { display: inline-flex; align-items: center; gap: 8px; color: var(--text-soft); font-size: var(--font-sm); }
+#tcpInterceptStatus { color: var(--warning); font-size: var(--font-sm); white-space: nowrap; }
+#tcpInterceptStatus:empty { display: none; }
+#tcpInterceptDirection, #tcpDirection, #tcpPendingPicker {
+  height: var(--control-h); padding: 0 8px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--panel); color: var(--text-soft); font: inherit; max-width: 100%;
+}
+.tcp-stream .pane-header { gap: 12px; }
+.tcp-stream-title { flex: 1; min-width: 0; overflow: hidden; color: var(--text-dim); font-size: var(--font-sm); text-overflow: ellipsis; white-space: nowrap; }
+.tcp-stream .tcp-close { min-height: var(--control-h); padding: 0 10px; border-radius: 6px; font-size: var(--font-sm); }
+.tcp-stream .tcp-close:disabled { display: none; }
+.tcp-stream-surface, .tcp-pending-surface { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.tcp-stream-surface[hidden], .tcp-pending-surface[hidden] { display: none; }
+/* Expanded original bytes scroll inside Pending, never over Forward or Drop. */
+.tcp-pending-surface { overflow-y: auto; }
+.tcp-pending-surface > .tcp-pending-bar { flex-shrink: 0; }
+.tcp-conversation { flex: 1 1 0; min-height: 40px; overflow: auto; padding: 10px 12px; color: var(--text-dim); font: var(--font-sm)/1.55 var(--mono); }
+.tcp-conversation:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.tcp-chunk { margin: 0 0 8px; padding: 2px 0 2px 10px; border-left: 2px solid var(--line-strong); color: var(--text); }
+.tcp-chunk-out { border-left-color: var(--info); }
+.tcp-chunk-in { border-left-color: var(--point); }
+.tcp-chunk-head { color: var(--text-dim); font-size: var(--font-xs); }
+.tcp-chunk-out .tcp-chunk-head { color: var(--info); }
+.tcp-chunk-in .tcp-chunk-head { color: var(--point); }
+.tcp-chunk pre { margin: 2px 0 0; font: inherit; white-space: pre; }
+.tcp-intercept-history { flex: 0 0 auto; max-height: 32%; overflow: auto; font: var(--font-xs) var(--mono); }
+.tcp-intercept-history:empty { display: none; }
+.tcp-intercept-history.expanded { flex: 2 1 0; min-height: 100px; max-height: none; }
+.tcp-intercept-history details { padding: 5px 12px; border-top: 1px solid var(--line); }
+.tcp-intercept-history summary { cursor: pointer; color: var(--text-soft); }
+.tcp-event-bytes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.tcp-event-bytes pre { margin: 8px 0; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tcp-event-note { margin: 4px 12px; color: var(--text-dim); }
+#tcpStreamMeta:empty { display: none; }
+.tcp-pending-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 12px; }
+.tcp-pending-bar :is(.primary-action, .secondary-action) { min-height: var(--control-h); padding: 0 12px; border-radius: 6px; font-size: var(--font-sm); }
+#tcpPendingMeta { flex: 1; color: var(--text-dim); font-size: var(--font-sm); }
+#tcpPendingHex { flex: 1; min-height: 80px; padding: 12px; border: 0; border-block: 1px solid var(--line); background: var(--panel-code); color: var(--text); font: var(--font-sm)/1.7 var(--mono); resize: none; }
+#tcpPendingHex:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+#tcpPendingOriginal { flex: 0 0 auto; padding: 5px 12px; border-bottom: 1px solid var(--line); font: var(--font-xs) var(--mono); }
+#tcpPendingOriginal[hidden] { display: none; }
+#tcpPendingOriginal summary { cursor: pointer; color: var(--text-soft); }
+#tcpPendingOriginalHex { max-height: 120px; margin: 8px 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.tcp-notice, .tcp-error { margin: 0; padding: 6px 12px; font-size: var(--font-sm); }
+.tcp-notice { color: var(--text-dim); }
+.tcp-error { color: var(--danger); }
+.tcp-notice:empty, .tcp-error:empty { display: none; }
+@media (max-width: 680px) { .tcp-event-bytes { grid-template-columns: minmax(0, 1fr); gap: 0; } }
+/* The listener in Capture Settings: where it listens, an arrow, where it goes. */
+.tcp-listener-form { display: grid; gap: 10px; }
+.tcp-listener-route { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.tcp-listener-field { display: grid; gap: 4px; color: var(--text-dim); font-size: var(--font-xs); }
+#proxySettingsPanel .tcp-listener-field input { width: 90px; }
+#proxySettingsPanel .tcp-listener-host input { width: 220px; }
+.tcp-listener-arrow { padding-bottom: 4px; color: var(--text-dim); }
+.tcp-listener-actions { display: inline-flex; gap: 8px; margin-left: auto; }
+#tcpSettingsError { padding: 0; }
+
+/* Only large Replay Hex payloads need another row; ordinary messages keep their layout. */
+.replay-hex-pager {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 14px;
+  border-top: 1px solid var(--line);
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+}
+.replay-hex-pager[hidden] { display: none; }
+.replay-hex-pager [data-hex-range] { margin-right: auto; }
+.replay-hex-pager :is(input, button) {
+  min-height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-code);
+  color: var(--text-soft);
+  font: inherit;
+}
+.replay-hex-pager input { width: 64px; min-width: 0; padding: 2px 4px; text-align: center; }
+.replay-hex-pager button { min-width: 24px; padding: 2px 6px; cursor: pointer; }
+.replay-hex-pager button:hover:not(:disabled) { background: var(--panel-soft); color: var(--text); }
+.replay-hex-pager button:disabled { color: var(--text-dim); opacity: 0.5; cursor: default; }
+.replay-hex-pager :is(input, button):focus-visible { outline: 2px solid var(--point); outline-offset: 1px; }

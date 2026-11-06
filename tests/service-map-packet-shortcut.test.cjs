@@ -45,7 +45,7 @@ test("the Map packet viewer offers its packet to Cmd+R only while it is mounted"
   const node = () => ({ querySelector: () => ({ querySelector: () => ({}) }) });
   const container = { isConnected: true, querySelector: () => node() };
   const menus = [];
-  const c = loadFunctions(["mountServiceMapPacketViewer"], {
+  const c = loadFunctions(["mountServiceMapPacketViewer", "shownResponseView", "responseRenders"], {
     serviceMapPacketMenuTarget: null,
     createRecordClipboardOwner: () => () => true,
     createPacketViewerController: (options) => ({ update() {}, destroy() {}, options }),

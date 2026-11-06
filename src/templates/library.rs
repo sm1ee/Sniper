@@ -1489,7 +1489,7 @@ fn write_index(dir: &Path, sha256: &str, built: &BuiltIndex) -> Result<()> {
 
 /// Temp file, fsync, rename, directory fsync: the bundle is either whole or
 /// absent.
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     let temp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     let result = (|| -> Result<()> {
         let mut file = crate::session::create_private_file(&temp)

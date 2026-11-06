@@ -68,7 +68,7 @@ function fixture(overrides = {}) {
     activeConfirmDialog: null, compareLoadGeneration: 0, displaySettingsReturnFocus: null, filterSettingsReturnFocus: null, filterSettingsEditedControls: new Set(),
     displaySettingsPreviewActive: false, displaySettingsEditedControls: new Set(), wsFrameContextMenuTarget: null, browserMenu: null,
     window: { getComputedStyle: () => ({ visibility: "visible" }) },
-    hydrateDisplaySettingsForm() {}, applyDisplaySettingsState() {}, renderShortcutReference() {}, selectSettingsTab() {},
+    hydrateDisplaySettingsForm() {}, applyDisplaySettingsState() {}, renderShortcutReference() {}, loadVulndataStatus() {}, selectSettingsTab() {},
     hydrateFilterForm() {}, saveDisplaySettingsFromForm() {}, applyFilterSettings() {}, closeCurlImportModal() {},
     closeCompareModal() {},
     moveHistorySelection: async offset => calls.push(["history", offset]),

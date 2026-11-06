@@ -1,0 +1,23 @@
+const {test}=require('node:test'),a=require('node:assert/strict');
+const e=require('../web/msgpack-editor'),r=require('../web/msgpack-reader');
+const b=(...v)=>Uint8Array.from(v),value=index=>({kind:'value',index}),item=index=>({kind:'item',index});
+const reject=(f,code)=>a.throws(f,x=>x.code===code);
+test('duplicate/non-string map keys and unrelated noncanonical integers preserved',()=>{
+ const src=b(0x83,0xa1,97,0xcc,1,0xa1,97,0xcc,2,1,0xcc,3);
+ const out=e.session(src).apply(src,[value(1)],{kind:'integer',value:'9'});
+ const want=src.slice();want[8]=9;a.deepEqual(out,want);
+ reject(()=>e.session(src).apply(src,[{kind:'key',index:1}],{kind:'integer',value:'2'}),'invalid-path');
+});
+test('uint64 exact and range',()=>{const src=b(0xcf,0,0,0,0,0,0,0,0);const s=e.session(src);
+ reject(()=>s.apply(src,[],{kind:'integer',value:'18446744073709551616'}),'width-range');
+ a.equal(r.inspect(s.apply(src,[],{kind:'integer',value:'18446744073709551615'})).root.value,'18446744073709551615');
+});
+test('signed width boundaries',()=>{for(const [marker,width] of [[208,1],[209,2],[210,4],[211,8]])for(const v of [-(1n<<BigInt(width*8-1)),(1n<<BigInt(width*8-1))-1n]){const src=new Uint8Array(width+1);src[0]=marker;a.equal(r.inspect(e.session(src).apply(src,[],{kind:'integer',value:String(v)})).root.value,String(v));}});
+test('preserve string width and container counts',()=>{const src=b(0x92,0xd9,1,97,0xcc,5),out=e.session(src).apply(src,[item(0)],{kind:'bytes',value:b(98,99)});a.deepEqual(out,b(0x92,0xd9,2,98,99,0xcc,5));});
+test('fixstr cannot silently widen',()=>{const src=b(0xa0);reject(()=>e.session(src).apply(src,[],{kind:'bytes',value:new Uint8Array(32)}),'width-range');});
+test('extension/float/container edits refused',()=>{for(const src of [b(0xd4,255,1),b(0xca,0,0,0,0),b(0x90)])reject(()=>e.session(src).apply(src,[],{kind:'bytes',value:b(1)}),'unsupported-edit');});
+test('stale and reuse; external mutations cannot affect source',()=>{const src=b(1),s=e.session(src);src[0]=2;reject(()=>s.apply(src,[],{kind:'integer',value:'3'}),'stale-source');a.deepEqual(s.apply(b(1),[],{kind:'integer',value:'3'}),b(3));reject(()=>s.apply(b(1),[],{kind:'integer',value:'3'}),'session-used');});
+test('invalid UTF8 remains inspectable but replacement rejected',()=>{const src=b(0xa1,255);reject(()=>e.session(src).apply(src,[],{kind:'bytes',value:b(255)}),'invalid-utf8');a.deepEqual(e.session(src).apply(src,[],{kind:'bytes',value:b(97)}),b(0xa1,97));});
+test('boolean',()=>a.deepEqual(e.session(b(194)).apply(b(194),[],{kind:'boolean',value:true}),b(195)));
+test('1000 integer transitions preserve selected width',()=>{for(let i=0;i<1000;i++){const src=b(0xcd,0,0);const out=e.session(src).apply(src,[],{kind:'integer',value:String(i*61)});a.equal(r.inspect(out).root.value,String(i*61));a.equal(out[0],0xcd);}});
+test('oversized input and edit bounded',()=>{reject(()=>e.session(new Uint8Array(1048577)),'byte-limit');const src=b(0xc6,0,0,0,0);reject(()=>e.session(src).apply(src,[],{kind:'bytes',value:new Uint8Array(65537)}),'byte-limit');});

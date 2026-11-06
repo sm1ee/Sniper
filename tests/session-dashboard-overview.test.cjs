@@ -110,3 +110,22 @@ test("an unfamiliar activity status stays escaped rather than becoming markup", 
   assert.match(detail, /Recon · &lt;b&gt;partial&amp;unknown&lt;\/b&gt;/);
   assert.doesNotMatch(detail, /<b>/);
 });
+
+
+test("TCP-only sessions show retained connections without claiming HTTP requests", () => {
+  const tcp = { ...sessions[0], request_count: 0, websocket_count: 0, tcp_connection_count: 4, overview: overview() };
+  const els = render(tcp.id, [tcp]);
+  assert.match(els.dashboardSessionsBody.innerHTML, /Retained TCP connections">4<\/td>/);
+  assert.match(els.dashboardTiles.innerHTML, /4 TCP connections/);
+  assert.match(els.dashboardDetail.innerHTML, /4 retained connections/);
+  assert.doesNotMatch(els.dashboardDetail.innerHTML, /Nothing recorded/);
+  assert.match(els.dashboardTiles.innerHTML, /Last HTTP capture/);
+});
+
+test("unknown TCP counts stay unknown and legacy responses remain renderable", () => {
+  const unknown = { ...sessions[0], tcp_connection_count: null };
+  const els = render(unknown.id, [unknown]);
+  assert.match(els.dashboardSessionsBody.innerHTML, /TCP count unavailable">—<\/td>/);
+  assert.match(els.dashboardTiles.innerHTML, /0\+ TCP connections · some unavailable/);
+  assert.match(render().dashboardSessionsBody.innerHTML, /TCP count unavailable/);
+});

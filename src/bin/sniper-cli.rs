@@ -16,7 +16,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use sniper::{
     event_log::EventLogEntry,
-    fuzzer::FuzzerAttackRecord,
+    fuzzer::{FuzzerAttackRecord, FuzzerDelay, FuzzerStopMatch},
     history_retention::{history_retention_config_token, HistoryRetentionPolicy},
     history_selection::HistorySelection,
     intercept::{
@@ -49,7 +49,7 @@ use sniper::{
     skills,
     workspace::{
         FuzzerWorkspaceState, ReplayHistoryEntryState, ReplayTabState, ReplayWorkspaceState,
-        WorkspaceStateSnapshot,
+        WorkspaceStateSnapshot, CLI_WORKSPACE_CLIENT_ID,
     },
 };
 use url::Url;
@@ -201,6 +201,12 @@ enum Command {
     Templates {
         #[command(subcommand)]
         command: TemplatesCommand,
+    },
+    /// Public vulnerability data (retire.js, CISA KEV, FIRST EPSS) that lists
+    /// known advisories for the library versions Sniper detects.
+    Vulndata {
+        #[command(subcommand)]
+        command: VulndataCommand,
     },
     /// Read stored session event messages.
     #[command(name = "event-log")]
@@ -763,6 +769,93 @@ struct TemplatesImportArgs {
     /// A nuclei-templates release .tar.gz, at most 64 MiB.
     #[arg(long)]
     file: PathBuf,
+}
+
+#[derive(Subcommand, Debug)]
+enum VulndataCommand {
+    /// Each source's date, size, terms and last error, and whether the daily
+    /// update is on.
+    Status,
+    /// Fetch every source now: one request each to raw.githubusercontent.com,
+    /// www.cisa.gov and epss.empiricalsecurity.com.
+    Update,
+    /// Load a retire.js, CISA KEV or FIRST EPSS file from disk, for networks
+    /// that cannot reach those hosts.
+    Import(VulndataImportArgs),
+    /// Turn the daily update on or off.
+    AutoUpdate(VulndataAutoUpdateArgs),
+    /// The advisories the data lists for one product version.
+    Lookup(VulndataLookupArgs),
+}
+
+#[derive(Args, Debug)]
+struct VulndataImportArgs {
+    /// A jsrepository-v4.json, known_exploited_vulnerabilities.json or EPSS
+    /// .csv(.gz) file, at most 16 MiB.
+    #[arg(long)]
+    file: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct VulndataAutoUpdateArgs {
+    #[arg(long, action = ArgAction::Set, required = true)]
+    enabled: bool,
+}
+
+#[derive(Args, Debug)]
+struct VulndataLookupArgs {
+    /// A product id as the Service Map names it, such as `jquery`.
+    #[arg(long)]
+    product: String,
+    #[arg(long)]
+    version: String,
+}
+
+impl VulndataCommand {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            Self::Status => "vulndata.status",
+            Self::Update => "vulndata.update",
+            Self::Import(_) => "vulndata.import",
+            Self::AutoUpdate(_) => "vulndata.set_auto_update",
+            Self::Lookup(_) => "vulndata.lookup",
+        }
+    }
+
+    fn input_preview(&self) -> Value {
+        match self {
+            Self::Status | Self::Update => json!({}),
+            Self::Import(args) => json!({ "file": args.file }),
+            Self::AutoUpdate(args) => json!({ "enabled": args.enabled }),
+            Self::Lookup(args) => json!({ "product": args.product, "version": args.version }),
+        }
+    }
+
+    fn api_preview(&self) -> Value {
+        match self {
+            Self::Status => api_preview("GET", "/api/vulndata", None),
+            Self::Update => api_preview("POST", "/api/vulndata/update", Some(json!({}))),
+            Self::Import(args) => api_preview(
+                "POST",
+                "/api/vulndata/import",
+                Some(json!({ "file": args.file, "content_type": "application/octet-stream" })),
+            ),
+            Self::AutoUpdate(args) => api_preview(
+                "POST",
+                "/api/vulndata/auto-update",
+                Some(json!({ "enabled": args.enabled })),
+            ),
+            Self::Lookup(args) => api_preview("GET", vulndata_lookup_path(args), None),
+        }
+    }
+}
+
+fn vulndata_lookup_path(args: &VulndataLookupArgs) -> String {
+    let params = vec![
+        ("product".to_string(), args.product.clone()),
+        ("version".to_string(), args.version.clone()),
+    ];
+    format!("/api/vulndata/lookup?{}", encode_query(params))
 }
 
 #[derive(Args, Debug, Default, Clone)]
@@ -2236,6 +2329,41 @@ struct FuzzerRunArgs {
     /// Requests sent at once, 1-16
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=16))]
     concurrency: u8,
+    /// Wait between requests, in milliseconds: `500`, or a random time in a
+    /// range such as `200-800`
+    #[arg(long, alias = "sleep", value_parser = parse_fuzzer_delay)]
+    delay: Option<FuzzerDelay>,
+    /// Stop at the first response whose headers or body contain this text, in any case
+    #[arg(long, conflicts_with = "stop_on_regex")]
+    stop_on_match: Option<String>,
+    /// Stop at the first response whose headers or body match this regex
+    #[arg(long)]
+    stop_on_regex: Option<String>,
+}
+
+impl FuzzerRunArgs {
+    fn stop_match(&self) -> Option<FuzzerStopMatch> {
+        self.stop_on_match
+            .clone()
+            .map(|text| FuzzerStopMatch { text, regex: false })
+            .or_else(|| {
+                self.stop_on_regex
+                    .clone()
+                    .map(|text| FuzzerStopMatch { text, regex: true })
+            })
+    }
+}
+
+/// `500` or `200-800`, in milliseconds.
+fn parse_fuzzer_delay(value: &str) -> std::result::Result<FuzzerDelay, String> {
+    let (min, max) = value.split_once('-').unwrap_or((value, value));
+    let parse = |part: &str| part.trim().parse::<u64>();
+    match (parse(min), parse(max)) {
+        (Ok(min_ms), Ok(max_ms)) if min_ms <= max_ms => Ok(FuzzerDelay { min_ms, max_ms }),
+        _ => Err(format!(
+            "expected milliseconds such as `500`, or a range such as `200-800`; got `{value}`"
+        )),
+    }
 }
 
 /// How payloads fill the marked positions, as Burp Intruder names it.
@@ -2939,6 +3067,25 @@ fn api_failure_detail(status: StatusCode, message: String) -> String {
     message
 }
 
+/// Every request says who drives the CLI, so Replay can name it on the tabs
+/// it opens or changes: SNIPER_ACTOR when set, else Claude when Claude Code
+/// runs the command (it sets CLAUDECODE=1 for the commands it runs). With
+/// neither, the server says the CLI did it.
+fn api_client_builder() -> reqwest::ClientBuilder {
+    let actor = std::env::var("SNIPER_ACTOR").ok().or_else(|| {
+        (std::env::var("CLAUDECODE").as_deref() == Ok("1")).then(|| "Claude".to_string())
+    });
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(value) =
+        actor.and_then(|name| reqwest::header::HeaderValue::from_str(name.trim()).ok())
+    {
+        headers.insert("x-sniper-actor", value);
+    }
+    reqwest::Client::builder()
+        .no_proxy()
+        .default_headers(headers)
+}
+
 #[derive(Clone)]
 struct ApiClient {
     base_url: String,
@@ -2949,19 +3096,16 @@ struct ApiClient {
 
 impl ApiClient {
     async fn discover(cli_api: Option<String>) -> Result<Self> {
-        let probe_client = reqwest::Client::builder()
-            .no_proxy()
+        let probe_client = api_client_builder()
             .timeout(CLI_API_TIMEOUT)
             .build()
             .context("failed to build sniper-cli discovery HTTP client")?;
         let base_url = discover_api_base_url(cli_api, &probe_client).await?;
-        let client = reqwest::Client::builder()
-            .no_proxy()
+        let client = api_client_builder()
             .timeout(CLI_API_TIMEOUT)
             .build()
             .context("failed to build sniper-cli HTTP client")?;
-        let long_client = reqwest::Client::builder()
-            .no_proxy()
+        let long_client = api_client_builder()
             .build()
             .context("failed to build sniper-cli long-running HTTP client")?;
         Ok(Self {
@@ -3181,8 +3325,6 @@ fn api_request_error(error: reqwest::Error, method: &Method, message: String) ->
     }
 }
 
-const CLI_WORKSPACE_CLIENT_ID: &str = "sniper-cli";
-
 async fn post_workspace_state(
     api: &ApiClient,
     workspace: &mut WorkspaceStateSnapshot,
@@ -3360,6 +3502,10 @@ struct FuzzerRunPayload {
     attack_type: &'static str,
     url_encode: bool,
     concurrency: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delay: Option<FuzzerDelay>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_match: Option<FuzzerStopMatch>,
 }
 
 #[derive(Serialize)]
@@ -3417,6 +3563,7 @@ impl Command {
             Command::Recon { command } => command.operation_name(),
             Command::Scanner { command } => command.operation_name(),
             Command::Templates { command } => command.operation_name(),
+            Command::Vulndata { command } => command.operation_name(),
             Command::EventLog { command } => command.operation_name(),
             Command::Scope { command } => command.operation_name(),
             Command::Replay { command } => command.operation_name(),
@@ -3924,6 +4071,51 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             vec![json!({"enabled":false}), json!({"enabled":true})],
         ),
         op(
+            "vulndata.status",
+            "vulndata status",
+            "Read the vulnerability data: for retire.js (Apache-2.0), CISA KEV (CC0) and FIRST EPSS, when each last loaded (fetched_at), from a download or an import (origin), its size and SHA-256 and the last error; whether the daily update is on and an update is running; and the revision of the loaded index, null until retire.js loaded once; KEV and EPSS only mark its advisories. verified is always false: no source signs its file, so TLS is the only check. Local; contacts nothing.",
+            Read,
+            false,
+            &[],
+            vec![json!({})],
+        ),
+        op(
+            "vulndata.update",
+            "vulndata update",
+            "Fetch all three sources now, due or not and with the daily update off too: one request each to raw.githubusercontent.com, www.cisa.gov and epss.empiricalsecurity.com, through the environment's proxy. Nothing about any target is sent. A file over its limit or that does not parse keeps the previous one and shows in status as error. Waits until the update ends.",
+            Write,
+            true,
+            &[],
+            vec![json!({})],
+        ),
+        op(
+            "vulndata.import",
+            "vulndata import --file <path>",
+            "Load a jsrepository-v4.json, known_exploited_vulnerabilities.json or EPSS .csv(.gz) file from this machine, at most 16 MiB, for networks that cannot reach the hosts. Sniper tells which source it is and checks it as a download; the next successful fetch replaces it.",
+            Write,
+            true,
+            &["file"],
+            vec![json!({"file":"known_exploited_vulnerabilities.json"})],
+        ),
+        op(
+            "vulndata.set_auto_update",
+            "vulndata auto-update --enabled <true|false>",
+            "Turn the daily update on or off; it starts on. While on, Sniper fetches each source a minute after launch when it never loaded, then hourly when it failed last time or loaded a day ago.",
+            Write,
+            true,
+            &["enabled"],
+            vec![json!({"enabled":false}), json!({"enabled":true})],
+        ),
+        op(
+            "vulndata.lookup",
+            "vulndata lookup --product <id> --version <version>",
+            "List the known advisories for one product version, as findings and the Service Map show them: id, CVEs, severity, summary, fixed_in, https links, kev and epss, exploited ones first. product is a Service Map product id such as jquery. A version too partial to place in a range, such as 3 against 3.5.0, matches nothing. A match is a lead from the version string alone, not a confirmed vulnerability. Local; contacts nothing.",
+            Read,
+            false,
+            &["product", "version"],
+            vec![json!({"product":"jquery","version":"3.4.1"})],
+        ),
+        op(
             "templates.list",
             "templates list",
             "List templates in the installed release with severity, tags, protocol, whether Sniper can run each passively or actively and why not, risk tags, and whether a passive one is on. Filters narrow it; limit and offset page it.",
@@ -4217,7 +4409,11 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             Write,
             true,
             &[],
-            vec![json!({}), json!({"attack_type":"sniper","concurrency":4})],
+            vec![
+                json!({}),
+                json!({"attack_type":"sniper","concurrency":4}),
+                json!({"attack_type":"sniper","delay":"200-800","stop_on_match":"Welcome"}),
+            ],
         ),
         op(
             "fuzzer.status",
@@ -5737,6 +5933,19 @@ fn service_map_output_schema(operation: &str) -> Option<Value> {
         "type":"string","pattern":"^v1\\.",
         "description":"Evidence of the origin's newest retained icon: a GET answered 200 with a raster image at a favicon or apple-touch-icon path, kept whole. The GUI's card shows it. Found before the display filter; never fetched from the target. Absent when none was captured."
     });
+    let known = service_map_object(json!({
+        "product_id":{"type":"string","pattern":"^[a-z0-9_]{1,40}$"},
+        "name":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9 .!+_-]{0,39}$"},
+        "version":{"type":"string","pattern":"^[0-9][0-9A-Za-z.+-]{0,39}$"},
+        "count":{"type":"integer","minimum":1},
+        "kev_count":{"type":"integer","minimum":0},
+        "highest_severity":{"type":"string","enum":["critical","high","medium","low","unknown"]}
+    }));
+    origin["properties"]["known_vulnerabilities"] = json!({
+        "type":"array","maxItems":32,
+        "description":"For each front-end version the vulnerability data (retire.js, CISA KEV, FIRST EPSS) lists advisories for: how many, how many CISA lists as exploited, and the highest severity word. A lead from the version string alone; vulndata lookup lists the advisories. Absent when none, before the data has loaded, and on older servers.",
+        "items":known
+    });
     origin["properties"]["front_technologies"] = json!({
         "type":"array","maxItems":32,
         "description":"Front-end frameworks, CMSs, UI kits, libraries and analytics retained scripts, pages and asset URLs name: license banners, runtime values such as Next.js's window.next, page markup such as ng-version or data-v- attributes, <meta name=generator>, CDN package@version paths, versioned file names and build directories such as /_next/static/. An asset's goes to the page that loaded it when that page is in the map.",
@@ -6249,8 +6458,7 @@ fn recon_api_preview(command: &ReconCommand) -> Value {
 
 async fn discover_recon_api(cli_api: Option<String>) -> Result<ApiClient> {
     // A redirect or transport retry must never repeat a submission elsewhere.
-    let client = reqwest::Client::builder()
-        .no_proxy()
+    let client = api_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .timeout(CLI_API_TIMEOUT)
@@ -6483,6 +6691,30 @@ fn op(
     }
 }
 
+fn vulndata_input_schema(operation: &str) -> Option<Value> {
+    Some(match operation {
+        "vulndata.status" | "vulndata.update" => {
+            json!({"type":"object","additionalProperties":false,"required":[],"properties":{}})
+        }
+        "vulndata.import" => json!({
+            "type":"object","additionalProperties":false,"required":["file"],
+            "properties":{"file":{"type":"string","minLength":1,"description":"Path to a jsrepository-v4.json, known_exploited_vulnerabilities.json or EPSS .csv(.gz) file on this machine, at most 16 MiB."}}
+        }),
+        "vulndata.set_auto_update" => json!({
+            "type":"object","additionalProperties":false,"required":["enabled"],
+            "properties":{"enabled":{"type":"boolean","description":"Turn the daily update on (true) or off (false)."}}
+        }),
+        "vulndata.lookup" => json!({
+            "type":"object","additionalProperties":false,"required":["product","version"],
+            "properties":{
+                "product":{"type":"string","minLength":1,"maxLength":100,"description":"A Service Map product id, such as jquery."},
+                "version":{"type":"string","minLength":1,"maxLength":100,"description":"The version as detected, such as 3.4.1."}
+            }
+        }),
+        _ => return None,
+    })
+}
+
 fn templates_input_schema(operation: &str) -> Option<Value> {
     let filter = json!({
         "search":{"type":["string","null"],"maxLength":200,"description":"Substring of an id, name, path, tag, CVE, description or reference, case-insensitive."},
@@ -6695,7 +6927,7 @@ fn session_read_output_schema(operation: &str) -> Option<Value> {
             "rule_id":{"type":"string"},
             "severity":{"type":"string","enum":["info","low","medium","high","critical"]},
             "category":{"type":"string"}, "title":{"type":"string"},
-            "host":{"type":"string"}, "path":{"type":"string"},
+            "scheme":{"type":"string"}, "host":{"type":"string"}, "path":{"type":"string"},
             "location":{
                 "type":"object","required":["side"],
                 "properties":{
@@ -6899,6 +7131,9 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
         return schema;
     }
     if let Some(schema) = templates_input_schema(operation) {
+        return schema;
+    }
+    if let Some(schema) = vulndata_input_schema(operation) {
         return schema;
     }
     let mut properties = serde_json::Map::new();
@@ -7121,6 +7356,10 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "templates.library.download" => &["main"],
         "templates.library.import" => &["file"],
         "templates.library.set_auto_update" => &["enabled"],
+        "vulndata.status" | "vulndata.update" => &[],
+        "vulndata.import" => &["file"],
+        "vulndata.set_auto_update" => &["enabled"],
+        "vulndata.lookup" => &["product", "version"],
         "templates.list" => &[
             "search",
             "severity",
@@ -7273,6 +7512,9 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "attack_type",
             "raw_payloads",
             "concurrency",
+            "delay",
+            "stop_on_match",
+            "stop_on_regex",
         ],
         "fuzzer.status" | "fuzzer.results" | "fuzzer.stop" => &["id", "session_id"],
         "fuzzer.list" => &["session_id", "limit"],
@@ -7404,6 +7646,7 @@ fn command_input_preview(command: &Command) -> Value {
         Command::Recon { command } => recon_input_preview(command),
         Command::Scanner { command } => scanner_input_preview(command),
         Command::Templates { command } => templates_input_preview(command),
+        Command::Vulndata { command } => command.input_preview(),
         Command::Findings { command } => match command {
             FindingsCommand::List(args) => json!({"session_id":args.session_id,"limit":args.limit}),
             FindingsCommand::Get(args) => json!({"session_id":args.session_id,"id":args.id}),
@@ -7646,6 +7889,9 @@ fn fuzzer_input_preview(command: &FuzzerCommand) -> Value {
             "attack_type": args.attack_type.api_name(),
             "raw_payloads": args.raw_payloads,
             "concurrency": args.concurrency,
+            "delay": args.delay,
+            "stop_on_match": args.stop_on_match,
+            "stop_on_regex": args.stop_on_regex,
         }),
         FuzzerCommand::Status(args) | FuzzerCommand::Stop(args) => {
             json!({ "id": args.id, "session_id": args.session_id })
@@ -7833,6 +8079,7 @@ fn command_api_preview(command: &Command) -> Result<Value> {
         Command::Recon { command } => recon_api_preview(command),
         Command::Scanner { command } => scanner_api_preview(command),
         Command::Templates { command } => templates_api_preview(command),
+        Command::Vulndata { command } => command.api_preview(),
         Command::Findings { command } => findings_api_preview(command),
         Command::EventLog {
             command: EventLogCommand::List(args),
@@ -8508,6 +8755,9 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
         "templates.library.check" | "templates.library.download" => notes.push("Contacts GitHub through the environment's proxy: the latest-release API, then for a download the release's checksums file and source .tar.gz; with main, the branch API and that commit's .tar.gz. A release that does not match its published SHA-256 is not installed; main has no checksum. Dry-run contacts nothing."),
         "templates.library.import" => notes.push("Reads the local .tar.gz and uploads it to the running Sniper, which installs it; nothing contacts GitHub. Dry-run reads nothing."),
         "templates.library.set_auto_update" => notes.push("While on, Sniper asks GitHub once a day through the environment's proxy and installs a newer release or main commit. Dry-run contacts nothing."),
+        "vulndata.update" => notes.push("Contacts raw.githubusercontent.com, www.cisa.gov and epss.empiricalsecurity.com through the environment's proxy, one file each; nothing about any target is sent. Dry-run contacts nothing."),
+        "vulndata.import" => notes.push("Reads the local file and uploads it to the running Sniper, which checks and loads it; nothing contacts the data hosts. Dry-run reads nothing."),
+        "vulndata.set_auto_update" => notes.push("While on, Sniper fetches the three files through the environment's proxy when they are due, at most once a day each after they load. Dry-run contacts nothing."),
         "templates.passive.set_enabled" => notes.push("Enabled passive templates judge captured responses whose host is in a non-empty Scope include list while Passive Scan is on, and never send requests. Run findings rescan to apply a change to stored history."),
         "templates.auto.set" => notes.push("While on, the auto scan sends requests to every new host the proxy captures in Scope or on its list. Dry-run contacts nothing."),
         "templates.scan.start" => notes.push("Sends the templates' requests to the targets once it runs. Dry-run contacts nothing; templates scan preview asks Sniper what would be sent and still sends nothing to a target."),
@@ -8863,6 +9113,28 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                     enabled: call_required(operation, input, "enabled")?,
                 }),
             },
+        },
+        "vulndata.status" => Command::Vulndata {
+            command: VulndataCommand::Status,
+        },
+        "vulndata.update" => Command::Vulndata {
+            command: VulndataCommand::Update,
+        },
+        "vulndata.import" => Command::Vulndata {
+            command: VulndataCommand::Import(VulndataImportArgs {
+                file: call_required::<String>(operation, input, "file")?.into(),
+            }),
+        },
+        "vulndata.set_auto_update" => Command::Vulndata {
+            command: VulndataCommand::AutoUpdate(VulndataAutoUpdateArgs {
+                enabled: call_required(operation, input, "enabled")?,
+            }),
+        },
+        "vulndata.lookup" => Command::Vulndata {
+            command: VulndataCommand::Lookup(VulndataLookupArgs {
+                product: call_required(operation, input, "product")?,
+                version: call_required(operation, input, "version")?,
+            }),
         },
         "templates.list" => {
             let limit = call_optional::<u64>(operation, input, "limit")?.unwrap_or(200);
@@ -9536,6 +9808,22 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
             if !(1..=16).contains(&concurrency) {
                 bail!("invalid field `concurrency` for `{operation}`; expected 1-16");
             }
+            // Milliseconds as a number, or the flag's `500` / `200-800` text.
+            let delay = match call_optional::<Value>(operation, input, "delay")? {
+                None => None,
+                Some(Value::Number(ms)) => Some(parse_fuzzer_delay(&ms.to_string())),
+                Some(Value::String(text)) => Some(parse_fuzzer_delay(&text)),
+                Some(_) => Some(Err("expected milliseconds or a range".to_string())),
+            }
+            .transpose()
+            .map_err(|error| anyhow!("invalid field `delay` for `{operation}`; {error}"))?;
+            let stop_on_match = call_optional::<String>(operation, input, "stop_on_match")?;
+            let stop_on_regex = call_optional::<String>(operation, input, "stop_on_regex")?;
+            if stop_on_match.is_some() && stop_on_regex.is_some() {
+                bail!(
+                    "fields `stop_on_match` and `stop_on_regex` have conflicts for `{operation}`"
+                );
+            }
             Command::Fuzzer {
                 command: FuzzerCommand::Run(FuzzerRunArgs {
                     session_id: call_optional(operation, input, "session_id")?,
@@ -9547,6 +9835,9 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                     },
                     raw_payloads: call_bool_any(operation, input, &["raw_payloads"])?,
                     concurrency,
+                    delay,
+                    stop_on_match,
+                    stop_on_regex,
                 }),
             }
         }
@@ -10529,6 +10820,7 @@ async fn run(cli: Cli) -> Result<()> {
                 Command::Recon { command } => handle_recon(api, command).await,
                 Command::Scanner { command } => handle_scanner(api, command).await,
                 Command::Templates { command } => handle_templates(api, command).await,
+                Command::Vulndata { command } => handle_vulndata(api, command).await,
                 Command::Findings { command } => handle_findings(api, command).await,
                 Command::EventLog { command } => handle_event_log(api, command).await,
                 Command::Scope { command } => handle_target(api, command).await,
@@ -10763,6 +11055,70 @@ async fn wait_for_template_library(api: &ApiClient) -> Result<Value> {
                 TEMPLATE_LIBRARY_WAIT.as_secs()
             ),
             _ => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
+        }
+    }
+}
+
+const VULNDATA_UPDATE_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+const MAX_VULNDATA_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+async fn handle_vulndata(api: ApiClient, command: VulndataCommand) -> Result<()> {
+    match command {
+        VulndataCommand::Status => print_json(&api.get_json::<Value>("/api/vulndata").await?),
+        VulndataCommand::Update => {
+            let _: Value = api.post_json("/api/vulndata/update", &json!({})).await?;
+            let deadline = std::time::Instant::now() + VULNDATA_UPDATE_WAIT;
+            loop {
+                let status: Value = api.get_json("/api/vulndata").await?;
+                if status["updating"] != json!(true) {
+                    return print_json(&status);
+                }
+                if std::time::Instant::now() >= deadline {
+                    bail!(
+                        "still updating after {} seconds; `vulndata status` reports the outcome",
+                        VULNDATA_UPDATE_WAIT.as_secs()
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+        VulndataCommand::Import(args) => {
+            let size = std::fs::metadata(&args.file)
+                .with_context(|| format!("cannot read {}", args.file.display()))?
+                .len();
+            if size > MAX_VULNDATA_FILE_BYTES {
+                bail!("{} is larger than 16 MiB", args.file.display());
+            }
+            let bytes = std::fs::read(&args.file)
+                .with_context(|| format!("cannot read {}", args.file.display()))?;
+            const PATH: &str = "/api/vulndata/import";
+            let response = api
+                .long_client
+                .post(api.url(PATH))
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(bytes)
+                .send()
+                .await
+                .with_context(|| format!("failed to POST {PATH}"))?;
+            let status = response.status();
+            if !status.is_success() {
+                let message = response.text().await.unwrap_or_default();
+                bail!(
+                    "request to {PATH} failed ({status}): {}",
+                    api_failure_detail(status, message)
+                );
+            }
+            print_json(&response.json::<Value>().await?)
+        }
+        VulndataCommand::AutoUpdate(args) => print_json(
+            &api.post_json::<_, Value>(
+                "/api/vulndata/auto-update",
+                &json!({ "enabled": args.enabled }),
+            )
+            .await?,
+        ),
+        VulndataCommand::Lookup(args) => {
+            print_json(&api.get_json::<Value>(&vulndata_lookup_path(&args)).await?)
         }
     }
 }
@@ -11428,8 +11784,7 @@ fn service_map_read_client() -> Result<reqwest::Client> {
 }
 
 fn service_map_client(timeout: std::time::Duration) -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .no_proxy()
+    api_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .timeout(timeout)
@@ -13171,8 +13526,7 @@ fn replay_update_is_label_only(args: &ReplayUpdateArgs) -> bool {
 
 fn saved_configuration_write_client() -> Result<reqwest::Client> {
     // A metadata write must not be replayed automatically or sent to a redirect target.
-    reqwest::Client::builder()
-        .no_proxy()
+    api_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .timeout(CLI_API_TIMEOUT)
@@ -13690,8 +14044,7 @@ async fn handle_saved_replay_tab(
 ) -> Result<()> {
     // Do not inherit redirect or protocol retry behavior from legacy clients:
     // an acknowledgement loss must never create a second duplicate or close.
-    let client = reqwest::Client::builder()
-        .no_proxy()
+    let client = api_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .timeout(CLI_API_TIMEOUT)
@@ -13890,6 +14243,8 @@ async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
                         attack_type: args.attack_type.api_name(),
                         url_encode: !args.raw_payloads,
                         concurrency: args.concurrency.max(1),
+                        delay: args.delay,
+                        stop_match: args.stop_match(),
                     },
                 )
                 .await?;
@@ -18380,8 +18735,7 @@ async fn run_saved_call(
     let uncertain_outcome = if write { "unknown" } else { "not_applied" };
     // A redirect can transparently resend a destructive POST to another runtime.
     // Keep this policy local to the opt-in contract; legacy clients are unchanged.
-    let client = reqwest::Client::builder()
-        .no_proxy()
+    let client = api_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .timeout(CLI_API_TIMEOUT)
@@ -21905,6 +22259,71 @@ mod tests {
                 .is_err()
         );
 
+        // A delay, fixed or a range (`--sleep` reads the same), and a stop
+        // pattern as text or a regex.
+        let delay = |min_ms, max_ms| Some(sniper::fuzzer::FuzzerDelay { min_ms, max_ms });
+        let stop = |text: &str, regex| {
+            Some(sniper::fuzzer::FuzzerStopMatch {
+                text: text.into(),
+                regex,
+            })
+        };
+        let parse = |flags: &[&str]| -> Option<super::FuzzerRunArgs> {
+            let mut argv = vec!["sniper-cli", "fuzzer", "run"];
+            argv.extend_from_slice(flags);
+            match Cli::try_parse_from(argv).ok()?.command {
+                Command::Fuzzer {
+                    command: FuzzerCommand::Run(args),
+                } => Some(args),
+                _ => None,
+            }
+        };
+        let args = parse(&["--delay", "500", "--stop-on-match", "Welcome"]).unwrap();
+        assert_eq!(
+            (args.delay, args.stop_match()),
+            (delay(500, 500), stop("Welcome", false))
+        );
+        let args = parse(&["--sleep", "200-800", "--stop-on-regex", "role.?:.?admin"]).unwrap();
+        assert_eq!(
+            (args.delay, args.stop_match()),
+            (delay(200, 800), stop("role.?:.?admin", true))
+        );
+        for bad in [
+            &["--delay", "800-200"][..],
+            &["--delay", "soon"],
+            &["--stop-on-match", "a", "--stop-on-regex", "b"],
+        ] {
+            assert!(parse(bad).is_none(), "{bad:?}");
+        }
+        let input = json!({"delay":"200-800","stop_on_regex":"admin"});
+        let Command::Fuzzer {
+            command: FuzzerCommand::Run(args),
+        } = command_from_operation_input("fuzzer.run", &input).unwrap()
+        else {
+            panic!("expected fuzzer run");
+        };
+        assert_eq!(
+            (args.delay, args.stop_match()),
+            (delay(200, 800), stop("admin", true))
+        );
+        let input = json!({"delay":300,"stop_on_match":"ok"});
+        let Command::Fuzzer {
+            command: FuzzerCommand::Run(args),
+        } = command_from_operation_input("fuzzer.run", &input).unwrap()
+        else {
+            panic!("expected fuzzer run");
+        };
+        assert_eq!(
+            (args.delay, args.stop_match()),
+            (delay(300, 300), stop("ok", false))
+        );
+        assert!(command_from_operation_input(
+            "fuzzer.run",
+            &json!({"stop_on_match":"a","stop_on_regex":"b"})
+        )
+        .is_err());
+        assert!(command_from_operation_input("fuzzer.run", &json!({"delay":"9-1"})).is_err());
+
         let id = "22222222-2222-2222-2222-222222222222";
         let Command::Fuzzer {
             command: FuzzerCommand::Stop(args),
@@ -22002,6 +22421,30 @@ mod tests {
         assert!(
             Cli::try_parse_from(["sniper-cli", "templates", "library", "auto-update"]).is_err()
         );
+    }
+
+    #[test]
+    fn vulndata_commands_name_their_values() {
+        let set = |input: Value| command_from_operation_input("vulndata.set_auto_update", &input);
+        assert!(set(json!({})).is_err());
+        let off = set(json!({"enabled": false})).unwrap();
+        assert!(off.requires_confirmation());
+        let preview = super::command_api_preview(&off).unwrap();
+        assert_eq!(preview["path"], "/api/vulndata/auto-update");
+        assert_eq!(preview["body"], json!({ "enabled": false }));
+        assert!(
+            command_from_operation_input("vulndata.lookup", &json!({"product": "jquery"})).is_err()
+        );
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "vulndata",
+            "lookup",
+            "--product",
+            "jquery",
+            "--version",
+            "3.4.1"
+        ])
+        .is_ok());
     }
 
     // Turning passive templates on takes exactly one selection, so a missing

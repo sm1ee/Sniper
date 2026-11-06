@@ -32,6 +32,7 @@ pub const BUILTIN_RULES: &[(&str, &str)] = &[
     ("misconfig", "Security Misconfiguration"),
     ("info", "Information Disclosure"),
     ("auth", "Authentication Issues"),
+    ("known_cve", "Known Vulnerabilities"),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -260,6 +261,10 @@ pub struct ScannerFinding {
     pub title: String,
     pub detail: String,
     pub evidence: String,
+    /// The record's scheme, which says whether the host's port is the default.
+    /// Empty on findings saved before it was kept.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scheme: String,
     pub host: String,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,6 +281,8 @@ pub struct FindingSummary {
     pub severity: Severity,
     pub category: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scheme: String,
     pub host: String,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -301,6 +308,7 @@ impl ScannerFinding {
             severity: self.severity.clone(),
             category: self.category.clone(),
             title: self.title.clone(),
+            scheme: self.scheme.clone(),
             host: self.host.clone(),
             path: self.path.clone(),
             location: self.location.clone(),
@@ -572,6 +580,7 @@ pub struct Rescan {
     findings: Vec<ScannerFinding>,
     scanned: HashSet<Uuid>,
     templates: Option<RescanTemplates>,
+    known: Option<std::sync::Arc<crate::vulndata::index::VulnIndex>>,
 }
 
 /// The passive Nuclei templates a rescan runs, with the scope they apply to,
@@ -590,11 +599,22 @@ impl Rescan {
             findings: Vec::new(),
             scanned: HashSet::new(),
             templates: None,
+            known: None,
         }
     }
 
     pub fn with_templates(mut self, templates: Option<RescanTemplates>) -> Self {
         self.templates = templates;
+        self
+    }
+
+    /// The vulnerability data, read once when the rescan starts; None until
+    /// it has loaded.
+    pub fn with_known_vulnerabilities(
+        mut self,
+        index: Option<std::sync::Arc<crate::vulndata::index::VulnIndex>>,
+    ) -> Self {
+        self.known = index;
         self
     }
 
@@ -614,6 +634,16 @@ impl Rescan {
                 })) {
                     found.extend(more);
                 }
+            }
+        }
+        if let Some(index) = self.known.as_ref().filter(|_| {
+            self.config
+                .is_rule_enabled(crate::vulndata::findings::CATEGORY)
+        }) {
+            if let Ok(more) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::vulndata::findings::for_record(index, record)
+            })) {
+                found.extend(more);
             }
         }
         for finding in found {
@@ -847,6 +877,7 @@ fn make_finding(
         title: title.into(),
         detail: detail.into(),
         evidence: evidence.into(),
+        scheme: record.scheme.clone(),
         host: record.host.clone(),
         path: record.path.clone(),
         location: None,
@@ -4618,10 +4649,71 @@ mod tests {
             title: title.to_string(),
             detail: String::new(),
             evidence: String::new(),
+            scheme: String::new(),
             host: "example.com".to_string(),
             path: "/".to_string(),
             location: None,
         }
+    }
+
+    // Review focus 4 and 5: a library two pages of one host load is one
+    // finding, on the page's host, and the rule switch turns it off.
+    #[test]
+    fn rescan_keeps_one_known_vulnerability_finding_per_page_library() {
+        use crate::vulndata::findings::tests::{jquery_index, script};
+        let index = std::sync::Arc::new(jquery_index(false));
+        let records = [
+            script(
+                "/npm/jquery@3.4.1/dist/jquery.min.js",
+                Some("https://app.example.com/shop"),
+            ),
+            script(
+                "/npm/jquery@3.4.1/dist/jquery.js",
+                Some("https://app.example.com/cart"),
+            ),
+        ];
+        let run = |config: ScannerConfig| {
+            let mut rescan = Rescan::new(config).with_known_vulnerabilities(Some(index.clone()));
+            for record in &records {
+                rescan.scan(record);
+            }
+            rescan
+                .finish()
+                .0
+                .into_iter()
+                .filter(|finding| finding.category == "known_cve")
+                .collect::<Vec<_>>()
+        };
+        let found = run(ScannerConfig::default());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].host, "app.example.com");
+        let mut off = ScannerConfig::default();
+        off.rules.insert("known_cve".into(), false);
+        assert!(run(off).is_empty());
+    }
+
+    // The Findings Host column hides the scheme's default port. A finding had
+    // only "host:443", so the column took every :443 as HTTPS.
+    #[test]
+    fn a_finding_keeps_its_records_scheme_and_old_ones_still_read() {
+        let mut record = make_record(vec![], vec![], "", 200);
+        record.scheme = "http".into();
+        record.host = "example.com:443".into();
+        let finding = make_finding(&record, Severity::Low, "test", "title", "", "");
+        assert_eq!(finding.scheme, "http");
+        assert_eq!(
+            serde_json::to_value(finding.summary()).unwrap()["scheme"],
+            "http"
+        );
+
+        let mut saved = serde_json::to_value(&finding).unwrap();
+        saved.as_object_mut().unwrap().remove("scheme");
+        let old: ScannerFinding = serde_json::from_value(saved).unwrap();
+        assert_eq!(old.scheme, "");
+        assert!(serde_json::to_value(old.summary())
+            .unwrap()
+            .get("scheme")
+            .is_none());
     }
 
     fn custom_rule(id: String) -> CustomRule {
@@ -8409,6 +8501,28 @@ mod tests {
             .into_iter()
             .map(|finding| finding.title)
             .collect()
+    }
+
+    #[test]
+    fn a_text_file_served_as_octet_stream_is_still_scanned() {
+        // nginx's default_type answers a .env, a .git/config or a dump this way.
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            "application/octet-stream".parse().unwrap(),
+        );
+        let body = b"APP_NAME=Shop\nAPP_KEY=base64:x\n";
+        let mut record = make_record(vec![], vec![], "", 200);
+        record.path = "/.env".into();
+        record.response = Some(MessageRecord::from_headers_and_body(&headers, body, 1024));
+        let titles: Vec<String> = scan_transaction(&record, &ScannerConfig::default())
+            .into_iter()
+            .map(|finding| finding.title)
+            .collect();
+        assert!(
+            titles.contains(&".env file exposed".to_string()),
+            "{titles:?}"
+        );
     }
 
     #[test]

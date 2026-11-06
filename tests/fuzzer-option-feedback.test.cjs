@@ -8,10 +8,14 @@ const choices = [
   ['fuzzerAttackType', 'battering_ram', 'sniper'],
   ['fuzzerUrlEncode', false, true],
   ['fuzzerConcurrency', '1', 4],
+  ['fuzzerDelay', '200-800', ''],
+  ['fuzzerStopMatch', 'Welcome', ''],
+  ['fuzzerStopRegex', true, false],
 ];
 function fixture(extra = {}) {
   const nodes = {};
-  for (const id of ['fuzzerPreflightSummary', 'fuzzerPreflightNotice', 'fuzzerAttackType', 'fuzzerConcurrency', 'fuzzerUrlEncode', 'startFuzzerButton']) {
+  for (const id of ['fuzzerPreflightSummary', 'fuzzerPreflightNotice', 'fuzzerAttackType', 'fuzzerConcurrency', 'fuzzerUrlEncode',
+    'fuzzerDelay', 'fuzzerStopMatch', 'fuzzerStopRegex', 'startFuzzerButton']) {
     const classes = new Set();
     nodes[id] = { value: '', checked: false, textContent: '', handlers: {}, classes,
       addEventListener(type, callback) { this.handlers[type] = callback; },

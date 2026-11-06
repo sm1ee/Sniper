@@ -54,9 +54,10 @@ use crate::{
     ui_settings::AppUiSettingsSnapshot,
     websocket::WebSocketListFilters,
     workspace::{
-        can_replace_snapshot, validate_workspace_serialized_size, FuzzerWorkspaceState,
-        ReplayTabState, SavedReplayTabOperation, WorkspaceReplaceError, WorkspaceStateSnapshot,
-        WorkspaceTransformError, MAX_WORKSPACE_SERIALIZED_BYTES,
+        can_replace_snapshot, mark_cli_replay_tabs, validate_workspace_serialized_size,
+        FuzzerWorkspaceState, ReplayTabState, SavedReplayTabOperation, WorkspaceReplaceError,
+        WorkspaceStateSnapshot, WorkspaceTransformError, CLI_WORKSPACE_CLIENT_ID,
+        MAX_WORKSPACE_SERIALIZED_BYTES,
     },
 };
 
@@ -356,12 +357,41 @@ fn write_remote_ui_token_file(path: &std::path::Path, auth_url: &str) -> Result<
 
 fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessControl) -> Router {
     Router::new()
+        .route("/api/tcp/status", get(tcp_status))
+        .route("/api/tcp/start", post(tcp_start))
+        .route("/api/tcp/stop", post(tcp_stop))
+        .route("/api/tcp/connections", get(tcp_connections))
+        .route("/api/tcp/connections/:id", get(tcp_connection))
+        .route(
+            "/api/tcp/intercept",
+            get(tcp_intercept_policy)
+                .put(tcp_intercept_set_policy)
+                .layer(axum::extract::DefaultBodyLimit::max(24 * 1024)),
+        )
+        .route(
+            "/api/tcp/connections/:id/pending",
+            get(tcp_intercept_pending),
+        )
+        .route(
+            "/api/tcp/connections/:id/pending/:pending_id/decision",
+            post(tcp_intercept_decide).layer(axum::extract::DefaultBodyLimit::max(24 * 1024)),
+        )
+        .route("/api/tcp/connections/:id/close", post(tcp_close_connection))
         .route("/", get(index))
         .route("/decoder", get(decoder_index))
         .route("/decoder/", get(decoder_index))
         .route("/decoder/*path", get(decoder_asset))
         .route("/app.js", get(app_js))
+        .route("/tcp-capture.js", get(tcp_capture_js))
         .route("/fuzzer-workflow.js", get(fuzzer_workflow_js))
+        .route("/grpc-envelope.js", get(grpc_envelope_js))
+        .route("/cbor-reader.js", get(cbor_reader_js))
+        .route("/cbor-editor.js", get(cbor_editor_js))
+        .route("/msgpack-reader.js", get(msgpack_reader_js))
+        .route("/msgpack-editor.js", get(msgpack_editor_js))
+        .route("/protobuf-wire.js", get(protobuf_wire_js))
+        .route("/protobuf-edit.js", get(protobuf_edit_js))
+        .route("/protobuf-fields.js", get(protobuf_fields_js))
         .route("/recon.js", get(recon_js))
         .route("/templates.js", get(templates_js))
         .route("/api/recon", get(crate::recon::list))
@@ -387,6 +417,14 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             "/api/templates/library/auto-update",
             post(crate::templates::library::set_auto_update),
         )
+        .route("/api/vulndata", get(crate::vulndata::get_status))
+        .route("/api/vulndata/update", post(crate::vulndata::start_update))
+        .route("/api/vulndata/import", post(crate::vulndata::import))
+        .route(
+            "/api/vulndata/auto-update",
+            post(crate::vulndata::set_auto_update),
+        )
+        .route("/api/vulndata/lookup", get(crate::vulndata::lookup))
         .route(
             "/api/templates/passive",
             post(crate::templates::library::set_passive),
@@ -3194,7 +3232,9 @@ async fn rename_session(
 
 fn session_operation_error_response(error: anyhow::Error) -> Response {
     let message = error.to_string();
-    let status = if message.contains("was not found") {
+    let status = if error.is::<crate::tcp_capture::TcpPersistenceError>() {
+        StatusCode::INTERNAL_SERVER_ERROR
+    } else if message.contains("was not found") {
         StatusCode::NOT_FOUND
     } else if message.contains("cannot delete the active session")
         || message.contains("live captures are active")
@@ -3293,6 +3333,7 @@ struct SetSavedReplayTabLabelPayload {
 
 async fn set_saved_replay_tab_label(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<SetSavedReplayTabLabelPayload>,
 ) -> Response {
     // Apply the same normalization as the tab strip without parsing any draft.
@@ -3317,12 +3358,14 @@ async fn set_saved_replay_tab_label(
             expected_active_session_id: payload.expected_active_session_id,
         },
         SavedReplayTabOperation::SetLabel(label),
+        replay_actor(&headers),
     )
     .await
 }
 
 async fn set_saved_http_tab_pinned(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<SetSavedHttpTabPinnedPayload>,
 ) -> Response {
     mutate_saved_replay_tab(
@@ -3334,34 +3377,55 @@ async fn set_saved_http_tab_pinned(
             expected_active_session_id: payload.expected_active_session_id,
         },
         SavedReplayTabOperation::SetPinned(payload.pinned),
+        replay_actor(&headers),
     )
     .await
 }
 
 async fn close_saved_http_tab(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<SavedHttpTabPayload>,
 ) -> Response {
-    mutate_saved_replay_tab(state, payload, SavedReplayTabOperation::Close).await
+    let actor = replay_actor(&headers);
+    mutate_saved_replay_tab(state, payload, SavedReplayTabOperation::Close, actor).await
 }
 
 async fn duplicate_saved_http_tab(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<SavedHttpTabPayload>,
 ) -> Response {
-    mutate_saved_replay_tab(state, payload, SavedReplayTabOperation::Duplicate).await
+    let actor = replay_actor(&headers);
+    mutate_saved_replay_tab(state, payload, SavedReplayTabOperation::Duplicate, actor).await
+}
+
+/// Who sniper-cli says drives it, for Replay to name on the tabs it opens or
+/// changes. Any local client can send the header, so it is a short label at
+/// most; without one the tab says the CLI did it.
+fn replay_actor(headers: &HeaderMap) -> String {
+    headers
+        .get("x-sniper-actor")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && name.len() <= 32)
+        .unwrap_or("CLI")
+        .to_string()
 }
 
 async fn mutate_saved_replay_tab(
     state: Arc<AppState>,
     payload: SavedHttpTabPayload,
     operation: SavedReplayTabOperation,
+    actor: String,
 ) -> Response {
     // Keep the operation/persistence locks alive through disk commit and memory
     // publication even when the requester disconnects during spawn_blocking.
-    tokio::spawn(mutate_saved_replay_tab_inner(state, payload, operation))
-        .await
-        .unwrap_or_else(|_| saved_http_tab_uncertain_response())
+    tokio::spawn(mutate_saved_replay_tab_inner(
+        state, payload, operation, actor,
+    ))
+    .await
+    .unwrap_or_else(|_| saved_http_tab_uncertain_response())
 }
 
 fn saved_http_tab_uncertain_response() -> Response {
@@ -3376,6 +3440,7 @@ async fn mutate_saved_replay_tab_inner(
     state: Arc<AppState>,
     payload: SavedHttpTabPayload,
     operation: SavedReplayTabOperation,
+    actor: String,
 ) -> Response {
     if payload.tab_id.trim().is_empty() || payload.tab_id.len() > MAX_WORKSPACE_REPLAY_TAB_ID_BYTES
     {
@@ -3424,6 +3489,7 @@ async fn mutate_saved_replay_tab_inner(
             &payload.tab_id,
             payload.expected_workspace_revision,
             operation.clone(),
+            &actor,
         )
         .await
     {
@@ -3503,6 +3569,7 @@ fn workspace_commit_uncertain_response() -> Response {
 
 async fn update_workspace_state(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(snapshot): Json<WorkspaceStateSnapshot>,
 ) -> Response {
     let mut snapshot = snapshot;
@@ -3572,6 +3639,9 @@ async fn update_workspace_state(
         return (StatusCode::CONFLICT, Json(current)).into_response();
     }
     merge_incomplete_workspace_update_ws_frames(&mut snapshot, &current);
+    if snapshot.client_id.as_deref() == Some(CLI_WORKSPACE_CLIENT_ID) {
+        mark_cli_replay_tabs(&mut snapshot, &current, &replay_actor(&headers));
+    }
     if let Err(error) = validate_workspace_state(&snapshot) {
         return (StatusCode::BAD_REQUEST, error).into_response();
     }
@@ -4405,6 +4475,39 @@ async fn update_runtime_settings(
         persist_rolled_back_session_snapshot(&state, &session, "runtime settings update").await;
         return response;
     }
+    // Turning interception off lets go of what it held, as the UI's switch, Burp
+    // and Caido do; otherwise each held exchange waits out its client's timeout.
+    // Only once the setting is saved, since a forward cannot be taken back. A
+    // request that read the old setting can still queue just after; Forward all
+    // releases it.
+    if previous.intercept_enabled && !snapshot.intercept_enabled {
+        let events_before_release = session
+            .event_log
+            .snapshot(Some(state.config.max_entries))
+            .await;
+        let requests = session.intercepts.forward_all().await;
+        let responses = session.response_intercepts.forward_all().await;
+        if requests + responses > 0 {
+            session
+                .event_log
+                .push(
+                    EventLevel::Info,
+                    "intercept",
+                    "Held traffic forwarded",
+                    format!(
+                        "Intercept turned off: {requests} request(s) and {responses} response(s) forwarded"
+                    ),
+                )
+                .await;
+            persist_nonrollbackable_event_log_mutation(
+                &state,
+                &session,
+                events_before_release,
+                "intercept off forward",
+            )
+            .await;
+        }
+    }
     Json(snapshot.redacted_for_read()).into_response()
 }
 
@@ -4788,7 +4891,16 @@ async fn get_finding(
         Err(response) => return response,
     };
     match session.scanner.get(id).await {
-        Some(finding) => Json(finding).into_response(),
+        Some(mut finding) => {
+            if finding
+                .rule_id
+                .starts_with(crate::vulndata::findings::RULE_PREFIX)
+            {
+                finding.detail =
+                    crate::vulndata::findings::detail(state.vulndata.index().as_deref(), &finding);
+            }
+            Json(finding).into_response()
+        }
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -4909,7 +5021,9 @@ async fn rescan_findings(
     let Some((rescan, unreadable)) = session
         .store
         .visit_records(
-            crate::scanner::Rescan::new(config).with_templates(rescan_templates),
+            crate::scanner::Rescan::new(config)
+                .with_templates(rescan_templates)
+                .with_known_vulnerabilities(state.vulndata.index()),
             |rescan, record| rescan.scan(record),
         )
         .await
@@ -5872,8 +5986,12 @@ async fn get_target_service_map_impl(
         Err(response) => return response,
     };
     let (include, exclude) = session.runtime.scope_lists().await;
-    let cache_key =
-        format!("{catalog:?}|{catalog_marker:?}|{cache_query:?}|{include:?}|{exclude:?}");
+    // New vulnerability data must not be answered from a map cached before it.
+    let known = state.vulndata.index();
+    let known_revision = known.as_ref().map(|index| index.revision.clone());
+    let cache_key = format!(
+        "{catalog:?}|{catalog_marker:?}|{cache_query:?}|{include:?}|{exclude:?}|{known_revision:?}"
+    );
     let worker_include = include.clone();
     let worker_exclude = exclude.clone();
     let worker_session = session.clone();
@@ -5911,6 +6029,9 @@ async fn get_target_service_map_impl(
                     }
                 })?;
             map.technology_catalog_version = catalog_marker;
+            if let Some(index) = &known {
+                crate::vulndata::annotate(&mut map.origins, index);
+            }
             let bytes = bytes::Bytes::from(
                 serde_json::to_vec(&map).map_err(|_| ServiceMapReadError::BuildFailed)?,
             );
@@ -5936,6 +6057,9 @@ async fn get_target_service_map_impl(
         )
         .map_err(|_| ServiceMapReadError::ScopeWorkLimit)?;
         map.technology_catalog_version = catalog_marker;
+        if let Some(index) = &known {
+            crate::vulndata::annotate(&mut map.origins, index);
+        }
         let bytes = serde_json::to_vec(&map).map_err(|_| ServiceMapReadError::BuildFailed)?;
         Ok::<_, ServiceMapReadError>((bytes::Bytes::from(bytes), Some(epoch), permit))
     })
@@ -8431,6 +8555,8 @@ async fn run_fuzzer_attack(
             attack_type: payload.attack_type,
             url_encode: payload.url_encode,
             concurrency: payload.concurrency,
+            delay: payload.delay,
+            stop_match: payload.stop_match,
         },
     )
     .await;
@@ -9360,10 +9486,73 @@ async fn app_js() -> Response {
     )
 }
 
+async fn tcp_capture_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/tcp-capture.js"),
+    )
+}
+
 async fn fuzzer_workflow_js() -> Response {
     asset_response(
         "application/javascript; charset=utf-8",
         include_str!("../web/fuzzer-workflow.js"),
+    )
+}
+
+async fn grpc_envelope_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/grpc-envelope.js"),
+    )
+}
+
+async fn cbor_reader_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/cbor-reader.js"),
+    )
+}
+
+async fn cbor_editor_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/cbor-editor.js"),
+    )
+}
+
+async fn msgpack_reader_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/msgpack-reader.js"),
+    )
+}
+
+async fn msgpack_editor_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/msgpack-editor.js"),
+    )
+}
+
+async fn protobuf_wire_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/protobuf-wire.js"),
+    )
+}
+
+async fn protobuf_edit_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/protobuf-edit.js"),
+    )
+}
+
+async fn protobuf_fields_js() -> Response {
+    asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../web/protobuf-fields.js"),
     )
 }
 
@@ -9940,6 +10129,7 @@ mod tests {
             category: "header".into(),
             detail: String::new(),
             evidence: String::new(),
+            scheme: String::new(),
             host: "example.com".into(),
             path: "/".into(),
             location: None,
@@ -12433,6 +12623,7 @@ mod tests {
         let request = tokio::spawn(async move {
             super::close_saved_http_tab(
                 State(request_state),
+                HeaderMap::new(),
                 Json(super::SavedHttpTabPayload {
                     session_id: id,
                     tab_id: "saved-only".into(),
@@ -12791,6 +12982,8 @@ mod tests {
         expected.client_version = 0;
         expected.expected_active_session_id = None;
         expected.replay.tabs[0].custom_label = "Saved conversation".into();
+        // This route is sniper-cli's, so the person's tab is flagged as well.
+        expected.replay.tabs[0].changed_by = Some("CLI".into());
         assert_eq!(
             serde_json::to_value(&actual).unwrap(),
             serde_json::to_value(&expected).unwrap()
@@ -13007,6 +13200,7 @@ mod tests {
             title: "Synthetic saved finding".into(),
             detail: String::new(),
             evidence: String::new(),
+            scheme: String::new(),
             host: "example.com".into(),
             path: "/".into(),
             location: None,
@@ -14085,7 +14279,8 @@ mod tests {
             ..WorkspaceStateSnapshot::default()
         };
         let current_response =
-            super::update_workspace_state(State(state.clone()), Json(current)).await;
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(current))
+                .await;
         assert_eq!(current_response.status(), StatusCode::OK);
         let saved_current: WorkspaceStateSnapshot = response_json(current_response).await;
 
@@ -14112,7 +14307,8 @@ mod tests {
             ..WorkspaceStateSnapshot::default()
         };
         let update_response =
-            super::update_workspace_state(State(state.clone()), Json(incoming)).await;
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(incoming))
+                .await;
         assert_eq!(update_response.status(), StatusCode::OK);
 
         let reloaded = state.sessions.load_context(session_id).unwrap();
@@ -14160,7 +14356,8 @@ mod tests {
             ..WorkspaceStateSnapshot::default()
         };
         let current_response =
-            super::update_workspace_state(State(state.clone()), Json(current)).await;
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(current))
+                .await;
         assert_eq!(current_response.status(), StatusCode::OK);
         let saved_current: WorkspaceStateSnapshot = response_json(current_response).await;
 
@@ -14187,7 +14384,8 @@ mod tests {
             ..WorkspaceStateSnapshot::default()
         };
         let update_response =
-            super::update_workspace_state(State(state.clone()), Json(incoming)).await;
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(incoming))
+                .await;
         assert_eq!(update_response.status(), StatusCode::OK);
 
         let reloaded = state.sessions.load_context(session_id).unwrap();
@@ -16042,6 +16240,130 @@ mod tests {
             second_task.await.unwrap(),
             ResponseInterceptResolution::Forward { .. }
         ));
+    }
+
+    // A known-vulnerability finding stores no advisory list; reading it joins
+    // the list from the data loaded now.
+    #[tokio::test]
+    async fn a_known_vulnerability_finding_reads_its_advisories_from_the_current_data() {
+        let config = test_app_config("sniper-known-cve-detail");
+        let data_dir = config.data_dir.clone();
+        let state = Arc::new(AppState::new(config).unwrap());
+        let session = state.session().await;
+        let record = crate::vulndata::findings::tests::script(
+            "/npm/jquery@3.4.1/dist/jquery.min.js",
+            Some("https://app.example.com/shop"),
+        );
+        let index = crate::vulndata::findings::tests::jquery_index(false);
+        let finding = crate::vulndata::findings::for_record(&index, &record).remove(0);
+        let id = finding.id;
+        session.scanner.push(finding).await;
+        let read = |state: Arc<AppState>| async move {
+            let response = super::get_finding(
+                State(state),
+                Path(id.to_string()),
+                Query(super::SessionScopedQuery { session_id: None }),
+            )
+            .await;
+            response_body_json(response).await["detail"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert!(read(state.clone())
+            .await
+            .contains("Vulnerability data has not been fetched yet."));
+
+        for file in [
+            r#"{"jquery": {"vulnerabilities": [{"atOrAbove": "1.0.3", "below": "3.5.0", "severity": "medium", "identifiers": {"CVE": ["CVE-2020-11023"]}, "info": []}]}}"#,
+            r#"{"catalogVersion": "1", "vulnerabilities": [{"cveID": "CVE-2020-11023"}]}"#,
+            "cve,epss,percentile\nCVE-2020-11023,0.94,0.99\n",
+        ] {
+            state.vulndata.import_blocking(file.as_bytes()).unwrap();
+        }
+        let detail = read(state.clone()).await;
+        assert!(detail.contains("CVE-2020-11023 · medium · KEV · EPSS 0.94 · fixed in 3.5.0"));
+        assert!(detail.contains("; fetched "));
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    // `sniper-cli capture intercept off` only changed the setting, so traffic held
+    // at that moment waited out its client's timeout. The UI's switch forwarded
+    // it, as Burp and Caido do.
+    #[tokio::test]
+    async fn turning_intercept_off_forwards_what_it_held() {
+        let config = test_app_config("sniper-intercept-off-forwards");
+        let data_dir = config.data_dir.clone();
+        let state = Arc::new(AppState::new(config).unwrap());
+        let session = state.session().await;
+        let set = |intercept_enabled: Option<bool>, scope_patterns: Option<Vec<String>>| {
+            super::update_runtime_settings(
+                State(state.clone()),
+                Json(RuntimeSettingsUpdate {
+                    intercept_enabled,
+                    scope_patterns,
+                    ..RuntimeSettingsUpdate::default()
+                }),
+            )
+        };
+        assert_eq!(set(Some(true), None).await.status(), StatusCode::OK);
+        let request_task = tokio::spawn({
+            let queue = session.intercepts.clone();
+            async move {
+                queue
+                    .enqueue(InterceptRecord {
+                        id: Uuid::new_v4(),
+                        started_at: Utc::now(),
+                        peer_addr: "127.0.0.1:12345".to_string(),
+                        request: test_editable_request("/held"),
+                        is_websocket: false,
+                    })
+                    .await
+            }
+        });
+        let response_task = tokio::spawn({
+            let queue = session.response_intercepts.clone();
+            async move {
+                queue
+                    .enqueue(ResponseInterceptRecord {
+                        id: Uuid::new_v4(),
+                        started_at: Utc::now(),
+                        scheme: "https".to_string(),
+                        host: "example.test".to_string(),
+                        method: "GET".to_string(),
+                        path: "/held".to_string(),
+                        status: 200,
+                        response: test_editable_response(200),
+                    })
+                    .await
+            }
+        });
+        for _ in 0..20 {
+            if session.intercepts.list().await.len() == 1
+                && session.response_intercepts.list().await.len() == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Changing something else while interception stays on keeps them held.
+        let scope = Some(vec!["example.test".to_string()]);
+        assert_eq!(set(None, scope).await.status(), StatusCode::OK);
+        assert_eq!(session.intercepts.list().await.len(), 1);
+        assert_eq!(session.response_intercepts.list().await.len(), 1);
+
+        assert_eq!(set(Some(false), None).await.status(), StatusCode::OK);
+        assert!(session.intercepts.list().await.is_empty());
+        assert!(session.response_intercepts.list().await.is_empty());
+        assert!(matches!(
+            request_task.await.unwrap(),
+            InterceptResolution::Forward { edited: false, .. }
+        ));
+        assert!(matches!(
+            response_task.await.unwrap(),
+            ResponseInterceptResolution::Forward { edited: false, .. }
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     #[test]
@@ -19780,6 +20102,7 @@ mod tests {
             title: "Active finding".to_string(),
             detail: String::new(),
             evidence: String::new(),
+            scheme: String::new(),
             host: "active.test".to_string(),
             path: "/".to_string(),
             location: None,
@@ -19794,6 +20117,7 @@ mod tests {
             title: "Inactive finding".to_string(),
             detail: String::new(),
             evidence: String::new(),
+            scheme: String::new(),
             host: "inactive.test".to_string(),
             path: "/finding".to_string(),
             location: None,
@@ -20018,6 +20342,7 @@ mod tests {
             title: "Cookie without Secure flag".to_string(),
             detail: String::new(),
             evidence: "BIGipServerpool".to_string(),
+            scheme: String::new(),
             host: "example.com".to_string(),
             path: "/".to_string(),
             location: None,
@@ -20173,6 +20498,7 @@ mod tests {
                     title: "Example Active".into(),
                     detail: String::new(),
                     evidence: evidence.into(),
+                    scheme: String::new(),
                     host: "app.example.com".into(),
                     path: "/echo?q=1".into(),
                     location: None,
@@ -20211,6 +20537,7 @@ mod tests {
             .unwrap();
         assert_eq!(finding.category, "nuclei");
         assert_eq!(finding.title, "Example Detect");
+        assert_eq!(finding.scheme, "https");
         drop(session);
         drop(state);
         let _ = std::fs::remove_dir_all(path);
@@ -20551,7 +20878,7 @@ mod tests {
             )
             .await
         } else {
-            super::update_workspace_state(State(state), Json(snapshot)).await
+            super::update_workspace_state(State(state), HeaderMap::new(), Json(snapshot)).await
         }
     }
 
@@ -20618,6 +20945,7 @@ mod tests {
             // the unrelated draft that became visible despite the error.
             let stale = super::set_saved_replay_tab_label(
                 State(state.clone()),
+                HeaderMap::new(),
                 Json(super::SetSavedReplayTabLabelPayload {
                     session_id: session.id(),
                     tab_id: "synthetic-tab".into(),
@@ -20651,6 +20979,7 @@ mod tests {
             assert_eq!(refreshed.revision, memory.revision);
             let response = super::set_saved_replay_tab_label(
                 State(state.clone()),
+                HeaderMap::new(),
                 Json(super::SetSavedReplayTabLabelPayload {
                     session_id: session.id(),
                     tab_id: "synthetic-tab".into(),
@@ -20861,7 +21190,9 @@ mod tests {
         std::fs::remove_file(&registry_path).unwrap();
         std::fs::create_dir(&registry_path).unwrap();
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::OK);
         let live = session.workspace.snapshot().await;
@@ -20947,7 +21278,9 @@ mod tests {
         };
         snapshot.replay.active_tab_id = Some("unknown-session-tab".to_string());
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::CONFLICT);
         let active = active_session.workspace.snapshot().await;
@@ -20985,7 +21318,9 @@ mod tests {
             ..ReplayTabState::default()
         });
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::CONFLICT);
         let active = active_session.workspace.snapshot().await;
@@ -21035,6 +21370,8 @@ mod tests {
             marker_count: 0,
             results: Vec::new(),
             notes: Vec::new(),
+            delay: None,
+            stop_match: None,
         };
         let attack_id = attack.id;
         let snapshot = WorkspaceStateSnapshot {
@@ -21048,7 +21385,9 @@ mod tests {
             ..WorkspaceStateSnapshot::default()
         };
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::OK);
         let saved: WorkspaceStateSnapshot = response_json(response).await;
@@ -21095,7 +21434,9 @@ mod tests {
             ..ReplayTabState::default()
         });
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::OK);
         let active = state.session().await;
@@ -21157,7 +21498,9 @@ mod tests {
             ..ReplayTabState::default()
         });
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::CONFLICT);
         let body = response_body_json(response).await;
@@ -21211,7 +21554,9 @@ mod tests {
             ..ReplayTabState::default()
         });
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::CONFLICT);
         let body = response_body_json(response).await;
@@ -21343,7 +21688,9 @@ mod tests {
             ..ReplayTabState::default()
         });
 
-        let response = super::update_workspace_state(State(state.clone()), Json(snapshot)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
 
         assert_eq!(response.status(), super::StatusCode::CONFLICT);
         assert!(inactive
@@ -21965,6 +22312,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22015,6 +22364,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22076,6 +22427,8 @@ mod tests {
                 attack_type: Default::default(),
                 url_encode: true,
                 concurrency: 1,
+                delay: None,
+                stop_match: None,
                 session_id: Some(session.id()),
                 expected_active_session_id: None,
                 expected_workspace_revision: None,
@@ -22162,6 +22515,8 @@ mod tests {
                     host: "example.test".to_string(),
                     port: "443".to_string(),
                 }),
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22223,6 +22578,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22291,6 +22648,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22350,6 +22709,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22411,6 +22772,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: Some("HTTP/3".to_string()),
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22460,6 +22823,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22529,6 +22894,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -22587,6 +22954,8 @@ mod tests {
                 source_transaction_id: None,
                 http_version: None,
                 target: None,
+                delay: None,
+                stop_match: None,
             }),
         )
         .await;
@@ -23742,6 +24111,8 @@ mod tests {
             marker_count: 0,
             results: Vec::new(),
             notes: vec!["inactive attack".to_string()],
+            delay: None,
+            stop_match: None,
         };
         let attack_id = attack.id;
         original.fuzzer.insert(attack).await;
@@ -24318,6 +24689,7 @@ mod tests {
 
         let response = super::update_workspace_state(
             State(state.clone()),
+            HeaderMap::new(),
             Json(WorkspaceStateSnapshot {
                 session_id: Some(original_id),
                 ..WorkspaceStateSnapshot::default()
@@ -24376,7 +24748,8 @@ mod tests {
             ..ReplayTabState::default()
         });
 
-        let response = super::update_workspace_state(State(state), Json(stale)).await;
+        let response =
+            super::update_workspace_state(State(state), HeaderMap::new(), Json(stale)).await;
 
         assert_eq!(response.status(), super::StatusCode::CONFLICT);
         let _ = std::fs::remove_dir_all(data_dir);
@@ -26683,7 +27056,9 @@ mod tests {
 
         // Use the ordinary save handler, including its shared operation lock and
         // mutation-safe persistence. Saving a reference does not recreate a row.
-        let response = super::update_workspace_state(State(state.clone()), Json(unsaved)).await;
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(unsaved))
+                .await;
         assert_eq!(response.status(), StatusCode::OK);
         let saved: crate::workspace::WorkspaceStateSnapshot = response_json(response).await;
         assert_eq!(saved.replay.tabs.len(), 1);
@@ -27330,5 +27705,357 @@ mod web_assets {
             !outside.contains("randomUUID()"),
             "call generateUuid() instead of crypto.randomUUID()"
         );
+    }
+}
+
+// These routes inherit the same access-control middleware as the HTTP API.
+async fn tcp_status(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionScopedQuery>,
+) -> Result<Json<crate::tcp_capture::TcpStatus>, Response> {
+    let session = resolve_read_session_for_optional_id(&state, query.session_id).await?;
+    Ok(Json(session.tcp_capture.status().await))
+}
+async fn tcp_start(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionWriteQuery>,
+    Json(settings): Json<crate::tcp_capture::TcpSettings>,
+) -> Result<Json<crate::tcp_capture::TcpStatus>, (StatusCode, String)> {
+    state
+        .configure_tcp_capture(
+            Some(settings),
+            query.session_id,
+            query.expected_active_session_id,
+        )
+        .await
+        .map(Json)
+        .map_err(tcp_configuration_error)
+}
+async fn tcp_stop(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionWriteQuery>,
+) -> Result<Json<crate::tcp_capture::TcpStatus>, (StatusCode, String)> {
+    state
+        .configure_tcp_capture(None, query.session_id, query.expected_active_session_id)
+        .await
+        .map(Json)
+        .map_err(tcp_configuration_error)
+}
+fn tcp_configuration_error(error: anyhow::Error) -> (StatusCode, String) {
+    let message = error.to_string();
+    let status = if error.is::<crate::tcp_capture::TcpPersistenceError>() {
+        StatusCode::INTERNAL_SERVER_ERROR
+    } else if message == "TCP capture cannot start while Sniper is shutting down" {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if message.starts_with("active session changed") {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    (status, message)
+}
+async fn tcp_connections(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionScopedQuery>,
+) -> Result<Json<Vec<crate::tcp_capture::TcpConnection>>, Response> {
+    let session = resolve_read_session_for_optional_id(&state, query.session_id).await?;
+    Ok(Json(session.tcp_capture.summaries().await))
+}
+async fn tcp_connection(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<SessionScopedQuery>,
+) -> Result<Json<crate::tcp_capture::TcpConnection>, Response> {
+    let session = resolve_read_session_for_optional_id(&state, query.session_id).await?;
+    session
+        .tcp_capture
+        .detail(id)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Saved TCP detail could not be read. History requires recovery.",
+            )
+                .into_response()
+        })?
+        .map(Json)
+        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())
+}
+
+async fn tcp_intercept_policy(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionScopedQuery>,
+) -> Result<Json<crate::tcp_capture::InterceptPolicy>, Response> {
+    let session = resolve_read_session_for_optional_id(&state, query.session_id).await?;
+    Ok(Json(session.tcp_capture.policy()))
+}
+
+async fn tcp_intercept_set_policy(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionWriteQuery>,
+    Json(update): Json<crate::tcp_capture::PolicyUpdate>,
+) -> Result<Json<crate::tcp_capture::InterceptPolicy>, (StatusCode, String)> {
+    state
+        .configure_tcp_intercept(update, query.session_id, query.expected_active_session_id)
+        .await
+        .map(Json)
+        .map_err(tcp_intercept_error)
+}
+
+async fn tcp_intercept_pending(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<SessionScopedQuery>,
+) -> Result<Json<crate::tcp_capture::PendingResponse>, Response> {
+    let session = resolve_read_session_for_optional_id(&state, query.session_id).await?;
+    session
+        .tcp_capture
+        .pending(id)
+        .map(Json)
+        .map_err(|error| tcp_intercept_error(error).into_response())
+}
+
+async fn tcp_intercept_decide(
+    State(state): State<Arc<AppState>>,
+    Path((id, pending_id)): Path<(Uuid, Uuid)>,
+    Query(query): Query<SessionWriteQuery>,
+    Json(decision): Json<crate::tcp_capture::DecisionRequest>,
+) -> Result<(StatusCode, Json<crate::tcp_capture::DecisionReceipt>), (StatusCode, String)> {
+    state
+        .decide_tcp_intercept(
+            id,
+            pending_id,
+            decision,
+            query.session_id,
+            query.expected_active_session_id,
+        )
+        .await
+        .map(|receipt| (StatusCode::ACCEPTED, Json(receipt)))
+        .map_err(tcp_intercept_error)
+}
+
+async fn tcp_close_connection(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<SessionWriteQuery>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    state
+        .close_tcp_connection(id, query.session_id, query.expected_active_session_id)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(tcp_intercept_error)
+}
+
+fn tcp_intercept_error(error: crate::tcp_capture::InterceptError) -> (StatusCode, String) {
+    use crate::tcp_capture::InterceptError;
+    let status = match &error {
+        InterceptError::BadRequest(_) => StatusCode::BAD_REQUEST,
+        InterceptError::Conflict(_) => StatusCode::CONFLICT,
+        InterceptError::NotFound(_) => StatusCode::NOT_FOUND,
+        InterceptError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+    };
+    (status, error.to_string())
+}
+
+#[cfg(test)]
+mod tcp_asset_tests {
+    #[tokio::test]
+    async fn tcp_capture_asset_has_javascript_type_and_exact_embedded_bytes() {
+        let response = super::tcp_capture_js().await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/javascript; charset=utf-8"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), include_bytes!("../web/tcp-capture.js"));
+    }
+}
+
+#[cfg(test)]
+mod tcp_intercept_api_tests {
+    use super::*;
+    use hyper::service::Service;
+
+    fn state() -> (Arc<AppState>, PathBuf) {
+        let path = std::env::temp_dir().join(format!("sniper-tcp-api-{}", Uuid::new_v4()));
+        let state = AppState::new(crate::config::AppConfig {
+            proxy_addr: "127.0.0.1:0".parse().unwrap(),
+            ui_addr: "127.0.0.1:0".parse().unwrap(),
+            max_entries: 32,
+            max_transaction_entries: 32,
+            body_preview_bytes: 4096,
+            data_dir: path.clone(),
+        })
+        .unwrap();
+        (Arc::new(state), path)
+    }
+
+    async fn request(app: Router, method: &str, uri: &str, body: &str) -> Response {
+        let service = hyper_util::service::TowerToHyperService::new(app);
+        service
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("host", "127.0.0.1")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn tcp_intercept_routes_validate_revision_session_and_body_limits() {
+        let (state, path) = state();
+        let app = router(state.clone());
+        let policy = r#"{"enabled":true,"direction":"both","expected_revision":0}"#;
+        assert_eq!(
+            request(app.clone(), "PUT", "/api/tcp/intercept", policy)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            request(app.clone(), "PUT", "/api/tcp/intercept", policy)
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let stale = Uuid::new_v4();
+        let conn = Uuid::new_v4();
+        let ticket = Uuid::new_v4();
+        for field in ["session_id", "expected_active_session_id"] {
+            for (method, route, body) in [
+                ("PUT", "/api/tcp/intercept".into(), policy),
+                ("POST", format!("/api/tcp/connections/{conn}/close"), ""),
+                (
+                    "POST",
+                    format!("/api/tcp/connections/{conn}/pending/{ticket}/decision"),
+                    r#"{"action":"forward","expected_revision":0}"#,
+                ),
+            ] {
+                assert_eq!(
+                    request(
+                        app.clone(),
+                        method,
+                        &format!("{route}?{field}={stale}"),
+                        body
+                    )
+                    .await
+                    .status(),
+                    StatusCode::CONFLICT
+                );
+            }
+        }
+        for route in [
+            "/api/tcp/intercept".to_owned(),
+            format!("/api/tcp/connections/{conn}/pending/{ticket}/decision"),
+        ] {
+            let method = if route.ends_with("decision") {
+                "POST"
+            } else {
+                "PUT"
+            };
+            assert_eq!(
+                request(app.clone(), method, &route, &" ".repeat(24 * 1024 + 1))
+                    .await
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+            assert_eq!(
+                request(app.clone(), method, &route, "{").await.status(),
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                request(app.clone(), method, &route, "{}").await.status(),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        }
+        assert_eq!(
+            request(
+                app.clone(),
+                "GET",
+                &format!("/api/tcp/connections/{conn}/pending"),
+                ""
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(
+                app,
+                "POST",
+                &format!("/api/tcp/connections/{conn}/close"),
+                ""
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        drop(state);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn tcp_intercept_routes_require_remote_authentication() {
+        let (state, path) = state();
+        let access = UiAccessControl {
+            remote: Some(Arc::new(RemoteUiAuth::new())),
+            same_host_ips: Arc::new(HashSet::new()),
+        };
+        let app = router_with_access_control(state.clone(), access);
+        let id = Uuid::new_v4();
+        for (method, route) in [
+            ("GET", "/api/tcp/intercept".to_owned()),
+            ("PUT", "/api/tcp/intercept".to_owned()),
+            ("GET", format!("/api/tcp/connections/{id}/pending")),
+            (
+                "POST",
+                format!("/api/tcp/connections/{id}/pending/{id}/decision"),
+            ),
+            ("POST", format!("/api/tcp/connections/{id}/close")),
+        ] {
+            assert_eq!(
+                request(app.clone(), method, &route, "{}").await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        drop(state);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn tcp_persistence_and_shutdown_errors_are_server_failures() {
+        let error = crate::tcp_capture::TcpPersistenceError { pending_records: 2 };
+        assert_eq!(
+            tcp_configuration_error(error.into()).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            tcp_configuration_error(anyhow::anyhow!(
+                "TCP capture cannot start while Sniper is shutting down"
+            ))
+            .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn tcp_intercept_errors_map_to_distinct_http_statuses() {
+        use crate::tcp_capture::InterceptError::*;
+        for (error, expected) in [
+            (BadRequest("x".into()), 400),
+            (Conflict("x".into()), 409),
+            (NotFound("x".into()), 404),
+            (TooLarge("x".into()), 413),
+        ] {
+            assert_eq!(tcp_intercept_error(error).0.as_u16(), expected);
+        }
     }
 }

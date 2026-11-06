@@ -371,8 +371,75 @@
       }
       entry.seen.push(item);
     }
+    for (const entry of products.values()) {
+      entry.known = (origin?.known_vulnerabilities || []).filter((item) => item.product_id === entry.id && entry.versions.has(item.version));
+    }
     return [...products.values()].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   }
+  // Known advisories for a product's versions: a count, and KEV when CISA
+  // lists one as exploited. A lead from the version string alone. The
+  // sentence shows on hover, as ⚠'s does: the desktop app shows no title.
+  const advisories = (count) => `${count} known advisor${count === 1 ? "y" : "ies"}`;
+  const advisorySentence = (item) => `${advisories(item.count)} for ${item.name} ${item.version}, ${item.kev_count} exploited (CISA KEV). Tentative: version match only.`;
+  // A card's row has room for the count alone; the inspector names it.
+  function advisoryBadges(known, compact = false) {
+    if (!known?.length) return "";
+    const total = known.reduce((sum, item) => sum + item.count, 0);
+    const exploited = known.reduce((sum, item) => sum + item.kev_count, 0);
+    const more = escape(known.map(advisorySentence).join("\n"));
+    return `<span class="service-map-advisories" aria-label="${advisories(total)}" data-more="${more}" title="">${compact ? total : `${total} advisor${total === 1 ? "y" : "ies"}`}</span>${exploited ? `<span class="service-map-kev" data-more="${more}" title="">KEV</span>` : ""}`;
+  }
+  // A chip's list (+N, ⚠, the lock, an advisory badge) opens in one popup on
+  // the page: the map's layer clips anything past its edge, which left a
+  // one-row map's list a line tall. Below the chip, or above it near the
+  // window's bottom, and unscaled by the zoom.
+  function morePopupPlacement(anchor, size, view, gap = 4) {
+    const fitsBelow = anchor.bottom + gap + size.height <= view.height;
+    const fitsAbove = anchor.top - gap - size.height >= 0;
+    const top = !fitsBelow && fitsAbove
+      ? anchor.top - gap - size.height
+      : Math.max(0, Math.min(anchor.bottom + gap, view.height - size.height));
+    return { left: Math.max(0, Math.min(anchor.left, view.width - size.width)), top };
+  }
+  function createMorePopup(doc) {
+    let popup = null;
+    return {
+      show(anchor) {
+        const text = anchor?.getAttribute?.("data-more");
+        if (!text || !doc?.body) return;
+        if (!popup) {
+          popup = doc.createElement("div");
+          popup.className = "service-map-more";
+          popup.setAttribute("role", "tooltip");
+          doc.body.appendChild(popup);
+        }
+        popup.textContent = text;
+        popup.hidden = false;
+        const view = { width: doc.documentElement?.clientWidth || 0, height: doc.documentElement?.clientHeight || 0 };
+        const place = morePopupPlacement(anchor.getBoundingClientRect(), { width: popup.offsetWidth, height: popup.offsetHeight }, view);
+        popup.style.left = `${place.left}px`;
+        popup.style.top = `${place.top}px`;
+      },
+      hide() {
+        if (popup) popup.hidden = true;
+      },
+      remove() {
+        popup?.remove();
+        popup = null;
+      },
+    };
+  }
+  // The advisories behind a badge, from GET /api/vulndata/lookup.
+  const ADVISORY_TOKEN = /^[\x21-\x7e]{1,100}$/;
+  function normalizeAdvisories(payload) {
+    return array(payload?.advisories).filter((row) => ADVISORY_TOKEN.test(row?.id) && /^[a-z]{1,10}$/.test(row.severity)
+      && ADVISORY_TOKEN.test(row.fixed_in) && typeof row.kev === "boolean")
+      .slice(0, 100).map((row) => ({ id: row.id, severity: row.severity, fixed_in: row.fixed_in, kev: row.kev,
+        epss: typeof row.epss === "number" && row.epss >= 0 && row.epss <= 1 ? row.epss : null,
+        summary: typeof row.summary === "string" ? row.summary.slice(0, 300) : "" }));
+  }
+  // The finding detail's own lines.
+  const advisoryListMarkup = (rows) => rows.map((row) => `<p>${escape(`${row.id} · ${row.severity}${row.kev ? " · KEV" : ""}${row.epss === null ? "" : ` · EPSS ${row.epss.toFixed(2)}`} · fixed in ${row.fixed_in}`)}</p>${row.summary ? `<p class="service-map-muted">${escape(row.summary)}</p>` : ""}`).join("");
   function productMatches(origin, productId = "", version = "") {
     if (!productId && !version) return true;
     return reportedProducts(origin).some((product) => (!productId || product.id === productId)
@@ -438,7 +505,10 @@
     private_key: "Private key", jwt: "JWT", private_ip: "Private IP" };
   const productRank = (product) => RANKS[product.category] ?? (product.observations.length ? 5 : 15);
   function productSummaryMarkup(origin) {
-    const products = reportedProducts(origin).sort((a, b) => productRank(a) - productRank(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    // A version with known advisories leads, as an exposure does: hidden under
+    // +N, its badge would not be seen.
+    const products = reportedProducts(origin).sort((a, b) => Number(b.known.length > 0) - Number(a.known.length > 0)
+      || productRank(a) - productRank(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     const exposures = (origin?.server_technologies || []).filter((item) => item.category === "exposure");
     const methods = origin?.auth || [];
     if (!products.length && !exposures.length && !methods.length) return "";
@@ -450,13 +520,17 @@
     const primary = methods.find((item) => !AUTH_FLOWS.includes(item.kind)) || methods[0];
     const lock = primary ? `<span class="service-map-auth" aria-label="Authentication: ${escape(methods.map(authName).join(", "))}" data-more="${escape(methods.map((item) => `${authName(item)}${item.name && item.kind !== "scheme" ? ` (${item.name})` : ""}`).join("\n"))}" title="">${LOCK_ICON}${escape(authWord(primary))}${methods.length > 1 ? ` +${methods.length - 1}` : ""}</span>` : "";
     // An exposure and the way requests authenticate each take a product place.
-    const shown = 2 - (warning ? 1 : 0) - (lock ? 1 : 0);
+    // A version with advisories takes both: beside a second product its name
+    // would shrink to a letter.
+    const shown = Math.min(2 - (warning ? 1 : 0) - (lock ? 1 : 0), products[0]?.known.length ? 1 : 2);
     const full = (product) => [product.observations.length ? "Header-reported declarations; versions unverified." : "",
       ...product.observations.map((item) => `${productText(item)} · ${item.header_name} header · ${item.row_count} retained row${item.row_count === 1 ? "" : "s"} · First: ${item.first_seen} · Last: ${item.last_seen}`),
       ...product.declared.map((item) => `${item.name}${item.version ? ` ${item.version}` : ""} · ${item.row_count} retained row${item.row_count === 1 ? "" : "s"} from ${item.source_origin}`),
       ...product.seen.map((item) => `${item.name}${item.version ? ` ${item.version}` : ""} · ${item.row_count} retained row${item.row_count === 1 ? "" : "s"} · ${item.signals.join(", ")}`)].filter(Boolean).join("\n");
     const label = (product) => `${product.name}${product.versions.size > 1 ? ` · ${product.versions.size} versions` : product.versions.size ? ` ${[...product.versions][0]}` : ""}`;
-    return `<span class="service-map-clues service-map-products" title="${escape(products.map(full).join("\n"))}">${warning}${lock}${products.slice(0, shown).map((product) => `<span title="${escape(full(product))}">${productIcon(product.id)}${escape(label(product))}</span>`).join("")}${products.length > shown ? `<span class="service-map-products-more" aria-label="${products.length - shown} additional products" data-more="${escape(products.slice(shown).map(label).join("\n"))}" title="">+${products.length - shown}</span>` : ""}</span>`;
+    return `<span class="service-map-clues service-map-products" title="${escape(products.map(full).join("\n"))}">${warning}${lock}${products.slice(0, shown).map((product) => product.known.length
+      ? `<span class="service-map-known" title="${escape(full(product))}"><span class="service-map-known-name">${productIcon(product.id)}${escape(label(product))}</span>${advisoryBadges(product.known, true)}</span>`
+      : `<span title="${escape(full(product))}">${productIcon(product.id)}${escape(label(product))}</span>`).join("")}${products.length > shown ? `<span class="service-map-products-more" aria-label="${products.length - shown} additional products" data-more="${escape(products.slice(shown).map(label).join("\n"))}" title="">+${products.length - shown}</span>` : ""}</span>`;
   }
   // What an origin serves, read from the response types of its loaded
   // endpoints: pages (Front), API data, or static files. A front-end framework
@@ -1138,6 +1212,12 @@
           source_origin: safeOrigin(entry.source_origin), row_count: count(entry.row_count),
           evidence: array(entry.evidence).filter((id) => typeof id === "string" && id.length > 0),
         })),
+        // Advisories the vulnerability data lists for those versions.
+        known_vulnerabilities: array(item.known_vulnerabilities).filter((entry) => /^[a-z0-9_]{1,40}$/.test(entry?.product_id)
+          && /^[A-Za-z0-9][A-Za-z0-9 .!+_-]{0,39}$/.test(entry.name) && /^[0-9][0-9A-Za-z.+-]{0,39}$/.test(entry.version)
+          && count(entry.count) > 0 && ["critical", "high", "medium", "low", "unknown"].includes(entry.highest_severity))
+          .slice(0, 32).map((entry) => ({ product_id: entry.product_id, name: entry.name, version: entry.version,
+            count: count(entry.count), kev_count: count(entry.kev_count), highest_severity: entry.highest_severity })),
         // What no rule names: a banner, a header name, a cookie name.
         unnamed: Object.fromEntries(["banners", "headers", "cookies"].map((kind) => [kind, array(item.unnamed?.[kind])
           .filter((signal) => typeof signal?.value === "string" && /^[\x20-\x7e]{1,80}$/.test(signal.value)).slice(0, 16)
@@ -1675,6 +1755,7 @@
       bodyReferencesSource: null, relationLayers: Object.freeze([]), bodyOverlayNotice: "", apiDocs: null, apiDocsRequestId: 0,
       relationshipKind: "body", linkDeclarations: null, linkDeclarationsSource: null, linkDeclarationsError: "",
       parameters: null, parametersKey: null, parametersLoading: false, parametersError: "", parametersRequestId: 0, busyRetries: 0,
+      advisories: new Map(),
       htmlGenerators: null, htmlGeneratorsLoading: false, htmlGeneratorsError: "", htmlGeneratorsRequestId: 0, htmlGeneratorsSource: null,
       inactiveSessionId: null, historyVersion: 0, stale: false, anchorOrigin: null, modeNotice: "", zoomScale: 1,
       flowOrigin: null, flow: null, flowLoading: false, flowError: "", flowRequestId: 0,
@@ -1703,6 +1784,7 @@
     let refreshTimer = null;
     let historyPresentationPending = false;
     const eventDisposers = [];
+    const morePopup = createMorePopup(doc);
     function listen(element, type, handler, options) {
       const owned = (...args) => { if (!destroyed) return handler(...args); };
       element?.addEventListener?.(type, owned, options);
@@ -1791,6 +1873,7 @@
     function applyGraphScale() {
       // Mutating the canvas variables leaves card DOM, focus, inspector and
       // in-flight exact-source reads untouched, including during polling.
+      morePopup.hide();
       if (currentLayout && els.canvas.style) {
         els.canvas.style.setProperty("--service-map-scale", String(state.zoomScale));
         els.canvas.style.setProperty("--service-map-scaled-width", `${currentLayout.width * state.zoomScale}px`);
@@ -1845,6 +1928,8 @@
     }
     function replace(element, html, force = false) {
       if (!element) return;
+      // A redrawn map may drop the chip a list was opened from.
+      if (element === els.canvas) morePopup.hide();
       // Compare our last output, not browser serialization: boolean attributes
       // and native control/disclosure state can change innerHTML without a new
       // render. Replacing an unchanged select dismisses its native popup.
@@ -3879,9 +3964,33 @@
       const total = groups.reduce((sum, [kind]) => sum + origin.unnamed[kind].length, 0);
       return `<details class="service-map-technologies service-map-unnamed"><summary data-service-focus="unnamed:summary">Unnamed signals · ${total}</summary>${groups.map(([kind, title]) => `<h4>${title}</h4><div class="service-map-evidence-list">${origin.unnamed[kind].map((signal) => `<button class="service-map-evidence-button" type="button" data-service-relation-origin="${escape(origin.origin)}" data-service-relation-evidence="${escape(signal.evidence[0] || "")}" data-service-focus="unnamed:${escape(JSON.stringify([kind, signal.value]))}" ${signal.evidence.length ? "" : "disabled"}><span><code>${escape(signal.value)}</code> · ${rowCount(signal.row_count)}</span><span>View source ›</span></button>`).join("")}</div>`).join("")}</details>`;
     }
+    // The map carries counts only; the advisories behind a badge are read
+    // when the inspector shows the library, before any Rescan raises findings.
+    const advisoryKey = (entry) => JSON.stringify([state.snapshot?.snapshot.generation, entry.product_id, entry.version]);
+    function advisoryListFor(entry) {
+      const loaded = state.advisories.get(advisoryKey(entry));
+      if (!loaded) Promise.resolve().then(() => loadAdvisories(entry));
+      if (!loaded || loaded === "loading") return `<p class="service-map-muted">Loading advisories…</p>`;
+      return Array.isArray(loaded) ? advisoryListMarkup(loaded) : `<p class="service-map-muted">Advisories unavailable.</p>`;
+    }
+    async function loadAdvisories(entry) {
+      const key = advisoryKey(entry);
+      if (state.advisories.has(key)) return;
+      if (state.advisories.size > 200) state.advisories.clear();
+      state.advisories.set(key, "loading");
+      let rows = null;
+      try {
+        const response = await request(`/api/vulndata/lookup?${new URLSearchParams({ product: entry.product_id, version: entry.version })}`);
+        if (response.ok) rows = normalizeAdvisories(await response.json());
+      } catch {
+        // Shown as unavailable below.
+      }
+      state.advisories.set(key, rows ?? "unavailable");
+      renderDetail();
+    }
     function frontTechnologiesMarkup(origin) {
       if (!origin.front_technologies?.length) return "";
-      return `<section class="service-map-technologies" aria-label="Front-end"><h4>Front-end</h4><ul class="service-map-references">${origin.front_technologies.map((item) => `<li><strong>${escape(item.name)}</strong>${item.version ? ` · ${escape(item.version)}` : ""}<p class="service-map-muted">${item.row_count} retained row${item.row_count === 1 ? "" : "s"} from ${escape(item.source_origin)}</p><div class="service-map-evidence-list">${item.evidence.map((id, index) => `<button class="service-map-evidence-button" type="button" data-service-relation-origin="${escape(item.source_origin)}" data-service-relation-evidence="${escape(id)}" data-service-focus="library:${escape(JSON.stringify([item.product_id, item.version, id]))}"><span>${escape(item.name)}${item.version ? ` ${escape(item.version)}` : ""}</span><span>View source${item.evidence.length > 1 ? ` ${index + 1}` : ""} ›</span></button>`).join("")}</div></li>`).join("")}</ul></section>`;
+      return `<section class="service-map-technologies" aria-label="Front-end"><h4>Front-end</h4><ul class="service-map-references">${origin.front_technologies.map((item) => { const known = (origin.known_vulnerabilities || []).filter((entry) => entry.product_id === item.product_id && entry.version === item.version); return `<li><strong>${escape(item.name)}</strong>${item.version ? ` · ${escape(item.version)}` : ""}${advisoryBadges(known)}<p class="service-map-muted">${item.row_count} retained row${item.row_count === 1 ? "" : "s"} from ${escape(item.source_origin)}</p>${known.map((entry) => `<p class="service-map-muted">${escape(advisorySentence(entry))}</p>${advisoryListFor(entry)}`).join("")}<div class="service-map-evidence-list">${item.evidence.map((id, index) => `<button class="service-map-evidence-button" type="button" data-service-relation-origin="${escape(item.source_origin)}" data-service-relation-evidence="${escape(id)}" data-service-focus="library:${escape(JSON.stringify([item.product_id, item.version, id]))}"><span>${escape(item.name)}${item.version ? ` ${escape(item.version)}` : ""}</span><span>View source${item.evidence.length > 1 ? ` ${index + 1}` : ""} ›</span></button>`).join("")}</div></li>`; }).join("")}</ul></section>`;
     }
     function evidenceMarkup(origin) {
       const items = evidenceItems(origin), row = state.evidence, endpoint = state.endpointIndex === null ? null : origin.endpoints[state.endpointIndex];
@@ -4209,6 +4318,23 @@
         ? { x: event.clientX - rect.left, y: event.clientY - rect.top } : null;
     };
     listen(els.viewport, "scroll", pinFlowHeads, { passive: true });
+    const moreAnchor = (target) => target?.closest?.("[data-more]") || null;
+    listen(els.viewport, "pointerover", (event) => {
+      const anchor = moreAnchor(event.target);
+      if (anchor) morePopup.show(anchor);
+    });
+    listen(els.viewport, "pointerout", (event) => {
+      const anchor = moreAnchor(event.target);
+      if (anchor && !anchor.contains(event.relatedTarget)) morePopup.hide();
+    });
+    // +N's list also opens when its card has keyboard focus.
+    listen(els.viewport, "focusin", (event) => {
+      const more = event.target?.matches?.(".service-map-card:focus-visible")
+        ? event.target.querySelector(".service-map-products-more[data-more]") : null;
+      if (more) morePopup.show(more);
+    });
+    listen(els.viewport, "focusout", () => morePopup.hide());
+    listen(els.viewport, "scroll", () => morePopup.hide(), { passive: true });
     listen(els.viewport, "wheel", (event) => {
       if (!event.ctrlKey || pinchStartScale !== null || !zoomAvailable()) return;
       event.preventDefault();
@@ -4368,6 +4494,7 @@
         cancelParameters();
         resizeObserver?.disconnect();
         for (const dispose of eventDisposers) dispose();
+        morePopup.remove();
         if (faviconRedraw !== null) root.clearTimeout?.(faviconRedraw);
         faviconRedraw = null;
         doc?.removeEventListener?.("visibilitychange", onVisibilityChange);
@@ -4431,5 +4558,5 @@
       getState: () => state,
     };
   }
-  root.SniperServiceMap = { createController, normalizePacket, technologyLiteral, normalizeFlow, flowLayout, flowMarkup, flowHeadsOffset, flowMermaid, EXPOSURE_LABELS, AUTH_KINDS, relationshipOrder, siteKey, groupSites, originRole, originRoles, reportedProducts, productMatches, productSummaryMarkup, normalizeSnapshot, normalizeRowTechnologies, normalizeBodyReferences, normalizeHtmlGenerators, normalizeLinkDeclarations, normalizeSocketPeer, normalizePeerMatches, usableSocketPeer, peerGraphLayout, PEER_MATCH_LIMITS, LINK_DECLARATION_LIMITS, BODY_REFERENCE_LIMITS, HTML_GENERATOR_LIMITS, MAX_RELATION_LAYERS, stableOrder, graphLayout, graphGeometry, safeOrigin, safePath, MAX_CARDS, MAX_EDGES, MAX_REFERENCE_CARDS, GRAPH_GEOMETRY, ZOOM_LIMITS };
+  root.SniperServiceMap = { createController, normalizePacket, technologyLiteral, normalizeFlow, flowLayout, flowMarkup, flowHeadsOffset, flowMermaid, EXPOSURE_LABELS, AUTH_KINDS, relationshipOrder, siteKey, groupSites, originRole, originRoles, reportedProducts, productMatches, productSummaryMarkup, normalizeAdvisories, advisoryListMarkup, morePopupPlacement, createMorePopup, normalizeSnapshot, normalizeRowTechnologies, normalizeBodyReferences, normalizeHtmlGenerators, normalizeLinkDeclarations, normalizeSocketPeer, normalizePeerMatches, usableSocketPeer, peerGraphLayout, PEER_MATCH_LIMITS, LINK_DECLARATION_LIMITS, BODY_REFERENCE_LIMITS, HTML_GENERATOR_LIMITS, MAX_RELATION_LAYERS, stableOrder, graphLayout, graphGeometry, safeOrigin, safePath, MAX_CARDS, MAX_EDGES, MAX_REFERENCE_CARDS, GRAPH_GEOMETRY, ZOOM_LIMITS };
 })(typeof window === "undefined" ? globalThis : window);

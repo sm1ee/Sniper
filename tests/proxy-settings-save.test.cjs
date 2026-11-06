@@ -14,7 +14,7 @@ for (const [id, expected] of [
   ["oastPayloadText", { id: "oastPayloadText", class: "oast-payload-input", type: "text",
     placeholder: "Generate or paste a domain", spellcheck: "false", "aria-label": "OAST payload" }],
   ["proxySettingOastToken", { id: "proxySettingOastToken", type: "password", autocomplete: "off", spellcheck: "false",
-    placeholder: "Server authentication token (optional)", "aria-label": "OAST token" }],
+    placeholder: "Optional", "aria-label": "OAST token" }],
 ]) test(`${id} retains its explicit name, input policy and empty default`, () => {
   const matches = [...html.matchAll(new RegExp(`<input\\b([^>]*\\bid="${id}"[^>]*)/>`, "g"))];
   assert.equal(matches.length, 1);
@@ -58,6 +58,7 @@ function fixture() {
   const document = { getElementById: element, activeElement: null };
   const c = loadFunctions([
     "renderProxySettings", "renderOastSettingsControls", "proxySettingsFromRuntime", "saveProxySettings",
+    "syncCaptureSettingsForm", "proxySettingsDirty", "proxySettingsFormValues",
     "postRuntimeSettings", "currentSessionId", "strictIntegerInRange", "isValidIpLiteral",
     "normalizeIpLiteralForSettings", "validateOastServerUrlForSettings",
   ], {
@@ -187,4 +188,25 @@ test("a field typed in Settings is sent even when the form was redrawn under it"
   assert.deepEqual(sent.scope_patterns, ["app.example.com", "api.example.com"]);
   assert.deepEqual(sent.upstream_proxy, { enabled: true, url: "http://proxy.example.com:3128", username: "", password: "" });
   assert.equal(Object.hasOwn(sent, "intercept_enabled"), false);
+});
+
+// Save and Revert appear only while there is something to save, and go away
+// when a change is put back by hand.
+test("Save and Revert show only while the form differs from what was loaded", () => {
+  const f = fixture();
+  let hidden = true;
+  f.element("proxySettingsSaveBar").classList = { toggle(name, value) { if (name === "hidden") hidden = value; } };
+  f.c.renderProxySettings();
+  assert.equal(hidden, true, "a freshly loaded form has nothing to save");
+  f.element("proxySettingWebsocketCapture").checked = true; f.c.syncCaptureSettingsForm();
+  assert.equal(hidden, false);
+  f.element("proxySettingWebsocketCapture").checked = false; f.c.syncCaptureSettingsForm();
+  assert.equal(hidden, true, "putting a change back leaves nothing to save");
+  f.element("proxySettingScopePatterns").value = "app.example.com\n  \n"; f.c.syncCaptureSettingsForm();
+  assert.equal(hidden, true, "blank lines are not a change, as Save reads them");
+  f.element("proxySettingPort").value = "8081"; f.c.syncCaptureSettingsForm();
+  assert.equal(hidden, false, "a new listener port is a change");
+  f.element("proxySettingPort").value = "8080"; f.state.oastTokenClearPending = true; f.c.syncCaptureSettingsForm();
+  assert.equal(hidden, false, "clearing the OAST token is a change");
+  assert.equal(f.posts.length, 0, "showing the bar saves nothing");
 });

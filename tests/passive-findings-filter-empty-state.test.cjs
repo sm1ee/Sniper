@@ -105,15 +105,19 @@ for (const query of ["does-not-match", "別の項目🔎"]) {
 
 // HTTPS captured through CONNECT keeps the tunnel's "host:443" while Replay
 // and scans store the bare host, so one origin showed both ways down the column.
-test("the Host column leaves out :443 as History does and keeps any other port", () => {
-  const at = (id, host) => ({ ...row(id, `${id} entry`), host });
-  const f = fixture([at("proxy", "api.example.com:443"), at("replay", "api.example.com"),
-    at("alt", "api.example.com:8443"), at("plain", "api.example.com:80"), at("v6", "[2001:db8::1]:443")]);
+test("the Host column leaves out the finding's default port as History does", () => {
+  const at = (id, host, scheme) => ({ ...row(id, `${id} entry`), host, ...(scheme && { scheme }) });
+  const f = fixture([at("proxy", "api.example.com:443", "https"), at("replay", "api.example.com", "https"),
+    at("alt", "api.example.com:8443", "https"), at("plain", "api.example.com:80", "http"),
+    at("tlsport", "api.example.com:443", "http"), at("old", "api.example.com:443"),
+    at("v6", "[2001:db8::1]:443", "https")]);
   const hosts = Object.fromEntries(Array.from(f.body.innerHTML.matchAll(
     /data-finding-id="(\w+)"[\s\S]*?<td class="findings-col-host">([^<]*)<\/td>/g), (m) => [m[1], m[2]]));
   assert.deepEqual(hosts, {
     proxy: "api.example.com", replay: "api.example.com", alt: "api.example.com:8443",
-    plain: "api.example.com:80", v6: "[2001:db8::1]",
+    plain: "api.example.com", tlsport: "api.example.com:443", v6: "[2001:db8::1]",
+    // Saved before findings kept a scheme: its :443 is taken as HTTPS's.
+    old: "api.example.com",
   });
 });
 

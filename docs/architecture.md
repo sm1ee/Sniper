@@ -66,6 +66,10 @@ works.
   the match & replace rules.
 - `src/fuzzer.rs`, `src/websocket.rs`: the payload fuzzer engine and WebSocket
   capture.
+- `src/tcp_capture.rs`, `web/tcp-capture.js`: the TCP relay. It listens on
+  127.0.0.1 only, forwards to one target, records each direction's reads with
+  bounded previews, holds read ranges for Intercept, and keeps one record per
+  connection under the session's `tcp-history/`.
 - `src/service_map*.rs`, `web/service-map.js`: the Service Map, a bounded,
   on-demand projection of retained history. It starts no network discovery and
   keeps no persistent index; see [Service Map](integrations/service-map.md).

@@ -79,3 +79,30 @@ test("Intercept is one labelled switch whose state is aria-checked", () => {
   c.renderInterceptStatus();
   assert.equal(attributes["aria-checked"], "false");
 });
+
+// The switch forwarded both queues itself after turning Intercept off, which
+// sniper-cli did not, so traffic held at that moment hung for CLI users. The
+// server now forwards it whoever turns Intercept off.
+test("turning Intercept off sends one runtime write and reads both queues again", async () => {
+  const writes = [], reloads = [];
+  const state = { runtime: { intercept_enabled: true } };
+  const c = loadFunctions(["toggleIntercept"], {
+    state, els: { interceptStatus: { disabled: false } },
+    _interceptToggleInFlight: false, _interceptToggleRequestSeq: 0,
+    currentSessionId: () => "s-1", expectedActiveSessionIdForWrite: () => "s-1",
+    renderInterceptStatus() {}, scheduleRefresh() {}, sessionWritePath: (path) => path,
+    postRuntimeSettings: async (path, body) => {
+      writes.push(`${path} intercept_enabled=${body.intercept_enabled}`);
+      return { ok: true, json: async () => ({ intercept_enabled: false }) };
+    },
+    fetch: async (url, init) => { writes.push(`${init?.method} ${url}`); return { ok: true }; },
+    requireOkResponse: async (response) => assert.equal(response.ok, true),
+    loadIntercepts: async () => { reloads.push("requests"); },
+    loadResponseIntercepts: async () => { reloads.push("responses"); },
+    showToast: (message) => assert.fail(`Unexpected toast: ${message}`), loadRuntimeSettings: async () => {},
+  });
+  await c.toggleIntercept();
+  assert.deepEqual(writes, ["/api/runtime intercept_enabled=false"]);
+  assert.deepEqual(reloads, ["requests", "responses"]);
+  assert.equal(state.runtime.intercept_enabled, false);
+});

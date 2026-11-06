@@ -112,7 +112,7 @@ function fixture() {
     scheduleUiSettingsSave() {}, renderReplay() {}, duplicateActiveReplayTab: action("duplicate replay"),
     activeConfirmDialog: null, displaySettingsPreviewActive: false, displaySettingsReturnFocus: null, filterSettingsReturnFocus: null,
     displaySettingsEditedControls: new Set(), filterSettingsEditedControls: new Set(),
-    hydrateDisplaySettingsForm() {}, applyDisplaySettingsState() {}, renderShortcutReference() {}, selectSettingsTab() {}, hydrateFilterForm() {},
+    hydrateDisplaySettingsForm() {}, applyDisplaySettingsState() {}, renderShortcutReference() {}, loadVulndataStatus() {}, selectSettingsTab() {}, hydrateFilterForm() {},
     saveDisplaySettingsFromForm: action("settings apply"), applyFilterSettings: action("filter apply"),
     scannerSettingsBaseline: null, scannerSettingsSessionId: null, scannerSettingsGeneration: 0,
     scannerSettingsSavePending: null, scannerSettingsReturnFocus: null, scannerConfigStateGeneration: 0, scannerConfigLoadGeneration: 0, scannerConfigCache: null, scannerConfigSavePending: null, scannerQuickTogglePending: null,

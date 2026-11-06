@@ -37,11 +37,23 @@ conflict changes nothing. Only HTTP tabs are accepted, including legacy tabs
 with an empty or missing type.
 
 - Close removes the tab and its history. If it was active, its previous neighbor
-  (pinned tabs first) becomes active, else the next one, else none.
-- Duplicate copies the tab into a new unpinned tab with a fresh UUID and leaves
-  focus alone.
-- Set-pinned changes only the flag. Repeating a value does not toggle it, but
-  still advances the revision.
+  (pinned tabs first, then tabs sniper-cli opened) becomes active, else the next
+  one, else none.
+- Duplicate copies the tab into a new unpinned tab with a fresh UUID, with
+  `opened_by` set, and leaves focus alone.
+- Set-pinned changes the flag. Repeating a value does not toggle it, but still
+  advances the revision.
+
+These routes are sniper-cli's, so a pin or label it sets on a tab the person
+opened also sets `changed_by` on that tab.
+
+`opened_by` and `changed_by` name who drove sniper-cli: the `X-Sniper-Actor`
+header it sends, which is `SNIPER_ACTOR` when set, else `Claude` when Claude
+Code runs it (Claude Code sets `CLAUDECODE=1`), else absent, which the server
+records as `CLI`. The server also writes them on a whole-workspace save with
+`client_id: "sniper-cli"`: a tab it adds gets `opened_by`, a tab of the
+person's it changes gets `changed_by`, and marks already stored are kept even
+when an older sniper-cli leaves the fields out.
 
 A success returns exactly `session_id`, the new `revision` and `active_tab_id`,
 plus `closed_tab_id` (close), `tab_id` and `pinned` (set-pinned), or
@@ -67,3 +79,9 @@ A clean desktop workspace follows a tab closed elsewhere. If the desktop has an
 unsaved or conflicting draft, it keeps the editor and stops autosaving until the
 conflict is resolved. Copy the draft before reloading. Pin changes made
 elsewhere merge even during an edit, unless the pin was also changed locally.
+
+Tabs sniper-cli opened sit on a blue row under the pinned one, each with who
+opened it before its name. Dragging one to another row, or pinning it, makes it
+the person's; a person cannot drag a tab into that row. A tab the person opened
+that sniper-cli changed shows a blue dot, naming who changed it, until they
+select it.

@@ -29,7 +29,7 @@ use uuid::Uuid;
 use wry::WebViewBuilderExtUnix;
 use wry::{WebView, WebViewBuilder};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum DesktopUserEvent {
     ShutdownSignal,
     /// A trackpad scroll gesture began or ended. `wheel` events carry no phase,
@@ -49,6 +49,12 @@ enum DesktopUserEvent {
     },
     WebviewCloseFlushTimedOut {
         generation: u64,
+    },
+    /// A download from the page ended; the web view shows no download bar,
+    /// so the page says where it went.
+    DownloadFinished {
+        place: Option<String>,
+        ok: bool,
     },
 }
 
@@ -336,6 +342,7 @@ fn run_desktop() -> Result<()> {
     runtime.spawn(sniper::templates::library::run_daily_update(
         state.templates.clone(),
     ));
+    runtime.spawn(sniper::vulndata::run_daily_update(state.vulndata.clone()));
 
     let event_loop = EventLoopBuilder::<DesktopUserEvent>::with_user_event().build();
     let event_proxy = event_loop.create_proxy();
@@ -355,6 +362,16 @@ fn run_desktop() -> Result<()> {
     let ui_url = format!("http://{}/", config.ui_addr);
     let ui_origin = format!("http://{}", config.ui_addr);
     let ipc_event_proxy = event_loop.create_proxy();
+    let download_event_proxy = event_loop.create_proxy();
+    let download_home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    // The path each download was given, by URL: WebKit reports none when the
+    // download ends.
+    let download_paths = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::<
+        String,
+        PathBuf,
+    >::new()));
     let ui_task = runtime.spawn(async move {
         if let Err(error) = api::serve_api(ui_listener, ui_state).await {
             error!(?error, "ui task stopped");
@@ -384,6 +401,36 @@ fn run_desktop() -> Result<()> {
         .with_new_window_req_handler({
             let ui_origin = ui_origin.clone();
             move |url| handle_new_window_request(&url, &ui_origin)
+        })
+        // Render's Download saves a body the view cannot draw. Without these,
+        // WKWebView cancels every download.
+        .with_download_started_handler({
+            let download_paths = download_paths.clone();
+            let download_home = download_home.clone();
+            move |url, path| {
+                let Some(target) = desktop_download_path(path, download_home.as_deref())
+                    .and_then(|suggested| ask_download_path(&suggested))
+                else {
+                    return false;
+                };
+                download_paths.borrow_mut().insert(url, target.clone());
+                *path = target;
+                true
+            }
+        })
+        .with_download_completed_handler(move |url, path, ok| {
+            // A cancel in the save panel has no place; the page still stops
+            // the button's ring.
+            let finished = finished_download(&mut download_paths.borrow_mut(), &url, path, ok);
+            let event = DesktopUserEvent::DownloadFinished {
+                place: finished
+                    .as_ref()
+                    .map(|(path, _)| display_download_path(path, download_home.as_deref())),
+                ok: finished.is_some_and(|(_, ok)| ok),
+            };
+            if let Err(error) = download_event_proxy.send_event(event) {
+                warn!(?error, "failed to tell the page a download finished");
+            }
         })
         .with_ipc_handler(move |request| {
             let Some(event) = desktop_user_event_from_ipc(request.body()) else {
@@ -552,6 +599,12 @@ fn run_desktop() -> Result<()> {
                 } else {
                     "window.__sniperScrollGesture && window.__sniperScrollGesture('began')"
                 });
+            }
+            Event::UserEvent(DesktopUserEvent::DownloadFinished { place, ok }) => {
+                let detail = serde_json::json!({ "place": place, "ok": ok });
+                let _ = webview.evaluate_script(&format!(
+                    "window.__sniperDownloadFinished && window.__sniperDownloadFinished({detail})"
+                ));
             }
             #[cfg(target_os = "macos")]
             Event::UserEvent(DesktopUserEvent::CheckForUpdates) => {
@@ -763,6 +816,17 @@ async fn wait_for_desktop_shutdown_signal(proxy: EventLoopProxy<DesktopUserEvent
 }
 
 fn persist_desktop_session_state(
+    runtime: &tokio::runtime::Runtime,
+    state: &AppState,
+) -> Result<()> {
+    let result = persist_desktop_session_state_inner(runtime, state);
+    if result.is_err() {
+        state.cancel_tcp_shutdown();
+    }
+    result
+}
+
+fn persist_desktop_session_state_inner(
     runtime: &tokio::runtime::Runtime,
     state: &AppState,
 ) -> Result<()> {
@@ -1222,6 +1286,113 @@ fn is_blocked_desktop_navigation_scheme(url: &str) -> bool {
     matches!(parsed.scheme(), "data" | "javascript" | "file")
 }
 
+/// Where a download from the page (Render's Download) is saved. WebKit
+/// suggests a bare file name, which goes to the user's Downloads under its
+/// last component only, numbered if taken; WebView2 suggests a full path in
+/// the download folder, which stands. No home, no download.
+fn desktop_download_path(suggested: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    if suggested.is_absolute() {
+        return Some(suggested.to_path_buf());
+    }
+    let home = home?;
+    let downloads = home.join("Downloads");
+    let dir = if downloads.is_dir() {
+        downloads
+    } else {
+        home.to_path_buf()
+    };
+    let name = suggested
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("download");
+    let first = dir.join(name);
+    if !first.exists() {
+        return Some(first);
+    }
+    let (stem, extension) = match name.rfind('.') {
+        Some(at) if at > 0 => name.split_at(at),
+        _ => (name, ""),
+    };
+    // ponytail: past 999 copies the last one is overwritten.
+    Some(
+        (1..1000)
+            .map(|n| dir.join(format!("{stem} ({n}){extension}")))
+            .find(|path| !path.exists())
+            .unwrap_or(first),
+    )
+}
+
+/// Asks where to save a download, opening at the suggested folder and name.
+/// None when the person cancels. A file they agree to replace is removed
+/// first, since WebKit will not write over one.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn ask_download_path(suggested: &Path) -> Option<PathBuf> {
+    use cocoa::{
+        appkit::{NSModalResponse, NSSavePanel},
+        base::{id, nil, selector, YES},
+        foundation::{NSString, NSURL},
+    };
+    use objc::Message;
+
+    let folder = suggested.parent()?.to_str()?;
+    let name = suggested.file_name()?.to_str()?;
+    // SAFETY: WebKit asks the download delegate for a destination on the main
+    // thread, where AppKit runs panels, and every object here is one AppKit
+    // just returned.
+    let chosen = unsafe {
+        let panel: id = NSSavePanel::savePanel(nil);
+        panel.setCanCreateDirectories(YES);
+        panel.setDirectoryURL(NSURL::fileURLWithPath_(
+            nil,
+            NSString::alloc(nil).init_str(folder),
+        ));
+        (*panel)
+            .send_message::<_, ()>(
+                selector("setNameFieldStringValue:"),
+                (NSString::alloc(nil).init_str(name),),
+            )
+            .ok()?;
+        if panel.runModal() != NSModalResponse::NSModalResponseOk {
+            return None;
+        }
+        let path = panel.URL().path();
+        PathBuf::from(std::ffi::CStr::from_ptr(path.UTF8String()).to_str().ok()?)
+    };
+    if chosen.exists() {
+        std::fs::remove_file(&chosen).ok()?;
+    }
+    Some(chosen)
+}
+
+/// WebView2 and WebKitGTK keep their own download prompts.
+#[cfg(not(target_os = "macos"))]
+fn ask_download_path(suggested: &Path) -> Option<PathBuf> {
+    Some(suggested.to_path_buf())
+}
+
+/// When a download ends: where it went and whether it finished. WebKit reports
+/// no path, so the one the download was given stands in; with neither, the
+/// person cancelled in the save panel and nothing needs saying.
+fn finished_download(
+    given: &mut std::collections::HashMap<String, PathBuf>,
+    url: &str,
+    reported: Option<PathBuf>,
+    ok: bool,
+) -> Option<(PathBuf, bool)> {
+    let given = given.remove(url);
+    reported.or(given).map(|path| (path, ok))
+}
+
+/// A saved file's path as the page shows it, the home folder written `~`.
+fn display_download_path(path: &Path, home: Option<&Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
 fn is_same_origin(url: &str, expected_origin: &str) -> bool {
     let (Ok(url), Ok(expected)) = (Url::parse(url), Url::parse(expected_origin)) else {
         return false;
@@ -1241,14 +1412,17 @@ mod tests {
     use super::request_existing_desktop_focus_with;
     use super::{
         begin_desktop_teardown, block_desktop_shutdown, combine_desktop_persist_results,
-        complete_desktop_shutdown, desktop_close_flush_script, desktop_user_event_from_ipc,
-        finish_desktop_teardown, handle_navigation_request, handle_new_window_request,
+        complete_desktop_shutdown, desktop_close_flush_script, desktop_download_path,
+        desktop_user_event_from_ipc, display_download_path, finish_desktop_teardown,
+        finished_download, handle_navigation_request, handle_new_window_request,
         is_blocked_desktop_navigation_scheme, is_same_origin, normalize_empty_data_dir_env,
         persist_desktop_session_state, process_path_points_to_desktop_bundle,
         should_install_cli_path_on_launch, should_install_skills_on_launch,
         should_request_existing_desktop_focus, AppConfig, AppState, DesktopUserEvent,
         SNIPER_DATA_DIR_ENV,
     };
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -1517,6 +1691,83 @@ mod tests {
     }
 
     #[test]
+    fn desktop_persist_blocks_on_tcp_failure_and_reopens_start_after_recovery() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let root =
+            std::env::temp_dir().join(format!("sniper-desktop-tcp-retry-{}", uuid::Uuid::new_v4()));
+        let state = AppState::new(AppConfig {
+            proxy_addr: "127.0.0.1:0".parse().unwrap(),
+            ui_addr: "127.0.0.1:0".parse().unwrap(),
+            max_entries: 32,
+            max_transaction_entries: 32,
+            body_preview_bytes: 4096,
+            data_dir: root.clone(),
+        })
+        .unwrap();
+        let (client, server, settings, directory) = runtime.block_on(async {
+            let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let settings = sniper::tcp_capture::TcpSettings {
+                local_port: probe.local_addr().unwrap().port(),
+                target_host: "127.0.0.1".into(),
+                target_port: upstream.local_addr().unwrap().port(),
+            };
+            drop(probe);
+            state
+                .configure_tcp_capture(Some(settings.clone()), None, None)
+                .await
+                .unwrap();
+            let mut client = tokio::net::TcpStream::connect((
+                std::net::Ipv4Addr::LOCALHOST,
+                settings.local_port,
+            ))
+            .await
+            .unwrap();
+            let (mut server, _) = upstream.accept().await.unwrap();
+            client.write_all(b"saved-later").await.unwrap();
+            let mut bytes = [0; 11];
+            server.read_exact(&mut bytes).await.unwrap();
+            let session = state.session().await;
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while session.tcp_capture.summaries().await[0].client_bytes != 11 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            (
+                client,
+                server,
+                settings,
+                session.storage_dir().join("tcp-history"),
+            )
+        });
+        let held = directory.with_extension("held");
+        std::fs::rename(&directory, &held).unwrap();
+        std::fs::write(&directory, b"storage unavailable").unwrap();
+        let error = persist_desktop_session_state(&runtime, &state).unwrap_err();
+        assert!(error.is::<sniper::tcp_capture::TcpPersistenceError>());
+        std::fs::remove_file(&directory).unwrap();
+        std::fs::rename(&held, &directory).unwrap();
+        runtime.block_on(async {
+            state.configure_tcp_capture(None, None, None).await.unwrap();
+            // A blocked close must not leave the continuing desktop in shutdown.
+            state
+                .configure_tcp_capture(Some(settings), None, None)
+                .await
+                .unwrap();
+            state.configure_tcp_capture(None, None, None).await.unwrap();
+            assert!(state.session().await.tcp_capture.summaries().await[0].durable);
+        });
+        drop((client, server));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn desktop_persist_aborts_proxy_task_before_returning_success() {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -1603,6 +1854,53 @@ mod tests {
             "http://[::1]:3000/dashboard",
             "http://[::1]:3000",
         ));
+    }
+
+    #[test]
+    fn a_download_lands_in_downloads_under_its_own_name_only() {
+        let home = std::env::temp_dir().join(format!("sniper-download-{}", uuid::Uuid::new_v4()));
+        let downloads = home.join("Downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        let place = |suggested: &str| desktop_download_path(Path::new(suggested), Some(&home));
+        assert_eq!(place("report.pdf"), Some(downloads.join("report.pdf")));
+        std::fs::write(downloads.join("report.pdf"), b"").unwrap();
+        assert_eq!(place("report.pdf"), Some(downloads.join("report (1).pdf")));
+        assert_eq!(place("../../evil.sh"), Some(downloads.join("evil.sh")));
+        assert_eq!(place(""), Some(downloads.join("download")));
+        // WebView2 suggests a full path in the user's download folder.
+        let absolute = home.join("elsewhere").join("x.bin");
+        assert_eq!(
+            desktop_download_path(&absolute, Some(&home)),
+            Some(absolute.clone())
+        );
+        assert_eq!(desktop_download_path(Path::new("x.bin"), None), None);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_finished_download_says_where_it_went_and_a_cancel_says_nothing() {
+        let saved = PathBuf::from("/Users/someone/Downloads/report.pdf");
+        let mut pending = HashMap::from([("blob:one".to_string(), saved.clone())]);
+        // WebKit reports no path when a download ends; the one chosen is kept.
+        assert_eq!(
+            finished_download(&mut pending, "blob:one", None, true),
+            Some((saved.clone(), true))
+        );
+        assert!(pending.is_empty());
+        assert_eq!(
+            finished_download(&mut pending, "blob:two", None, false),
+            None,
+            "cancelled in the save panel"
+        );
+        let home = Path::new("/Users/someone");
+        assert_eq!(
+            display_download_path(&saved, Some(home)),
+            "~/Downloads/report.pdf"
+        );
+        assert_eq!(
+            display_download_path(Path::new("/Volumes/USB/report.pdf"), Some(home)),
+            "/Volumes/USB/report.pdf"
+        );
     }
 
     #[test]

@@ -323,6 +323,8 @@ async fn saved_http_tab_duplicate_clones_every_saved_field_without_focus_or_capt
         marker_count: 1,
         results: vec![],
         notes: vec!["generated saved fuzzer run".into()],
+        delay: None,
+        stop_match: None,
     };
     let attack_id = attack.id;
     session.fuzzer.insert(attack).await;
@@ -336,6 +338,7 @@ async fn saved_http_tab_duplicate_clones_every_saved_field_without_focus_or_capt
         title: "Generated finding".into(),
         detail: "Preserve saved detail".into(),
         evidence: "synthetic".into(),
+        scheme: String::new(),
         host: "example.com".into(),
         path: "/unrelated-capture".into(),
         location: None,
@@ -381,6 +384,8 @@ async fn saved_http_tab_duplicate_clones_every_saved_field_without_focus_or_capt
     expected.id = new_id.into();
     expected.sequence = 91;
     expected.pinned = false;
+    // sniper-cli made the copy, and nothing said who drives it.
+    expected.opened_by = Some("CLI".into());
     assert_eq!(serialized(duplicate), serialized(&expected));
     assert_eq!(duplicate.response_record_complete, Some(true));
     assert_eq!(duplicate.history_entries_complete, Some(true));
@@ -1159,13 +1164,15 @@ async fn saved_http_tab_set_pinned_is_idempotent_desired_state_only_and_survives
                 })
             );
             let mut expected = before.clone();
-            expected
+            let changed = expected
                 .replay
                 .tabs
                 .iter_mut()
                 .find(|tab| tab.id == tab_id)
-                .unwrap()
-                .pinned = pinned;
+                .unwrap();
+            changed.pinned = pinned;
+            // This route is sniper-cli's, so the person's tab is flagged.
+            changed.changed_by = Some("CLI".into());
             expected.revision += 1;
             expected.session_id = Some(session.id());
             expected.client_id = None;

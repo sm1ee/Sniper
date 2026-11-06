@@ -207,7 +207,7 @@ const FINDINGS_ROW_HEIGHT = 27;
 let measuredFindingsRowHeight = FINDINGS_ROW_HEIGHT;
 const FINDINGS_BUFFER_ROWS = 20;
 const IMPLEMENTED_TOOLS = new Set(["dashboard", "target", "proxy", "map", "fuzzer", "sequence", "replay", "recon", "templates", "tools", "logger"]);
-const IMPLEMENTED_PROXY_TABS = new Set(["intercept", "http-history", "websockets-history", "replace", "findings", "oast", "proxy-settings"]);
+const IMPLEMENTED_PROXY_TABS = new Set(["intercept", "http-history", "websockets-history", "tcp-history", "replace", "findings", "oast", "proxy-settings"]);
 const DECODER_SCRIPT_SOURCES = [
   "/decoder/lib/jquery-1.7.2.min.js",
   "/decoder/lib/cryptojs/components/core-min.js",
@@ -329,7 +329,11 @@ function safeEncodeBase64(value) {
 }
 
 function decodedBase64Length(value) {
-  return atob(value || "").length;
+  try {
+    return atob(value || "").length;
+  } catch (_error) {
+    throw new Error("Enter a valid Base64 body.");
+  }
 }
 
 function editableRequestBodyLength(body, bodyEncoding) {
@@ -341,7 +345,7 @@ function editableRequestBodyLength(body, bodyEncoding) {
 
 function editableResponseBodyLength(bodyText, bodyEncoding) {
   if (bodyEncoding === "base64") {
-    return decodedBase64Length(safeEncodeBase64(bodyText || ""));
+    return decodedBase64Length(bodyText || "");
   }
   return new TextEncoder().encode(bodyText || "").length;
 }
@@ -578,6 +582,9 @@ const state = {
   fuzzerAttackType: "sniper",
   fuzzerUrlEncode: true,
   fuzzerConcurrency: 4,
+  fuzzerDelayText: "",
+  fuzzerStopMatchText: "",
+  fuzzerStopRegex: false,
   // The attack this session runs now, so Stop can reach it.
   fuzzerRunningAttackId: null,
   fuzzerStopRequest: null,
@@ -747,7 +754,6 @@ const els = {
   oastDetailView: document.getElementById("oastDetailView"),
   proxySettingsPanel: document.getElementById("proxySettingsPanel"),
   upstreamPeerSection: document.getElementById("upstreamPeerSection"),
-  upstreamPeerSession: document.getElementById("upstreamPeerSession"),
   upstreamPeerEnabled: document.getElementById("upstreamPeerEnabled"),
   upstreamPeerError: document.getElementById("upstreamPeerError"),
   upstreamPeerStatus: document.getElementById("upstreamPeerStatus"),
@@ -758,8 +764,9 @@ const els = {
   historyRecoveredNotes: document.getElementById("historyRecoveredNotes"),
   historyRecoveredNotesSummary: document.getElementById("historyRecoveredNotesSummary"),
   historyRecoveredNotesList: document.getElementById("historyRecoveredNotesList"),
-  historyRetentionSession: document.getElementById("historyRetentionSession"),
   historyRetentionEnabled: document.getElementById("historyRetentionEnabled"),
+  historyRetentionPresetField: document.getElementById("historyRetentionPresetField"),
+  historyRetentionWarning: document.getElementById("historyRetentionWarning"),
   historyRetentionPreset: document.getElementById("historyRetentionPreset"),
   historyRetentionCustom: document.getElementById("historyRetentionCustom"),
   historyRetentionCustomField: document.getElementById("historyRetentionCustomField"),
@@ -1048,6 +1055,7 @@ const sectionToggles = Array.from(document.querySelectorAll(".section-toggle"));
 let sortHeaders = Array.from(document.querySelectorAll(".sort-header"));
 let historyColumnHandles = Array.from(document.querySelectorAll(".column-resize-handle"));
 
+let tcpCaptureController = null;
 let reconController = null;
 let templatesController = null;
 let targetServiceMapController = null;
@@ -1309,6 +1317,23 @@ function copyReconEndpointUrl(text, label, isCurrent) {
 }
 
 function bindEvents() {
+  tcpCaptureController = window.SniperTcpCapture?.createController({
+    intercept: true,
+    document,
+    sessionId: currentSessionId,
+    readPath: sessionQueryPath,
+    writePath: sessionWritePath,
+    request: fetch,
+    openSettings() {
+      setActiveProxyTab("proxy-settings");
+      renderProxyPanels();
+      document.getElementById("tcpSettingsSection")?.scrollIntoView({ block: "start" });
+    },
+    arrowStep: tableArrowStep,
+    formatTime: formatTimestamp,
+    formatSize,
+  });
+
   initializeTargetWorkspace();
   if (window.SniperRecon && els.reconShell) {
     reconController = window.SniperRecon.createController({
@@ -1333,7 +1358,7 @@ function bindEvents() {
       rawExchange: (record) => ({ request: buildRawRequest(record), response: buildRawResponse(record) }),
     });
   }
-  document.querySelectorAll(".recon-table, .fuzzer-results-table").forEach(bindTableColumnResizers);
+  document.querySelectorAll(".recon-table, .fuzzer-results-table, .tcp-table").forEach(bindTableColumnResizers);
   document.querySelectorAll(".list-detail-resizer").forEach(bindListDetailResizer);
   window.addEventListener("resize", resetLayoutTextareas);
   document.addEventListener("visibilitychange", flushWorkspaceStateBeforeHidden);
@@ -1819,6 +1844,7 @@ function bindEvents() {
   if (els.toolsClearButton) els.toolsClearButton.addEventListener("click", clearToolsInputs);
   els.closeDisplaySettingsButton.addEventListener("click", closeDisplaySettingsModal);
   bindCliPathControls();
+  bindVulndataControls();
   els.displaySettingsModal.querySelectorAll("[data-settings-tab]").forEach((tab) => {
     tab.addEventListener("click", () => selectSettingsTab(tab.dataset.settingsTab));
   });
@@ -2094,12 +2120,21 @@ function bindEvents() {
         proxySettingsSaveInFlight = false;
         proxySettingsSavePromise = null;
         els.saveProxySettingsButton.disabled = false;
+        syncCaptureSettingsForm();
       });
   });
-  onClickWithProgress(els.reloadProxySettingsButton, () =>
-    loadSettings()
+  onClickWithProgress(els.reloadProxySettingsButton, () => {
+    state.oastTokenClearPending = false;
+    return loadSettings()
       .then(renderProxySettings)
-      .catch((error) => console.error(error)));
+      .catch((error) => console.error(error));
+  });
+  const captureSettings = document.getElementById("proxySettingsPanel");
+  for (const type of ["input", "change"]) captureSettings?.addEventListener(type, syncCaptureSettingsForm);
+  captureSettings?.querySelector(".capture-settings-nav")?.addEventListener("click", (event) => {
+    const target = document.getElementById(event.target.closest("[data-settings-jump]")?.dataset.settingsJump || "");
+    target?.scrollIntoView({ block: "start", behavior: "smooth" });
+  });
   els.upstreamPeerEnabled?.addEventListener("change", editUpstreamPeerSettings);
   els.upstreamPeerSave?.addEventListener("click", saveUpstreamPeerSettings);
   els.upstreamPeerCancel?.addEventListener("click", cancelUpstreamPeerSettings);
@@ -2397,14 +2432,14 @@ function bindEvents() {
     const tab = getActiveReplayTab();
     if (!tab) return;
     const text = els.replayRequestHighlight.innerText || "";
+    if (syncReplayRequestTextFromEditor(text) === false) return;
     if (state._replayLastSnapshot !== null && state._replayLastSnapshot !== text) {
       state._replayUndoStack.push(state._replayLastSnapshot);
       if (state._replayUndoStack.length > 200) state._replayUndoStack.shift();
       state._replayRedoStack.length = 0;
     }
     state._replayLastSnapshot = text;
-    els.replayRequestEditor.value = text;
-    syncReplayRequestTextFromEditor(text);
+    els.replayRequestEditor.value = tab.requestText || text;
     const renderedText = tab.requestText || text;
     // Debounce re-render so syntax highlighting refreshes without losing cursor
     clearTimeout(els.replayRequestHighlight._renderTimer);
@@ -2420,8 +2455,10 @@ function bindEvents() {
       const stack = e.shiftKey ? state._replayRedoStack : state._replayUndoStack;
       const opposite = e.shiftKey ? state._replayUndoStack : state._replayRedoStack;
       if (!stack.length) return;
+      const restored = stack[stack.length - 1];
+      if (!acceptReplayRequestEdit(restored)) return;
       opposite.push(state._replayLastSnapshot || els.replayRequestHighlight.innerText || "");
-      const restored = stack.pop();
+      stack.pop();
       state._replayLastSnapshot = restored;
       let undoHtml = renderCodeHtml(restored, state.replayMessageViews.request, "request");
       els.replayRequestHighlight.innerHTML = undoHtml;
@@ -2459,12 +2496,49 @@ function bindEvents() {
     btn.addEventListener("click", () => {
       const target = btn.dataset.replayTarget;
       const view = btn.dataset.replayView;
+      globalThis.SniperProtobufFields?.close(target);
       state.replayMessageViews[target] = view;
       renderReplayViewTabs();
       renderReplayViewContent(target);
     });
   });
 
+  globalThis.SniperProtobufFields?.init(() => {
+    const tab = getActiveReplayTab();
+    return {
+      owner: tab,
+      views: state.replayMessageViews,
+      revision: tab?.protobufEditRevision || 0,
+      requestText: tab?.requestText,
+      editable: state.replayMessageViews.request === "raw",
+      applyFields: (snapshot, bytes) => {
+        const current = getActiveReplayTab();
+        if (current !== tab || current !== snapshot.owner
+            || (current.protobufEditRevision || 0) !== snapshot.revision
+            || current.requestText !== snapshot.requestText
+            || state.replayMessageViews.request !== "raw") throw new Error("stale-source");
+        const parsed = parseEditableRawRequest(current.requestText, current.baseRequest);
+        if (globalThis.SniperProtobufFields.editBlockReason(parsed, snapshot.format || "protobuf")) throw new Error("editing-blocked");
+        let binary = "";
+        for (const byte of bytes) binary += String.fromCharCode(byte);
+        const { head } = splitRawHttpMessage(current.requestText);
+        let next = `${head}\n\n${btoa(binary)}`;
+        // Use the existing framing policy; auto-length off may reject a size change.
+        const updated = parseEditableRawRequest(next, current.baseRequest);
+        next = updated._normalizedRawText || next;
+        if (!acceptReplayRequestEdit(next, current)) throw new Error("The edited request exceeds Replay's save limit. Use a smaller request.");
+        setReplayRequestEditorText(next, { preserveSelection: false });
+        syncReplayRequestTextFromEditor(next);
+      },
+      request: () => {
+        if (!tab || tab.type === "websocket") return null;
+        // Inspection never falls back to an older request after a parse error.
+        if ((tab.requestText || "").length > 2 * 1024 * 1024) throw new Error("limit");
+        return parseEditableRawRequest(tab.requestText, tab.baseRequest);
+      },
+      response: () => tab?.responseRecord?.response || null,
+    };
+  });
   bindWsReplayEvents();
   bindFindingsEvents();
 
@@ -2535,6 +2609,7 @@ function bindEvents() {
     const ver = e.target.value;
     const tab = getActiveReplayTab();
     if (!tab || tab.type === "websocket") return;
+    const previousVersion = tab.httpVersionMode;
     if (renderedHttpReplayDraftOwner?.tab === tab) renderedHttpReplayDraftOwner.preservedVersionDraft = null;
     tab.httpVersionMode = ver || "";
     const cv = getCMView("replayReq");
@@ -2548,6 +2623,11 @@ function bindEvents() {
         : lines[0].replace(/\s+HTTP\/[0-9.]+\s*$/i, "");
       if (ver && !lines[0].match(/HTTP\//i)) lines[0] += ` ${ver}`;
       const newText = lines.join("\n");
+      if (!acceptReplayRequestEdit(newText, tab)) {
+        tab.httpVersionMode = previousVersion;
+        e.target.value = normalizeReplayHttpVersionMode(previousVersion);
+        return;
+      }
       tab.requestText = newText;
       tab.requestBytes = null;
       tab.requestOriginalBytes = null;
@@ -2577,6 +2657,11 @@ function bindEvents() {
         : legacyLines[0].replace(/\s+HTTP\/[0-9.]+\s*$/i, "");
       if (ver && !legacyLines[0].match(/HTTP\//i)) legacyLines[0] += ` ${ver}`;
       const newText = legacyLines.join("\n");
+      if (!acceptReplayRequestEdit(newText, tab)) {
+        tab.httpVersionMode = previousVersion;
+        e.target.value = normalizeReplayHttpVersionMode(previousVersion);
+        return;
+      }
       hl.innerText = newText;
       hl.dispatchEvent(new Event("input"));
       tab.requestText = newText;
@@ -2966,6 +3051,27 @@ function bindEvents() {
       return;
     }
 
+    // Cmd+R on a Fuzzer result sends its request to Replay, as it does in HTTP
+    // history. Not from the template or a field being typed in: there the chord
+    // would not be about the result.
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      event.key.toLowerCase() === "r" &&
+      state.activeTool === "fuzzer" &&
+      fuzzerSelectedTransactionId() &&
+      !event.target?.closest?.("input, textarea, select, #fuzzerRequestCM")
+    ) {
+      event.preventDefault();
+      try {
+        openTransactionRecordInReplay(state._fuzzerDetailRecord);
+      } catch (error) {
+        handleSendActionError(error);
+      }
+      return;
+    }
+
     // Cmd+R on WebSocket tab — send selected frame to WS Replay
     if (
       (event.metaKey || event.ctrlKey) &&
@@ -3251,6 +3357,17 @@ async function checkForUpdatesNow() {
 }
 
 window.__sniperCheckForUpdates = checkForUpdatesNow;
+// The desktop app's web view shows no download bar; the app reports where
+// the file went, held long enough to read the path.
+function reportDesktopDownload(result) {
+  pendingDesktopDownload?.();
+  pendingDesktopDownload = null;
+  // No place: cancelled in the save panel.
+  if (!result?.place) return;
+  if (result.ok) showToast(`Saved to ${result.place}`, "success", 6000);
+  else showToast(`Could not save ${result.place}.`, "error", 6000);
+}
+window.__sniperDownloadFinished = reportDesktopDownload;
 
 // The steps the server reports that the button reacts to. It sends others meant
 // for logs, such as where the installer's log file is; those are ignored here, so an
@@ -3770,11 +3887,18 @@ async function adoptExternalWorkspace({ keepLocal = false } = {}) {
     const baseline = baselineById.get(tab.id);
     if (baseline && baseline.type !== "websocket"
       && existing.type !== "websocket" && tab.type !== "websocket") {
-      const nextPinned = !!tab.pinned;
-      if (!!existing.pinned === !!baseline.pinned || !!existing.pinned === nextPinned) {
-        if (!!existing.pinned !== nextPinned) updated = true;
-        existing.pinned = nextPinned;
-        baseline.pinned = nextPinned;
+      // The CLI's marks merge the same way: sniper-cli sets them, a person
+      // clears them by taking the tab or selecting it.
+      const name = (value) => value || null;
+      for (const [field, key, value] of [["pinned", "pinned", Boolean], ["openedBy", "opened_by", name], ["changedBy", "changed_by", name]]) {
+        const next = value(tab[key]);
+        if (value(existing[field]) === value(baseline[key]) || value(existing[field]) === next) {
+          if (value(existing[field]) !== next) {
+            updated = true;
+            existing[field] = next;
+          }
+          if (value(baseline[key]) !== next) baseline[key] = next;
+        }
       }
     }
     if (replayTabHasUncommittedEditorState(existing)) continue;
@@ -3985,6 +4109,7 @@ function hydrateReplayTab(tab) {
       sequence: Number.isFinite(tab.sequence) ? tab.sequence : state.replayTabSequence + 1,
       customLabel: normalizeReplayTabCustomLabel(tab.custom_label || ""),
       pinned: !!tab.pinned,
+      openedBy: tab.opened_by || null, changedBy: tab.changed_by || null,
       label: `WS ${tab.ws_host || "draft"}`,
       wsScheme,
       wsHost: tab.ws_host || "",
@@ -4034,6 +4159,7 @@ function hydrateReplayTab(tab) {
     sequence: Number.isFinite(tab.sequence) ? tab.sequence : state.replayTabSequence + 1,
     customLabel: normalizeReplayTabCustomLabel(tab.custom_label || ""),
     pinned: !!tab.pinned,
+    openedBy: tab.opened_by || null, changedBy: tab.changed_by || null,
     baseRequest: fallbackRequest,
     sourceTransactionId: tab.source_transaction_id || null,
     notice: tab.notice || "",
@@ -4196,6 +4322,7 @@ function snapshotHttpReplayTab(tab) {
     sequence: tab.sequence,
     custom_label: tab.customLabel || "",
     pinned: !!tab.pinned,
+    opened_by: tab.openedBy || null, changed_by: tab.changedBy || null,
     base_request: tab.baseRequest ? cloneEditableRequest(tab.baseRequest) : null,
     source_transaction_id: tab.sourceTransactionId || null,
     notice: tab.notice || "",
@@ -4240,6 +4367,7 @@ function snapshotWorkspaceState(options = {}) {
         sequence: tab.sequence,
         custom_label: tab.customLabel || "",
         pinned: !!tab.pinned,
+        opened_by: tab.openedBy || null, changed_by: tab.changedBy || null,
         ws_scheme: tab.wsScheme || "wss",
         ws_host: tab.wsHost || "",
         ws_port: tab.wsPort || defaultWsPortForScheme(tab.wsScheme),
@@ -4441,6 +4569,19 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
       if (!(error instanceof WorkspaceStateConflictError)) {
         workspaceSaveDirty = true;
         window.clearTimeout(workspaceSaveTimer);
+        workspaceSaveTimer = null;
+        if (error.workspaceValidation) {
+          // Validation cannot succeed on an unchanged retry. Keep the unsaved
+          // state and close prompt, and retry only after an edit or explicit save.
+          window.clearTimeout(wsTranscriptSaveTimer);
+          wsTranscriptSaveTimer = null;
+          wsTranscriptFirstDirtyAt = 0;
+          // A correction may arrive while the refused POST is in flight. It
+          // still deserves its own save; only unchanged invalid data is stopped.
+          if (workspaceSaveVersion !== version) continue;
+          showToast(`Workspace was not saved: ${error.message} Keep the app open and correct the draft before closing.`, "error", 10000);
+          throw error;
+        }
         workspaceSaveTimer = window.setTimeout(() => {
           workspaceSaveTimer = null;
           flushQueuedWorkspaceStateSave().catch((error) => console.error(error));
@@ -4471,7 +4612,6 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
     workspaceSaveConflictPending = false;
     workspaceSaveConflictLatest = null;
     workspaceTabCapNoticeShown = false;
-    workspaceResponseTrimNoticeShown = false;
   }
 }
 
@@ -4483,14 +4623,15 @@ async function runQueuedWorkspaceStateSaves(options = {}) {
 // Drop response bodies largest-first, and only as many as needed to get back
 // under the threshold, so a single giant response doesn't cost every other
 // tab's modest response. Requests and metadata are always kept (a response is
-// re-fetchable by re-sending). If requests alone still overflow, history is
-// dropped as a last resort.
+// re-fetchable by re-sending). If requests/history alone still overflow, refuse
+// the save and keep all drafts and history intact.
 function boundWorkspaceSnapshotForSave(snapshot) {
   if (!snapshot || typeof snapshot !== "object") return snapshot;
   const totalBytes = utf8ByteLength(JSON.stringify(snapshot));
   // A snapshot smaller than the per-record limit cannot contain a record that
   // breaks it, so the common case still costs one measurement.
   if (totalBytes <= WORKSPACE_SAVE_SAFE_BYTES && totalBytes <= WORKSPACE_SAVE_RECORD_SAFE_BYTES) {
+    workspaceResponseTrimNoticeShown = false;
     return snapshot;
   }
   // Deep clone so we can null response records in place without touching state.
@@ -4531,24 +4672,24 @@ function boundWorkspaceSnapshotForSave(snapshot) {
     dropped = true;
   }
 
-  // Last resort: requests/history text alone still overflow. Drop history,
-  // keeping each tab's current request so replay still works.
+  // Responses can be reacquired; request history may contain the only copy of
+  // an edited request. Refuse the save rather than silently discard that work.
   if (utf8ByteLength(JSON.stringify(bounded)) > WORKSPACE_SAVE_SAFE_BYTES) {
-    for (const tab of tabs) {
-      tab.history_entries = [];
-      tab.history_index = null;
-    }
-    dropped = true;
+    const error = new Error("Workspace requests and history exceed the safe save budget. Close unneeded Replay tabs or reduce request sizes. Request history was not removed.");
+    error.workspaceValidation = true;
+    throw error;
   }
 
+  // The response stays in its tab, so every save leaves it out again: say so
+  // once, and again only after a save had nothing to leave out.
   if (dropped && !workspaceResponseTrimNoticeShown) {
-    workspaceResponseTrimNoticeShown = true;
     showToast(
       "A large replay response was not saved to keep the workspace under its size limit.",
       "warning",
       6000,
     );
   }
+  workspaceResponseTrimNoticeShown = dropped;
   return bounded;
 }
 
@@ -4561,6 +4702,15 @@ async function saveWorkspaceState(snapshot = null, options = {}) {
   const sessionId = currentSessionId();
   if (!snapshot) {
     snapshot = snapshotWorkspaceState(options);
+  }
+  for (const tab of snapshot.replay?.tabs || []) {
+    const problem = replayRequestSizeError(tab.request_text, tab.base_request)
+      || (tab.history_entries || []).map(entry => replayRequestSizeError(entry.request_text, entry.request)).find(Boolean);
+    if (problem) {
+      const error = new Error(`Replay ${problem}. Reduce the request size before saving; nothing was truncated.`);
+      error.workspaceValidation = true;
+      throw error;
+    }
   }
   snapshot = boundWorkspaceSnapshotForSave(snapshot);
 
@@ -4590,7 +4740,9 @@ async function saveWorkspaceState(snapshot = null, options = {}) {
         throw new WorkspaceStateConflictError(latest);
       }
     }
-    throw new Error(message);
+    const error = new Error(message);
+    error.workspaceValidation = [400, 413, 422].includes(response.status);
+    throw error;
   }
   const saved = await response.json();
   const activeSessionId = currentSessionId();
@@ -5114,6 +5266,9 @@ function syncReplayDraftsBeforeWorkspaceClose() {
 
 function workspaceUnloadPayload(primarySnapshot) {
   if (workspaceSaveConflictPending) return null;
+  if ((primarySnapshot?.replay?.tabs || []).some(tab =>
+    replayRequestSizeError(tab.request_text, tab.base_request)
+    || (tab.history_entries || []).some(entry => replayRequestSizeError(entry.request_text, entry.request)))) return null;
   const primaryPayload = JSON.stringify(primarySnapshot);
   if (utf8ByteLength(primaryPayload) <= WORKSPACE_UNLOAD_KEEPALIVE_MAX_BYTES) {
     return { payload: primaryPayload, endpoint: "/api/workspace-state" };
@@ -5373,6 +5528,7 @@ function compactWorkspaceUnloadReplayTab(tab, options = {}, liveTab = null) {
       sequence: tab.sequence,
       custom_label: tab.custom_label || "",
       pinned: !!tab.pinned,
+      opened_by: tab.opened_by || null, changed_by: tab.changed_by || null,
       ws_scheme: tab.ws_scheme || "wss",
       ws_host: tab.ws_host || "",
       ws_port: tab.ws_port || defaultWsPortForScheme(tab.ws_scheme),
@@ -5410,6 +5566,7 @@ function compactWorkspaceUnloadReplayTab(tab, options = {}, liveTab = null) {
     sequence: tab.sequence,
     custom_label: tab.custom_label || "",
     pinned: !!tab.pinned,
+    opened_by: tab.opened_by || null, changed_by: tab.changed_by || null,
     base_request: compactWorkspaceUnloadEditableRequest(tab.base_request, options),
     source_transaction_id: tab.source_transaction_id || null,
     notice: tab.notice || "",
@@ -5516,6 +5673,7 @@ async function cleanupWsReplayTabsBeforeStateReset(options = {}) {
 }
 
 function resetSessionScopedUiState() {
+  if (typeof tcpCaptureController !== "undefined") tcpCaptureController?.reset();
   workspaceStateGeneration += 1;
   state._recordClipboardSessionGeneration = (state._recordClipboardSessionGeneration || 0) + 1;
   if (typeof reconController !== "undefined") reconController?.reset();
@@ -8418,6 +8576,7 @@ async function loadTargetSiteMap(forceScopeSync = false, saveContext = null) {
 
 async function pollAuxiliaryData() {
   const tasks = [];
+  if (state.activeTool === "proxy" && ["tcp-history", "proxy-settings"].includes(state.activeProxyTab)) tasks.push(tcpCaptureController?.refresh());
   const now = Date.now();
 
   if (state.activeTool === "proxy" && state.activeProxyTab === "intercept") {
@@ -9985,11 +10144,13 @@ function renderDashboard() {
   };
   const tile = (label, value, note) => `<div class="dashboard-tile"><div class="dashboard-tile-value">${value}</div>`
     + `<div class="dashboard-tile-label">${label}</div>${note ? `<div class="dashboard-tile-note">${note}</div>` : ""}</div>`;
-  const totals = { bytes: 0, requests: 0, websockets: 0, findings: {}, latest: null };
+  const totals = { bytes: 0, requests: 0, websockets: 0, tcp: 0, tcpUnknown: false, findings: {}, latest: null };
   for (const session of state.sessions) {
     totals.bytes += Number(session.storage_bytes) || 0;
     totals.requests += Number(session.request_count) || 0;
     totals.websockets += Number(session.websocket_count) || 0;
+    totals.tcp += Number(session.tcp_connection_count) || 0;
+    totals.tcpUnknown ||= session.tcp_connection_count === null;
     for (const name of SEVERITIES) {
       totals.findings[name] = (totals.findings[name] || 0) + (Number(session.overview?.findings?.[name]) || 0);
     }
@@ -10001,9 +10162,10 @@ function renderDashboard() {
   els.dashboardTiles.innerHTML = sessionCount ? [
     tile("On disk", formatSize(totals.bytes), `${sessionCount} session${sessionCount === 1 ? "" : "s"}`),
     tile("Requests", totals.requests.toLocaleString(),
-      totals.websockets ? `and ${totals.websockets.toLocaleString()} WebSocket session${totals.websockets === 1 ? "" : "s"}` : ""),
+      [totals.websockets ? `and ${totals.websockets.toLocaleString()} WebSocket session${totals.websockets === 1 ? "" : "s"}` : "",
+        totals.tcp || totals.tcpUnknown ? `${totals.tcp.toLocaleString()}${totals.tcpUnknown ? "+" : ""} TCP connections${totals.tcpUnknown ? " · some unavailable" : ""}` : ""].filter(Boolean).join(" · ")),
     tile("Findings", findingTotal.toLocaleString(), severityLine(totals.findings)),
-    tile("Last capture", totals.latest ? escapeHtml(formatTimestamp(totals.latest.at)) : "None yet",
+    tile("Last HTTP capture", totals.latest ? escapeHtml(formatTimestamp(totals.latest.at)) : "None yet",
       totals.latest ? escapeHtml(totals.latest.name) : ""),
   ].join("") : "";
   const largest = Math.max(1, ...state.sessions.map((session) => Number(session.storage_bytes) || 0));
@@ -10037,6 +10199,9 @@ function renderDashboard() {
     section("Scope", scopeBody + excludedBody),
     section("Hosts", list((overview.top_hosts || []).map((entry) => `${escapeHtml(entry.host)} <span class="dashboard-dim">${Number(entry.requests).toLocaleString()}</span>`))),
     section("Marked and kept", list(kept)),
+    section("TCP", current?.tcp_connection_count > 0
+      ? `<p>${Number(current.tcp_connection_count).toLocaleString()} retained connection${current.tcp_connection_count === 1 ? "" : "s"} · Open this session, then Capture → TCP.</p>`
+      : current?.tcp_connection_count === null ? '<p class="dashboard-dim">History count unavailable. Open this session, then Capture → TCP to inspect.</p>' : ""),
     section("Scans", list(scans) + (overview.activity_count > scans.length ? `<p class="dashboard-dim">${more(scans.length, overview.activity_count).trim()} earlier</p>` : "")),
     section("Findings", findingBadges ? `<div class="dashboard-severities">${findingBadges}</div>` : ""),
   ].join("");
@@ -10077,6 +10242,7 @@ function renderDashboard() {
             <td><div class="session-size"><span class="session-size-bar"><span style="width:${Math.max(2, Math.round((Number(session.storage_bytes) || 0) / largest * 100))}%"></span></span>${formatSize(session.storage_bytes)}</div></td>
             <td>${formatCappedCount(session.request_count)}</td>
             <td>${formatCappedCount(session.websocket_count, retainedEntriesCap())}</td>
+            <td title="${session.tcp_connection_count == null ? "TCP count unavailable" : "Retained TCP connections"}">${session.tcp_connection_count == null ? "—" : Number(session.tcp_connection_count).toLocaleString()}</td>
             <td class="dashboard-findings${SEVERITIES.find((name) => session.overview?.findings?.[name]) ? ` severity-text-${SEVERITIES.find((name) => session.overview?.findings?.[name])}` : ""}">${sessionFindingCount(session).toLocaleString()}</td>
             <td>${session.overview?.last_captured_at ? escapeHtml(formatTimestamp(session.overview.last_captured_at)) : "-"}</td>
             <td>${escapeHtml(formatTimestamp(session.created_at))}</td>
@@ -10091,7 +10257,7 @@ function renderDashboard() {
         .join("")
     : `
         <tr class="empty-row">
-          <td colspan="8">No sessions are available yet.</td>
+          <td colspan="9">No sessions are available yet.</td>
         </tr>
       `;
 
@@ -10452,6 +10618,7 @@ const BUILTIN_RULE_LABELS = {
   misconfig: "Security Misconfiguration",
   info: "Information Disclosure",
   auth: "Authentication Issues",
+  known_cve: "Known Vulnerabilities",
 };
 
 const BUILTIN_FINDING_CATEGORIES = new Set(Object.keys(BUILTIN_RULE_LABELS));
@@ -11037,14 +11204,14 @@ function renderFindingsVirtual() {
     for (let i = startIdx; i < endIdx; i++) {
       const f = entries[i];
       const selected = f.id === selectedFindingId ? " selected" : "";
-      // A finding carries no scheme. Its ":443" is the CONNECT authority of an
-      // HTTPS capture, which Replay and scans store without, so leave it out as
-      // History does; any other port stays.
+      // HTTPS captured through CONNECT keeps the tunnel's ":443", which Replay
+      // and scans store without, so leave the default port out as History does.
+      // A finding saved before it kept a scheme counts its :443 as HTTPS's.
       rows.push(`<tr class="history-row${selected}" data-finding-id="${f.id}" data-record-id="${f.record_id}">
         <td class="findings-col-severity"><span class="severity-badge ${severityClass(f.severity)}">${severityLabel(f.severity)}</span></td>
         <td class="findings-col-category">${escapeHtml(f.category)}</td>
         <td class="findings-col-title">${escapeHtml(f.title)}</td>
-        <td class="findings-col-host">${escapeHtml(displayHost(f.host, "https"))}</td>
+        <td class="findings-col-host">${escapeHtml(displayHost(f.host, f.scheme || "https"))}</td>
         <td class="findings-col-path">${escapeHtml(f.path)}</td>
         <td class="findings-col-time">${escapeHtml(formatTimestamp(f.found_at))}</td>
       </tr>`);
@@ -11201,7 +11368,15 @@ function renderFindingDescription(finding, fallbackLocation = null) {
   const locationHtml = locationLabel
     ? `<span class="findings-location-chip">${escapeHtml(locationLabel)}</span>`
     : "";
-  els.findingsDetailDesc.innerHTML = `${locationHtml}<span class="findings-desc-text">${escapeHtml(finding.detail || "")}</span>`;
+  // A known-vulnerability finding lists its advisories, and a template its
+  // references, below a first line: they open from it instead of hiding past
+  // the two-line clamp.
+  const detail = String(finding.detail || "");
+  const lineBreak = detail.indexOf("\n");
+  const text = lineBreak < 0
+    ? `<span class="findings-desc-text">${escapeHtml(detail)}</span>`
+    : `<details class="findings-desc-more"><summary class="findings-desc-summary">${escapeHtml(detail.slice(0, lineBreak))}</summary><div class="findings-desc-rest">${escapeHtml(detail.slice(lineBreak + 1))}</div></details>`;
+  els.findingsDetailDesc.innerHTML = `${locationHtml}${text}`;
 }
 
 function normalizeFindingLocation(location) {
@@ -11602,6 +11777,7 @@ function openTransactionRecordInReplay(record) {
     notice: isRequestPreviewTruncated(record) ? buildTruncatedBodyNotice(record, "Replay") : "",
     requestText: buildEditableRawRequest(request),
   });
+  if (!tab) return false;
   state.replayTabs.push(tab);
   state.activeReplayTabId = tab.id;
   setActiveTool("replay");
@@ -12580,6 +12756,8 @@ function renderProxyPanels() {
   const showHistory = state.activeProxyTab === "http-history";
   const showIntercept = state.activeProxyTab === "intercept";
   const showWebsockets = state.activeProxyTab === "websockets-history";
+  document.getElementById("tcpPanel")?.classList.toggle("hidden", state.activeProxyTab !== "tcp-history");
+  if (state.activeTool === "proxy" && ["tcp-history", "proxy-settings"].includes(state.activeProxyTab)) tcpCaptureController?.refresh();
   const showMatchReplace = state.activeProxyTab === "replace";
   const showFindings = state.activeProxyTab === "findings";
   const showOast = state.activeProxyTab === "oast";
@@ -13536,7 +13714,10 @@ function createPacketViewerController({ panes, bindControls = true, onMode, onVa
         : pane.legacy && pane.lines ? updateCodePane(pane.legacy, pane.lines, text, mode, side) : null;
       if (pane.search && pane.search.value !== query) pane.search.value = query;
       if (pane.meta) pane.meta.innerHTML = buildSearchMeta(result?.lineCount || 0, result?.matchCount || 0);
-      for (const tab of pane.column?.querySelectorAll?.(".view-tab[data-view]") || []) tab.classList.toggle("active", tab.dataset.view === mode);
+      for (const tab of pane.column?.querySelectorAll?.(".view-tab[data-view]") || []) {
+        tab.classList.toggle("active", tab.dataset.view === mode);
+        if (side === "response" && tab.dataset.view === "render") tab.hidden = !responseRenders(renderSubject?.response);
+      }
       if (pane.notice) { pane.notice.textContent = notice; pane.notice.classList.toggle("hidden", !notice); }
       if (side === "response") renderResponsePreview({ view: pane.render, editor: pane.cm?.closest?.(".editor-shell"), search: pane.search }, mode === "render", renderSubject || { note: "No response selected." });
       return result;
@@ -13599,7 +13780,8 @@ function mountServiceMapPacketViewer(container, { packet, row, isCurrent }) {
   });
   function draw(side) {
     if (!current()) return;
-    const message = packet[side]?.message, raw = buildPacketMessagePresentation(message, side), mode = modes[side];
+    const message = packet[side]?.message, raw = buildPacketMessagePresentation(message, side);
+    const mode = side === "response" ? shownResponseView(modes.response, message?.body) : modes[side];
     let text = raw.text;
     if (mode === "pretty" && message?.body.available && message.body.body_encoding === "utf8") text = prettyFormat(text, message.body);
     else if (mode === "hex") text = message?.body.available ? toHexDumpFromHttpParts(raw.head, message.body) : toHexDump(text);
@@ -13647,7 +13829,7 @@ function renderMessagePanes() {
     : (state.historyDetailError || (detailLoading ? "Loading response details." : "No response selected."));
 
   const reqMode = state.messageViews.request;
-  const resMode = state.messageViews.response;
+  const resMode = shownResponseView(state.messageViews.response, responseRecord?.response);
   // Map view mode to CM highlight mode: pretty/raw → http, hex → hex, diff → diff
   const cmMode = (m) => (m === "hex" ? "hex" : m === "diff" ? "diff" : "http");
 
@@ -13737,6 +13919,14 @@ function renderResponsePreview({ view, editor, search }, active, subject) {
       note.textContent = model.note;
       children.push(note);
     }
+    if (model.download) {
+      const save = document.createElement("button");
+      save.type = "button";
+      save.className = "secondary-action render-download";
+      save.textContent = "Download";
+      save.addEventListener("click", () => withButtonProgress(save, () => downloadResponseBody(response, subject.url)));
+      children.push(save);
+    }
   } else if (model.image) {
     // An <img> never runs script, SVG included, so an image needs no frame.
     const image = document.createElement("img");
@@ -13785,6 +13975,19 @@ function renderResponsePreview({ view, editor, search }, active, subject) {
 // What Render shows for a response: HTML to draw, an image to show, or why there
 // is neither. HTML and images are what Burp's Render tab covers too. Pure so it
 // can be tested without a DOM.
+// Render draws a page, an image or a file to save. A response in text that
+// Pretty shows whole has nothing there to add, so for it Render is hidden and a
+// choice of Render shows Pretty; the choice stands for the next response.
+function responseRenders(response) {
+  const mime = String(response?.content_type || "").split(";")[0].trim().toLowerCase();
+  return Boolean(response?.body_preview) && (mime === "text/html" || mime === "application/xhtml+xml"
+    || /^image\/[\w.+-]+$/.test(mime) || response.body_encoding === "base64");
+}
+
+function shownResponseView(mode, response) {
+  return mode === "render" && !responseRenders(response) ? "pretty" : mode;
+}
+
 function responseRenderModel(response) {
   if (!response) {
     return { note: "This request has no response to render." };
@@ -13792,8 +13995,11 @@ function responseRenderModel(response) {
   const mime = String(response.content_type || "").split(";")[0].trim().toLowerCase();
   const html = mime === "text/html" || mime === "application/xhtml+xml";
   const image = /^image\/[\w.+-]+$/.test(mime);
+  // What Render cannot draw, a PDF say, it offers to save, as Burp and
+  // Postman leave a PDF to a viewer of its own.
+  const download = response.body_preview ? { download: true } : {};
   if (!html && !image) {
-    return { note: `Render draws HTML and images. This response is ${mime || "untyped"}.` };
+    return { note: `Render draws HTML and images. This response is ${mime || "untyped"}.`, ...download };
   }
   if (!response.body_preview) {
     return { note: "This response has no body to render." };
@@ -13808,9 +14014,69 @@ function responseRenderModel(response) {
     return { image: data, truncated };
   }
   if (base64) {
-    return { note: "This HTML body is binary, so it cannot be rendered." };
+    return { note: "This HTML body is binary, so it cannot be rendered.", ...download };
   }
   return { html: response.body_preview, truncated };
+}
+
+// A saved body's file name: Content-Disposition's, else the URL's last path
+// segment, else "response" with the type's extension. Only a last path
+// component survives, with what a file system or a shell could trip on
+// swapped out.
+function downloadFileName(response, url) {
+  const disposition = normalizedHeaders(response?.headers)
+    .find((header) => headerNameEquals(header, "content-disposition"))?.value || "";
+  const extended = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(disposition);
+  const quoted = /filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(disposition);
+  let name = "";
+  try {
+    name = extended ? decodeURIComponent(extended[1].trim()) : "";
+  } catch {
+    name = "";
+  }
+  if (!name && quoted) name = (quoted[1] ?? quoted[2] ?? "").trim();
+  if (!name) {
+    try {
+      name = decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
+    } catch {
+      name = "";
+    }
+  }
+  name = name.split(/[\\/]/).pop().replace(/[^\p{L}\p{N}._-]+/gu, "_").replace(/^[._]+/, "").slice(0, 120);
+  if (name) return name;
+  const subtype = String(response?.content_type || "").split(";")[0].trim().toLowerCase().split("/")[1] || "";
+  return `response.${/^[a-z0-9]{1,8}$/.test(subtype) ? subtype : "bin"}`;
+}
+
+// The body as Sniper kept it; a cut preview saves what was kept, as the
+// banner says. octet-stream, so a browser saves it rather than opening it,
+// and the URL lives long enough for the desktop app's download to read it.
+// Settles when a browser has the file, or when the desktop app reports the
+// save ended (reportDesktopDownload), so the button's ring covers the wait.
+let pendingDesktopDownload = null;
+async function downloadResponseBody(response, url) {
+  // Let the button's ring start before a large body is decoded.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([messageBodyBytes(response)], { type: "application/octet-stream" }));
+  link.download = downloadFileName(response, url);
+  const saved = typeof window.ipc?.postMessage === "function"
+    ? new Promise((resolve) => {
+      // ponytail: a save panel left open two minutes stops the ring early.
+      const timer = setTimeout(finish, 120_000);
+      function finish() {
+        clearTimeout(timer);
+        resolve();
+      }
+      pendingDesktopDownload?.();
+      pendingDesktopDownload = finish;
+    })
+    : null;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 60_000);
+  await saved;
 }
 
 // Captured HTML must never run with Sniper's privileges or reach the network.
@@ -14091,7 +14357,10 @@ function renderViewTabs() {
   const hasResponseDiff = Boolean(record?.original_response);
   viewTabs.forEach((tab) => {
     const target = tab.dataset.target;
-    tab.classList.toggle("active", state.messageViews[target] === tab.dataset.view);
+    const shown = target === "response"
+      ? shownResponseView(state.messageViews.response, record?.response) : state.messageViews[target];
+    tab.classList.toggle("active", shown === tab.dataset.view);
+    if (tab.dataset.view === "render") tab.hidden = !responseRenders(record?.response);
   });
   els.requestMrToggle.classList.toggle("hidden", !hasRequestDiff);
   els.responseMrToggle.classList.toggle("hidden", !hasResponseDiff);
@@ -14171,7 +14440,7 @@ function handleInterceptDraftReadFailure(queue, status, { capture = false, owner
   const view = getCMView(response ? "interceptRes" : "interceptReq");
   const editor = response ? els.interceptResponseEditor : els.interceptRequestEditor;
   const text = view ? view.getContent() : editor?.value;
-  const original = response ? buildEditableRawResponse(record.response) : buildEditableRawRequest(record.request);
+  const original = response ? buildEditableRawResponse(record.response) : buildEditableRawRequest(record.request, true);
   // Both CM and native textareas normalize line endings. Compare in that
   // editor domain without rewriting the text retained for recovery.
   const comparableOriginal = original.replace(/\r\n?/g, "\n");
@@ -14463,7 +14732,7 @@ function renderIntercepts() {
   if (els.interceptRequestCM) {
     if (state.interceptEditorSeedId !== state.selectedInterceptRecord.id) {
       setInterceptPaneContent("interceptReq", els.interceptRequestCM,
-        takeInterceptDraftRecovery("request", state.selectedInterceptRecord) ?? buildEditableRawRequest(state.selectedInterceptRecord.request), {
+        takeInterceptDraftRecovery("request", state.selectedInterceptRecord) ?? buildEditableRawRequest(state.selectedInterceptRecord.request, true), {
         mode: "http", readOnly: false,
       });
       state.interceptEditorSeedId = state.selectedInterceptRecord.id;
@@ -14472,7 +14741,7 @@ function renderIntercepts() {
     els.interceptRequestEditor.placeholder = "";
     if (state.interceptEditorSeedId !== state.selectedInterceptRecord.id) {
       els.interceptRequestEditor.value = takeInterceptDraftRecovery("request", state.selectedInterceptRecord)
-        ?? buildEditableRawRequest(state.selectedInterceptRecord.request);
+        ?? buildEditableRawRequest(state.selectedInterceptRecord.request, true);
       state.interceptEditorSeedId = state.selectedInterceptRecord.id;
     }
     renderInterceptRequestHighlight(els.interceptRequestEditor.value);
@@ -15259,7 +15528,6 @@ function renderUpstreamPeerSettings() {
   const saved = settings.saved;
   const blocked = saved?.status.blocked_reason;
   const retryDurability = blocked === "persistence_uncertain" && !settings.dirty;
-  els.upstreamPeerSession.textContent = state.activeSession?.name || settings.sessionId || "No active session";
   els.upstreamPeerEnabled.checked = settings.draft;
   els.upstreamPeerEnabled.disabled = !saved || blocked === "invalid_configuration";
   els.upstreamPeerError.textContent = settings.error;
@@ -15269,16 +15537,13 @@ function renderUpstreamPeerSettings() {
   els.upstreamPeerCancel.disabled = !saved || (!settings.dirty && !settings.conflict);
   els.upstreamPeerRefresh.classList.toggle("hidden", !(settings.error || settings.uncertain || settings.conflict || settings.readFailed));
   els.upstreamPeerRefresh.disabled = settings.loading || settings.saving;
+  // The switch and its Save button already show the setting and an unsaved
+  // change; the line only speaks when something is wrong.
   const parts = [];
-  if (!saved) parts.push(settings.loading ? "Loading saved setting…" : "Load the saved setting before making changes.");
-  if (saved) {
-    parts.push(`${blocked === "persistence_uncertain" ? "Current setting" : "Saved setting"}: ${saved.enabled ? "On" : "Off"}.`);
-    if (blocked === "persistence_uncertain") parts.push("Storage is unconfirmed. Peer recording is paused until a save succeeds.");
-    else if (blocked === "invalid_configuration") parts.push("The saved configuration is invalid or exhausted. Peer recording is off and this setting cannot be changed here.");
-    else if (blocked === "http_capture_paused") parts.push("HTTP capture is paused, so no new socket peers are being recorded.");
-    else if (saved.status.effective_enabled) parts.push("Recording peers for new captured HTTP(S) exchanges.");
-    if (settings.dirty) parts.push("Unsaved changes.");
-  }
+  if (!saved && !settings.loading) parts.push("Load the saved setting before making changes.");
+  if (blocked === "persistence_uncertain") parts.push("Storage is unconfirmed. Peer recording is paused until a save succeeds.");
+  else if (blocked === "invalid_configuration") parts.push("The saved configuration is invalid or exhausted. Peer recording is off and this setting cannot be changed here.");
+  else if (blocked === "http_capture_paused") parts.push("HTTP capture is paused, so no new socket peers are being recorded.");
   if (settings.readFailed && !settings.message.includes("Check status before saving")) parts.push("Check status before saving.");
   if (settings.message) parts.push(settings.message);
   els.upstreamPeerStatus.textContent = parts.join(" ");
@@ -15509,14 +15774,17 @@ function renderHistoryRetentionSettings() {
   if (!els.historyRetentionSection) return;
   const settings = historyRetentionSettingsState();
   const { draft, saved } = settings;
-  els.historyRetentionSession.textContent = state.activeSession?.name || settings.sessionId || "No active session";
-  els.historyRetentionEnabled.checked = draft.mode === "keep_newest";
+  const off = draft.mode === "off";
+  els.historyRetentionEnabled.checked = !off;
   els.historyRetentionEnabled.disabled = !saved;
   els.historyRetentionPreset.value = draft.preset;
-  els.historyRetentionPreset.disabled = !saved || draft.mode === "off";
+  els.historyRetentionPreset.disabled = !saved || off;
   els.historyRetentionCustom.value = draft.custom;
-  els.historyRetentionCustom.disabled = !saved || draft.mode === "off" || draft.preset !== "custom";
-  els.historyRetentionCustomField.classList.toggle("hidden", draft.preset !== "custom");
+  els.historyRetentionCustom.disabled = !saved || off || draft.preset !== "custom";
+  // The limit and the warning matter only once cleanup is on.
+  els.historyRetentionPresetField?.classList.toggle("hidden", off);
+  els.historyRetentionWarning?.classList.toggle("hidden", off);
+  els.historyRetentionCustomField.classList.toggle("hidden", off || draft.preset !== "custom");
   let invalid = false;
   try { historyRetentionPolicyFromDraft(draft); } catch (_) { invalid = true; }
   els.historyRetentionCustom.setAttribute("aria-invalid", String(invalid));
@@ -15524,21 +15792,21 @@ function renderHistoryRetentionSettings() {
   const retryDurability = saved?.status.blocked_reason === "persistence_error" && !settings.dirty;
   els.historyRetentionSave.disabled = !saved || (!settings.dirty && !retryDurability) || settings.saving || settings.loading || settings.conflict || !!settings.uncertain || invalid;
   els.historyRetentionCancel.disabled = !saved || (!settings.dirty && !settings.conflict);
+  els.historyRetentionRefresh.classList.toggle("hidden", !(settings.error || settings.uncertain || settings.conflict || (!saved && !settings.loading)));
   els.historyRetentionRefresh.disabled = settings.loading || settings.saving;
-  els.historyRetentionSave.textContent = settings.saving ? "Saving…" : retryDurability ? "Retry policy save" : "Save cleanup policy";
+  els.historyRetentionSave.textContent = settings.saving ? "Saving…" : retryDurability ? "Retry save" : "Save";
+  // The switch, the limit and the Save button already show the policy and an
+  // unsaved change; the line only speaks about what they cannot show.
   const parts = [];
-  if (!saved) parts.push(settings.loading ? "Loading saved policy…" : "Load the saved policy before making changes.");
+  if (!saved && !settings.loading) parts.push("Load the saved policy before making changes.");
   if (saved) {
     const status = saved.status;
-    parts.push(`Saved policy: ${saved.policy.mode === "off" ? "Off" : `keep newest ${saved.policy.max_entries.toLocaleString()} total entries`}.`);
-    parts.push(`${status.total_count.toLocaleString()} stored; ${status.protected_count.toLocaleString()} protected.`);
     if (status.pending) parts.push("Cleanup pending.");
     if (status.blocked_reason === "protected_records") parts.push("Protected records prevent reaching the target. The limit is soft.");
     if (status.blocked_reason === "record_identity_conflict") parts.push("Duplicate record IDs prevent further automatic cleanup.");
     if (status.blocked_reason === "workspace_durability_uncertain") parts.push("Cleanup paused until saved HTTP tab protection is durable.");
-    if (status.blocked_reason === "persistence_error") parts.push("Cleanup paused after a storage error. Retry policy save to confirm durability; cleanup may still be blocked.");
+    if (status.blocked_reason === "persistence_error") parts.push("Cleanup paused after a storage error. Retry save to confirm durability; cleanup may still be blocked.");
     if (status.disk_cleanup_pending) parts.push("Deleted records are hidden; disk space reclamation is pending.");
-    if (settings.dirty) parts.push("Unsaved changes.");
   }
   if (settings.message) parts.push(settings.message);
   els.historyRetentionStatus.textContent = parts.join(" ");
@@ -15587,7 +15855,7 @@ function renderProxySettings() {
   els.proxySettingsProxyAddr.textContent = state.settings.proxy_addr;
   els.proxySettingsNextProxyAddr.textContent = startup?.proxy_addr || state.settings.proxy_addr;
   els.proxySettingsUiAddr.textContent = state.settings.ui_addr;
-  els.proxySettingsCaptureCap.textContent = `${formatSize(state.settings.body_preview_bytes)} body preview cap`;
+  els.proxySettingsCaptureCap.textContent = formatSize(state.settings.body_preview_bytes);
   els.proxySettingsBootstrap.textContent = state.settings.certificate.special_host_https;
   // Auto Content-Length (local UI setting, not server-side)
   const aclEl = document.getElementById("proxySettingAutoContentLength");
@@ -15598,15 +15866,60 @@ function renderProxySettings() {
   els.proxySettingsDataDir.textContent = state.settings.data_dir;
   els.proxySettingsStartupPath.textContent = startup?.file_path || state.settings.data_dir;
   els.proxySettingsCertificateName.textContent = `${state.settings.certificate.common_name} · expires ${formatTimestamp(state.settings.certificate.expires_at)}`;
-  els.proxySettingListenerHelp.textContent = startup
-    ? startup.rebound === true
-      ? `Proxy listener is now running on ${startup.active_proxy_addr}.`
-      : startup.rebind_error
-        ? `${startup.rebind_error} Saved ${startup.proxy_addr} for the next launch.`
-        : startup.restart_required
-          ? `Saved ${startup.proxy_addr} for the next launch. Restart Sniper to replace the active listener ${startup.active_proxy_addr}.`
-          : `Proxy listener is running on ${startup.active_proxy_addr}.`
-    : "Changes are saved for the next app start.";
+  // Only what the fields cannot show: a listener still on its old address.
+  els.proxySettingListenerHelp.textContent = startup?.rebind_error
+    ? `${startup.rebind_error} Saved ${startup.proxy_addr} for the next launch.`
+    : startup?.restart_required && startup.rebound !== true
+      ? `Restart Sniper to move the listener from ${startup.active_proxy_addr}.`
+      : "";
+  syncCaptureSettingsForm();
+}
+
+// The proxy form as it stands, in the shape proxySettingsFromRuntime gives,
+// so a form left alone compares equal to what was loaded.
+function proxySettingsFormValues() {
+  const value = (id) => document.getElementById(id)?.value ?? "";
+  const checked = (id) => Boolean(document.getElementById(id)?.checked);
+  const list = (id) => value(id).split("\n").map((line) => line.trim()).filter(Boolean);
+  return {
+    intercept_enabled: checked("proxySettingIntercept"),
+    websocket_capture_enabled: checked("proxySettingWebsocketCapture"),
+    upstream_insecure: checked("proxySettingUpstreamInsecure"),
+    upstream_proxy: {
+      enabled: checked("proxyChainEnabled"),
+      url: value("proxyChainUrl").trim(),
+      username: value("proxyChainUsername"),
+      password: value("proxyChainPassword"),
+    },
+    scope_patterns: list("proxySettingScopePatterns"),
+    passthrough_hosts: list("proxySettingPassthroughHosts"),
+    upstream_bypass_hosts: list("proxyChainBypassHosts"),
+    oast_enabled: checked("proxySettingOastEnabled"),
+    oast_provider: value("proxySettingOastProvider") || "custom",
+    oast_server_url: value("proxySettingOastServerUrl"),
+    oast_polling_interval_secs: Number(value("proxySettingOastInterval").trim()) || 5,
+  };
+}
+
+function proxySettingsDirty() {
+  if (!state.proxySettingsShown) return false;
+  const startup = state.settings?.startup;
+  const listenerMoved = Boolean(startup) && (
+    document.getElementById("proxySettingBindHost")?.value.trim() !== startup.proxy_bind_host
+    || document.getElementById("proxySettingPort")?.value.trim() !== String(startup.proxy_port));
+  return listenerMoved
+    || Boolean(state.oastTokenClearPending)
+    || Boolean(document.getElementById("proxySettingOastToken")?.value.trim())
+    || JSON.stringify(proxySettingsFormValues()) !== JSON.stringify(state.proxySettingsShown);
+}
+
+// A section's fields show only while its switch is on, and Save and Revert
+// only while the form differs from what was loaded.
+function syncCaptureSettingsForm() {
+  for (const toggle of document.querySelectorAll?.("#proxySettingsPanel [data-reveals]") || []) {
+    document.getElementById(toggle.dataset.reveals)?.classList.toggle("hidden", !toggle.checked);
+  }
+  document.getElementById("proxySettingsSaveBar")?.classList.toggle("hidden", !proxySettingsDirty());
 }
 
 // The runtime settings as the Settings form shows them, in the shape
@@ -15705,6 +16018,8 @@ function renderReplay(options = {}) {
   if (els.replayEmptyState) els.replayEmptyState.classList.toggle("hidden", !!tab);
 
   if (isWsTab) {
+    syncReplayHexPager("request");
+    syncReplayHexPager("response");
     renderedHttpReplayDraftOwner = null;
     renderWsReplay();
     return;
@@ -15738,13 +16053,40 @@ function renderReplay(options = {}) {
     return;
   }
 
+  // Migrate old UTF-8 binary drafts before they enter a newline-normalizing
+  // editor. This changes only the presentation, never the payload bytes.
+  let migratedBinaryDraft = false;
+  if (tab.baseRequest && tab.baseRequest.body_encoding !== "base64") {
+    const raw = tab.requestBytes ? new TextDecoder().decode(tab.requestBytes) : String(tab.requestText || "");
+    const split = splitRawHttpMessage(raw);
+    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/im;
+    const baseHeaders = (tab.baseRequest.headers || []).map(h => `${h.name}: ${h.value}`).join("\n");
+    const boundary = /\r?\n\r?\n/.exec(raw);
+    if (boundary && (binaryMime.test(split.head) || binaryMime.test(baseHeaders))) {
+      const bytes = new TextEncoder().encode(split.body);
+      let binary = "";
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      const encoded = btoa(binary);
+      const requestText = raw.slice(0, boundary.index + boundary[0].length) + encoded;
+      const baseRequest = { ...tab.baseRequest, body: encoded, body_encoding: "base64" };
+      if (canStoreReplayRequest(requestText, baseRequest, "convert this binary draft to Base64")) {
+        tab.requestText = requestText;
+        tab.baseRequest = baseRequest;
+        tab.requestBytes = null;
+        tab.requestOriginalBytes = null;
+        tab.protobufEditRevision = (tab.protobufEditRevision || 0) + 1;
+        migratedBinaryDraft = true;
+        scheduleWorkspaceStateSave();
+      }
+    }
+  }
   const previousOwner = getRenderedHttpReplayDraftOwner(tab);
   const draftOwner = {
     tab,
     sessionId: currentSessionId(),
     generation: workspaceStateGeneration,
     // Keep the editor's history on redraw, while refreshing draft-capture state.
-    editorOwner: previousOwner?.editorOwner || {},
+    editorOwner: migratedBinaryDraft ? {} : previousOwner?.editorOwner || {},
   };
   // Async captured-record opens and workspace adoption can change owners without
   // going through a tab-click handler. Focus only protects this owner's draft.
@@ -15754,13 +16096,13 @@ function renderReplay(options = {}) {
     // CM path for all modes
     if (reqMode === "hex") {
       // Hex mode: read-only hex dump view
-      if (!tab.requestBytes) {
+      if (!tab.requestBytes && tab.requestText.length <= 4096) {
         tab.requestBytes = new TextEncoder().encode(tab.requestText);
         tab.requestOriginalBytes = new Uint8Array(tab.requestBytes);
       }
-      const hexText = toHexDumpFromBytes(tab.requestBytes);
+      const hexText = replayRequestHexText(tab);
       updateCodePaneCM("replayReq", els.replayRequestCM, hexText, {
-        mode: "hex", readOnly: true, owner: draftOwner.editorOwner,
+        mode: "hex", readOnly: true, owner: draftOwner.editorOwner, preserveEditableState: true,
       });
       updateReplaySearchPane("request", hexText, { scrollToFirst: !previousOwner });
     } else {
@@ -15771,22 +16113,26 @@ function renderReplay(options = {}) {
         tab.requestOriginalBytes = null;
       }
       updateCodePaneCM("replayReq", els.replayRequestCM, replayRequestEditorText(tab.requestText), {
-        mode: "http", readOnly: false, owner: draftOwner.editorOwner,
+        mode: "http", readOnly: false, owner: draftOwner.editorOwner, preserveEditableState: true,
         onChange: syncReplayRequestTextFromEditor,
       });
       updateReplaySearchPane("request", tab.requestText, { scrollToFirst: !previousOwner });
     }
   } else if (reqMode === "hex") {
     if (els.replayRequestHighlight) els.replayRequestHighlight.removeAttribute("contenteditable");
-    if (!tab.requestBytes) {
+    if (!tab.requestBytes && tab.requestText.length <= 4096) {
       tab.requestBytes = new TextEncoder().encode(tab.requestText);
       tab.requestOriginalBytes = new Uint8Array(tab.requestBytes);
     }
     if (els.replayRequestHighlight) {
-      els.replayRequestHighlight.innerHTML = renderEditableHexHtml(tab.requestBytes, tab.requestOriginalBytes);
-      bindHexByteHandlers(els.replayRequestHighlight, tab);
+      if (tab.baseRequest?.body_encoding === "base64" || !tab.requestBytes || tab.requestBytes.length > 4096) {
+        els.replayRequestHighlight.innerHTML = renderHexHtml(replayRequestHexText(tab));
+      } else {
+        els.replayRequestHighlight.innerHTML = renderEditableHexHtml(tab.requestBytes, tab.requestOriginalBytes);
+        bindHexByteHandlers(els.replayRequestHighlight, tab);
+      }
     }
-    updateReplaySearchPane("request", toHexDumpFromBytes(tab.requestBytes));
+    updateReplaySearchPane("request", replayRequestHexText(tab));
   } else {
     // Legacy non-CM path
     if (tab.requestBytes) {
@@ -15815,17 +16161,13 @@ function renderReplay(options = {}) {
   const hasLocation = normalizedHeaders(tab.responseRecord.response?.headers).some((h) => headerNameEquals(h, "location"));
   els.replayFollowRedirectButton.classList.toggle("hidden", !(isRedirect && hasLocation));
 
-  els.replayResponseMeta.textContent = [
-    `${formatStatus(tab.responseRecord.status)}`,
-    `${tab.responseRecord.duration_ms} ms`,
-    tab.responseRecord.response?.content_type || tab.responseRecord.request.content_type || "n/a",
-  ].join(" · ");
+  els.replayResponseMeta.textContent = ""; // The response says its status; its foot, the time.
 
   const rawResponseText = buildRawResponse(tab.responseRecord);
-  const respMode = state.replayMessageViews.response;
+  const respMode = shownResponseView(state.replayMessageViews.response, tab.responseRecord.response);
   let responseText;
   if (respMode === "hex") {
-    responseText = buildMessageHexPresentation("response", tab.responseRecord, rawResponseText);
+    responseText = replayHexPageText("response", tab);
   } else if (respMode === "pretty") {
     responseText = prettyFormat(rawResponseText, tab.responseRecord.response);
   } else {
@@ -15942,30 +16284,30 @@ function replayEditorShowsDraft(shown, draft) {
   return replayRequestTextsEquivalent(shown, draft) || shown === replayRequestEditorText(draft);
 }
 
-function syncReplayRequestTextFromEditor(newText) {
+function syncReplayRequestTextFromEditor(newText, validatedCandidate = null) {
   const activeTab = getActiveReplayTab();
   if (!activeTab || activeTab.type === "websocket") {
     return;
   }
-  // Input synchronization invalidates an earlier capture even after edit-and-revert.
-  if (renderedHttpReplayDraftOwner?.tab === activeTab) renderedHttpReplayDraftOwner.preservedVersionDraft = null;
   const previousText = activeTab.requestText;
   const rendered = replayRequestEditorText(previousText);
   if (rendered !== previousText && newText === rendered) return;
-  let nextText = newText;
-  let parsed = null;
-  try {
-    parsed = parseEditableRawRequest(
-      newText,
-      activeTab.baseRequest || createDefaultEditableRequest(),
-    );
-    if (parsed._normalizedRawText && parsed._normalizedRawText !== newText) {
-      nextText = parsed._normalizedRawText;
-      setReplayRequestEditorText(nextText, { preserveSelection: true });
-    }
-  } catch (_error) {
-    // Keep partially typed drafts as-is until they are parseable again.
+  let candidate = validatedCandidate;
+  if (!candidate && !acceptReplayRequestEdit(newText, activeTab, value => { candidate = value; })) {
+    // CodeMirror rejects before dispatch; the legacy editor has already applied
+    // its input, so restore the whole previous draft rather than trim the paste.
+    setReplayRequestEditorText(rendered, { preserveSelection: true });
+    return false;
   }
+  const { requestText: nextText, request: parsed } = candidate || replayRequestEditCandidate(activeTab, newText);
+  // Recover an older unsavable base only when the operator explicitly replaces
+  // it with a complete, smaller request. Ordinary edits retain Reset's baseline.
+  if (parsed && replayRequestSizeError("", activeTab.baseRequest)) {
+    activeTab.baseRequest = cloneEditableRequest(parsed);
+  }
+  if (renderedHttpReplayDraftOwner?.tab === activeTab) renderedHttpReplayDraftOwner.preservedVersionDraft = null;
+  activeTab.protobufEditRevision = (activeTab.protobufEditRevision || 0) + 1;
+  if (nextText !== newText) setReplayRequestEditorText(nextText, { preserveSelection: true });
   activeTab.requestText = nextText;
   activeTab.httpVersionMode = replayHttpVersionState(parsed, nextText, activeTab.httpVersionMode);
   activeTab.requestBytes = null;
@@ -15982,6 +16324,7 @@ function syncReplayRequestTextFromEditor(newText) {
   syncReplayToolbar(activeTab);
   refreshReplayTabLabel(activeTab.id);
   updateReplaySearchPane("request", nextText, { scrollToFirst: false });
+  globalThis.SniperProtobufFields?.sync();
   scheduleWorkspaceStateSave();
 }
 
@@ -16076,6 +16419,7 @@ function renderReplayResponseView(text) {
   }
   // Every path that redraws the response comes through here, so Render follows.
   syncReplayResponsePreview(text);
+  globalThis.SniperProtobufFields?.sync();
 }
 
 function syncReplayResponsePreview(placeholder) {
@@ -16087,7 +16431,7 @@ function syncReplayResponsePreview(placeholder) {
       editor: els.replayResponseCM?.closest(".editor-panel"),
       search: els.replayResponseSearchInput,
     },
-    state.replayMessageViews.response === "render",
+    shownResponseView(state.replayMessageViews.response, record?.response) === "render",
     record
       ? { response: record.response || null, key: `${tab.id}:${record.id}`, url: recordPageUrl(record) }
       : { note: placeholder ?? "" },
@@ -16112,16 +16456,12 @@ function renderReplayResponseOnly(tab) {
   const isRedirect = [301, 302, 303, 307, 308].includes(tab.responseRecord.status);
   const hasLocation = normalizedHeaders(tab.responseRecord.response?.headers).some((h) => headerNameEquals(h, "location"));
   els.replayFollowRedirectButton.classList.toggle("hidden", !(isRedirect && hasLocation));
-  els.replayResponseMeta.textContent = [
-    `${formatStatus(tab.responseRecord.status)}`,
-    `${tab.responseRecord.duration_ms} ms`,
-    tab.responseRecord.response?.content_type || tab.responseRecord.request.content_type || "n/a",
-  ].join(" · ");
+  els.replayResponseMeta.textContent = ""; // The response says its status; its foot, the time.
   const rawResponseText = buildRawResponse(tab.responseRecord);
-  const respMode = state.replayMessageViews.response;
+  const respMode = shownResponseView(state.replayMessageViews.response, tab.responseRecord.response);
   let responseText;
   if (respMode === "hex") {
-    responseText = buildMessageHexPresentation("response", tab.responseRecord, rawResponseText);
+    responseText = replayHexPageText("response", tab);
   } else if (respMode === "pretty") {
     responseText = prettyFormat(rawResponseText, tab.responseRecord.response);
   } else {
@@ -16132,11 +16472,197 @@ function renderReplayResponseOnly(tab) {
 }
 
 function renderReplayViewTabs() {
+  const response = getActiveReplayTab()?.responseRecord?.response;
   document.querySelectorAll(".replay-view-tab").forEach((btn) => {
     const target = btn.dataset.replayTarget;
     const view = btn.dataset.replayView;
-    btn.classList.toggle("active", state.replayMessageViews[target] === view);
+    const shown = target === "response"
+      ? shownResponseView(state.replayMessageViews.response, response) : state.replayMessageViews[target];
+    btn.classList.toggle("active", shown === view);
+    if (view === "render") btn.hidden = !responseRenders(response);
   });
+  globalThis.SniperProtobufFields?.sync();
+}
+
+// Index source text in small chunks. Hex pages decode only their own bytes;
+// validation still covers the entire body, including an invalid final quartet.
+function replayHexTextSource(value, encoding = "utf8", strict = false) {
+  const text = String(value || "");
+  const checkpoints = [[0, 0]];
+  if (encoding === "base64") {
+    let digits = 0, padding = 0, last = 0;
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const values = new Int16Array(128).fill(-1);
+    for (let i = 0; i < alphabet.length; i++) values[alphabet.charCodeAt(i)] = i;
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      if (!strict && (code === 9 || code === 10 || code === 12 || code === 13 || code === 32)) continue;
+      if (code === 61) { if (++padding > 2) return null; continue; }
+      const digit = code < 128 ? values[code] : -1;
+      if (digit < 0 || padding) return null;
+      if (digits && digits % 4096 === 0) checkpoints.push([i, digits]);
+      digits++; last = digit;
+    }
+    const remainder = digits % 4;
+    if (remainder === 1 || (padding && (digits + padding) % 4 !== 0)
+      || (strict && (digits + padding) % 4 !== 0)
+      || (strict && ((remainder === 2 && (last & 15)) || (remainder === 3 && (last & 3))))) return null;
+    const length = Math.floor(digits * 6 / 8);
+    return { length, read(start, count) {
+      const out = new Uint8Array(Math.max(0, Math.min(count, length - start)));
+      const firstDigit = Math.floor(start / 3) * 4;
+      const checkpoint = checkpoints[Math.floor(firstDigit / 4096)];
+      let digitIndex = checkpoint[1], bits = 0, buffer = 0, byteIndex = Math.floor(firstDigit / 4) * 3, written = 0;
+      for (let i = checkpoint[0]; i < text.length && written < out.length; i++) {
+        const code = text.charCodeAt(i);
+        const digit = code < 128 ? values[code] : -1;
+        if (digit < 0) continue;
+        if (digitIndex++ < firstDigit) continue;
+        buffer = (buffer << 6) | digit; bits += 6;
+        if (bits >= 8) {
+          bits -= 8;
+          if (byteIndex++ >= start) out[written++] = (buffer >> bits) & 255;
+          buffer &= (1 << bits) - 1;
+        }
+      }
+      return out;
+    } };
+  }
+  let length = 0;
+  for (let i = 0, previous = 0; i < text.length;) {
+    if (i - previous >= 4096) { checkpoints.push([i, length]); previous = i; }
+    const point = text.codePointAt(i);
+    i += point > 0xffff ? 2 : 1;
+    length += point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+  }
+  return { length, read(start, count) {
+    const out = new Uint8Array(Math.max(0, Math.min(count, length - start)));
+    let low = 0, high = checkpoints.length;
+    while (low + 1 < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (checkpoints[mid][1] <= start) low = mid; else high = mid;
+    }
+    let [index, offset] = checkpoints[low];
+    let written = 0;
+    function emit(byte) { if (offset++ >= start && written < out.length) out[written++] = byte; }
+    while (index < text.length && written < out.length) {
+      let point = text.codePointAt(index); index += point > 0xffff ? 2 : 1;
+      if (point >= 0xd800 && point <= 0xdfff) point = 0xfffd;
+      if (point < 0x80) emit(point);
+      else if (point < 0x800) { emit(0xc0 | (point >> 6)); emit(0x80 | (point & 63)); }
+      else if (point < 0x10000) { emit(0xe0 | (point >> 12)); emit(0x80 | ((point >> 6) & 63)); emit(0x80 | (point & 63)); }
+      else { emit(0xf0 | (point >> 18)); emit(0x80 | ((point >> 12) & 63)); emit(0x80 | ((point >> 6) & 63)); emit(0x80 | (point & 63)); }
+    }
+    return out;
+  } };
+}
+
+function replayHexPageText(target, tab) {
+  const pages = replayHexPageText.pages || (replayHexPageText.pages = {});
+  const session = typeof currentSessionId === "function" ? currentSessionId() : null;
+  const generation = typeof workspaceStateGeneration === "number" ? workspaceStateGeneration : 0;
+  const message = target === "response" ? tab.responseRecord?.response : null;
+  const draft = target === "request" ? tab.requestText : message?.body_preview;
+  const encoding = target === "request" ? tab.baseRequest?.body_encoding : message?.body_encoding;
+  const bytes = target === "request" ? tab.requestBytes : null;
+  const record = target === "response" ? tab.responseRecord : null;
+  const head = message ? buildRawResponseHead(record) : "";
+  let page = pages[target];
+  if (!page || page.tab !== tab || page.session !== session || page.generation !== generation
+    || page.draft !== draft || page.encoding !== encoding || page.bytes !== bytes || page.record !== record
+    || page.message !== message || page.head !== head || page.truncated !== !!message?.preview_truncated) {
+    const parts = [];
+    let notice = "";
+    if (target === "request") {
+      const raw = bytes ? new TextDecoder().decode(bytes) : String(draft || "");
+      const boundary = encoding === "base64" && /\r?\n\r?\n/.exec(raw);
+      if (boundary) {
+        const bodyStart = boundary.index + boundary[0].length;
+        parts.push(replayHexTextSource(raw.slice(0, bodyStart)));
+        const body = replayHexTextSource(raw.slice(bodyStart), "base64", true);
+        if (body) parts.push(body);
+        else notice = "\n\n[Invalid Base64 body; decoded bytes unavailable]";
+      } else if (bytes) {
+        parts.push({ length: bytes.length, read: (start, count) => bytes.subarray(start, start + count) });
+      } else parts.push(replayHexTextSource(raw));
+    } else if (message) {
+      parts.push(replayHexTextSource(head));
+      const body = replayHexTextSource(message.body_preview, encoding);
+      if (!body) notice = "\n\n[Invalid base64 preview; body bytes unavailable]";
+      else if (body.length) parts.push(replayHexTextSource("\n\n"), body);
+      if (message.preview_truncated) notice += "\n\n[preview truncated]";
+    } else parts.push(replayHexTextSource(buildRawResponse(record)));
+    page = pages[target] = { tab, session, generation, draft, encoding, bytes, record, message, head, truncated: !!message?.preview_truncated, parts, notice, index: 0,
+      size: 4096, total: parts.reduce((sum, part) => sum + part.length, 0) };
+  }
+  page.index = Math.max(0, Math.min(page.index, Math.max(0, Math.ceil(page.total / page.size) - 1)));
+  const start = page.index * page.size;
+  const output = new Uint8Array(Math.min(page.size, Math.max(0, page.total - start)));
+  let offset = 0, written = 0;
+  for (const part of page.parts) {
+    if (offset + part.length > start && written < output.length) {
+      const chunk = part.read(Math.max(0, start - offset), output.length - written);
+      output.set(chunk, written); written += chunk.length;
+    }
+    offset += part.length;
+  }
+  syncReplayHexPager(target);
+  return toHexDumpFromBytes(output, start) + page.notice;
+}
+
+function syncReplayHexPager(target) {
+  const pages = replayHexPageText.pages;
+  let page = pages?.[target];
+  const mode = typeof state === "object" ? state.replayMessageViews?.[target] : "hex";
+  if (mode !== "hex" || (typeof getActiveReplayTab === "function" && getActiveReplayTab() !== page?.tab)
+    || (page && typeof currentSessionId === "function" && page.session !== currentSessionId())
+    || (page && typeof workspaceStateGeneration === "number" && page.generation !== workspaceStateGeneration)
+    || (target === "response" && !page?.tab.responseRecord)) {
+    if (pages) delete pages[target];
+    page = null;
+  }
+  const root = typeof document === "object" ? document.getElementById?.(`replay${target === "request" ? "Request" : "Response"}HexPager`) : null;
+  if (!root) return;
+  root.hidden = !page || page.total <= page.size;
+  const search = target === "request" ? els.replayRequestSearchInput : els.replayResponseSearchInput;
+  if (search) search.placeholder = root.hidden ? `Search ${target}` : "Search this hex page";
+  if (root.hidden) {
+    const input = root.querySelector("input");
+    input.onchange = null; input.onkeydown = null; input._replayHexPage = null;
+    root.querySelector("[data-hex-previous]").onclick = null;
+    root.querySelector("[data-hex-next]").onclick = null;
+    return;
+  }
+  const totalPages = Math.ceil(page.total / page.size);
+  root.querySelector("[data-hex-range]").textContent = `Bytes ${page.index * page.size + 1}–${Math.min((page.index + 1) * page.size, page.total)} of ${page.total}${page.truncated ? " available" : ""}`;
+  const input = root.querySelector("input");
+  if (document.activeElement !== input || input._replayHexPage !== page || page.forceControlSync) {
+    input.value = String(page.index + 1);
+  }
+  input._replayHexPage = page;
+  page.forceControlSync = false;
+  input.max = String(totalPages);
+  root.querySelector("[data-hex-pages]").textContent = `/ ${totalPages}`;
+  const change = index => {
+    // A queued click or change from a retired tab/session must never repaint its successor.
+    if (replayHexPageText.pages?.[target] !== page || getActiveReplayTab() !== page.tab
+      || currentSessionId() !== page.session || workspaceStateGeneration !== page.generation
+      || (target === "request" && page.tab.requestText !== page.draft)
+      || (target === "response" && page.tab.responseRecord !== page.record)) return;
+    page.index = Number.isFinite(index) ? Math.max(0, Math.min(Math.floor(index), totalPages - 1)) : page.index;
+    page.forceControlSync = true;
+    renderReplayViewContent(target);
+  };
+  const previous = root.querySelector("[data-hex-previous]"), next = root.querySelector("[data-hex-next]");
+  previous.disabled = page.index === 0; next.disabled = page.index === totalPages - 1;
+  previous.onclick = () => change(page.index - 1); next.onclick = () => change(page.index + 1);
+  input.onchange = () => change(Number(input.value) - 1);
+  input.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); change(Number(input.value) - 1); } };
+}
+
+// The page is presentation only. Editing, sending and persistence keep the full draft.
+function replayRequestHexText(tab) {
+  return replayHexPageText("request", tab);
 }
 
 function renderReplayViewContent(target) {
@@ -16148,13 +16674,13 @@ function renderReplayViewContent(target) {
     if (els.replayRequestCM) {
       // CM path for all modes
       if (mode === "hex") {
-        if (!tab.requestBytes) {
+        if (!tab.requestBytes && tab.requestText.length <= 4096) {
           tab.requestBytes = new TextEncoder().encode(tab.requestText);
           tab.requestOriginalBytes = new Uint8Array(tab.requestBytes);
         }
-        const hexText = toHexDumpFromBytes(tab.requestBytes);
+        const hexText = replayRequestHexText(tab);
         updateCodePaneCM("replayReq", els.replayRequestCM, hexText, {
-          mode: "hex", readOnly: true, owner: getRenderedHttpReplayDraftOwner(tab)?.editorOwner,
+          mode: "hex", readOnly: true, owner: getRenderedHttpReplayDraftOwner(tab)?.editorOwner, preserveEditableState: true,
         });
         updateReplaySearchPane("request", hexText);
       } else {
@@ -16167,6 +16693,7 @@ function renderReplayViewContent(target) {
           mode: "http",
           readOnly: false,
           owner: getRenderedHttpReplayDraftOwner(tab)?.editorOwner,
+          preserveEditableState: true,
           onChange: syncReplayRequestTextFromEditor,
         });
         updateReplaySearchPane("request", tab.requestText);
@@ -16175,15 +16702,19 @@ function renderReplayViewContent(target) {
       // Legacy non-CM path
       if (mode === "hex") {
         if (els.replayRequestHighlight) els.replayRequestHighlight.removeAttribute("contenteditable");
-        if (!tab.requestBytes) {
+        if (!tab.requestBytes && tab.requestText.length <= 4096) {
           tab.requestBytes = new TextEncoder().encode(tab.requestText);
           tab.requestOriginalBytes = new Uint8Array(tab.requestBytes);
         }
         if (els.replayRequestHighlight) {
-          els.replayRequestHighlight.innerHTML = renderEditableHexHtml(tab.requestBytes, tab.requestOriginalBytes);
-          bindHexByteHandlers(els.replayRequestHighlight, tab);
+          if (tab.baseRequest?.body_encoding === "base64" || !tab.requestBytes || tab.requestBytes.length > 4096) {
+            els.replayRequestHighlight.innerHTML = renderHexHtml(replayRequestHexText(tab));
+          } else {
+            els.replayRequestHighlight.innerHTML = renderEditableHexHtml(tab.requestBytes, tab.requestOriginalBytes);
+            bindHexByteHandlers(els.replayRequestHighlight, tab);
+          }
         }
-        updateReplaySearchPane("request", toHexDumpFromBytes(tab.requestBytes));
+        updateReplaySearchPane("request", replayRequestHexText(tab));
       } else {
         if (tab.requestBytes) {
           tab.requestText = new TextDecoder().decode(tab.requestBytes);
@@ -16205,11 +16736,11 @@ function renderReplayViewContent(target) {
       renderReplayEmptyResponse(tab);
       return;
     }
-    const mode = state.replayMessageViews.response;
+    const mode = shownResponseView(state.replayMessageViews.response, tab.responseRecord.response);
     const rawText = buildRawResponse(tab.responseRecord);
     let displayText;
     if (mode === "hex") {
-      displayText = buildMessageHexPresentation("response", tab.responseRecord, rawText);
+      displayText = replayHexPageText("response", tab);
     } else if (mode === "pretty") {
       displayText = prettyFormat(rawText, tab.responseRecord.response);
     } else {
@@ -16221,6 +16752,7 @@ function renderReplayViewContent(target) {
 }
 
 function updateReplaySearchPane(target, text, options = {}) {
+  syncReplayHexPager(target);
   const isRequest = target === "request";
   const scrollToFirst = options.scrollToFirst !== false;
   const query = state.replayMessageSearch[target];
@@ -16243,11 +16775,13 @@ function updateReplaySearchPane(target, text, options = {}) {
       return;
     }
   }
+  const took = isRequest ? NaN : Number(getActiveReplayTab()?.responseRecord?.duration_ms);
+  const withTime = (html) => (Number.isFinite(took) ? `${html} · ${took} ms` : html);
   // CM path for response (via existing _replayResponseCMView)
   if (!isRequest && _replayResponseCMView) {
     const result = _replayResponseCMView.applySearch(query || "", { scrollToFirst });
     const mode = state.replayMessageViews[target] || "pretty";
-    meta.innerHTML = buildSearchMeta(_replayResponseCMView.view.state.doc.lines, result.matchCount);
+    meta.innerHTML = withTime(buildSearchMeta(_replayResponseCMView.view.state.doc.lines, result.matchCount));
     return;
   }
 
@@ -16256,7 +16790,7 @@ function updateReplaySearchPane(target, text, options = {}) {
 
   const searchResult = applyCodeSearch(view, query);
   const mode = state.replayMessageViews[target] || "pretty";
-  meta.innerHTML = buildSearchMeta(countLines(text), searchResult.count);
+  meta.innerHTML = withTime(buildSearchMeta(countLines(text), searchResult.count));
 }
 
 function syncReplayToolbar(tab, { force = false } = {}) {
@@ -16754,6 +17288,33 @@ async function retryFuzzerWorkspaceLoad() {
 }
 
 function renderFuzzer() {
+  let binaryMarkersBlocked = false;
+  // Legacy binary drafts must not enter CodeMirror as newline-normalized text.
+  const base = state.fuzzerBaseRequest;
+  if (base && base.body_encoding !== "base64") {
+    const raw = String(state.fuzzerRequestText || "");
+    const boundary = /\r?\n\r?\n/.exec(raw);
+    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/im;
+    const originalHeaders = (base.headers || []).map(h => `${h.name}: ${h.value}`).join("\n");
+    if (boundary && (binaryMime.test(raw.slice(0, boundary.index)) || binaryMime.test(originalHeaders))) {
+      const body = raw.slice(boundary.index + boundary[0].length);
+      if (/§|\$payload\$/.test(body)) {
+        binaryMarkersBlocked = true;
+        state.fuzzerNoticeError = true;
+        state.fuzzerNotice = "Legacy binary body contains payload markers. Reopen the original request, then use header or query positions.";
+      } else {
+        let binary = "";
+        for (const byte of new TextEncoder().encode(body)) binary += String.fromCharCode(byte);
+        const encoded = btoa(binary);
+        state.fuzzerRequestText = raw.slice(0, boundary.index + boundary[0].length) + encoded;
+        state.fuzzerBaseRequest = { ...base, body: encoded, body_encoding: "base64" };
+        state.fuzzerBinaryPresentationRevision = (state.fuzzerBinaryPresentationRevision || 0) + 1;
+        state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
+        state._fuzzerMarkerUndo = null;
+        scheduleWorkspaceStateSave();
+      }
+    }
+  }
   const retry = els.fuzzerRetryWorkspaceButton;
   if (retry) {
     retry.classList.toggle("hidden", workspaceLoaded || !state.workspaceLoadError);
@@ -16765,11 +17326,11 @@ function renderFuzzer() {
     const cv = getCMView("fuzzerReq");
     const sessionId = currentSessionId();
     const generation = workspaceStateGeneration;
-    const owner = JSON.stringify([sessionId, generation]);
+    const owner = JSON.stringify([sessionId, generation, state.fuzzerBinaryPresentationRevision || 0]);
     // A session/workspace replacement retires history even for identical text.
-    if (!cv || cv._owner !== owner || cv._editable !== workspaceLoaded || cv.getContent() !== state.fuzzerRequestText) {
+    if (!cv || cv._owner !== owner || cv._editable !== (workspaceLoaded && !binaryMarkersBlocked) || cv.getContent() !== state.fuzzerRequestText) {
       updateCodePaneCM("fuzzerReq", els.fuzzerRequestCM, state.fuzzerRequestText, {
-        mode: "http", readOnly: !workspaceLoaded, owner,
+        mode: "http", readOnly: !workspaceLoaded || binaryMarkersBlocked, owner,
         payloadHighlight: true,
         placeholder: "Paste an HTTP request, then mark the values to fuzz",
       });
@@ -16780,7 +17341,7 @@ function renderFuzzer() {
       if (newCv && !newCv._fuzzerOnChangeWired) {
         newCv._fuzzerOnChangeWired = true;
         addCMUpdateListener(newCv.view, (newText) => {
-          if (!workspaceLoaded || getCMView("fuzzerReq") !== newCv || sessionId !== currentSessionId()
+          if (!workspaceLoaded || binaryMarkersBlocked || getCMView("fuzzerReq") !== newCv || sessionId !== currentSessionId()
             || generation !== workspaceStateGeneration) return;
           updateFuzzerRequestText(newText, { userEdit: true });
           scheduleWorkspaceStateSave();
@@ -16789,7 +17350,7 @@ function renderFuzzer() {
       }
     }
   } else if (els.fuzzerRequestEditor) {
-    els.fuzzerRequestEditor.readOnly = !workspaceLoaded;
+    els.fuzzerRequestEditor.readOnly = !workspaceLoaded || binaryMarkersBlocked;
     if (els.fuzzerRequestEditor.value !== state.fuzzerRequestText) {
       els.fuzzerRequestEditor.value = state.fuzzerRequestText;
     }
@@ -16841,9 +17402,10 @@ function renderFuzzer() {
 
   const planned = attackRecord.planned || attackRecord.payload_count || attackRecord.results.length;
   const sent = attackRecord.results.length;
+  const matched = attackRecord.results.find((result) => result?.matched);
   els.fuzzerMeta.textContent = [
     attackRecord.running ? `Sending… ${sent} of ${planned} requests`
-      : attackRecord.stopped ? `Stopped after ${sent} of ${planned} requests`
+      : attackRecord.stopped ? `Stopped after ${sent} of ${planned} requests${matched ? `: #${Number(matched.index) + 1} matched` : ""}`
         : `${attackRecord.payload_count ?? sent} payload${(attackRecord.payload_count ?? sent) === 1 ? "" : "s"}`,
     `${attackRecord.marker_count ?? 0} position${attackRecord.marker_count === 1 ? "" : "s"}`,
     ...(attackRecord.running || attackRecord.stopped ? [] : [attackRecord.status || "completed"]),
@@ -17244,6 +17806,10 @@ async function readFuzzerSavedRun(action) {
           if (record.attack_type) state.fuzzerAttackType = record.attack_type;
           if (typeof record.url_encode === "boolean") state.fuzzerUrlEncode = record.url_encode;
           if (record.concurrency) state.fuzzerConcurrency = record.concurrency;
+          const { min_ms: min, max_ms: max } = record.delay || {};
+          state.fuzzerDelayText = max ? (min === max ? String(min) : `${min}-${max}`) : "";
+          state.fuzzerStopMatchText = record.stop_match?.text || "";
+          state.fuzzerStopRegex = !!record.stop_match?.regex;
           state.fuzzerSourceTransactionId = null;
           state.fuzzerTarget = null;
           state.fuzzerTargetRequestText = null;
@@ -17348,8 +17914,9 @@ function renderFuzzerResultsVirtual() {
     const resultIndex = Number.isFinite(Number(result.index)) ? Number(result.index) : sourceIndex;
     const selectionKey = fuzzerSelectionKeyForResult(result, sourceIndex);
     const selectedClass = state._selectedFuzzerResultKey === selectionKey ? " fuzzer-result-selected" : "";
+    const matchedClass = result.matched ? " fuzzer-result-matched" : "";
     rows.push(`
-      <tr class="fuzzer-result-row${selectedClass}" data-transaction-id="${escapeHtml(result.transaction_id || "")}" data-result-index="${resultIndex}" data-row-index="${rowIndex}" data-source-index="${sourceIndex}">
+      <tr class="fuzzer-result-row${selectedClass}${matchedClass}" data-transaction-id="${escapeHtml(result.transaction_id || "")}" data-result-index="${resultIndex}" data-row-index="${rowIndex}" data-source-index="${sourceIndex}">
         <td>${resultIndex + 1}</td>
         <td class="cell-url">${result.position != null && (state.fuzzerAttackRecord?.marker_count || 0) > 1 ? `<span class="fuzzer-position">§${Number(result.position) + 1}</span> ` : ""}${escapeHtml(result.payload)}</td>
         <td>${escapeHtml(formatStatus(result.status))}</td>
@@ -17559,7 +18126,7 @@ function clearFuzzerResponsePane() {
 function syncFuzzerResponsePreview(record) {
   renderResponsePreview(
     { view: els.fuzzerDetailResRenderView, editor: els.fuzzerDetailResCM?.closest(".editor-shell") },
-    _fuzzerDetailViewModes.response === "render",
+    shownResponseView(_fuzzerDetailViewModes.response, record?.response) === "render",
     record
       ? { response: record.response || null, key: `${record.id}`, url: recordPageUrl(record) }
       : { note: "" },
@@ -17617,21 +18184,25 @@ async function showFuzzerResultDetail(transactionId, selectionKey = `tx:${transa
   }
 }
 
-function syncFuzzerDetailTabs() {
+function syncFuzzerDetailTabs(record = state._fuzzerDetailRecord) {
+  const response = record?.response;
   document.querySelectorAll(".fuzzer-detail-view-tab").forEach((btn) => {
     const target = btn.dataset.fuzzerDetailTarget;
     const view = btn.dataset.fuzzerDetailView;
-    btn.classList.toggle("active", view === _fuzzerDetailViewModes[target]);
+    const shown = target === "response"
+      ? shownResponseView(_fuzzerDetailViewModes.response, response) : _fuzzerDetailViewModes[target];
+    btn.classList.toggle("active", view === shown);
+    if (view === "render") btn.hidden = !responseRenders(response);
   });
 }
 
 function renderFuzzerDetailPanes(record) {
   if (!record) return;
 
-  syncFuzzerDetailTabs();
+  syncFuzzerDetailTabs(record);
 
   const reqMode = _fuzzerDetailViewModes.request;
-  const resMode = _fuzzerDetailViewModes.response;
+  const resMode = shownResponseView(_fuzzerDetailViewModes.response, record.response);
 
   // Request
   const rawReq = buildRawRequest(record);
@@ -17661,7 +18232,7 @@ function renderFuzzerDetailPanes(record) {
       updateCodePaneCM("fuzzerDetailRes", els.fuzzerDetailResCM, resText, { mode: cmResMode });
     }
     if (els.fuzzerDetailResponseMeta) {
-      els.fuzzerDetailResponseMeta.textContent = `${record.status ?? ""} · ${record.response?.content_type || ""}`;
+      els.fuzzerDetailResponseMeta.textContent = ""; // Its row in the results says the status and time.
     }
   } else {
     if (els.fuzzerDetailResCM) {
@@ -18060,6 +18631,14 @@ function fuzzerRequestTextForAction() {
 
 function parseFuzzerRequestTemplate(text, fallback = state.fuzzerBaseRequest || createDefaultEditableRequest()) {
   const raw = String(text || "");
+  const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/im;
+  const split = splitRawHttpMessage(raw);
+  const originalHeaders = (fallback?.headers || []).map(h => `${h.name}: ${h.value}`).join("\n");
+  if (fallback?.body_encoding !== "base64" && /§|\$payload\$/.test(split.body)
+    && (binaryMime.test(split.head) || binaryMime.test(originalHeaders))) {
+    throw new Error("Legacy binary body contains payload markers. Reopen the original request, then use header or query positions.");
+  }
+
   const boundary = /\r?\n\r?\n/.exec(raw);
   const { body } = splitRawHttpMessage(raw);
   const bodyEncoding = fallback?.body_encoding === "base64" ? "base64" : "utf8";
@@ -18128,7 +18707,28 @@ function fuzzerSetupPreflight(raw = fuzzerRequestTextForAction()) {
   const target = activeFuzzerTargetForRequest(raw);
   const httpVersion = replayHttpVersionFromText(raw) || template.http_version || undefined;
   const options = { target, httpVersion, attackType: state.fuzzerAttackType || "sniper", urlEncode: state.fuzzerUrlEncode !== false };
-  return { ...SniperFuzzerWorkflow.preflight(template, payloads, options), template, payloads, target, httpVersion };
+  const checked = SniperFuzzerWorkflow.preflight(template, payloads, options);
+  const { error } = fuzzerRunControls();
+  return { ...checked, ...(error ? { valid: false, errors: [error, ...(checked.errors || [])] } : {}),
+    template, payloads, target, httpVersion };
+}
+
+// The Options a run takes besides concurrency: a wait between requests, `500`
+// or a random one in a range such as `200-800` ms, and a text or regex that
+// stops the attack at the first response it is found in.
+function fuzzerRunControls() {
+  const delayText = String(state.fuzzerDelayText || "").trim();
+  const range = /^(\d{1,5})(?:\s*-\s*(\d{1,5}))?$/.exec(delayText);
+  const min = range ? Number(range[1]) : 0;
+  const max = range?.[2] !== undefined ? Number(range[2]) : min;
+  if (delayText && (!range || min > max || max > 60000)) {
+    return { error: "Delay is milliseconds up to 60000: 500, or a range such as 200-800." };
+  }
+  const text = String(state.fuzzerStopMatchText || "").trim();
+  return {
+    delay: max ? { min_ms: min, max_ms: max } : null,
+    stop_match: text ? { text, regex: !!state.fuzzerStopRegex } : null,
+  };
 }
 
 function fuzzerTransportState(raw = fuzzerRequestTextForAction(), template = undefined) {
@@ -18256,6 +18856,12 @@ function renderFuzzerSetup() {
   if (attackType) { attackType.value = state.fuzzerAttackType || "sniper"; attackType.disabled = busy; }
   if (urlEncode) { urlEncode.checked = state.fuzzerUrlEncode !== false; urlEncode.disabled = busy; }
   if (concurrency) { concurrency.value = String(state.fuzzerConcurrency || 4); concurrency.disabled = busy; }
+  for (const [id, field] of [["fuzzerDelay", "fuzzerDelayText"], ["fuzzerStopMatch", "fuzzerStopMatchText"]]) {
+    const input = fuzzerSetupNode(id);
+    if (input) { input.value = state[field] || ""; input.disabled = busy; }
+  }
+  const stopRegex = fuzzerSetupNode("fuzzerStopRegex");
+  if (stopRegex) { stopRegex.checked = !!state.fuzzerStopRegex; stopRegex.disabled = busy; }
   for (const id of ["fuzzerMarkSelectionButton", "fuzzerClearMarkersButton", "fuzzerMarkCandidateButton", "fuzzerImportPayloadButton", "fuzzerApplyPresetButton", "fuzzerGenerateRangeButton"]) {
     const button = fuzzerSetupNode(id);
     if (button) button.disabled = busy;
@@ -18601,6 +19207,22 @@ function initFuzzerSetupControls() {
     const concurrency = Number.isFinite(value) ? Math.min(16, Math.max(1, value)) : 4;
     const changed = concurrency !== (state.fuzzerConcurrency || 4);
     state.fuzzerConcurrency = concurrency;
+    finishFuzzerOptionChange(changed);
+  });
+  for (const [id, field] of [["fuzzerDelay", "fuzzerDelayText"], ["fuzzerStopMatch", "fuzzerStopMatchText"]]) {
+    fuzzerSetupNode(id)?.addEventListener("change", (event) => {
+      if (!workspaceLoaded) return;
+      const value = String(event.target.value).trim();
+      const changed = value !== (state[field] || "");
+      state[field] = value;
+      finishFuzzerOptionChange(changed);
+    });
+  }
+  fuzzerSetupNode("fuzzerStopRegex")?.addEventListener("change", (event) => {
+    if (!workspaceLoaded) return;
+    const value = !!event.target.checked;
+    const changed = value !== !!state.fuzzerStopRegex;
+    state.fuzzerStopRegex = value;
     finishFuzzerOptionChange(changed);
   });
   bind("fuzzerImportPayloadButton", () => fuzzerSetupNode("fuzzerPayloadFile")?.click());
@@ -19150,6 +19772,8 @@ async function runFuzzerAttack() {
     const concurrency = Math.min(16, Math.max(1, Number(state.fuzzerConcurrency) || 4));
     const setupCheck = SniperFuzzerWorkflow.preflight(template, payloads, { attackType, urlEncode });
     if (!setupCheck.valid) throw new Error(setupCheck.errors.join(" "));
+    const controls = fuzzerRunControls();
+    if (controls.error) throw new Error(controls.error);
 
     if (payloads.length === 0) {
       clearFuzzerAttackRecord();
@@ -19190,6 +19814,8 @@ async function runFuzzerAttack() {
         attack_type: attackType,
         url_encode: urlEncode,
         concurrency,
+        delay: controls.delay,
+        stop_match: controls.stop_match,
       }),
     });
     if (!isCurrentFuzzerRun(runToken, sessionId)) {
@@ -19665,10 +20291,11 @@ function syncSequenceStepFromDom({ allowInvalidRequests = false } = {}) {
     if (labelInput) step.label = labelInput.value;
     const reqTextarea = card.querySelector(".step-request-text");
     if (reqTextarea) {
-      step.request_text = reqTextarea.value;
+      if (!step.binary_body_blocked) step.request_text = reqTextarea.value;
       const httpVersion = replayHttpVersionFromText(reqTextarea.value);
       step.http_version = httpVersion || null;
       try {
+        if (step.binary_body_blocked) throw new Error(step.binary_body_blocked);
         const parsed = parseEditableRawRequest(reqTextarea.value, step.request);
         parsed.http_version = httpVersion || undefined;
         Object.assign(step.request, parsed);
@@ -20017,13 +20644,39 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
 
   if (hasSequence) {
     stepsContainer.innerHTML = editing.steps.map((step, idx) => {
+      // Migrate legacy binary drafts before textarea newline normalization.
+      // Body template substitution operates on text: do not silently encode it.
+      delete step.binary_body_blocked;
+      if (step.request?.body_encoding !== "base64" && (Array.isArray(step.request?.headers) ? step.request.headers : []).some(h =>
+        String(h?.name || "").toLowerCase() === "content-type" && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()))) {
+        try {
+          const raw = step.request_text ?? buildEditableRawRequest(step.request);
+          const originalBody = splitRawHttpMessage(raw).body;
+          if (/\{\{|§/.test(originalBody)) throw new Error("Reopen the original binary request before adding body variables.");
+          const parsed = parseEditableRawRequest(raw, step.request);
+          const safe = buildEditableRawRequest(parsed, true);
+          // A draft may already have changed its MIME. Encode from the original
+          // binary classification rather than relying on the edited headers.
+          let binary = "";
+          for (const byte of new TextEncoder().encode(originalBody)) binary += String.fromCharCode(byte);
+          const encoded = btoa(binary);
+          const { head } = splitRawHttpMessage(safe);
+          step.request = { ...parsed, body: encoded, body_encoding: "base64" };
+          step.request_text = encoded ? `${head}\n\n${encoded}` : head;
+          delete step.request_parse_error;
+          state.sequenceDirty = true;
+        } catch (error) {
+          step.binary_body_blocked = error?.message || "Reopen the original binary request.";
+          step.request_parse_error = step.binary_body_blocked;
+        }
+      }
       const requestForRender = {
         ...(step.request || {}),
         http_version: normalizeReplayHttpVersion(step.http_version || step.request?.http_version || "")
           || step.request?.http_version,
       };
       const reqText = step.request_text ?? buildEditableRawRequest(requestForRender);
-      const requestError = requestErrorSteps.has(step.id) && step.request_parse_error
+      const requestError = (step.binary_body_blocked || requestErrorSteps.has(step.id)) && step.request_parse_error
         ? sequenceRequestErrorMessage(step, idx, step.request_parse_error)
         : "";
       const requestErrorId = `sequenceStepRequestError-${idx}`;
@@ -20058,7 +20711,7 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
           <button class="step-move" type="button" data-move-step="${idx}" data-move-direction="1" title="Move step ${idx + 1} down" aria-label="Move step ${idx + 1} down" aria-disabled="${idx === editing.steps.length - 1}">&darr;</button>
           <button class="step-remove" data-remove-step="${idx}" title="Remove step" aria-label="Remove step ${idx + 1}">&times;</button>
         </div>
-        <textarea class="step-request-text" spellcheck="false" aria-label="Step ${idx + 1} raw HTTP request" aria-invalid="${Boolean(requestError)}" aria-describedby="${requestErrorId}">${escapeHtml(reqText)}</textarea>
+        <textarea class="step-request-text"${step.binary_body_blocked ? " readonly" : ""} spellcheck="false" aria-label="Step ${idx + 1} raw HTTP request" aria-invalid="${Boolean(requestError)}" aria-describedby="${requestErrorId}">${escapeHtml(reqText)}</textarea>
         <p class="step-request-error${requestError ? "" : " hidden"}" id="${requestErrorId}">${escapeHtml(requestError)}</p>
         <details class="step-extractions"${expandedSteps.has(step.id) || focusExtractionStepId === step.id ? " open" : ""}>
           <summary>Extractions (${step.extractions.length}) <button class="secondary-action ext-add" data-add-ext="${idx}" aria-label="Add extraction to step ${idx + 1}">+ Extract</button></summary>
@@ -20182,16 +20835,8 @@ async function toggleIntercept() {
     state.runtime = runtime;
     renderInterceptStatus();
 
+    // The server forwards what was held when Intercept turns off.
     if (turningOff && state.runtime?.intercept_enabled === false) {
-      const [requestResponse, responseResponse] = await Promise.all([
-        fetch(sessionWritePath("/api/intercepts/forward-all", sessionId), { method: "POST" }),
-        fetch(sessionWritePath("/api/response-intercepts/forward-all", sessionId), { method: "POST" }),
-      ]);
-      await requireOkResponse(requestResponse, "Failed to forward queued requests.");
-      await requireOkResponse(responseResponse, "Failed to forward queued responses.");
-      if (requestSeq !== _interceptToggleRequestSeq || sessionId !== currentSessionId()) {
-        return;
-      }
       await Promise.all([loadIntercepts(false), loadResponseIntercepts(false)]);
       if (sessionId === currentSessionId()) {
         scheduleRefresh();
@@ -20708,12 +21353,13 @@ async function forwardSelectedIntercept() {
   const request = parseEditableRawRequest(
     interceptReqText,
     state.selectedInterceptRecord.request,
+    true,
   );
   // The editor is the only place that knows whether anything was actually typed.
   // Comparing the parsed request against the held one on the server reports edits
   // that never happened, because the round trip through text normalises headers
   // and can rewrite Content-Length on its own.
-  const edited = interceptReqText !== buildEditableRawRequest(state.selectedInterceptRecord.request);
+  const edited = interceptReqText.replace(/\r\n?/g, "\n") !== buildEditableRawRequest(state.selectedInterceptRecord.request, true).replace(/\r\n?/g, "\n");
   if (state.selectedInterceptRecord.is_websocket && request.body) {
     showToast("WebSocket upgrade requests must not include a request body.", "error");
     return;
@@ -20888,8 +21534,13 @@ function buildEditableRawResponse(resp) {
     text += `${h.name}: ${h.value}\r\n`;
   }
   text += "\r\n";
-  if (source.body_encoding === "base64") {
-    text += safeDecodeBase64(source.body);
+  const binaryMime = normalizedHeaders(source.headers).some(h =>
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
+  if (source.body_encoding !== "base64" && binaryMime) {
+    // Encode UTF-8 bytes, not Latin-1 code units, before the editor normalizes lines.
+    let binary = "";
+    for (const byte of new TextEncoder().encode(source.body || "")) binary += String.fromCharCode(byte);
+    text += btoa(binary);
   } else {
     text += source.body || "";
   }
@@ -20922,7 +21573,9 @@ function parseEditableRawResponse(text, original, requestMethod = "") {
   }
 
   const bodyText = body;
-  const isText = !original || original.body_encoding === "utf8";
+  const originalBinaryMime = normalizedHeaders(original?.headers).some(h =>
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
+  const isText = (!original || original.body_encoding === "utf8") && !originalBinaryMime;
   const bodyEncoding = isText ? "utf8" : "base64";
   const bodyLength = editableResponseBodyLength(bodyText, bodyEncoding);
   if (responseMustNotIncludeBody(status, requestMethod) && bodyLength > 0) {
@@ -20946,7 +21599,7 @@ function parseEditableRawResponse(text, original, requestMethod = "") {
   return {
     status,
     headers,
-    body: isText ? bodyText : safeEncodeBase64(bodyText),
+    body: bodyText,
     body_encoding: bodyEncoding,
   };
 }
@@ -21049,7 +21702,7 @@ async function forwardSelectedResponseIntercept() {
     state.selectedResponseInterceptRecord.method,
   );
   const edited =
-    interceptResText !== buildEditableRawResponse(state.selectedResponseInterceptRecord.response);
+    interceptResText.replace(/\r\n?/g, "\n") !== buildEditableRawResponse(state.selectedResponseInterceptRecord.response).replace(/\r\n?/g, "\n");
 
   // Optimistic UI
   state.responseIntercepts = state.responseIntercepts.filter((i) => i.id !== id);
@@ -21320,6 +21973,7 @@ async function sendReplay() {
       throw new Error("Cannot send Replay because the request body is preview-truncated. Edit the body or reopen it from the original capture.");
     }
     requestText = request._normalizedRawText || replayReqText;
+    if (!canStoreReplayRequest(requestText, request, "send this request from Replay")) return;
     if (requestText !== replayReqText) {
       tab.requestText = requestText;
       setReplayRequestEditorText(replayRequestEditorText(requestText), { preserveSelection: true });
@@ -21745,13 +22399,15 @@ async function followRedirect() {
     preview_truncated: false,
   };
 
+  const requestText = buildEditableRawRequest(newRequest);
+  if (!canStoreReplayRequest(requestText, newRequest, "follow this redirect in Replay")) return;
+
   // Update tab target
   tab.targetScheme = newScheme;
   tab.targetHost = newHost;
   tab.targetPort = newPort;
 
   // Build raw request text and set in editor
-  const requestText = buildEditableRawRequest(newRequest);
   tab.requestText = requestText;
   tab.baseRequest = cloneEditableRequest(newRequest);
   // A Hex view caches bytes separately; carrying them across the redirect would
@@ -21901,6 +22557,7 @@ function appendUnsentReplayDraft(seed, isCurrent, action) {
   if (!preserveActiveHttpReplayDraftBeforeSessionChange(action)) return false;
   if (!isCurrent()) return false;
   const tab = createReplayTab(seed);
+  if (!tab) return false;
   state.replayTabs.push(tab);
   state.activeReplayTabId = tab.id;
   setActiveTool("replay");
@@ -21924,6 +22581,7 @@ function openReconEndpointInReplay(endpoint, sourceIsCurrent = () => false) {
 function openBlankReplayTab() {
   if (!preserveActiveHttpReplayDraftBeforeNavigation(getActiveReplayTab(), "opening a new tab")) return;
   const tab = createReplayTab();
+  if (!tab) return false;
   state.replayTabs.push(tab);
   state.activeReplayTabId = tab.id;
   setActiveTool("replay");
@@ -22004,16 +22662,75 @@ function duplicateActiveReplayTab() {
     historyIndex: normalizeRepeaterHistoryIndex(tab.historyIndex, historyEntries.length),
   });
 
+  if (!duplicate) return;
   state.replayTabs.push(duplicate);
   state.activeReplayTabId = duplicate.id;
   scheduleWorkspaceStateSave();
   renderReplay();
 }
 
+// Match the independent UTF-8 text and serialized EditableRequest caps in
+// src/api.rs. Measure the stored form, including Base64, JSON escaping and
+// default fields; the decoded body size alone is not a persistence limit.
+function replayRequestSizeError(requestText, request) {
+  const limit = 2 * 1024 * 1024;
+  const bytes = text => new TextEncoder().encode(text).length;
+  if (bytes(String(requestText ?? "")) > limit) return "request text exceeds 2 MiB (2,097,152 UTF-8 bytes)";
+  if (request) {
+    const stored = {
+      scheme: request.scheme, host: request.host, method: request.method, path: request.path,
+      headers: (request.headers || []).map(header => ({ name: header.name || "", value: header.value || "" })),
+      body: request.body || "", body_encoding: request.body_encoding || "utf8",
+      preview_truncated: !!request.preview_truncated,
+    };
+    if (bytes(JSON.stringify(stored)) > limit) return "stored request exceeds 2 MiB (including headers, JSON escaping and Base64)";
+  }
+  return "";
+}
+
+function canStoreReplayRequest(requestText, request, action = "apply this edit") {
+  const problem = replayRequestSizeError(requestText, request);
+  if (!problem) return true;
+  showToast(`Cannot ${action}: ${problem}. Nothing was truncated. The original source and previous draft are unchanged; use a smaller request.`, "error", 8000);
+  return false;
+}
+
+function replayRequestEditCandidate(tab, newText) {
+  // Preserve body bytes when only headers changed in a newline-normalizing editor.
+  if (tab.baseRequest?.body_encoding !== "base64") {
+    const before = splitRawHttpMessage(tab.requestText);
+    const after = splitRawHttpMessage(newText);
+    if (before.body.replace(/\r\n?/g, "\n") === after.body.replace(/\r\n?/g, "\n")) {
+      const boundary = /\r?\n\r?\n/.exec(newText);
+      if (boundary) newText = newText.slice(0, boundary.index + boundary[0].length) + before.body;
+    }
+  }
+  let request = null;
+  try {
+    request = parseEditableRawRequest(newText, tab.baseRequest || createDefaultEditableRequest());
+  } catch (_error) {
+    // Partially typed requests remain valid drafts; their saved base is unchanged.
+  }
+  return { request, requestText: request?._normalizedRawText || newText };
+}
+
+function acceptReplayRequestEdit(text, tab = getActiveReplayTab(), acceptedCandidate = null) {
+  if (!tab || tab.type === "websocket" || replayEditorShowsDraft(text, tab.requestText)) return true;
+  if (!canStoreReplayRequest(text, null)) return false;
+  const candidate = replayRequestEditCandidate(tab, text);
+  if (!canStoreReplayRequest(candidate.requestText, candidate.request || tab.baseRequest)) return false;
+  if (acceptedCandidate) acceptedCandidate(candidate);
+  return true;
+}
+
 function createReplayTab(seed = {}) {
-  state.replayTabSequence += 1;
   const baseRequest = seed.baseRequest ? cloneEditableRequest(seed.baseRequest) : createDefaultEditableRequest();
   const requestText = seed.requestText ?? buildEditableRawRequest(baseRequest);
+  if (!canStoreReplayRequest(requestText, baseRequest, "open this request in Replay")) return null;
+  for (const entry of seed.historyEntries || []) {
+    if (!canStoreReplayRequest(entry.requestText, entry.request, "copy this Replay history")) return null;
+  }
+  state.replayTabSequence += 1;
   const target = authorityToTargetState(baseRequest.host, baseRequest.scheme);
   const normalizedTarget = normalizeRepeaterTargetInput(
     seed.targetHost ?? target.host,
@@ -22059,12 +22776,10 @@ function getActiveReplayTab() {
   return state.replayTabs.find((tab) => tab.id === state.activeReplayTabId) || null;
 }
 
+// The rows top to bottom: pinned, an agent's, then the rest.
 function getReplayTabVisualOrder() {
-  return [...state.replayTabs].sort((a, b) => {
-    if (a.pinned && !b.pinned) return -1;
-    if (!a.pinned && b.pinned) return 1;
-    return 0;
-  });
+  const row = (tab) => (tab.pinned ? 0 : tab.openedBy ? 1 : 2);
+  return [...state.replayTabs].sort((a, b) => row(a) - row(b));
 }
 
 // ─── Replay tab drag reorder ───
@@ -22075,7 +22790,7 @@ function getReplayTabVisualOrder() {
 let replayTabDragId = null;
 
 function clearReplayTabDropSlot() {
-  els.replayTabStrip?.classList.remove("tab-dragging", "pin-zone");
+  els.replayTabStrip?.classList.remove("tab-dragging", "pin-zone", "agent-drag");
   els.replayTabStrip?.querySelectorAll(".replay-tab").forEach((element) => {
     element.classList.remove("dragging");
   });
@@ -22143,10 +22858,16 @@ function commitReplayTabDrag() {
     const after = slot.nextElementSibling?.dataset?.replayTabId;
     if (before) moved = moveReplayTabBeside(draggedId, before, true);
     else if (after) moved = moveReplayTabBeside(draggedId, after, false);
-    const pinned = slot.parentElement?.dataset?.replayTabRow === "pinned";
+    const rowName = slot.parentElement?.dataset?.replayTabRow;
+    const pinned = rowName === "pinned";
     if (!!tab.pinned !== pinned) {
       previousPinned = !!tab.pinned;
       tab.pinned = pinned;
+    }
+    // Taken out of the CLI's row, the tab is the person's.
+    if (tab.openedBy && rowName !== "agent") {
+      tab.openedBy = null;
+      moved = true;
     }
   }
   replayTabDragId = null;
@@ -22159,18 +22880,33 @@ function commitReplayTabDrag() {
   else if (moved) scheduleWorkspaceStateSave();
 }
 
-// Which row the pointer is aiming at. Stacked rows split at the gap between
-// them; a pin zone opened beside the tabs (see dragstart) splits sideways.
+// Which row the pointer is aiming at. The rows shown are read in their
+// on-screen order, and two neighbours split at the gap between them: by height
+// when stacked, sideways when they share a line, as a pin zone opened beside
+// the tabs does (see dragstart). A person cannot put a tab among an agent's, so
+// over that row theirs stays with the rest.
 function replayTabDropRow(event) {
-  const [pinnedRow, tabRow] = els.replayTabStrip.querySelectorAll(".replay-tab-list");
-  if (!pinnedRow || !tabRow) return tabRow || null;
-  const pinned = pinnedRow.getBoundingClientRect();
-  const rest = tabRow.getBoundingClientRect();
-  if (!pinned.width) return tabRow;
-  const aimsAtPin = pinned.bottom <= rest.top
-    ? event.clientY < (pinned.bottom + rest.top) / 2
-    : event.clientX < (pinned.right + rest.left) / 2;
-  return aimsAtPin ? pinnedRow : tabRow;
+  const middle = (box) => (box.top + box.bottom) / 2;
+  const sameLine = (a, b) => Math.abs(middle(a) - middle(b)) < Math.min(a.height, b.height) / 2;
+  const rows = Array.from(els.replayTabStrip.querySelectorAll(".replay-tab-list"),
+    (row) => ({ row, box: row.getBoundingClientRect() }))
+    .filter(({ row, box }) => box.width || row.dataset?.replayTabRow === "tabs")
+    .sort((a, b) => (sameLine(a.box, b.box) ? a.box.left - b.box.left : middle(a.box) - middle(b.box)));
+  let index = 0;
+  for (; index + 1 < rows.length; index += 1) {
+    const upper = rows[index].box;
+    const lower = rows[index + 1].box;
+    const past = sameLine(upper, lower)
+      ? event.clientX >= (upper.right + lower.left) / 2
+      : event.clientY >= (upper.bottom + lower.top) / 2;
+    if (!past) break;
+  }
+  const target = rows[index]?.row || null;
+  const dragged = replayTabById(replayTabDragId);
+  if (target?.dataset?.replayTabRow === "agent" && !(dragged?.openedBy && !dragged.pinned)) {
+    return rows.find(({ row }) => row.dataset?.replayTabRow === "tabs")?.row || null;
+  }
+  return target;
 }
 
 // The tab that should follow the dropped one in this row: the first one on a
@@ -22246,6 +22982,9 @@ function wireReplayTabDragReorder(tabElement, id) {
       // be aiming at the pin zone before it had moved.
       els.replayTabStrip.classList.add("tab-dragging");
       els.replayTabStrip.classList.toggle("pin-zone", !els.replayTabStrip.querySelector(".replay-tab.pinned"));
+      // An agent's tab can go back to its row, so the row stays up even when
+      // the tab was the only one on it.
+      els.replayTabStrip.classList.toggle("agent-drag", tabElement.classList.contains("agent"));
     }, 0);
     event.dataTransfer.effectAllowed = "move";
     // Firefox will not start a drag without data on the transfer, but the type
@@ -22277,6 +23016,13 @@ function renderReplayTabs(options = {}) {
   const focusedControl = [".replay-tab-button", ".replay-tab-pin-btn", ".replay-tab-close"]
     .find((selector) => focused?.matches?.(selector));
   const sortedTabs = getReplayTabVisualOrder();
+  // What the CLI changed on the tab in front of the person is seen.
+  const shownTab = state.activeTool === "replay"
+    ? sortedTabs.find((tab) => tab.id === state.activeReplayTabId) : null;
+  if (shownTab?.changedBy) {
+    shownTab.changedBy = null;
+    scheduleWorkspaceStateSave();
+  }
   const renamingTab = sortedTabs.find((tab) => tab.id === state.replayRenamingTabId);
   const renameInput = renamingTab && els.replayTabStrip.querySelector(
     `.replay-tab[data-replay-tab-id="${CSS.escape(renamingTab.id)}"] .replay-tab-name-input`,
@@ -22297,7 +23043,13 @@ function renderReplayTabs(options = {}) {
   const tabMarkup = (tab) => {
     const isActive = tab.id === state.activeReplayTabId;
     const active = isActive ? "active" : "";
-    const pinned = tab.pinned ? "pinned" : "";
+    const row = tab.pinned ? "pinned" : tab.openedBy ? "agent" : "";
+    const changedBy = tab.changedBy ? escapeHtml(`Changed by ${tab.changedBy}`) : "";
+    const agentDot = changedBy
+      ? `<span class="replay-tab-agent-dot" role="img" aria-label="${changedBy}" title="${changedBy}"></span>` : "";
+    // Who opened it shows before its name, drawn by CSS so the name can be
+    // replaced alone and a click on it still selects the tab.
+    const actor = row === "agent" ? ` data-actor="${escapeHtml(tab.openedBy)}"` : "";
     const pinBtnState = tab.pinned ? "on" : (!isActive ? "idle" : "");
     const pinHiddenAttrs = pinBtnState === "idle" ? 'tabindex="-1"' : "";
     const pinLabel = tab.pinned ? "Unpin tab" : "Pin tab";
@@ -22307,29 +23059,33 @@ function renderReplayTabs(options = {}) {
     const title = replayTabTooltipLabel(tab, label, autoLabel);
     const labelControl = state.replayRenamingTabId === tab.id
       ? `<input class="replay-tab-name-input" type="text" value="${escapeHtml(tab.customLabel || "")}" placeholder="${escapeHtml(autoLabel)}" maxlength="80" aria-label="Replay tab name">`
-      : `<button class="replay-tab-button" type="button" title="${escapeHtml(title)}">${escapeHtml(label)}</button>`;
+      : `<button class="replay-tab-button" type="button" title="${escapeHtml(title)}"${actor}>${escapeHtml(label)}</button>`;
     // Not draggable while the name is being edited: a draggable ancestor stops
     // the browser letting you select text inside the input.
     const dragAttr = state.replayRenamingTabId === tab.id ? "" : ' draggable="true"';
     return `
-      <div class="replay-tab ${active} ${pinned}" data-replay-tab-id="${tab.id}"${dragAttr}>
+      <div class="replay-tab ${active} ${row}" data-replay-tab-id="${tab.id}"${dragAttr}>
         ${pinBtn}
+        ${agentDot}
         ${labelControl}
         <button class="replay-tab-close" type="button" aria-label="Close replay tab">\u00d7</button>
       </div>
     `.trim();
   };
-  // The pinned row renders with nothing in it when nothing is pinned, so that
-  // :empty hides it and a drag can still drop into it.
+  // The pinned and agent rows render with nothing in them when they have no
+  // tabs, so that :empty hides them and a drag can still drop into them.
   const pinnedTabs = sortedTabs.filter((tab) => tab.pinned);
-  const otherTabs = sortedTabs.filter((tab) => !tab.pinned);
+  const agentTabs = sortedTabs.filter((tab) => !tab.pinned && tab.openedBy);
+  const otherTabs = sortedTabs.filter((tab) => !tab.pinned && !tab.openedBy);
   els.replayTabStrip.innerHTML =
     `<div class="replay-tab-list replay-tab-list-pinned" data-replay-tab-row="pinned" aria-label="Pinned tabs">${pinnedTabs.map(tabMarkup).join("")}</div>`
+    + `<div class="replay-tab-list replay-tab-list-agent" data-replay-tab-row="agent" aria-label="Opened from sniper-cli">${agentTabs.map(tabMarkup).join("")}</div>`
     + `<div class="replay-tab-list" data-replay-tab-row="tabs">${otherTabs.map(tabMarkup).join("")}</div>`;
-  // With every tab pinned there is no tab row to start a second line, so the
-  // pinned tabs share theirs with + and the gear. Set here rather than with
-  // :has(), so the layout holds while a drag moves a tab between the rows.
-  els.replayTabStrip.classList.toggle("all-pinned", pinnedTabs.length > 0 && !otherTabs.length);
+  // With no tab row to start a last line, the row above it shares its line
+  // with + and the gear. Set here rather than with :has(), so the layout holds
+  // while a drag moves a tab between the rows.
+  els.replayTabStrip.classList.toggle("all-pinned", pinnedTabs.length > 0 && !agentTabs.length && !otherTabs.length);
+  els.replayTabStrip.classList.toggle("agent-last", agentTabs.length > 0 && !otherTabs.length);
 
   Array.from(els.replayTabStrip.querySelectorAll(".replay-tab")).forEach((tabElement) => {
     const id = tabElement.dataset.replayTabId;
@@ -22584,6 +23340,8 @@ function toggleReplayTabPin(id) {
   if (!tab) return;
   const previousPinned = !!tab.pinned;
   tab.pinned = !tab.pinned;
+  // Pinned by a person, the CLI's tab is the person's.
+  if (tab.pinned) tab.openedBy = null;
   // Flush immediately so pin state survives quick app quit
   persistReplayTabMetadataEdit(tab, "pinned", previousPinned);
   renderReplayTabs();
@@ -22591,10 +23349,19 @@ function toggleReplayTabPin(id) {
 
 
 function scrollActiveReplayTabIntoView() {
-  const activeTab = els.replayTabStrip.querySelector(".replay-tab.active");
-  if (activeTab) {
-    activeTab.scrollIntoView({ behavior: "smooth", inline: "nearest", block: "nearest" });
-  }
+  revealReplayTab(els.replayTabStrip.querySelector(".replay-tab.active"));
+}
+
+// Only the tab's own row moves, at once and just far enough. A smooth
+// scrollIntoView did not finish: Ctrl+Tab from the last tab made the first
+// active and left the strip at its far end, the new tab out of view.
+function revealReplayTab(tab) {
+  const row = tab?.closest(".replay-tab-list");
+  if (!row) return;
+  const left = tab.getBoundingClientRect().left - row.getBoundingClientRect().left + row.scrollLeft;
+  const right = left + tab.getBoundingClientRect().width;
+  if (left < row.scrollLeft) row.scrollLeft = left;
+  else if (right > row.scrollLeft + row.clientWidth) row.scrollLeft = right - row.clientWidth;
 }
 
 function getRenderedHttpReplayDraftOwner(tab) {
@@ -22699,7 +23466,12 @@ function preserveActiveHttpReplayDraftBeforeNavigation(tab, action) {
 
   // Preserve supported edits before the shared editor displays another tab,
   // without re-rendering or parsing partially typed text into a different draft.
+  if (textChanged && !acceptReplayRequestEdit(requestText, tab)) return false;
   if (textChanged) {
+    if (replayRequestSizeError("", tab.baseRequest)) {
+      const candidate = replayRequestEditCandidate(tab, requestText);
+      if (candidate.request) tab.baseRequest = cloneEditableRequest(candidate.request);
+    }
     tab.requestText = requestText;
     tab.httpVersionMode = replayHttpVersionState(null, requestText, tab.httpVersionMode);
     tab.requestBytes = null;
@@ -22783,6 +23555,13 @@ async function closeRepeaterTab(id, pendingRename = null) {
     if (generation !== workspaceStateGeneration || sessionId !== currentSessionId()) return;
     if (isTooManyReplayTabsError(error)) {
       // Keep the close: it is progress back under the limit.
+      return;
+    }
+    if (error.workspaceValidation) {
+      // A local/server validation rejection is known not to have committed.
+      // Keep this requested close so multiple oversized tabs can be removed,
+      // without an incorrect uncertain-commit barrier preventing recovery.
+      showToast("Tab closed locally, but the workspace is still unsaved. Close more unneeded tabs or correct oversized drafts before closing the app.", "error", 10000);
       return;
     }
     // A failed POST may already have reached disk. Preserve newer local/remote
@@ -23338,6 +24117,7 @@ function cloneReplayTabState(tab) {
       sequence: tab.sequence,
       customLabel: normalizeReplayTabCustomLabel(tab.customLabel || ""),
       pinned: !!tab.pinned,
+      openedBy: tab.openedBy || null, changedBy: tab.changedBy || null,
       label: tab.label || `WS ${tab.wsHost || "draft"}`,
       wsScheme: tab.wsScheme || "wss",
       wsHost: tab.wsHost || "",
@@ -23380,6 +24160,7 @@ function cloneReplayTabState(tab) {
     sequence: tab.sequence,
     customLabel: normalizeReplayTabCustomLabel(tab.customLabel || ""),
     pinned: !!tab.pinned,
+    openedBy: tab.openedBy || null, changedBy: tab.changedBy || null,
     baseRequest: tab.baseRequest ? cloneEditableRequest(tab.baseRequest) : createDefaultEditableRequest(),
     sourceTransactionId: tab.sourceTransactionId || null,
     notice: tab.notice || "",
@@ -23907,6 +24688,97 @@ function openDisplaySettingsModal() {
   // is still display:none.
   selectSettingsTab("runtime");
   els.closeDisplaySettingsButton.focus();
+  loadVulndataStatus();
+}
+
+// Settings ▸ Runtime ▸ Vulnerability data: the three files known-vulnerability
+// findings are matched against, their daily update, Update now and Import.
+let vulndataStatus = null;
+let vulndataPoll = 0;
+
+function bindVulndataControls() {
+  document.getElementById("vulndataAutoUpdate")?.addEventListener("click", toggleVulndataAutoUpdate);
+  document.getElementById("vulndataUpdateNow")?.addEventListener("click", updateVulndataNow);
+  document.getElementById("vulndataImportMenu")?.addEventListener("click", () => {
+    document.getElementById("vulndataMore").open = false;
+    document.getElementById("vulndataImportFile")?.click();
+  });
+  document.getElementById("vulndataImportFile")?.addEventListener("change", (event) => importVulndataFiles(event.target));
+}
+
+function loadVulndataStatus() {
+  return vulndataRequest("/api/vulndata");
+}
+
+function toggleVulndataAutoUpdate() {
+  const enabled = !(vulndataStatus?.auto_update ?? true);
+  return vulndataRequest("/api/vulndata/auto-update", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }),
+  });
+}
+
+function updateVulndataNow() {
+  document.getElementById("vulndataMore").open = false;
+  return vulndataRequest("/api/vulndata/update", { method: "POST" });
+}
+
+async function vulndataRequest(path, init) {
+  try {
+    const response = await fetch(path, init);
+    await requireOkResponse(response, "The vulnerability data request failed.");
+    renderVulndataStatus(await response.json());
+  } catch (error) {
+    setVulndataMessage(error?.message || "The vulnerability data request failed.", true);
+  }
+}
+
+// One upload per file; Sniper tells which source each one is.
+async function importVulndataFiles(input) {
+  const files = Array.from(input.files || []);
+  input.value = "";
+  for (const file of files) {
+    try {
+      const response = await fetch("/api/vulndata/import", {
+        method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file,
+      });
+      await requireOkResponse(response, `${file.name} could not be imported.`);
+      renderVulndataStatus((await response.json()).status);
+    } catch (error) {
+      setVulndataMessage(`${file.name}: ${error?.message || "could not be imported."}`, true);
+    }
+  }
+}
+
+function renderVulndataStatus(status) {
+  if (!Array.isArray(status?.sources)) return;
+  vulndataStatus = status;
+  document.getElementById("vulndataAutoUpdate")?.setAttribute("aria-checked", String(Boolean(status.auto_update)));
+  const list = document.getElementById("vulndataSources");
+  if (list) {
+    // A failure says why where it is read: the desktop app shows no title tooltip.
+    list.innerHTML = status.sources.map((source) => {
+      const imported = source.origin === "import";
+      // TLS carried only what Sniper downloaded; an imported file came by hand.
+      const facts = [
+        source.fetched_at ? `${imported ? "imported" : "fetched"} ${formatTimestamp(source.fetched_at)}` : "not fetched yet",
+        source.license,
+        imported ? "not verified" : "not verified (TLS only)",
+      ].filter(Boolean).join(" · ");
+      const failed = source.error ? `<span class="vulndata-error">Last update failed: ${escapeHtml(source.error)}</span>` : "";
+      return `<li><strong>${escapeHtml(source.name)}</strong><span class="vulndata-facts">${escapeHtml(facts)}</span>${failed}</li>`;
+    }).join("");
+  }
+  document.getElementById("vulndataRescanNote")?.classList.toggle("hidden", !status.revision);
+  setVulndataMessage(status.updating ? "Updating…" : "", false);
+  clearTimeout(vulndataPoll);
+  if (status.updating) vulndataPoll = setTimeout(loadVulndataStatus, 2000);
+}
+
+function setVulndataMessage(message, error) {
+  const line = document.getElementById("vulndataMessage");
+  if (!line) return;
+  line.textContent = message;
+  line.classList.toggle("error", Boolean(error));
 }
 
 function createCliPathState() {
@@ -25530,7 +26402,8 @@ async function openCertificateFolder() {
 }
 
 function buildMessagePresentation(target, record) {
-  const mode = state.messageViews[target];
+  const mode = target === "response"
+    ? shownResponseView(state.messageViews.response, record?.response) : state.messageViews[target];
   const text = target === "request" ? buildRawRequest(record) : buildRawResponse(record);
 
   if (mode === "hex") {
@@ -25973,8 +26846,19 @@ function renderBody(message) {
   }
 
   let body = message.body_preview || "";
+  // A binary body shows its bytes, one character each, as Burp's Raw tab
+  // does; a stand-in said nothing about a PDF or a protobuf. Only the first
+  // 64 KiB, and only those decoded: a 5 MB PDF drawn whole made the editor
+  // crawl. The stand-in stays for a preview that is not Base64 after all.
   if (body && message.body_encoding === "base64") {
-    body = binaryBodyPlaceholder(message);
+    const limit = 64 * 1024;
+    const held = Math.floor((body.length * 3) / 4);
+    const placeholder = binaryBodyPlaceholder(message);
+    const decoded = safeDecodeBase64(held > limit ? body.slice(0, Math.ceil(limit / 3) * 4) : body, placeholder);
+    const total = Number(message.decoded_body_size ?? message.body_size) || held;
+    body = decoded === placeholder || held <= limit
+      ? decoded
+      : `${decoded.slice(0, limit)}\n\n[first ${formatSize(limit)} of ${formatSize(total)} shown; Hex shows every byte]`;
   }
 
   return message.preview_truncated
@@ -26073,6 +26957,75 @@ function prettyJsonText(text) {
 
 // `jsonLines: false` is for an editor whose text is sent: spreading a JSON line
 // over several would change a line-delimited stream.
+// Where a tag ends: its first > outside an attribute's quotes.
+function markupTagEnd(source, open) {
+  let quote = "";
+  for (let at = open + 1; at < source.length; at += 1) {
+    const char = source[at];
+    if (quote) {
+      if (char === quote) quote = "";
+    } else if ((char === '"' || char === "'") && /=\s*$/.test(source.slice(Math.max(open, at - 8), at))) {
+      quote = char;
+    } else if (char === ">") {
+      return at + 1;
+    }
+  }
+  return source.length;
+}
+
+// One tag or text run per line, two spaces a level. Only the whitespace
+// between tags changes: comments, doctypes and attributes stay whole, script
+// and style keep their code, and pre and textarea their spaces.
+// ponytail: no implied end tags; an unclosed <p> or <li> leaves what follows
+// one level deeper.
+function prettyMarkup(source, { xml = false } = {}) {
+  const voidElements = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
+  const rawElements = new Set(["script", "style", "pre", "textarea"]);
+  const lines = [];
+  const lower = source.toLowerCase();
+  let depth = 0;
+  let at = 0;
+  const push = (text) => {
+    const trimmed = text.trim();
+    if (trimmed) lines.push(`${"  ".repeat(depth)}${trimmed}`);
+  };
+  while (at < source.length) {
+    let open = source.indexOf("<", at);
+    // A < that starts no tag, as in "a < b", is text.
+    while (open !== -1 && !/[A-Za-z/!?]/.test(source[open + 1] || "")) open = source.indexOf("<", open + 1);
+    if (open === -1) {
+      push(source.slice(at));
+      break;
+    }
+    push(source.slice(at, open));
+    const marker = source.startsWith("<!--", open) ? "-->" : source.startsWith("<![CDATA[", open) ? "]]>" : "";
+    const found = marker ? source.indexOf(marker, open + 4) : -1;
+    const end = marker ? (found === -1 ? source.length : found + marker.length) : markupTagEnd(source, open);
+    const tag = source.slice(open, end);
+    at = end;
+    if (tag.startsWith("</")) {
+      depth = Math.max(0, depth - 1);
+      push(tag);
+      continue;
+    }
+    push(tag);
+    const name = /^<([A-Za-z][\w:.-]*)/.exec(tag)?.[1].toLowerCase();
+    if (!name || tag.endsWith("/>") || (!xml && voidElements.has(name))) continue;
+    depth += 1;
+    if (xml || !rawElements.has(name)) continue;
+    const close = lower.indexOf(`</${name}`, end);
+    const stop = close === -1 ? source.length : close;
+    const inner = source.slice(end, stop);
+    if (name === "pre" || name === "textarea") {
+      if (inner) lines.push(inner);
+    } else {
+      push(inner);
+    }
+    at = stop;
+  }
+  return lines.join("\n");
+}
+
 function prettyFormat(text, message, { jsonLines = true } = {}) {
   if (!message || message.body_encoding === "base64") {
     return text;
@@ -26087,6 +27040,16 @@ function prettyFormat(text, message, { jsonLines = true } = {}) {
   const head = text.slice(0, boundary);
   const body = text.slice(boundary + divider.length);
   const contentType = (message.content_type || "").toLowerCase();
+  // HTML and XML are laid out by tag, as Burp's Pretty does; minified pages
+  // were one line. The editable request passes no type, so its body stays
+  // as captured.
+  const markup = contentType.includes("html") ? "html" : contentType.includes("xml") ? "xml" : "";
+  if (markup) {
+    const notice = "\n\n[preview truncated]";
+    const cut = body.endsWith(notice);
+    const source = cut ? body.slice(0, -notice.length) : body;
+    return `${head}${divider}${prettyMarkup(source, { xml: markup === "xml" })}${cut ? notice : ""}`;
+  }
   // Server-sent events, as streamed API replies send them, carry JSON after
   // "data:" on their own lines.
   const events = contentType.includes("text/event-stream");
@@ -26155,7 +27118,7 @@ function editableRequestFromRecord(record) {
   };
 }
 
-function buildEditableRawRequest(request) {
+function buildEditableRawRequest(request, binarySafe = false) {
   const source = request || {};
   const headers = normalizedHeaders(source.headers);
   if (!headers.some((header) => headerNameEquals(header, "host")) && source.host) {
@@ -26164,12 +27127,18 @@ function buildEditableRawRequest(request) {
   const httpVer = source.http_version || "HTTP/1.1";
   const head = `${source.method || "GET"} ${source.path || "/"} ${httpVer}`;
   const headerBlock = mergeHeaders(headers).map((header) => `${header.name}: ${header.value}`).join("\n");
-  const body = source.body || "";
+  let body = source.body || "";
+  if (binarySafe && source.body_encoding !== "base64" && headers.some(h =>
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()))) {
+    let binary = "";
+    for (const byte of new TextEncoder().encode(body)) binary += String.fromCharCode(byte);
+    body = btoa(binary);
+  }
   const rawHead = headerBlock ? `${head}\n${headerBlock}` : head;
   return body.length > 0 ? `${rawHead}\n\n${body}` : rawHead;
 }
 
-function parseEditableRawRequest(text, fallback) {
+function parseEditableRawRequest(text, fallback, binarySafe = false) {
   const { head, body } = splitRawHttpMessage(text);
   const lines = head.split("\n").filter((line) => line.length > 0);
   const fallbackPath = fallback?.path && String(fallback.path).trim()
@@ -26246,7 +27215,9 @@ function parseEditableRawRequest(text, fallback) {
     throw new Error("Request is missing a Host header");
   }
 
-  const bodyEncoding = fallback?.body_encoding === "base64" ? "base64" : "utf8";
+  const legacyBinary = binarySafe && normalizedHeaders(fallback?.headers).some(h =>
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
+  const bodyEncoding = fallback?.body_encoding === "base64" || legacyBinary ? "base64" : "utf8";
   const bodyLength = editableRequestBodyLength(body, bodyEncoding);
   const acceptedBodyLengths = [bodyLength];
   let contentLengthChanged = false;
@@ -26265,8 +27236,13 @@ function parseEditableRawRequest(text, fallback) {
   }
   validateRawHttpBodyFraming(headers, bodyLength, acceptedBodyLengths);
 
-  const fallbackBody = String(fallback?.body ?? fallback?.body_preview ?? "");
-  const fallbackBodyEncoding = fallback?.body_encoding === "base64" ? "base64" : "utf8";
+  let fallbackBody = String(fallback?.body ?? fallback?.body_preview ?? "");
+  if (legacyBinary && fallback?.body_encoding !== "base64") {
+    let binary = "";
+    for (const byte of new TextEncoder().encode(fallbackBody)) binary += String.fromCharCode(byte);
+    fallbackBody = btoa(binary);
+  }
+  const fallbackBodyEncoding = fallback?.body_encoding === "base64" || legacyBinary ? "base64" : "utf8";
   const previewTruncated = Boolean(fallback?.preview_truncated)
     && body === fallbackBody
     && bodyEncoding === fallbackBodyEncoding;
@@ -26504,7 +27480,7 @@ function toHexDump(text) {
   return rows.join("\n") || "00000000";
 }
 
-function toHexDumpFromBytes(bytes) {
+function toHexDumpFromBytes(bytes, startOffset = 0) {
   const rows = [];
   for (let offset = 0; offset < bytes.length; offset += 16) {
     const chunk = Array.from(bytes.slice(offset, offset + 16));
@@ -26514,7 +27490,7 @@ function toHexDumpFromBytes(bytes) {
     const ascii = chunk
       .map((value) => (value >= 32 && value <= 126 ? String.fromCharCode(value) : "."))
       .join("");
-    rows.push(`${offset.toString(16).padStart(8, "0")}  ${hex} ${ascii}`);
+    rows.push(`${(startOffset + offset).toString(16).padStart(8, "0")}  ${hex} ${ascii}`);
   }
   return rows.join("\n") || "00000000";
 }
@@ -30664,6 +31640,9 @@ const SHORTCUT_REFERENCE = [
     ["down", "Next WebSocket frame"],
     ["mod+enter", "Send (WebSocket editor)"],
   ]],
+  ["Fuzzer", [
+    ["mod+r", "Send the selected result to Replay"],
+  ]],
   ["Anywhere", [
     ["mod+shift+f", "Open the Fuzzer, with the selection if there is one"],
     ["mod+c", "Copy the selected text in a message pane"],
@@ -30784,6 +31763,7 @@ function runInterceptMenuAction(action, interceptId, clipboardOwner = createReco
           sourceTransactionId: null,
           requestText: buildEditableRawRequest(request),
         });
+        if (!tab) return;
         state.replayTabs.push(tab);
         state.activeReplayTabId = tab.id;
         setActiveTool("replay");
@@ -31687,7 +32667,9 @@ function changeReplayMethod(newMethod, tabId = state.activeReplayTabId) {
     ? cv.getContent()
     : (isActiveTab && els.replayRequestEditor ? els.replayRequestEditor.value : tab.requestText) || "";
   const text = replayEditorShowsDraft(shown, tab.requestText) ? tab.requestText || "" : shown;
-  tab.requestText = requestTextWithMethod(text, newMethod);
+  const nextText = requestTextWithMethod(text, newMethod);
+  if (!acceptReplayRequestEdit(nextText, tab)) return;
+  tab.requestText = nextText;
   clearReplayResponseForDraftChange(tab);
   syncReplayRequestEditorForTab(tab);
   scheduleWorkspaceStateSave();
@@ -32703,7 +33685,14 @@ function applyCurlImport() {
     showToast(result.error, "error");
     return;
   }
+  const request = {
+    scheme: result.scheme, host: result.host, method: result.method, path: result.path,
+    headers: normalizedHeaders(result.headers), body: result.body,
+    body_encoding: "utf8", preview_truncated: false,
+  };
+  if (!canStoreReplayRequest(result.requestText, request, "import this cURL request")) return;
   const tab = createReplayTab();
+  if (!tab) return;
   tab.httpVersionMode = normalizeReplayHttpVersion(result.httpVersion || "");
   const target = normalizeRepeaterTargetInput(result.host, result.port || "", result.scheme || "https");
   tab.requestText = result.requestText;
@@ -32725,6 +33714,7 @@ function applyCurlImport() {
     body_encoding: "utf8",
     preview_truncated: false,
   };
+  if (!tab) return false;
   state.replayTabs.push(tab);
   state.activeReplayTabId = tab.id;
   setActiveTool("replay");
@@ -32755,13 +33745,9 @@ function initReplayContextMenu() {
 
       if (action === "toggle-body") {
         const text = tab.requestText || "";
-        if (text.includes("\n\n")) {
-          // Remove body
-          tab.requestText = text.split("\n\n")[0];
-        } else {
-          // Add empty body section
-          tab.requestText = text + "\n\n";
-        }
+        const nextText = text.includes("\n\n") ? text.split("\n\n")[0] : text + "\n\n";
+        if (!acceptReplayRequestEdit(nextText, tab)) return;
+        tab.requestText = nextText;
         clearReplayResponseForDraftChange(tab);
         syncReplayRequestEditorForTab(tab);
         scheduleWorkspaceStateSave();
@@ -32814,7 +33800,9 @@ function setReplayHeader(name, value, tabId = state.activeReplayTabId) {
     lines.push(`${name}: ${value}`);
   }
 
-  tab.requestText = lines.join("\n") + body;
+  const nextText = lines.join("\n") + body;
+  if (!acceptReplayRequestEdit(nextText, tab)) return;
+  tab.requestText = nextText;
   clearReplayResponseForDraftChange(tab);
   syncReplayRequestEditorForTab(tab);
   scheduleWorkspaceStateSave();
@@ -33345,13 +34333,55 @@ const cmProgrammaticViews = new WeakSet();
 
 /** Add an update listener to a CM EditorView; returns a dispose function. */
 function addCMUpdateListener(view, callback) {
+  const isReplay = typeof syncReplayRequestTextFromEditor === "function" && callback === syncReplayRequestTextFromEditor;
+  let validated = null;
+  // This is a one-transaction handoff, not a cache of edits. Snapshot the fields
+  // used by parsing/validation without copying/serializing the large body again.
+  const identity = () => {
+    const tab = getActiveReplayTab(), base = tab?.baseRequest;
+    const currentView = getCMView("replayReq");
+    return [currentView, currentView?.view, currentView?._owner, currentView?._container, tab, tab?.id, tab?.type, tab?.requestText, tab?.protobufEditRevision,
+      base, base?.scheme, base?.host, base?.method, base?.path, base?.body,
+      base?.body_preview, base?.body_encoding, base?.preview_truncated,
+      JSON.stringify(base?.headers || []), currentSessionId(), workspaceStateGeneration,
+      state.replayMessageViews.request, renderedHttpReplayDraftOwner,
+      !!document.getElementById("proxySettingAutoContentLength")?.checked];
+  };
   const listener = CM.EditorView.updateListener.of((update) => {
+    const pending = validated;
+    validated = null;
     if (update.docChanged && !cmProgrammaticViews.has(update.view)) {
-      callback(update.state.doc.toString());
+      if (isReplay && getCMView("replayReq")?.view !== update.view) return;
+      let candidate = null;
+      // Other transaction filters/listeners can change the document or owner.
+      // Reuse only the exact transaction and unchanged model; otherwise perform
+      // the normal validation in the callback. Multi-transaction updates fall back.
+      if (isReplay && pending && update.transactions?.length === 1
+          && update.transactions[0].startState === pending.startState
+          && update.state.doc === pending.doc) {
+        const now = identity();
+        if (now.length === pending.identity.length && now.every((value, index) => value === pending.identity[index])) {
+          candidate = pending.candidate;
+        }
+      }
+      callback(update.state.doc.toString(), candidate);
     }
   });
-  view.dispatch({ effects: CM.StateEffect.appendConfig.of(listener) });
-  return () => {}; // CM does not support removing extensions, but the view will be destroyed
+  const extensions = [listener];
+  if (isReplay) {
+    extensions.push(CM.EditorState.transactionFilter.of(transaction => {
+      validated = null;
+      const currentView = getCMView("replayReq")?.view;
+      if (!transaction.docChanged || cmProgrammaticViews.has(currentView)) return transaction;
+      const before = identity();
+      const accepted = acceptReplayRequestEdit(transaction.newDoc.toString(), getActiveReplayTab(), candidate => {
+        validated = { startState: transaction.startState, doc: transaction.newDoc, identity: before, candidate };
+      });
+      return accepted ? transaction : [];
+    }));
+  }
+  view.dispatch({ effects: CM.StateEffect.appendConfig.of(extensions) });
+  return () => { validated = null; }; // The containing view owns these extensions.
 }
 
 const CM_SEARCH_DECORATION_LIMIT = 5000;
@@ -33862,11 +34892,11 @@ const packetEvidenceField = CM.StateField.define({
 });
 
 class SniperCodeView {
-  constructor(container, options = {}) {
+  constructor(container, options = {}, editorState = null) {
     this._options = options;
     this._searchNavIndex = -1;
     this.view = new CM.EditorView({
-      state: CM.EditorState.create({
+      state: editorState || CM.EditorState.create({
         // Initial content is a baseline, not an undoable edit from an empty pane.
         doc: options.content || "",
         extensions: [...createBaseExtensions(options), searchDecoField, changedDecoField, packetEvidenceField],
@@ -33984,6 +35014,17 @@ function updateCodePaneCM(key, container, text, options = {}) {
   const mode = options.mode || "http"; // "http" | "hex" | "diff"
   const editable = options.readOnly === false;
   let restoreFocus = false;
+  let suspendedEditableState = null;
+  const previous = _cmViews[key];
+  // A read-only presentation may suspend the current editor, never a different
+  // request or session. Keep just one state, not a cache of previously visited tabs.
+  if (options.preserveEditableState && options.owner != null && previous
+    && previous._owner === options.owner && previous._container === container) {
+    suspendedEditableState = previous._editable ? {
+      state: previous.view.state, mode: previous._hlMode,
+      onChange: previous._onChange, wired: previous._onChangeWired,
+    } : previous._suspendedEditableState;
+  }
   // Undo history belongs to one document owner. Tab/session replacement must
   // retire it even when the new document has the same text or persisted ID.
   if (_cmViews[key] && (_cmViews[key]._hlMode !== mode || !!_cmViews[key]._editable !== editable
@@ -33995,21 +35036,32 @@ function updateCodePaneCM(key, container, text, options = {}) {
   }
   if (!_cmViews[key]) {
     const cmOpts = { content: text || "" };
+    // Restore only an unchanged document. Edits or replacement while inspecting
+    // another presentation must not resurrect an obsolete draft or listener.
+    const restoreState = editable && suspendedEditableState?.mode === mode
+      && suspendedEditableState.onChange === options.onChange
+      && suspendedEditableState.state.doc.toString() === (text || "").replace(/\r\n?/g, "\n");
     cmOpts.readOnly = !editable;
     if (mode === "http") cmOpts.httpHighlight = true;
     else if (mode === "hex") cmOpts.hexHighlight = true;
     else if (mode === "diff") cmOpts.diffHighlight = true;
     if (options.placeholder) cmOpts.placeholder = options.placeholder;
     if (options.payloadHighlight) cmOpts.payloadHighlight = true;
-    _cmViews[key] = new SniperCodeView(container, cmOpts);
+    _cmViews[key] = new SniperCodeView(container, cmOpts, restoreState ? suspendedEditableState.state : null);
     _cmViews[key]._hlMode = mode;
     _cmViews[key]._editable = editable;
     _cmViews[key]._owner = options.owner;
     _cmViews[key]._container = container;
+    if (restoreState) {
+      _cmViews[key]._onChangeWired = suspendedEditableState.wired;
+      _cmViews[key]._onChange = suspendedEditableState.onChange;
+    }
   }
   const cv = _cmViews[key];
+  cv._suspendedEditableState = editable ? null : suspendedEditableState;
   if (editable && options.onChange && !cv._onChangeWired) {
     cv._onChangeDispose = addCMUpdateListener(cv.view, options.onChange);
+    cv._onChange = options.onChange;
     cv._onChangeWired = true;
   }
   cv.setContent(text || "");

@@ -149,7 +149,7 @@ for (const override of [false, true]) test(`existing workspace round-trip restor
 });
 
 for (const payloads of ['', 'a'.repeat(65537)]) test(`actual setup render keeps valid request transport editable with ${payloads ? 'invalid' : 'missing'} payloads and no markers`, () => {
-  const f = fixture(['renderFuzzerSetup', 'renderFuzzerPayloadImportStatus', 'fuzzerSetupPreflight',
+  const f = fixture(['renderFuzzerSetup', 'renderFuzzerPayloadImportStatus', 'fuzzerSetupPreflight','fuzzerRunControls',
     'fuzzerPayloadCount', 'splitFuzzerPayloadLines', 'replayHttpVersionFromText', 'escapeHtml']);
   for (const id of ['fuzzerPreflightSummary', 'fuzzerPreflightNotice', 'fuzzerTargetSummary', 'startFuzzerButton']) f.nodes[id] = control();
   f.c.renderFuzzerRemoveMarkerControl = () => {};
@@ -190,7 +190,7 @@ for (const phase of ['pending-start', 'running', 'restored-running']) test(`${ph
 });
 
 function startFixture() {
-  const f = fixture(['runFuzzerAttack', 'isCurrentFuzzerRun', 'splitFuzzerPayloadLines', 'fuzzerPayloadCount',
+  const f = fixture(['runFuzzerAttack', 'fuzzerRunControls', 'isCurrentFuzzerRun', 'splitFuzzerPayloadLines', 'fuzzerPayloadCount',
     'fuzzerPayloadTextWithinLimits', 'replayHttpVersionFromText']);
   const flushed = deferred(), replied = deferred(), followed = deferred(), requests = [];
   Object.assign(f.c, { expectedActiveSessionIdForWrite: value => value,

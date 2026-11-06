@@ -95,8 +95,9 @@
                     <th data-sort-key="storage_bytes" aria-sort="none"><button class="session-sort-button" type="button">Size</button></th>
                     <th data-sort-key="request_count" aria-sort="none"><button class="session-sort-button" type="button">Requests</button></th>
                     <th data-sort-key="websocket_count" aria-sort="none"><button class="session-sort-button" type="button">WebSockets</button></th>
+                    <th data-sort-key="tcp_connection_count" aria-sort="none"><button class="session-sort-button" type="button">TCP</button></th>
                     <th data-sort-key="finding_count" aria-sort="none"><button class="session-sort-button" type="button">Findings</button></th>
-                    <th data-sort-key="last_captured_at" aria-sort="none"><button class="session-sort-button" type="button">Last capture</button></th>
+                    <th data-sort-key="last_captured_at" aria-sort="none"><button class="session-sort-button" type="button">Last HTTP capture</button></th>
                     <th data-sort-key="created_at" aria-sort="descending"><button class="session-sort-button" type="button">Created</button></th>
                     <th>Action</th>
                   </tr>
@@ -113,6 +114,7 @@
             <button class="sub-tab" data-proxy-tab="intercept">Intercept</button>
             <button class="sub-tab active" data-proxy-tab="http-history">HTTP</button>
             <button class="sub-tab" data-proxy-tab="websockets-history">Web Socket</button>
+            <button class="sub-tab" data-proxy-tab="tcp-history">TCP</button>
             <button class="sub-tab" data-proxy-tab="replace">Replace</button>
             <button class="sub-tab" data-proxy-tab="findings">Findings <span class="findings-badge hidden" id="findingsBadge"></span></button>
             <button class="sub-tab" data-proxy-tab="oast">OAST <span class="findings-badge hidden" id="oastBadge"></span></button>
@@ -366,6 +368,78 @@
             </div>
           </section>
 
+          <section class="proxy-panel hidden" id="tcpPanel">
+            <div class="stack-panel tcp-workbench" id="tcpWorkbench">
+              <section class="panel-card panel-card-top tcp-history">
+                <div class="filter-bar">
+                  <div class="filter-summary" id="tcpHistoryStatus" role="status" aria-live="polite">No TCP connections</div>
+                  <div class="filter-actions">
+                    <button class="scope-pill" id="tcpLiveOnly" type="button" aria-pressed="false">Live only</button>
+                    <button class="tcp-listener-link" id="tcpOpenSettings" type="button">Listener off</button>
+                    <span class="tcp-intercept-control">
+                      <span id="tcpInterceptLabel">Intercept</span>
+                      <button class="switch" id="tcpInterceptToggle" type="button" role="switch" aria-checked="false" aria-labelledby="tcpInterceptLabel" disabled></button>
+                    </span>
+                    <select id="tcpInterceptDirection" aria-label="Intercept direction" hidden disabled><option value="both">Both directions</option><option value="client_to_server">Client → Server</option><option value="server_to_client">Server → Client</option></select>
+                    <span id="tcpInterceptStatus" role="status"></span>
+                  </div>
+                </div>
+                <div class="history-table-shell" tabindex="0" aria-label="TCP connections">
+                  <table class="mini-table tcp-table">
+                    <thead id="tcpHistoryHead">
+                      <tr>
+                        <th class="table-sortable active tcp-col-index" data-sort="index" aria-sort="descending"># <span class="table-sort-indicator" aria-hidden="true">↓</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                        <th class="table-sortable" data-sort="target" aria-sort="none">Target <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                        <th class="table-sortable" data-sort="peer" aria-sort="none">Client <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                        <th class="table-sortable" data-sort="status" aria-sort="none">Status <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                        <th class="table-sortable tcp-col-number" data-sort="client_bytes" aria-sort="none">Sent <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                        <th class="table-sortable tcp-col-number" data-sort="server_bytes" aria-sort="none">Received <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                        <th class="table-sortable tcp-col-number" data-sort="duration" aria-sort="none">Duration <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                        <th class="table-sortable" data-sort="started_at" aria-sort="none">Time <span class="table-sort-indicator" aria-hidden="true">↕</span></th>
+                      </tr>
+                    </thead>
+                    <tbody id="tcpHistoryRows"></tbody>
+                  </table>
+                </div>
+              </section>
+              <div class="stack-resizer" id="tcpStackResizer" role="separator" aria-orientation="horizontal" aria-label="Resize connections and stream panes"></div>
+              <section class="panel-card tcp-stream">
+                <header class="pane-header">
+                  <div class="view-tabs">
+                    <button class="view-tab active" id="tcpStreamTab" type="button" aria-pressed="true">Stream</button>
+                    <button class="view-tab" id="tcpPendingTab" type="button" aria-pressed="false" hidden>Pending</button>
+                  </div>
+                  <span class="tcp-stream-title" id="tcpStreamTitle"></span>
+                  <div class="view-tabs">
+                    <select id="tcpDirection" aria-label="Direction"><option value="both">Both directions</option><option value="client_to_server">Client → Server</option><option value="server_to_client">Server → Client</option></select>
+                    <button class="view-tab active" id="tcpHexView" type="button" aria-pressed="true">Hex</button>
+                    <button class="view-tab" id="tcpTextView" type="button" aria-pressed="false">Text</button>
+                    <button class="secondary-action tcp-close" id="tcpCloseConnection" type="button" title="Close both directions" disabled>Close connection</button>
+                  </div>
+                </header>
+                <div id="tcpStreamSurface" class="tcp-stream-surface">
+                  <div class="tcp-conversation" id="tcpStreamBytes" tabindex="0" aria-label="Captured TCP bytes">Select a connection.</div>
+                  <div id="tcpInterceptHistory" class="tcp-intercept-history"></div>
+                  <footer class="pane-footer" id="tcpStreamMeta"></footer>
+                </div>
+                <div id="tcpPendingSurface" class="tcp-pending-surface" hidden>
+                  <div class="tcp-pending-bar">
+                    <select id="tcpPendingPicker" aria-label="Pending bytes" disabled></select>
+                    <span id="tcpPendingMeta"></span>
+                    <button id="tcpPendingReset" class="secondary-action" type="button" disabled>Reset</button>
+                    <button id="tcpDrop" class="secondary-action" type="button" disabled>Drop</button>
+                    <button id="tcpForward" class="primary-action" type="button" disabled>Forward</button>
+                  </div>
+                  <textarea id="tcpPendingHex" aria-label="Pending bytes as hex" spellcheck="false" autocomplete="off" autocapitalize="off" disabled placeholder="No pending bytes"></textarea>
+                  <details id="tcpPendingOriginal" hidden><summary>Original bytes</summary><pre id="tcpPendingOriginalHex" tabindex="0" aria-label="Original bytes as hex"></pre></details>
+                </div>
+                <p id="tcpInterceptNotice" class="tcp-notice" role="status"></p>
+                <p id="tcpInterceptError" class="tcp-error" role="alert"></p>
+              </section>
+            </div>
+            <p id="tcpHistoryError" class="tcp-error" role="alert"></p>
+          </section>
+
           <section class="proxy-panel hidden" id="websocketPanel">
             <div class="stack-panel">
               <section class="panel-card panel-card-top ws-sessions-card">
@@ -585,6 +659,7 @@
                   <option value="misconfig">Misconfiguration</option>
                   <option value="info">Information</option>
                   <option value="auth">Authentication</option>
+                  <option value="known_cve">Known vulnerabilities</option>
                 </select>
                 <input id="findingsFilterSearch" class="findings-filter-input" type="text" placeholder="Search" aria-label="Search findings" />
               </div>
@@ -738,155 +813,173 @@
             </div>
           </section>
 
-          <section class="proxy-panel hidden" id="proxySettingsPanel">
-            <section class="panel-card upstream-peer-card" id="upstreamPeerSection" aria-labelledby="upstreamPeerHeading">
-              <header class="panel-toolbar">
-                <div><h2 id="upstreamPeerHeading">Upstream socket peer</h2><p>Current session: <strong id="upstreamPeerSession">Loading…</strong></p></div>
-              </header>
-              <div class="settings-form">
-                <label class="settings-toggle"><input id="upstreamPeerEnabled" type="checkbox" aria-describedby="upstreamPeerDisclosure" disabled /><span>Record upstream socket peer</span></label>
-                <p id="upstreamPeerDisclosure">Saves the upstream IP address and port with new HTTP(S) exchanges. It can be an internal or proxy address rather than the origin. Saved peers go into session exports and full-record JSON, and stay when this is turned off.</p>
-                <p id="upstreamPeerError" class="upstream-peer-error" role="alert"></p>
-                <p id="upstreamPeerStatus" role="status" aria-live="polite">Loading saved setting…</p>
-                <div class="toolbar-actions"><button class="primary-action" id="upstreamPeerSave" type="button" disabled>Save</button><button class="secondary-action" id="upstreamPeerCancel" type="button" disabled>Cancel</button><button class="secondary-action hidden" id="upstreamPeerRefresh" type="button">Check status</button></div>
-              </div>
-            </section>
-            <section class="panel-card history-retention-card" id="historyRetentionSection" aria-labelledby="historyRetentionHeading">
-              <header class="panel-toolbar">
-                <div><h2 id="historyRetentionHeading">HTTP History automatic cleanup</h2><p>Current session: <strong id="historyRetentionSession">Loading…</strong></p></div>
-              </header>
-              <div class="settings-form">
-                <fieldset class="history-retention-fields" aria-labelledby="historyRetentionHeading" aria-describedby="historyRetentionWarning historyRetentionProtection">
-                  <label class="settings-toggle"><input id="historyRetentionEnabled" type="checkbox" disabled /><span>Enable automatic cleanup</span></label>
-                  <label class="settings-field" for="historyRetentionPreset"><span>Keep the newest</span>
-                    <select id="historyRetentionPreset" disabled><option value="10000">10,000</option><option value="50000">50,000</option><option value="100000">100,000</option><option value="250000">250,000</option><option value="custom">Custom</option></select>
-                  </label>
-                  <label class="settings-field hidden" id="historyRetentionCustomField" for="historyRetentionCustom"><span>Custom limit</span><input id="historyRetentionCustom" type="text" inputmode="numeric" pattern="[0-9]+" aria-describedby="historyRetentionCustomHelp historyRetentionError" disabled /><small id="historyRetentionCustomHelp">Whole number from 1 to 4,294,967,295.</small></label>
-                </fieldset>
-                <p id="historyRetentionWarning" class="history-retention-warning">Saving with cleanup on deletes the oldest unprotected entries above the limit, now and as history grows. Deleted requests, responses and notes cannot be restored.</p>
-                <p id="historyRetentionProtection">Entries still being written, and originals that saved Replay tabs use, are kept, so the total can stay above the limit. Unsaved tabs and note edits do not keep an entry.</p>
-                <p id="historyRetentionError" class="history-retention-error" role="alert"></p>
-                <p id="historyRetentionStatus" role="status" aria-live="polite">Loading saved policy…</p>
-                <div class="toolbar-actions"><button class="primary-action" id="historyRetentionSave" type="button" disabled>Save cleanup policy</button><button class="secondary-action" id="historyRetentionCancel" type="button" disabled>Cancel</button><button class="secondary-action" id="historyRetentionRefresh" type="button">Check status</button></div>
-              </div>
-            </section>
-            <div class="split-panel split-panel-tight">
-              <section class="panel-card">
-                <header class="panel-toolbar">
-                  <h2>Proxy</h2>
-                  <div class="toolbar-actions">
-                    <button class="secondary-action" id="reloadProxySettingsButton" type="button">Reload</button>
-                    <button class="primary-action" id="saveProxySettingsButton" type="button">Save</button>
-                  </div>
-                </header>
-                <div class="settings-form">
-                  <label class="settings-toggle">
-                    <input id="proxySettingIntercept" type="checkbox" />
-                    <span>Enable request hold</span>
-                  </label>
-                  <label class="settings-toggle">
-                    <input id="proxySettingWebsocketCapture" type="checkbox" />
-                    <span>Capture WebSocket sessions and frames</span>
-                  </label>
-                  <label class="settings-toggle">
-                    <input id="proxySettingAutoContentLength" type="checkbox" checked />
-                    <span>Auto-update Content-Length on body edit</span>
-                  </label>
-                  <label class="settings-toggle">
-                    <input id="proxySettingUpstreamInsecure" type="checkbox" />
-                    <span>Accept invalid upstream TLS certificates</span>
-                  </label>
-                  <div class="settings-divider"></div>
-                  <label class="settings-toggle">
-                    <input id="proxyChainEnabled" type="checkbox" />
-                    <span>Enable proxy chain</span>
-                  </label>
-                  <label class="settings-field">
-                    <span>Upstream proxy address</span>
+          <section class="proxy-panel hidden capture-settings" id="proxySettingsPanel">
+            <nav class="capture-settings-nav" aria-label="Capture settings sections">
+              <button type="button" data-settings-jump="captureSettingsProxy">Proxy</button>
+              <button type="button" data-settings-jump="captureSettingsScope">Scope</button>
+              <button type="button" data-settings-jump="captureSettingsChain">Proxy chain</button>
+              <button type="button" data-settings-jump="captureSettingsOast">OAST</button>
+              <button type="button" data-settings-jump="tcpSettingsSection">TCP</button>
+              <button type="button" data-settings-jump="captureSettingsHistory">History</button>
+              <button type="button" data-settings-jump="captureSettingsRuntime">Runtime</button>
+            </nav>
+            <div class="capture-settings-body" id="captureSettingsBody">
+              <section class="capture-settings-section" id="captureSettingsProxy" aria-labelledby="captureSettingsProxyTitle">
+                <h2 id="captureSettingsProxyTitle">Proxy</h2>
+                <div class="capture-settings-row">
+                  <span class="capture-settings-label"><span id="proxyListenLabel">Listen on</span><small id="proxySettingListenerHelp"></small></span>
+                  <span class="capture-settings-address" role="group" aria-labelledby="proxyListenLabel">
+                    <input id="proxySettingBindHost" type="text" list="proxyBindHostPresets" placeholder="127.0.0.1" required aria-label="Proxy bind host" autocomplete="off" spellcheck="false" />
+                    <span aria-hidden="true">:</span>
+                    <input id="proxySettingPort" type="number" min="1" max="65535" placeholder="18080" required aria-label="Proxy port" />
+                  </span>
+                </div>
+                <datalist id="proxyBindHostPresets">
+                  <option value="127.0.0.1">This machine only</option>
+                  <option value="0.0.0.0">Other devices too</option>
+                  <option value="::1">This machine only</option>
+                </datalist>
+                <label class="capture-settings-row"><span class="capture-settings-label">Intercept requests</span><input class="switch-input" id="proxySettingIntercept" type="checkbox" role="switch" /></label>
+                <label class="capture-settings-row"><span class="capture-settings-label">Capture WebSocket frames</span><input class="switch-input" id="proxySettingWebsocketCapture" type="checkbox" role="switch" /></label>
+                <label class="capture-settings-row"><span class="capture-settings-label">Update Content-Length after a body edit</span><input class="switch-input" id="proxySettingAutoContentLength" type="checkbox" role="switch" checked /></label>
+                <label class="capture-settings-row"><span class="capture-settings-label">Accept invalid upstream TLS certificates</span><input class="switch-input" id="proxySettingUpstreamInsecure" type="checkbox" role="switch" /></label>
+              </section>
+
+              <section class="capture-settings-section" id="captureSettingsScope" aria-labelledby="captureSettingsScopeTitle">
+                <h2 id="captureSettingsScopeTitle">Scope</h2>
+                <label class="capture-settings-row capture-settings-stacked">
+                  <span class="capture-settings-label">In scope</span>
+                  <textarea id="proxySettingScopePatterns" rows="3" placeholder="All hosts"></textarea>
+                </label>
+                <label class="capture-settings-row capture-settings-stacked">
+                  <span class="capture-settings-label">TLS passthrough</span>
+                  <textarea id="proxySettingPassthroughHosts" rows="2" placeholder="None"></textarea>
+                </label>
+              </section>
+
+              <section class="capture-settings-section" id="captureSettingsChain" aria-labelledby="captureSettingsChainTitle">
+                <div class="capture-settings-head">
+                  <h2 id="captureSettingsChainTitle">Proxy chain</h2>
+                  <input class="switch-input" id="proxyChainEnabled" type="checkbox" role="switch" aria-labelledby="captureSettingsChainTitle" data-reveals="proxyChainFields" />
+                </div>
+                <div class="capture-settings-reveal" id="proxyChainFields">
+                  <label class="capture-settings-row capture-settings-stacked">
+                    <span class="capture-settings-label">Upstream proxy</span>
                     <input id="proxyChainUrl" type="text" placeholder="http://127.0.0.1:8081 or socks5h://127.0.0.1:1080" autocomplete="off" spellcheck="false" />
-                    <small>HTTP or SOCKS5, for captured traffic and Replay. SOCKS5 resolves names on the proxy, and a failed connection never goes direct.</small>
                   </label>
-                  <label class="settings-field">
-                    <span>Proxy username (optional)</span>
-                    <input id="proxyChainUsername" type="text" autocomplete="off" spellcheck="false" />
+                  <div class="capture-settings-pair">
+                    <label class="capture-settings-row capture-settings-stacked">
+                      <span class="capture-settings-label">Username</span>
+                      <input id="proxyChainUsername" type="text" placeholder="Optional" autocomplete="off" spellcheck="false" />
+                    </label>
+                    <label class="capture-settings-row capture-settings-stacked">
+                      <span class="capture-settings-label">Password</span>
+                      <input id="proxyChainPassword" type="password" placeholder="Optional" autocomplete="new-password" />
+                    </label>
+                  </div>
+                  <label class="capture-settings-row capture-settings-stacked">
+                    <span class="capture-settings-label">Connect directly to</span>
+                    <textarea id="proxyChainBypassHosts" rows="2" placeholder="None"></textarea>
                   </label>
-                  <label class="settings-field">
-                    <span>Proxy password</span>
-                    <input id="proxyChainPassword" type="password" autocomplete="new-password" />
-                    <small>Saved with this session on disk. Empty the field to remove it.</small>
-                  </label>
-                  <label class="settings-field">
-                    <span>Connect directly to</span>
-                    <textarea id="proxyChainBypassHosts" rows="3" placeholder="localhost&#10;*.internal.example.com"></textarea>
-                    <small>Reached without the proxy chain. Same patterns as Scope.</small>
-                  </label>
-                  <div class="settings-divider"></div>
-                  <label class="settings-field">
-                    <span>Scope patterns</span>
-                    <textarea id="proxySettingScopePatterns" rows="6" placeholder="*.example.com&#10;api.example.com"></textarea>
-                    <small>Empty puts every host in scope.</small>
-                  </label>
-                  <label class="settings-field">
-                    <span>SSL passthrough hosts</span>
-                    <textarea id="proxySettingPassthroughHosts" rows="4" placeholder="*.pinned.example.com&#10;banking.example.com"></textarea>
-                    <small>Not decrypted. For apps that pin their certificate.</small>
-                  </label>
-                  <div class="settings-divider"></div>
-                  <label class="settings-toggle">
-                    <input id="proxySettingOastEnabled" type="checkbox" />
-                    <span>Enable OAST (Out-of-Band Testing)</span>
-                  </label>
-                  <label class="settings-field">
-                    <span>Provider</span>
+                </div>
+              </section>
+
+              <section class="capture-settings-section" id="captureSettingsOast" aria-labelledby="captureSettingsOastTitle">
+                <div class="capture-settings-head">
+                  <h2 id="captureSettingsOastTitle">OAST</h2>
+                  <input class="switch-input" id="proxySettingOastEnabled" type="checkbox" role="switch" aria-labelledby="captureSettingsOastTitle" data-reveals="oastFields" />
+                </div>
+                <div class="capture-settings-reveal" id="oastFields">
+                  <label class="capture-settings-row">
+                    <span class="capture-settings-label">Provider</span>
                     <select id="proxySettingOastProvider">
                       <option value="interactsh">Interactsh</option>
                       <option value="boast">BOAST</option>
                       <option value="custom">Custom</option>
                     </select>
                   </label>
-                  <label class="settings-field">
-                    <span>OAST server URL</span>
-                    <input id="proxySettingOastServerUrl" type="text" placeholder="https://interact.sh" />
-                    <small id="oastServerUrlHint">Sniper registers with it and polls for callbacks.</small>
+                  <label class="capture-settings-row capture-settings-stacked">
+                    <span class="capture-settings-label">Server URL</span>
+                    <input id="proxySettingOastServerUrl" type="text" placeholder="https://interact.sh" autocomplete="off" spellcheck="false" />
                   </label>
-                  <div class="settings-field" id="oastTokenField">
-                    <span>OAST token</span>
-                    <div class="settings-inline-control">
-                      <input id="proxySettingOastToken" type="password" autocomplete="off" spellcheck="false" placeholder="Server authentication token (optional)" aria-label="OAST token" />
+                  <div class="capture-settings-row capture-settings-stacked" id="oastTokenField">
+                    <span class="capture-settings-label">Token<small id="proxySettingOastTokenHint"></small></span>
+                    <span class="settings-inline-control">
+                      <input id="proxySettingOastToken" type="password" autocomplete="off" spellcheck="false" placeholder="Optional" aria-label="OAST token" />
                       <button class="secondary-action" id="proxySettingOastClearToken" type="button">Clear</button>
-                    </div>
-                    <small id="proxySettingOastTokenHint"></small>
+                    </span>
                   </div>
-                  <label class="settings-field">
-                    <span>Polling interval (seconds)</span>
-                    <input id="proxySettingOastInterval" type="number" min="1" max="300" value="5" />
+                  <label class="capture-settings-row">
+                    <span class="capture-settings-label">Polling interval</span>
+                    <span class="capture-settings-unit"><input id="proxySettingOastInterval" type="number" min="1" max="300" value="5" aria-label="Polling interval in seconds" />s</span>
                   </label>
-                  <div class="settings-divider"></div>
-                  <label class="settings-field">
-                    <span>Proxy bind host</span>
-                    <input id="proxySettingBindHost" type="text" list="proxyBindHostPresets" placeholder="127.0.0.1 or 0.0.0.0" required />
-                    <small><code>127.0.0.1</code>: this machine only. <code>0.0.0.0</code>: other devices too.</small>
-                  </label>
-                  <label class="settings-field">
-                    <span>Proxy port</span>
-                    <input id="proxySettingPort" type="number" min="1" max="65535" placeholder="18080" required />
-                    <small id="proxySettingListenerHelp">Changes are saved for the next app start.</small>
-                  </label>
-                  <datalist id="proxyBindHostPresets">
-                    <option value="127.0.0.1"></option>
-                    <option value="0.0.0.0"></option>
-                    <option value="::1"></option>
-                  </datalist>
                 </div>
               </section>
 
-              <section class="panel-card">
-                <header class="panel-toolbar">
-                  <h2>Runtime details</h2>
-                  <div class="toolbar-actions">
-                    <button class="secondary-action" id="openCertFolderButton" type="button">Root CA</button>
+              <section class="capture-settings-section" id="tcpSettingsSection" aria-labelledby="tcpSettingsHeading">
+                <div class="capture-settings-head">
+                  <h2 id="tcpSettingsHeading">TCP listener</h2>
+                  <span class="capture-settings-status" id="tcpListenerStatus" role="status">Loading…</span>
+                </div>
+                <form class="tcp-listener-form" id="tcpListenerForm" aria-describedby="tcpRoutingDisclosure">
+                  <small id="tcpRoutingDisclosure">Connects directly, without the proxy chain.</small>
+                  <div class="tcp-listener-route">
+                    <label class="tcp-listener-field"><span>Listen on 127.0.0.1</span><input id="tcpLocalPort" type="number" min="1" max="65535" step="1" value="9000" required aria-label="TCP listen port" /></label>
+                    <span class="tcp-listener-arrow" aria-hidden="true">→</span>
+                    <label class="tcp-listener-field tcp-listener-host"><span>Target host</span><input id="tcpTargetHost" type="text" placeholder="127.0.0.1" autocomplete="off" spellcheck="false" required /></label>
+                    <label class="tcp-listener-field"><span>Port</span><input id="tcpTargetPort" type="number" min="1" max="65535" step="1" required aria-label="Target port" /></label>
+                    <span class="tcp-listener-actions"><button class="primary-action" id="tcpStart" type="submit" disabled>Start</button><button class="secondary-action" id="tcpStop" type="button" disabled>Stop</button></span>
                   </div>
-                </header>
+                  <p id="tcpSettingsError" class="tcp-error" role="alert"></p>
+                </form>
+              </section>
+
+              <section class="capture-settings-section" id="captureSettingsHistory" aria-labelledby="captureSettingsHistoryTitle">
+                <h2 id="captureSettingsHistoryTitle">History</h2>
+                <div class="history-retention-card" id="historyRetentionSection">
+                  <fieldset class="history-retention-fields" aria-labelledby="historyRetentionHeading" aria-describedby="historyRetentionWarning">
+                    <label class="capture-settings-row">
+                      <span class="capture-settings-label" id="historyRetentionHeading">Delete old HTTP history</span>
+                      <input class="switch-input" id="historyRetentionEnabled" type="checkbox" role="switch" disabled />
+                    </label>
+                    <label class="capture-settings-row" id="historyRetentionPresetField" for="historyRetentionPreset">
+                      <span class="capture-settings-label">Keep the newest</span>
+                      <select id="historyRetentionPreset" disabled><option value="10000">10,000</option><option value="50000">50,000</option><option value="100000">100,000</option><option value="250000">250,000</option><option value="custom">Custom</option></select>
+                    </label>
+                    <label class="capture-settings-row hidden" id="historyRetentionCustomField" for="historyRetentionCustom">
+                      <span class="capture-settings-label">Custom limit</span>
+                      <input id="historyRetentionCustom" type="text" inputmode="numeric" pattern="[0-9]+" placeholder="1 – 4,294,967,295" aria-describedby="historyRetentionError" disabled />
+                    </label>
+                  </fieldset>
+                  <small id="historyRetentionWarning" class="history-retention-warning">Deleted entries cannot be restored.</small>
+                  <p id="historyRetentionError" class="history-retention-error" role="alert"></p>
+                  <div class="capture-settings-actions">
+                    <small id="historyRetentionStatus" role="status" aria-live="polite"></small>
+                    <button class="secondary-action" id="historyRetentionRefresh" type="button">Check status</button>
+                    <button class="secondary-action" id="historyRetentionCancel" type="button" disabled>Cancel</button>
+                    <button class="primary-action" id="historyRetentionSave" type="button" disabled>Save</button>
+                  </div>
+                </div>
+                <div class="upstream-peer-card" id="upstreamPeerSection">
+                  <label class="capture-settings-row">
+                    <span class="capture-settings-label" id="upstreamPeerHeading">Record the server's IP address</span>
+                    <input class="switch-input" id="upstreamPeerEnabled" type="checkbox" role="switch" disabled />
+                  </label>
+                  <p id="upstreamPeerError" class="upstream-peer-error" role="alert"></p>
+                  <div class="capture-settings-actions">
+                    <small id="upstreamPeerStatus" role="status" aria-live="polite"></small>
+                    <button class="secondary-action hidden" id="upstreamPeerRefresh" type="button">Check status</button>
+                    <button class="secondary-action" id="upstreamPeerCancel" type="button" disabled>Cancel</button>
+                    <button class="primary-action" id="upstreamPeerSave" type="button" disabled>Save</button>
+                  </div>
+                </div>
+              </section>
+
+              <section class="capture-settings-section" id="captureSettingsRuntime" aria-labelledby="captureSettingsRuntimeTitle">
+                <div class="capture-settings-head">
+                  <h2 id="captureSettingsRuntimeTitle">Runtime</h2>
+                  <button class="secondary-action" id="openCertFolderButton" type="button">Root CA</button>
+                </div>
                 <dl class="modal-list runtime-list">
                   <dt>Proxy listener</dt>
                   <dd id="proxySettingsProxyAddr">Loading…</dd>
@@ -906,6 +999,12 @@
                   <dd id="proxySettingsCertificateName">Loading…</dd>
                 </dl>
               </section>
+
+              <div class="capture-settings-savebar hidden" id="proxySettingsSaveBar" role="group" aria-label="Unsaved proxy settings">
+                <span>Unsaved changes</span>
+                <button class="secondary-action" id="reloadProxySettingsButton" type="button">Revert</button>
+                <button class="primary-action" id="saveProxySettingsButton" type="button">Save</button>
+              </div>
             </div>
           </section>
         </section>
@@ -975,12 +1074,20 @@
                 <h2>Request</h2>
                 <div class="view-tabs">
                   <button class="replay-view-tab active" data-replay-target="request" data-replay-view="pretty">Pretty</button>
-                  <button class="replay-view-tab" data-replay-target="request" data-replay-view="raw">Raw</button>
-                  <button class="replay-view-tab" data-replay-target="request" data-replay-view="hex">Hex</button>
+                  <button class="replay-view-tab" data-replay-target="request" data-replay-view="raw" title="Edit request text; binary bodies are Base64-encoded">Raw</button>
+                  <button class="replay-view-tab" data-replay-target="request" data-replay-view="hex" title="Request headers and decoded body bytes; reconstructed headers, not a wire transcript. Binary Hex is read-only.">Hex</button>
+                  <button class="replay-fields-tab" hidden data-fields-target="request" title="Inspect Protobuf, MessagePack, CBOR or gRPC fields">Fields</button>
                 </div>
               </header>
               <div class="editor-panel">
                 <div id="replayRequestCM" class="cm-container" data-editor-label="Replay request" style="height:100%"></div>
+              </div>
+              <div id="replayRequestHexPager" class="replay-hex-pager" hidden aria-label="Request hex pages">
+                <span data-hex-range></span>
+                <button type="button" data-hex-previous aria-label="Previous request hex page">‹</button>
+                <input type="number" min="1" step="1" aria-label="Request hex page" />
+                <span data-hex-pages></span>
+                <button type="button" data-hex-next aria-label="Next request hex page">›</button>
               </div>
               <footer class="pane-footer">
                 <label class="pane-search">
@@ -997,7 +1104,8 @@
                 <div class="view-tabs">
                   <button class="replay-view-tab active" data-replay-target="response" data-replay-view="pretty">Pretty</button>
                   <button class="replay-view-tab" data-replay-target="response" data-replay-view="raw">Raw</button>
-                  <button class="replay-view-tab" data-replay-target="response" data-replay-view="hex">Hex</button>
+                  <button class="replay-view-tab" data-replay-target="response" data-replay-view="hex" title="Response headers and decoded body bytes; reconstructed headers, not a wire transcript">Hex</button>
+                  <button class="replay-fields-tab" hidden data-fields-target="response" title="Inspect Protobuf, MessagePack, CBOR or gRPC fields">Fields</button>
                   <button class="replay-view-tab" data-replay-target="response" data-replay-view="render" title="The page as a browser draws it, sandboxed: no scripts, forms, navigation or network">Render</button>
                 </div>
               </header>
@@ -1005,6 +1113,13 @@
                 <div id="replayResponseCM" class="cm-container" data-editor-label="Replay response"></div>
               </div>
               <div id="replayResponseRenderView" class="render-view hidden"></div>
+              <div id="replayResponseHexPager" class="replay-hex-pager" hidden aria-label="Response hex pages">
+                <span data-hex-range></span>
+                <button type="button" data-hex-previous aria-label="Previous response hex page">‹</button>
+                <input type="number" min="1" step="1" aria-label="Response hex page" />
+                <span data-hex-pages></span>
+                <button type="button" data-hex-next aria-label="Next response hex page">›</button>
+              </div>
               <footer class="pane-footer">
                 <label class="pane-search">
                   <input id="replayResponseSearchInput" type="search" aria-label="Search Replay response" placeholder="Search response" />
@@ -1302,6 +1417,17 @@
                         <input id="fuzzerConcurrency" type="number" min="1" max="16" step="1" value="4" />
                       </label>
                       <label class="fuzzer-check" for="fuzzerUrlEncode"><input id="fuzzerUrlEncode" type="checkbox" checked /> URL-encode in the URL</label>
+                      <label class="compact-field fuzzer-delay-field" for="fuzzerDelay" title="Wait between requests: 500, or a random time in a range such as 200-800">
+                        <span>Delay (ms)</span>
+                        <input id="fuzzerDelay" type="text" inputmode="numeric" placeholder="0" spellcheck="false" autocomplete="off" />
+                      </label>
+                    </div>
+                    <div class="fuzzer-control-row fuzzer-stop-options">
+                      <label class="compact-field fuzzer-field-grow" for="fuzzerStopMatch" title="Stop the attack at the first response whose headers or body contain this, in any case">
+                        <span>Stop when the response contains</span>
+                        <input id="fuzzerStopMatch" type="text" maxlength="1024" spellcheck="false" autocomplete="off" />
+                      </label>
+                      <label class="fuzzer-check" for="fuzzerStopRegex"><input id="fuzzerStopRegex" type="checkbox" /> Regex</label>
                     </div>
                   </div>
                 </details>
@@ -1986,6 +2112,28 @@
               </div>
               <p class="modal-copy settings-inline-status" id="installCliPathStatus" role="status" aria-live="polite" aria-atomic="true">Checking command-line availability…</p>
             </section>
+<section class="filter-group" aria-labelledby="vulndataTitle">
+              <div class="filter-group-header">
+                <h3 id="vulndataTitle">Vulnerability data</h3>
+                <div class="filter-group-actions">
+                  <details class="more-menu" id="vulndataMore">
+                    <summary class="secondary-action" aria-label="More">⋯</summary>
+                    <div class="context-menu more-menu-list" role="menu">
+                      <button class="context-menu-item" id="vulndataUpdateNow" type="button" role="menuitem">Update now</button>
+                      <button class="context-menu-item" id="vulndataImportMenu" type="button" role="menuitem">Import…</button>
+                    </div>
+                  </details>
+                </div>
+              </div>
+              <div class="vulndata-update">
+                <span id="vulndataUpdateLabel">Update daily</span>
+                <button class="switch" id="vulndataAutoUpdate" type="button" role="switch" aria-checked="true" aria-labelledby="vulndataUpdateLabel"></button>
+              </div>
+              <ul class="vulndata-sources" id="vulndataSources"></ul>
+              <p class="modal-copy hidden" id="vulndataRescanNote">Traffic captured before the data arrived needs a Findings Rescan.</p>
+              <p class="modal-copy settings-inline-status" id="vulndataMessage" role="status" aria-live="polite"></p>
+              <input class="hidden" id="vulndataImportFile" type="file" multiple accept=".json,.csv,.gz,application/json,text/csv,application/gzip" />
+            </section>
 <section class="filter-group filter-group-wide">
               <div class="filter-group-header">
                 <h3>Certificate authority</h3>
@@ -2269,6 +2417,15 @@
     <script src="/recon.js" defer></script>
     <script src="/templates.js" defer></script>
     <script src="/fuzzer-workflow.js" defer></script>
+    <script src="/grpc-envelope.js" defer></script>
+    <script src="/cbor-reader.js" defer></script>
+    <script src="/cbor-editor.js" defer></script>
+    <script src="/msgpack-reader.js" defer></script>
+    <script src="/msgpack-editor.js" defer></script>
+    <script src="/protobuf-wire.js" defer></script>
+    <script src="/protobuf-edit.js" defer></script>
+    <script src="/protobuf-fields.js" defer></script>
+    <script src="/tcp-capture.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

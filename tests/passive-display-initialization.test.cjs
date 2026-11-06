@@ -100,7 +100,7 @@ function fixture() {
       assert.ok(!options || options.method === "POST");
       const request = { ...deferred(), options }; requests.push(request); return request.promise;
     },
-    restoreModalFocus: target => target?.focus(), renderShortcutReference() {}, selectSettingsTab() {},
+    restoreModalFocus: target => target?.focus(), renderShortcutReference() {}, loadVulndataStatus() {}, selectSettingsTab() {},
     redrawResponsePreviews: () => redraws++,
     serializeHttpFilterSettings: () => state.filterSettings || {},
     serializeWorkbenchPaneWidths: () => state.workbenchPaneWidths,

@@ -22,7 +22,10 @@ function classList(initial = "") {
 }
 
 function tabFixture() {
-  const document = { activeElement: null };
+  const document = {
+    activeElement: null,
+    getElementById(id) { assert.equal(id, "tcpPanel"); return null; },
+  };
   const saved = [], loads = [];
   function node(dataset = {}, classes = "") {
     const handlers = new Map(), attrs = new Map();
@@ -91,7 +94,7 @@ function tabFixture() {
     loadWebsocketsPageRefresh: async () => loads.push("websockets"),
     loadTransactions: async () => loads.push("history"),
     consumeHistoryLoadOptions: () => ({}),
-    applySavedWebsocketPaneWidth() {}, hydrateDisplaySettingsForm() {}, applyDisplaySettingsState() {}, renderShortcutReference() {},
+    applySavedWebsocketPaneWidth() {}, hydrateDisplaySettingsForm() {}, applyDisplaySettingsState() {}, renderShortcutReference() {}, loadVulndataStatus() {},
     displaySettingsReturnFocus: null, displaySettingsPreviewActive: false, displaySettingsEditedControls: new Set(),
     window: { getComputedStyle: value => ({ visibility: value.visibility }) },
     fetch() { assert.fail("Passive tab tests must not make requests"); },

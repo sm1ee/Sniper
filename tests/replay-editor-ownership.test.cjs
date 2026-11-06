@@ -98,19 +98,93 @@ for (const boundary of ["same-ID replacement", "session identity", "workspace ge
   });
 }
 
-test("Pretty and Raw preserve same-owner history; Hex round-trip starts clean editable history", () => {
-  const f = editorFixture(); f.render(); editPath(f); const cv = f.cv();
-  f.state.replayMessageViews.request = "pretty"; f.context.renderReplayViewContent("request");
+function switchView(f, mode) {
+  f.state.replayMessageViews.request = mode;
+  f.context.renderReplayViewContent("request");
+}
+
+for (const mode of ["raw", "pretty"]) test(`${mode} and Hex round-trips preserve same-owner undo and redo`, () => {
+  const f = editorFixture(); f.render(); const original = lf(f.a.requestText);
+  editPath(f); const edited = f.a.requestText, cv = f.cv();
+  switchView(f, mode);
   assert.equal(f.cv(), cv); assert.equal(f.undo(), true); assert.equal(f.redo(), true);
-  const text = f.a.requestText;
-  f.state.replayMessageViews.request = "hex"; f.context.renderReplayViewContent("request");
-  assert.notEqual(f.cv(), cv); assert.equal(cv.view.destroyed, true);
-  assert.equal(f.cv()._editable, false);
-  assert.equal(f.undo(), false);
-  f.state.replayMessageViews.request = "raw"; f.context.renderReplayViewContent("request");
-  assert.equal(f.cv()._editable, true); assert.equal(f.cv().getContent(), text);
+  cv.view.dispatch({ selection: { anchor: 3, head: 8 } });
+  const selection = f.selection();
+  for (let i = 0; i < 3; i++) {
+    const old = f.cv(); switchView(f, "hex");
+    assert.notEqual(f.cv(), old); assert.equal(old.view.destroyed, true);
+    assert.equal(f.cv()._editable, false); assert.equal(f.undo(), false);
+    f.render(); f.render(); // Read-only redraws must keep the suspended state.
+    switchView(f, mode);
+    assert.equal(f.cv()._editable, true); assert.equal(f.cv().getContent(), edited);
+    assert.deepEqual(f.selection(), selection);
+    assert.equal(f.undo(), true); assert.equal(f.a.requestText, original);
+    assert.equal(f.undo(), false); assert.equal(f.redo(), true); assert.equal(f.a.requestText, edited);
+    f.cv().view.dispatch({ selection: { anchor: 3, head: 8 } });
+  }
+});
+
+test("Hex preserves a redo-only stack without duplicating change listeners", () => {
+  const f = editorFixture(); f.render(); const original = lf(f.a.requestText);
+  editPath(f); const edited = f.a.requestText;
+  assert.equal(f.undo(), true);
+  for (let i = 0; i < 3; i++) { switchView(f, "hex"); switchView(f, "raw"); }
+  const revision = f.a.protobufEditRevision;
+  assert.equal(f.undo(), false); assert.equal(f.cv().getContent(), original);
+  assert.equal(f.redo(), true); assert.equal(f.a.requestText, edited);
+  assert.equal(f.a.protobufEditRevision, revision + 1, "one change listener runs for one undo or redo");
+  assert.equal(f.redo(), false);
+});
+
+for (const boundary of ["other tab", "same-ID replacement", "session identity", "workspace generation", "session clear", "WebSocket tab", "container replacement", "missing owner", "changed draft"]) {
+  test(`a suspended Hex history cannot cross ${boundary}`, () => {
+    const f = editorFixture(); f.render(); editPath(f);
+    switchView(f, "hex");
+    if (boundary === "other tab") f.switchTo(f.b);
+    if (boundary === "same-ID replacement") f.state.replayTabs[0] = { ...f.a };
+    if (boundary === "session identity") f.state.activeSession = { id: "session-b" };
+    if (boundary === "workspace generation") f.context.workspaceStateGeneration++;
+    if (boundary === "session clear") f.context.renderReplayClearedState();
+    if (boundary === "WebSocket tab") {
+      f.state.replayTabs.push({ id: "ws", type: "websocket" });
+      f.state.activeReplayTabId = "ws"; f.render(); f.state.activeReplayTabId = f.a.id;
+    }
+    if (boundary === "container replacement") f.els.replayRequestCM = {};
+    if (boundary === "missing owner") f.context.renderedHttpReplayDraftOwner = null;
+    if (boundary === "changed draft") {
+      f.a.requestBytes = null;
+      f.a.requestText = "GET /replacement HTTP/1.1\nHost: example.com\n\n";
+    }
+    f.render(); switchView(f, "raw");
+    assert.equal(f.cv().getContent(), lf(f.context.getActiveReplayTab().requestText));
+    assert.equal(f.undo(), false); assert.equal(f.redo(), false);
+    if (boundary === "other tab") {
+      f.switchTo(f.a); assert.equal(f.undo(), false); assert.equal(f.redo(), false);
+    }
+  });
+}
+
+for (const action of ["close", "duplicate"]) test(`${action} while in Hex retires suspended undo history`, async () => {
+  const f = editorFixture(); f.render(); editPath(f); switchView(f, "hex");
+  if (action === "close") await f.context.closeRepeaterTab(f.a.id);
+  else f.context.duplicateActiveReplayTab();
+  switchView(f, "raw");
+  assert.notEqual(f.context.getActiveReplayTab(), f.a);
   assert.equal(f.undo(), false); assert.equal(f.redo(), false);
-  editPath(f); assert.equal(f.undo(), true); assert.equal(f.cv().getContent(), text);
+});
+
+test("history suspension requires opt-in and cannot retain a different callback", () => {
+  const f = editorFixture(); const owner = {}, container = {};
+  const callback = () => {};
+  const update = (text, editable, options = {}) => f.context.updateCodePaneCM("replayReq", container, text,
+    { mode: editable ? "http" : "hex", readOnly: !editable, owner, onChange: editable ? callback : undefined, ...options });
+  update("original", true); f.edit(0, 8, "edited");
+  update("hex", false); update("edited", true);
+  assert.equal(f.undo(), false, "other managed editors do not opt in implicitly");
+  f.edit(0, 6, "changed");
+  update("hex", false, { preserveEditableState: true });
+  update("changed", true, { preserveEditableState: true, onChange: () => {} });
+  assert.equal(f.undo(), false, "restored extensions must not call an obsolete listener");
 });
 
 for (const focus of ["editor", "toolbar", "tab button"]) {
@@ -144,3 +218,20 @@ for (const route of ["Ctrl+Tab", "Ctrl+Shift+Tab", "duplicate", "close"]) {
     assert.equal(f.document.activeElement, f.cv().view.contentDOM);
   });
 }
+
+
+test("a same-owner redraw cannot mislabel the listener in suspended state", () => {
+  const f = editorFixture(), owner = {}, container = {};
+  let callsA = 0, callsB = 0;
+  const callbackA = () => callsA++, callbackB = () => callsB++;
+  const update = (text, editable, callback) => f.context.updateCodePaneCM("replayReq", container, text,
+    { mode: editable ? "http" : "hex", readOnly: !editable, owner,
+      onChange: callback, preserveEditableState: true });
+  update("original", true, callbackA); f.edit(0, 8, "edited");
+  update("edited", true, callbackB);
+  update("hex", false);
+  update("edited", true, callbackB);
+  assert.equal(f.undo(), false, "the actual saved listener differs from the requested one");
+  f.edit(0, 6, "changed");
+  assert.equal(callsA, 1); assert.equal(callsB, 1);
+});

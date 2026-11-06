@@ -121,6 +121,9 @@ pub struct SessionListing {
     pub summary: SessionSummary,
     pub overview: SessionOverview,
     pub storage_bytes: u64,
+    /// Retained TCP records, or unknown if their storage cannot be summarized.
+    #[serde(default)]
+    pub tcp_connection_count: Option<usize>,
 }
 
 /// Findings counted by severity.
@@ -616,6 +619,7 @@ fn wait_snapshot_gate(gate: &mut Option<SnapshotTestGate>, phase: SnapshotTestPh
 }
 
 pub struct SessionContext {
+    pub tcp_capture: Arc<crate::tcp_capture::TcpCapture>,
     pub(crate) upstream_peer_settings: crate::upstream_peer_settings::SessionPeerSettingsState,
     pub(crate) history_retention: crate::history_retention::SessionRetentionState,
     retention_writable: bool,
@@ -762,6 +766,9 @@ impl SessionContext {
             store.mark_retention_compaction_pending(transaction_event_sequence);
         }
         Self {
+            tcp_capture: Arc::new(crate::tcp_capture::TcpCapture::load(
+                storage_dir.join("tcp-history"),
+            )),
             upstream_peer_settings: Default::default(),
             history_retention: Default::default(),
             retention_writable: enable_journal,
@@ -1220,6 +1227,7 @@ impl SessionContext {
         tab_id: &str,
         expected_revision: u64,
         operation: SavedReplayTabOperation,
+        actor: &str,
     ) -> std::result::Result<WorkspaceStateSnapshot, WorkspaceTransformError<anyhow::Error>> {
         let _mutation_guard = self.mutation_lock.lock().await;
         let _persist_guard = self.persist_lock.lock().await;
@@ -1228,7 +1236,7 @@ impl SessionContext {
             .transform_snapshot_checked_persisting(
                 expected_revision,
                 |current| {
-                    let mut next = transform_saved_replay_tab(current, tab_id, operation)?;
+                    let mut next = transform_saved_replay_tab(current, tab_id, operation, actor)?;
                     next.session_id = Some(self.id());
                     next.revision = expected_revision + 1;
                     next.expected_active_session_id = None;
@@ -2029,6 +2037,7 @@ impl SessionRegistry {
                 ),
                 overview: metadata.overview.clone(),
                 storage_bytes: 0,
+                tcp_connection_count: None,
             })
             .collect::<Vec<_>>();
         sessions.sort_by_key(|session| std::cmp::Reverse(session.summary.last_opened_at));
@@ -9767,6 +9776,7 @@ mod tests {
             title: "Old persisted finding".to_string(),
             detail: String::new(),
             evidence: String::new(),
+            scheme: String::new(),
             host: "old.example".to_string(),
             path: "/".to_string(),
             location: None,
@@ -13122,6 +13132,7 @@ mod tests {
             title: "synthetic".into(),
             detail: String::new(),
             evidence: String::new(),
+            scheme: String::new(),
             host: "example.com".into(),
             path: "/".into(),
             location: None,

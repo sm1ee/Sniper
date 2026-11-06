@@ -1296,6 +1296,46 @@ async fn handle_request(
     Ok(response)
 }
 
+fn cancelled_intercept_response(method: &str) -> Response<Body> {
+    let mut response = text_response_for_method(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Proxy intercept cancelled for a forced session switch.".to_owned(),
+        method,
+    );
+    response
+        .headers_mut()
+        .insert(CONNECTION, HeaderValue::from_static("close"));
+    response
+}
+
+async fn run_abortable_intercept_wait<F: Future>(
+    session_id: Uuid,
+    future: F,
+) -> std::result::Result<F::Output, futures_util::future::Aborted> {
+    let task_id = Uuid::new_v4();
+    let (abort, registration) = AbortHandle::new_pair();
+    remember_session_task(session_id, task_id, PROXY_WORK_HTTP_REQUEST, abort);
+    // Only the queue wait is cancellable, never transaction journaling. The
+    // caller must return without forwarding or recording on cancellation.
+    // Its service can also disappear on disconnect, so unregister on Drop.
+    let _registration_guard = SessionTaskRegistration {
+        session_id,
+        task_id,
+    };
+    Abortable::new(future, registration).await
+}
+
+struct SessionTaskRegistration {
+    session_id: Uuid,
+    task_id: Uuid,
+}
+
+impl Drop for SessionTaskRegistration {
+    fn drop(&mut self) {
+        forget_session_task(self.session_id, self.task_id);
+    }
+}
+
 async fn handle_connect(
     request: Request<Incoming>,
     state: Arc<AppState>,
@@ -3038,8 +3078,9 @@ async fn forward_http_request(
     let client_request = editable_request.clone();
     let (intercepted_request, intercept_edited) =
         match maybe_intercept_request(session.clone(), peer_addr, editable_request, false).await {
-            InterceptResolution::Forward { request, edited } => (request, edited),
-            InterceptResolution::Drop(request) => {
+            Err(_) => return cancelled_intercept_response(parts.method.as_str()),
+            Ok(InterceptResolution::Forward { request, edited }) => (request, edited),
+            Ok(InterceptResolution::Drop(request)) => {
                 let dropped = build_dropped_transaction(
                     state.as_ref(),
                     request,
@@ -3132,7 +3173,8 @@ async fn forward_http_request(
             )
             .await;
             match intercepted {
-                ResponseInterceptResolution::PassThrough => {
+                Err(_) => return cancelled_intercept_response(&response_method),
+                Ok(ResponseInterceptResolution::PassThrough) => {
                     // No intercept — use original raw bytes directly to avoid
                     // lossy UTF-8 conversion that corrupts gzip/br bodies.
                     rebuild_response(
@@ -3142,10 +3184,10 @@ async fn forward_http_request(
                         &response_method,
                     )
                 }
-                ResponseInterceptResolution::Forward {
+                Ok(ResponseInterceptResolution::Forward {
                     response: edited,
                     edited: was_edited,
-                } => {
+                }) => {
                     let headers = header_map_from_records(&edited.headers);
                     let body = Bytes::from(edited.body_bytes());
                     let status = StatusCode::from_u16(edited.status)
@@ -3167,7 +3209,7 @@ async fn forward_http_request(
                     ));
                     rebuild_response(headers, status, body, &response_method)
                 }
-                ResponseInterceptResolution::Drop => {
+                Ok(ResponseInterceptResolution::Drop) => {
                     let message = "Response dropped in intercept.";
                     let (response, response_capture) = synthetic_error_response_for_method(
                         StatusCode::BAD_GATEWAY,
@@ -3208,8 +3250,9 @@ async fn forward_websocket_request(
     let client_request = editable_request.clone();
     let (forwarded_request, ws_intercept_edited) =
         match maybe_intercept_request(session.clone(), peer_addr, editable_request, true).await {
-            InterceptResolution::Forward { request, edited } => (request, edited),
-            InterceptResolution::Drop(request) => {
+            Err(_) => return cancelled_intercept_response(parts.method.as_str()),
+            Ok(InterceptResolution::Forward { request, edited }) => (request, edited),
+            Ok(InterceptResolution::Drop(request)) => {
                 let dropped = build_dropped_transaction(
                     state.as_ref(),
                     request,
@@ -3749,34 +3792,34 @@ async fn maybe_intercept_request(
     peer_addr: SocketAddr,
     request: EditableRequest,
     is_websocket: bool,
-) -> InterceptResolution {
+) -> std::result::Result<InterceptResolution, futures_util::future::Aborted> {
     if !session.runtime.intercept_enabled().await {
-        return InterceptResolution::Forward {
+        return Ok(InterceptResolution::Forward {
             request,
             edited: false,
-        };
+        });
     }
 
     if special_host::is_special_host(&request.host) {
-        return InterceptResolution::Forward {
+        return Ok(InterceptResolution::Forward {
             request,
             edited: false,
-        };
+        });
     }
     if session.runtime.intercept_scope_only().await
         && !session.runtime.is_in_scope(&request.host).await
     {
-        return InterceptResolution::Forward {
+        return Ok(InterceptResolution::Forward {
             request,
             edited: false,
-        };
+        });
     }
 
     if !session.intercept_rules.matches_any(&request).await {
-        return InterceptResolution::Forward {
+        return Ok(InterceptResolution::Forward {
             request,
             edited: false,
-        };
+        });
     }
 
     session
@@ -3792,16 +3835,22 @@ async fn maybe_intercept_request(
         )
         .await;
 
-    let resolution = session
-        .intercepts
-        .enqueue(InterceptRecord {
+    let resolution = run_abortable_intercept_wait(
+        session.id(),
+        session.intercepts.enqueue(InterceptRecord {
             id: Uuid::new_v4(),
             started_at: Utc::now(),
             peer_addr: peer_addr.to_string(),
             request,
             is_websocket,
-        })
-        .await;
+        }),
+    )
+    .await;
+    if resolution.is_err() {
+        // Only the cancelled consumer was closed. Keep other live queue entries
+        // held even if activation subsequently fails or a different owner is busy.
+        session.intercepts.discard_cancelled().await;
+    }
     persist_session_state_quiet(&session);
     resolution
 }
@@ -3812,18 +3861,18 @@ async fn maybe_intercept_response(
     status: StatusCode,
     headers: &HeaderMap,
     body: &Bytes,
-) -> ResponseInterceptResolution {
+) -> std::result::Result<ResponseInterceptResolution, futures_util::future::Aborted> {
     if !session.runtime.intercept_enabled().await {
-        return ResponseInterceptResolution::PassThrough;
+        return Ok(ResponseInterceptResolution::PassThrough);
     }
 
     if special_host::is_special_host(&record.host) {
-        return ResponseInterceptResolution::PassThrough;
+        return Ok(ResponseInterceptResolution::PassThrough);
     }
     if session.runtime.intercept_scope_only().await
         && !session.runtime.is_in_scope(&record.host).await
     {
-        return ResponseInterceptResolution::PassThrough;
+        return Ok(ResponseInterceptResolution::PassThrough);
     }
 
     let editable_request = record.editable_request();
@@ -3832,7 +3881,7 @@ async fn maybe_intercept_response(
         .matches_any_response(&editable_request)
         .await
     {
-        return ResponseInterceptResolution::PassThrough;
+        return Ok(ResponseInterceptResolution::PassThrough);
     }
 
     session
@@ -3853,19 +3902,27 @@ async fn maybe_intercept_response(
         .await;
 
     let editable = editable_response_from_parts(status, headers, body);
-    let resolution = session
-        .response_intercepts
-        .enqueue(ResponseInterceptRecord {
-            id: Uuid::new_v4(),
-            started_at: Utc::now(),
-            scheme: record.scheme.clone(),
-            host: record.host.clone(),
-            method: record.method.clone(),
-            path: record.path.clone(),
-            status: status.as_u16(),
-            response: editable.clone(),
-        })
-        .await;
+    let resolution = run_abortable_intercept_wait(
+        session.id(),
+        session
+            .response_intercepts
+            .enqueue(ResponseInterceptRecord {
+                id: Uuid::new_v4(),
+                started_at: Utc::now(),
+                scheme: record.scheme.clone(),
+                host: record.host.clone(),
+                method: record.method.clone(),
+                path: record.path.clone(),
+                status: status.as_u16(),
+                response: editable.clone(),
+            }),
+    )
+    .await;
+    if resolution.is_err() {
+        // Only the cancelled consumer was closed. Keep other live queue entries
+        // held even if activation subsequently fails or a different owner is busy.
+        session.response_intercepts.discard_cancelled().await;
+    }
     persist_session_state_quiet(&session);
     resolution
 }
@@ -3912,9 +3969,13 @@ fn scan_record_for_session(
     let scan_generation = scanner.clear_generation();
     let scan_session = Arc::clone(session);
     let templates = Arc::clone(&state.templates);
+    let vulndata = Arc::clone(&state.vulndata);
     spawn_tracked_proxy_task(session.id(), PROXY_WORK_CAPTURE_TASK, async move {
         let config = scanner.get_config().await;
         let mut findings = crate::scanner::scan_transaction(&record, &config);
+        if config.is_rule_enabled(crate::vulndata::findings::CATEGORY) {
+            findings.extend(known_vulnerability_findings(&vulndata, &record).await);
+        }
         if config.enabled {
             findings.extend(passive_template_findings(&templates, &scan_session, record).await);
         }
@@ -3930,6 +3991,31 @@ fn scan_record_for_session(
             persist_session_state_quiet(&scan_session);
         }
     });
+}
+
+/// The library versions a record names that the vulnerability data lists
+/// advisories for. Like the passive templates, matching runs on the blocking
+/// pool, and a record that finds no free permit skips it for Rescan.
+async fn known_vulnerability_findings(
+    vulndata: &crate::vulndata::VulnData,
+    record: &TransactionRecord,
+) -> Vec<crate::scanner::ScannerFinding> {
+    let Some(index) = vulndata.index() else {
+        return Vec::new();
+    };
+    if !crate::vulndata::findings::may_name_a_library(record) {
+        return Vec::new();
+    }
+    let Some(permit) = vulndata.try_permit() else {
+        return Vec::new();
+    };
+    let record = record.clone();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        crate::vulndata::findings::for_record(&index, &record)
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// The findings of the Nuclei templates the operator turned on, for a record
@@ -5307,7 +5393,11 @@ fn editable_request_from_parts(
         });
     }
 
-    let body_encoding = if is_raw_request_body_utf8(request_bytes.as_ref()) {
+    let binary_mime = headers.iter().any(|header| {
+        header.name.eq_ignore_ascii_case("content-type")
+            && crate::model::is_binary_body_content_type(Some(&header.value))
+    });
+    let body_encoding = if !binary_mime && is_raw_request_body_utf8(request_bytes.as_ref()) {
         BodyEncoding::Utf8
     } else {
         BodyEncoding::Base64
@@ -5864,6 +5954,8 @@ static ACTIVE_SESSION_TASKS: LazyLock<
 pub(crate) const PROXY_WORK_STREAMED_RESPONSE: &str = "streamed response";
 /// Post-capture work such as scanning. Short-lived; waiting is enough.
 pub(crate) const PROXY_WORK_CAPTURE_TASK: &str = "capture task";
+/// A live request served by the HTTP proxy, including its intercept wait.
+pub(crate) const PROXY_WORK_HTTP_REQUEST: &str = "HTTP request";
 /// A replay or other API-driven exchange the user started.
 pub(crate) const PROXY_WORK_REPLAY: &str = "replay";
 /// An HTTPS CONNECT tunnel. A browser holds these open for minutes at a time, so
@@ -9418,6 +9510,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn intercept_abort_registration_is_session_scoped_and_releases_on_cancel() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let first = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_abortable_intercept_wait(first, async move {
+            ready_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        }));
+        ready_rx.await.unwrap();
+        assert_eq!(abort_session_tracked_tasks(other), 0);
+        assert_eq!(abort_session_idle_tunnels(first), 0);
+        assert!(!task.is_finished());
+        assert_eq!(abort_session_tracked_tasks(first), 1);
+        assert!(task.await.unwrap().is_err());
+        assert_eq!(abort_session_tracked_tasks(first), 0);
+
+        assert_eq!(
+            run_abortable_intercept_wait(first, async { 42 })
+                .await
+                .unwrap(),
+            42
+        );
+        assert_eq!(abort_session_tracked_tasks(first), 0);
+    }
+
+    #[tokio::test]
+    async fn intercept_abort_registration_releases_when_service_disappears() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let session_id = Uuid::new_v4();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_abortable_intercept_wait(session_id, async move {
+            ready_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        }));
+        ready_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(abort_session_tracked_tasks(session_id), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_intercept_response_closes_connection_and_obeys_head() {
+        for method in ["GET", "HEAD"] {
+            let response = cancelled_intercept_response(method);
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()[CONNECTION], "close");
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            if method == "HEAD" {
+                assert!(bytes.is_empty());
+            } else {
+                assert_eq!(
+                    bytes.as_ref(),
+                    b"Proxy intercept cancelled for a forced session switch."
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn forced_intercept_cancel_is_safe_when_activation_commit_fails() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let (state, data_dir) = test_proxy_state("sniper-force-intercept-failed-activation");
+        let original = state.session().await;
+        original
+            .runtime
+            .update(
+                serde_json::from_value(serde_json::json!({
+                    "intercept_enabled": true, "intercept_scope_only": false
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let target = state
+            .sessions
+            .create_session(Some("Synthetic target".into()))
+            .unwrap();
+        let held = tokio::spawn({
+            let state = state.clone();
+            async move {
+                let (session, _owner) = state.session_with_proxy_owner().await;
+                maybe_intercept_request(
+                    session,
+                    "127.0.0.1:1".parse().unwrap(),
+                    editable_request("example.com"),
+                    false,
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while original.intercepts.list().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        state
+            .sessions
+            .fail_next_activation(crate::session::SessionActivationFault::BeforeReplacement);
+        assert!(state
+            .activate_session_with_options(target.id, true)
+            .await
+            .is_err());
+        assert!(held.await.unwrap().is_err());
+        assert_eq!(state.active_session_summary().await.id, original.id());
+        assert!(original.intercepts.list().await.is_empty());
+        assert!(!session_has_active_proxy_work(original.id()));
+        assert_eq!(abort_session_tracked_tasks(original.id()), 0);
+        assert_eq!(
+            state.activate_session(target.id).await.unwrap().id,
+            target.id
+        );
+        drop(original);
+        drop(state);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
     async fn aborting_session_tasks_releases_work_that_never_finishes() {
         let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         // An HTTPS tunnel or a WebSocket relay runs for as long as the client
@@ -9516,6 +9728,29 @@ mod tests {
             .headers
             .iter()
             .any(|header| header.name.eq_ignore_ascii_case("content-length")));
+    }
+
+    #[test]
+    fn proxy_intercept_preserves_utf8_shaped_binary_bodies() {
+        let body = Bytes::from_static(b"\x0a\x03A\r\n");
+        for mime in [
+            "application/protobuf",
+            "application/msgpack",
+            "application/cbor",
+            "application/grpc+json",
+        ] {
+            let request = Request::builder()
+                .method("POST")
+                .uri("http://example.com/upload")
+                .header(CONTENT_TYPE, mime)
+                .body(())
+                .unwrap();
+            let (parts, _) = request.into_parts();
+            let uri: Uri = "http://example.com/upload".parse().unwrap();
+            let editable = editable_request_from_parts(&parts, &body, &uri);
+            assert_eq!(editable.body_encoding, BodyEncoding::Base64);
+            assert_eq!(editable.body_bytes(), body.as_ref());
+        }
     }
 
     #[test]

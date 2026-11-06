@@ -39,7 +39,7 @@ function fixture() {
     DISPLAY_UI_FONT_OPTIONS: new Set(["plex", "system", "notokr"]),
     DISPLAY_MONO_FONT_OPTIONS: new Set(["jetbrains", "sfmono", "plexmono"]),
     clamp: (value, min, max) => Math.min(max, Math.max(min, value)),
-    renderShortcutReference() {}, selectSettingsTab() {},
+    renderShortcutReference() {}, loadVulndataStatus() {}, selectSettingsTab() {},
     restoreModalFocus: target => { restored.push(target); document.activeElement = target; },
     persistUiSettings: async () => { writes.push({ ...state.displaySettings }); },
     sanitizeHistoryColumnWidths: value => value || {}, sanitizeHistoryColumnOrder: value => value || [],
