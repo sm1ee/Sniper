@@ -48,9 +48,10 @@ These routes are sniper-cli's, so a pin or label it sets on a tab the person
 opened also sets `changed_by` on that tab.
 
 `opened_by` and `changed_by` name who drove sniper-cli: the `X-Sniper-Actor`
-header it sends, which is `SNIPER_ACTOR` when set, else `Claude` when Claude
-Code runs it (Claude Code sets `CLAUDECODE=1`), else absent, which the server
-records as `CLI`. The server also writes them on a whole-workspace save with
+header it sends, which is `SNIPER_ACTOR` when set, else `Codex` when Codex
+runs it (`CODEX_THREAD_ID`, `CODEX_SANDBOX` or `CODEX_MANAGED_PACKAGE_ROOT`
+is set), else `Claude` when Claude Code runs it (`CLAUDECODE=1`), else absent,
+which the server records as `CLI`. The server also writes them on a whole-workspace save with
 `client_id: "sniper-cli"`: a tab it adds gets `opened_by`, a tab of the
 person's it changes gets `changed_by`, and marks already stored are kept even
 when an older sniper-cli leaves the fields out.

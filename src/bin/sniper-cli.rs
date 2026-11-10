@@ -3068,12 +3068,27 @@ fn api_failure_detail(status: StatusCode, message: String) -> String {
 }
 
 /// Every request says who drives the CLI, so Replay can name it on the tabs
-/// it opens or changes: SNIPER_ACTOR when set, else Claude when Claude Code
-/// runs the command (it sets CLAUDECODE=1 for the commands it runs). With
-/// neither, the server says the CLI did it.
+/// it opens or changes: SNIPER_ACTOR when set, else the agent running the
+/// command. Codex sets CODEX_THREAD_ID on its commands, CODEX_SANDBOX when it
+/// sandboxes them, and its npm launcher CODEX_MANAGED_PACKAGE_ROOT; Claude
+/// Code sets CLAUDECODE=1. Codex is checked first because Codex started from
+/// Claude Code, as Claude Code's Codex plugin starts it, inherits CLAUDECODE.
+/// With none, the server says the CLI did it.
 fn api_client_builder() -> reqwest::ClientBuilder {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
     let actor = std::env::var("SNIPER_ACTOR").ok().or_else(|| {
-        (std::env::var("CLAUDECODE").as_deref() == Ok("1")).then(|| "Claude".to_string())
+        if [
+            "CODEX_THREAD_ID",
+            "CODEX_SANDBOX",
+            "CODEX_MANAGED_PACKAGE_ROOT",
+        ]
+        .into_iter()
+        .any(set)
+        {
+            Some("Codex".to_string())
+        } else {
+            (std::env::var("CLAUDECODE").as_deref() == Ok("1")).then(|| "Claude".to_string())
+        }
     });
     let mut headers = reqwest::header::HeaderMap::new();
     if let Some(value) =
