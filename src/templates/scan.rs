@@ -42,6 +42,7 @@ use super::{
 };
 use crate::{
     event_log::EventLevel,
+    fuzzer::FuzzerDelay,
     model::{BodyEncoding, EditableRequest, HeaderRecord, TransactionRecord},
     oast::OastCallback,
     proxy::TemplateScanSendError,
@@ -151,6 +152,9 @@ pub struct ScanJob {
     pub redirects_not_followed: usize,
     pub matched: usize,
     pub rate: u32,
+    /// The wait between requests, besides the rate's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay: Option<FuzzerDelay>,
     pub concurrency: usize,
     pub max_requests: usize,
     pub allow_risks: Vec<String>,
@@ -366,6 +370,9 @@ pub struct StartScan {
     pub allow_risks: Vec<String>,
     #[serde(default = "default_rate")]
     pub rate: u32,
+    /// The wait between requests, as Fuzzer takes it; the rate still holds.
+    #[serde(default)]
+    pub delay: Option<FuzzerDelay>,
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,
     #[serde(default = "default_max_requests")]
@@ -594,6 +601,9 @@ pub async fn start(
             "Limits: rate 1–50 requests a second, concurrency 1–8, max_requests 1–{MAX_MAX_REQUESTS}."
         )));
     }
+    if let Some(delay) = request.delay {
+        delay.check().map_err(bad_request)?;
+    }
     let allowed = parse_risks(&request.allow_risks).map_err(bad_request)?;
     let (metas, ignored) = match (request.ids.is_empty(), &request.filter) {
         (false, None) => state.templates.active_selection(&request.ids, None),
@@ -677,6 +687,7 @@ pub async fn start(
             oast_unavailable,
             allow_risks,
             rate: request.rate,
+            delay: request.delay.filter(|delay| delay.max_ms > 0),
             concurrency: request.concurrency,
             max_requests: request.max_requests,
             apply_match_replace: request.apply_match_replace,
@@ -723,6 +734,7 @@ struct Plan {
     oast_unavailable: usize,
     allow_risks: Vec<String>,
     rate: u32,
+    delay: Option<FuzzerDelay>,
     concurrency: usize,
     max_requests: usize,
     apply_match_replace: bool,
@@ -747,6 +759,7 @@ async fn launch(
         oast_unavailable,
         allow_risks,
         rate,
+        delay,
         concurrency,
         max_requests,
         apply_match_replace,
@@ -819,6 +832,7 @@ async fn launch(
         templates: templates.len(),
         planned,
         rate,
+        delay,
         concurrency,
         max_requests,
         allow_risks,
@@ -892,6 +906,7 @@ async fn launch(
         max_requests,
         concurrency,
         gap: Duration::from_secs(1) / rate,
+        delay,
         next_slot: tokio::sync::Mutex::new(Instant::now()),
         sent: AtomicUsize::new(0),
         limit_reached: AtomicBool::new(false),
@@ -1020,6 +1035,7 @@ pub fn pump(
                 oast_unavailable,
                 allow_risks: Vec::new(),
                 rate,
+                delay: None,
                 concurrency,
                 max_requests: planned.clamp(1, MAX_MAX_REQUESTS),
                 apply_match_replace: false,
@@ -1235,6 +1251,7 @@ struct Run {
     concurrency: usize,
     /// Time between two requests, across all workers.
     gap: Duration,
+    delay: Option<FuzzerDelay>,
     next_slot: tokio::sync::Mutex<Instant>,
     sent: AtomicUsize,
     limit_reached: AtomicBool,
@@ -1546,12 +1563,16 @@ impl Run {
         taken
     }
 
-    /// Waits for this request's turn: one every `gap`, across all workers.
+    /// Waits for this request's turn: one every `gap`, or every delay when
+    /// that is longer, across all workers.
     async fn pace(&self) {
+        let gap = self
+            .delay
+            .map_or(self.gap, |delay| delay.sample().max(self.gap));
         let at = {
             let mut next = self.next_slot.lock().await;
             let at = (*next).max(Instant::now());
-            *next = at + self.gap;
+            *next = at + gap;
             at
         };
         tokio::time::sleep_until(at).await;
@@ -3480,6 +3501,82 @@ mod tests {
         server.abort();
     }
 
+    // A delay spaces the requests further apart than the rate does, as
+    // Fuzzer's does, and the job keeps it.
+    #[tokio::test]
+    async fn a_delay_spaces_a_scans_requests_and_stays_with_its_job() {
+        let (address, _log, server) = site(1, false).await;
+        let state = scan_state("delay", &[]).await;
+        let session = state.session().await;
+        let target = format!("http://{address}");
+        for delay in [
+            serde_json::json!({"min_ms": 800, "max_ms": 200}),
+            serde_json::json!({"min_ms": 0, "max_ms": 60_001}),
+        ] {
+            let refused = start(
+                State(state.clone()),
+                Json(request(
+                    session.id(),
+                    serde_json::json!({
+                        "targets": [target], "ids": ["example-slow"],
+                        "acknowledged": true, "delay": delay,
+                    }),
+                )),
+            )
+            .await;
+            assert_eq!(refused.unwrap_err().0, StatusCode::BAD_REQUEST, "{delay}");
+        }
+        let began = Instant::now();
+        let started = start(
+            State(state.clone()),
+            Json(request(
+                session.id(),
+                serde_json::json!({
+                    "targets": [target], "ids": ["example-slow"],
+                    "acknowledged": true, "rate": 50,
+                    "delay": {"min_ms": 300, "max_ms": 300},
+                }),
+            )),
+        )
+        .await
+        .unwrap()
+        .0;
+        let id: Uuid = serde_json::from_value(started["id"].clone()).unwrap();
+        let job = finished(&state, id).await;
+        assert_eq!(job.sent, 3, "{job:?}");
+        // Three requests, two waits between them.
+        assert!(
+            began.elapsed() >= Duration::from_millis(600),
+            "{:?}",
+            began.elapsed()
+        );
+        assert_eq!(
+            job.delay,
+            Some(crate::fuzzer::FuzzerDelay {
+                min_ms: 300,
+                max_ms: 300
+            })
+        );
+        // A delay of nothing is none: the job does not say "0 ms apart".
+        let started = start(
+            State(state.clone()),
+            Json(request(
+                session.id(),
+                serde_json::json!({
+                    "targets": [target], "ids": ["example-slow"],
+                    "acknowledged": true, "rate": 50,
+                    "delay": {"min_ms": 0, "max_ms": 0},
+                }),
+            )),
+        )
+        .await
+        .unwrap()
+        .0;
+        let id: Uuid = serde_json::from_value(started["id"].clone()).unwrap();
+        assert_eq!(finished(&state, id).await.delay, None);
+        server.abort();
+    }
+
     // "Turned on": the templates whose On box is ticked, whatever the search.
     #[tokio::test]
     async fn a_scan_can_take_the_templates_turned_on() {
@@ -3621,6 +3718,7 @@ mod tests {
             max_requests: 10,
             concurrency: 1,
             gap: Duration::from_millis(1),
+            delay: None,
             next_slot: tokio::sync::Mutex::new(Instant::now()),
             sent: AtomicUsize::new(0),
             limit_reached: AtomicBool::new(false),
@@ -3710,6 +3808,7 @@ mod tests {
             max_requests: 10,
             concurrency: 1,
             gap: Duration::from_millis(1),
+            delay: None,
             next_slot: tokio::sync::Mutex::new(Instant::now()),
             sent: AtomicUsize::new(0),
             limit_reached: AtomicBool::new(false),

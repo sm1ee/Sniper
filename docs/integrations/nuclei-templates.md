@@ -44,8 +44,10 @@ them rather than slow capture, and the library status counts it as
 
 By default a manual scan sends the templates turned on in the list's On
 column. It can take the list's search results or the selected template
-instead. To tick On for several at once, use **Turn on all** (shown once the
-list is narrowed) or Shift-click a range. Results replace the list, one row
+instead. A click anywhere in a row's On cell ticks it; Shift-click sets a
+range. **Turn on all** and **Turn off all**, shown once the list is narrowed,
+change only the templates listed, and say how many. **N on** lists the
+templates turned on, whatever the search. Results replace the list, one row
 per request; a row opens what was sent and what came back.
 
 ### What it sends
@@ -166,6 +168,9 @@ Templates tagged `dos` are never sent.
 - Rate: 1 to 50 requests a second across the scan, default 10. Concurrency: 1
   to 8 templates at once, default 4. A template's requests go one after
   another.
+- Delay: a wait between requests, as Fuzzer takes it: `500` ms, or a random
+  time in a range such as `200-800`, up to 60,000. It slows the scan below the
+  rate, never above it. The auto scan has none.
 - `max_requests` caps a scan at 1 to 50,000 requests, default 10,000, redirect
   hops included. A scan whose planned requests already exceed it does not
   start.
@@ -327,7 +332,7 @@ id repeats, the first file wins.
 | `GET /api/templates` | List; query `search` (a substring of the id, name, path, tags, CVEs, description or references), `severity` (comma-separated), `protocol`, `support` (`passive`, `active`, `unsupported`), `tag`, `enabled`, `sort` (`on`, `severity`, `name`, `mode`, `tags`) with `direction` (`asc`, the most severe first for severity, or `desc`), `limit` (at most 30,000), `offset`. Each template's `requests` is the most one scan sends a target before redirects; a flow can stop sooner. |
 | `GET /api/templates/:id` | One template with its description, references and YAML. |
 | `POST /api/templates/passive` | Body `{"ids": [...], "enabled": bool}` or `{"filter": {...list query...}, "enabled": bool}`. Ids that cannot run passively are ignored and counted. |
-| `POST /api/templates/scans` | Body: `session_id`, `targets`, `ids` or `filter` (a list query; `{"enabled": true}` takes the templates turned on), `allow_risks`, `rate`, `concurrency`, `max_requests`, `apply_match_replace`, `history` (`all`, the default, or `matched`), plus `"preview": true` to count or `"acknowledged": true` to start. A start returns the scan; 409 while one runs. |
+| `POST /api/templates/scans` | Body: `session_id`, `targets`, `ids` or `filter` (a list query; `{"enabled": true}` takes the templates turned on), `allow_risks`, `rate`, `delay` (`{"min_ms", "max_ms"}`, optional), `concurrency`, `max_requests`, `apply_match_replace`, `history` (`all`, the default, or `matched`), plus `"preview": true` to count or `"acknowledged": true` to start. A start returns the scan; 409 while one runs. |
 | `GET /api/templates/scans?session_id=` | The session's scans, newest first, without results or request logs. |
 | `GET /api/templates/scans/:id?session_id=` | One scan with its results (each naming the matched history record) and its latest requests. |
 | `POST /api/templates/scans/:id/stop` | Body `{"session_id"}`. Stops the running scan. |

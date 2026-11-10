@@ -699,6 +699,10 @@ struct TemplatesScanArgs {
     /// Requests a second across the scan.
     #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=50))]
     rate: u64,
+    /// Wait between requests, in milliseconds: `500`, or a random time in a
+    /// range such as `200-800`; the rate still holds
+    #[arg(long, alias = "sleep", value_parser = parse_fuzzer_delay)]
+    delay: Option<FuzzerDelay>,
     /// Templates in flight at once.
     #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u64).range(1..=8))]
     concurrency: u64,
@@ -1089,6 +1093,9 @@ fn templates_scan_body(
         "apply_match_replace": args.apply_match_replace,
         "history": args.history,
     });
+    if let Some(delay) = args.delay {
+        body["delay"] = json!(delay);
+    }
     if args.on {
         body["filter"] = json!({"enabled": true});
     } else if args.ids.is_empty() {
@@ -1108,6 +1115,7 @@ fn templates_scan_input(args: &TemplatesScanArgs) -> Value {
         ("ids", json!(args.ids)),
         ("allow_risks", json!(args.allow_risks)),
         ("rate", json!(args.rate)),
+        ("delay", json!(args.delay)),
         ("concurrency", json!(args.concurrency)),
         ("max_requests", json!(args.max_requests)),
         ("apply_match_replace", json!(args.apply_match_replace)),
@@ -6776,6 +6784,7 @@ fn templates_input_schema(operation: &str) -> Option<Value> {
             properties["ids"] = json!({"type":["array","null"],"items":{"type":"string","pattern":"^([a-zA-Z0-9]+[-_])*[a-zA-Z0-9]+$"},"maxItems":30000,"description":"Template ids. Exactly one of ids or a filter (search, severity, tag)."});
             properties["allow_risks"] = json!({"type":["array","null"],"items":{"type":"string","enum":["intrusive","default-login","bruteforce","token-spray","credential-stuffing","fuzz","fuzzing","dast","osint","method:put","method:delete","method:patch"]},"description":"Risks to allow by name; templates with any other risk are left out. dos never runs."});
             properties["rate"] = json!({"type":["integer","null"],"minimum":1,"maximum":50,"default":10,"description":"Requests a second across the scan. Null uses 10."});
+            properties["delay"] = json!({"type":["integer","string","null"],"description":"Wait between requests in milliseconds, up to 60000: 500, or a random time in a range such as \"200-800\". The rate still holds. Null waits only for the rate."});
             properties["concurrency"] = json!({"type":["integer","null"],"minimum":1,"maximum":8,"default":4,"description":"Templates in flight at once. Null uses 4."});
             properties["max_requests"] = json!({"type":["integer","null"],"minimum":1,"maximum":50000,"default":10000,"description":"The most requests the scan sends, redirects included. Null uses 10000."});
             properties["apply_match_replace"] = json!({"type":["boolean","null"],"default":false,"description":"Apply the session's Match & Replace rules; a request a rule would send elsewhere is not sent."});
@@ -7398,6 +7407,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "tag",
             "allow_risks",
             "rate",
+            "delay",
             "concurrency",
             "max_requests",
             "apply_match_replace",
@@ -9222,6 +9232,7 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 filter: call_templates_filter(operation, input)?,
                 allow_risks: call_optional(operation, input, "allow_risks")?.unwrap_or_default(),
                 rate: bounded("rate", 10, 50)?,
+                delay: call_delay(operation, input)?,
                 concurrency: bounded("concurrency", 4, 8)?,
                 max_requests: bounded("max_requests", 10_000, 50_000)?,
                 apply_match_replace: call_bool(operation, input, "apply_match_replace")?,
@@ -9823,15 +9834,7 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
             if !(1..=16).contains(&concurrency) {
                 bail!("invalid field `concurrency` for `{operation}`; expected 1-16");
             }
-            // Milliseconds as a number, or the flag's `500` / `200-800` text.
-            let delay = match call_optional::<Value>(operation, input, "delay")? {
-                None => None,
-                Some(Value::Number(ms)) => Some(parse_fuzzer_delay(&ms.to_string())),
-                Some(Value::String(text)) => Some(parse_fuzzer_delay(&text)),
-                Some(_) => Some(Err("expected milliseconds or a range".to_string())),
-            }
-            .transpose()
-            .map_err(|error| anyhow!("invalid field `delay` for `{operation}`; {error}"))?;
+            let delay = call_delay(operation, input)?;
             let stop_on_match = call_optional::<String>(operation, input, "stop_on_match")?;
             let stop_on_regex = call_optional::<String>(operation, input, "stop_on_regex")?;
             if stop_on_match.is_some() && stop_on_regex.is_some() {
@@ -10360,6 +10363,18 @@ fn call_templates_filter(operation: &str, input: &Value) -> Result<TemplatesFilt
 
 fn call_bool(operation: &str, input: &Value, field: &str) -> Result<bool> {
     Ok(call_optional::<bool>(operation, input, field)?.unwrap_or(false))
+}
+
+/// `delay` as milliseconds, or the flag's `500` / `200-800` text.
+fn call_delay(operation: &str, input: &Value) -> Result<Option<FuzzerDelay>> {
+    match call_optional::<Value>(operation, input, "delay")? {
+        None => None,
+        Some(Value::Number(ms)) => Some(parse_fuzzer_delay(&ms.to_string())),
+        Some(Value::String(text)) => Some(parse_fuzzer_delay(&text)),
+        Some(_) => Some(Err("expected milliseconds or a range".to_string())),
+    }
+    .transpose()
+    .map_err(|error| anyhow!("invalid field `delay` for `{operation}`; {error}"))
 }
 
 fn call_service_map_tokens(
@@ -22632,6 +22647,33 @@ mod tests {
             json!({"targets":target,"on":true,"history":"some"})
         )
         .is_err());
+        // A wait between requests, as Fuzzer takes it.
+        let paced = scan(
+            "templates.scan.start",
+            json!({"targets":target,"on":true,"delay":"200-800"}),
+        )
+        .unwrap();
+        assert_eq!(
+            super::command_api_preview(&paced).unwrap()["body"]["delay"],
+            json!({"min_ms":200,"max_ms":800})
+        );
+        assert!(scan(
+            "templates.scan.start",
+            json!({"targets":target,"on":true,"delay":"9-1"})
+        )
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "templates",
+            "scan",
+            "start",
+            "--target",
+            "https://app.example.com",
+            "--on",
+            "--sleep",
+            "500",
+        ])
+        .is_ok());
         assert!(Cli::try_parse_from([
             "sniper-cli",
             "templates",

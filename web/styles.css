@@ -9380,7 +9380,7 @@ button.utility-button.replay-tab-add {
 .vulndata-error { color: var(--danger); font-size: var(--font-xs); overflow-wrap: anywhere; }
 .templates-auto-fields { display: grid; grid-template-columns: minmax(0, 1fr) 84px; gap: 10px; align-items: start; }
 .templates-options[open] > summary { margin-bottom: 10px; }
-.templates-limits { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.templates-limits { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 /* Risks a scan may also send, as chips that light up when allowed. */
 .templates-risks { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
 .templates-chip-toggle { position: relative; display: inline-flex; cursor: pointer; }
@@ -9459,6 +9459,8 @@ button.utility-button.replay-tab-add {
 /* One line per value keeps rows level; the detail beside shows the rest. */
 .templates-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
 .templates-table .templates-off { color: var(--text-dim); }
+/* The whole cell ticks its box; Shift-click sets a range without selecting text. */
+.templates-table .templates-on-cell { cursor: pointer; -webkit-user-select: none; user-select: none; }
 .templates-table .templates-name,
 .templates-table .recon-help { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .templates-yaml {

@@ -111,7 +111,17 @@ pub struct FuzzerDelay {
 }
 
 impl FuzzerDelay {
-    fn sample(&self) -> Duration {
+    /// Template scans take the same delay, under the same limits.
+    pub(crate) fn check(&self) -> Result<(), String> {
+        if self.min_ms > self.max_ms || self.max_ms > MAX_FUZZER_DELAY_MS {
+            return Err(format!(
+                "The delay is 0–{MAX_FUZZER_DELAY_MS} ms, its shortest no longer than its longest."
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn sample(&self) -> Duration {
         let ms = if self.max_ms > self.min_ms {
             rand::thread_rng().gen_range(self.min_ms..=self.max_ms)
         } else {
@@ -560,13 +570,8 @@ pub async fn start_attack(
             "Concurrency is 1–{MAX_FUZZER_CONCURRENCY} requests at once."
         )));
     }
-    if options
-        .delay
-        .is_some_and(|delay| delay.min_ms > delay.max_ms || delay.max_ms > MAX_FUZZER_DELAY_MS)
-    {
-        return Err(FuzzerStartError::Invalid(format!(
-            "The delay is 0–{MAX_FUZZER_DELAY_MS} ms, its shortest no longer than its longest."
-        )));
+    if let Some(delay) = options.delay {
+        delay.check().map_err(FuzzerStartError::Invalid)?;
     }
     let stop_matcher = options
         .stop_match
