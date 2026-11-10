@@ -14,10 +14,15 @@ use std::{
     io::{Read, Seek, SeekFrom},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{mpsc, Mutex, OnceLock},
     time::Duration,
 };
+
+#[cfg(target_os = "macos")]
+use disclaimed::Child as BrowserChild;
+#[cfg(not(target_os = "macos"))]
+use std::process::Child as BrowserChild;
 
 use anyhow::{anyhow, Result};
 use base64::Engine as _;
@@ -1281,27 +1286,200 @@ fn spawn_browser(
     args: &[String],
     profile: &Path,
     keep_log: bool,
-) -> Result<Child, LaunchError> {
-    let log = if keep_log {
-        fs::File::create(profile.join(LAUNCH_LOG))
-            .map(Stdio::from)
-            .unwrap_or_else(|_| Stdio::null())
-    } else {
-        Stdio::null()
-    };
-    Command::new(exe)
+) -> Result<BrowserChild, LaunchError> {
+    let log = keep_log
+        .then(|| fs::File::create(profile.join(LAUNCH_LOG)).ok())
+        .flatten();
+    #[cfg(target_os = "macos")]
+    let spawned = disclaimed::spawn(exe, args, log.as_ref());
+    #[cfg(not(target_os = "macos"))]
+    let spawned = Command::new(exe)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(log)
-        .spawn()
+        .stderr(log.map_or_else(Stdio::null, Stdio::from))
+        .spawn();
+    spawned
         .map_err(|error| LaunchError::Failed(format!("could not start {}: {error}", exe.display())))
+}
+
+/// On macOS a browser Sniper starts answers for itself. macOS asks the process
+/// responsible for a child about the privacy permissions the child uses (screen
+/// recording, input monitoring), and Sniper's ad-hoc signature changes with every
+/// build, so a browser answering as Sniper lost each grant at the next build. As
+/// its own responsible process it is asked under its maker's signature, which
+/// keeps. Chromium and LLDB start processes this way. It stays Sniper's child.
+#[cfg(target_os = "macos")]
+mod disclaimed {
+    use std::{
+        ffi::{c_char, c_int, CString},
+        fs, io, iter,
+        os::unix::{
+            ffi::{OsStrExt, OsStringExt},
+            io::AsRawFd,
+            process::ExitStatusExt,
+        },
+        path::Path,
+        process::ExitStatus,
+        ptr,
+    };
+
+    pub(super) struct Child {
+        pid: libc::pid_t,
+    }
+
+    impl Child {
+        pub(super) fn id(&self) -> u32 {
+            self.pid as u32
+        }
+
+        pub(super) fn wait(&mut self) -> io::Result<ExitStatus> {
+            let mut status = 0;
+            loop {
+                if unsafe { libc::waitpid(self.pid, &mut status, 0) } == self.pid {
+                    return Ok(ExitStatus::from_raw(status));
+                }
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    /// What `std::process::Command` does with stdin and stdout on /dev/null, plus
+    /// the disclaim, which it has no way to ask for.
+    pub(super) fn spawn(
+        exe: &Path,
+        args: &[String],
+        stderr: Option<&fs::File>,
+    ) -> io::Result<Child> {
+        let program = CString::new(exe.as_os_str().as_bytes())?;
+        let argv = iter::once(Ok(program.clone()))
+            .chain(args.iter().map(|arg| CString::new(arg.as_str())))
+            .collect::<Result<Vec<_>, _>>()?;
+        // std copies the environment under its lock; `environ` read directly
+        // could be changing under another thread.
+        let env: Vec<CString> = std::env::vars_os()
+            .filter_map(|(key, value)| {
+                let mut pair = key.into_vec();
+                pair.push(b'=');
+                pair.extend(value.into_vec());
+                CString::new(pair).ok()
+            })
+            .collect();
+        let (argv, envp) = (terminated(&argv), terminated(&env));
+
+        let mut attr = Attr::new()?;
+        let mut actions = Actions::new()?;
+        let null = c"/dev/null".as_ptr();
+        let mut pid = 0;
+        unsafe {
+            let files = &mut actions.0;
+            check(libc::posix_spawn_file_actions_addopen(
+                files,
+                0,
+                null,
+                libc::O_RDONLY,
+                0,
+            ))?;
+            check(libc::posix_spawn_file_actions_addopen(
+                files,
+                1,
+                null,
+                libc::O_WRONLY,
+                0,
+            ))?;
+            check(match stderr {
+                Some(log) => libc::posix_spawn_file_actions_adddup2(files, log.as_raw_fd(), 2),
+                None => libc::posix_spawn_file_actions_addopen(files, 2, null, libc::O_WRONLY, 0),
+            })?;
+            // Rust ignores SIGPIPE and Command gives it back to the child. Nothing
+            // but the three descriptors above is inherited.
+            let mut sigpipe = 0;
+            libc::sigemptyset(&mut sigpipe);
+            libc::sigaddset(&mut sigpipe, libc::SIGPIPE);
+            check(libc::posix_spawnattr_setsigdefault(&mut attr.0, &sigpipe))?;
+            check(libc::posix_spawnattr_setflags(
+                &mut attr.0,
+                (libc::POSIX_SPAWN_SETSIGDEF | libc::POSIX_SPAWN_CLOEXEC_DEFAULT) as libc::c_short,
+            ))?;
+            // Private, so looked up rather than linked: where it is missing the
+            // browser still opens, answering as Sniper.
+            let symbol = libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"responsibility_spawnattrs_setdisclaim".as_ptr(),
+            );
+            if !symbol.is_null() {
+                let disclaim: unsafe extern "C" fn(*mut libc::posix_spawnattr_t, c_int) -> c_int =
+                    std::mem::transmute(symbol);
+                let _ = disclaim(&mut attr.0, 1);
+            }
+            check(libc::posix_spawnp(
+                &mut pid,
+                program.as_ptr(),
+                &actions.0,
+                &attr.0,
+                argv.as_ptr(),
+                envp.as_ptr(),
+            ))?;
+        }
+        Ok(Child { pid })
+    }
+
+    /// The NULL-terminated array exec takes; `strings` must outlive it.
+    fn terminated(strings: &[CString]) -> Vec<*mut c_char> {
+        strings
+            .iter()
+            .map(|string| string.as_ptr().cast_mut())
+            .chain(iter::once(ptr::null_mut()))
+            .collect()
+    }
+
+    fn check(code: c_int) -> io::Result<()> {
+        match code {
+            0 => Ok(()),
+            code => Err(io::Error::from_raw_os_error(code)),
+        }
+    }
+
+    struct Attr(libc::posix_spawnattr_t);
+
+    impl Attr {
+        fn new() -> io::Result<Self> {
+            let mut attr = ptr::null_mut();
+            check(unsafe { libc::posix_spawnattr_init(&mut attr) })?;
+            Ok(Self(attr))
+        }
+    }
+
+    impl Drop for Attr {
+        fn drop(&mut self) {
+            unsafe { libc::posix_spawnattr_destroy(&mut self.0) };
+        }
+    }
+
+    struct Actions(libc::posix_spawn_file_actions_t);
+
+    impl Actions {
+        fn new() -> io::Result<Self> {
+            let mut actions = ptr::null_mut();
+            check(unsafe { libc::posix_spawn_file_actions_init(&mut actions) })?;
+            Ok(Self(actions))
+        }
+    }
+
+    impl Drop for Actions {
+        fn drop(&mut self) {
+            unsafe { libc::posix_spawn_file_actions_destroy(&mut self.0) };
+        }
+    }
 }
 
 /// Waits on the process so it is reaped, then forgets it: clears the registry and
 /// owner record under the same lock a launch takes, and deletes a throwaway profile.
 fn watch_browser(
-    mut child: Child,
+    mut child: BrowserChild,
     profile: &Path,
     pid: u32,
     exe: &Path,
@@ -1389,7 +1567,7 @@ fn remove_profile_with_retry(profile: &Path) {
 
 /// Detached handoffs: the process exits as soon as the running browser takes the
 /// request, and something has to collect it.
-fn reap_in_background(mut child: Child, slot: HandoffSlot) {
+fn reap_in_background(mut child: BrowserChild, slot: HandoffSlot) {
     let _ = std::thread::Builder::new()
         .name("sniper-browser-reap".to_string())
         .spawn(move || {
@@ -1731,6 +1909,7 @@ pub(crate) fn forget_driver_ports(profile: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Child;
 
     #[test]
     fn spki_hash_is_the_sha256_of_the_public_key_info() {
@@ -2614,16 +2793,46 @@ mod tests {
             fs::write(profile.join("Cookies"), b"x").unwrap();
             let successor = browser_process(successor_for, &flags(&profile, &[]));
             lock(&profile, &format!("host-{}", successor.id()));
-            let first = Command::new(SHELL)
-                .args(["-c", &format!("sleep {lived}; {ends_with}")])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
+            let first = spawn_browser(
+                Path::new(SHELL),
+                &["-c".to_string(), format!("sleep {lived}; {ends_with}")],
+                &profile,
+                false,
+            )
+            .unwrap();
             let (tx, _rx) = mpsc::channel();
             let pid = first.id();
             watch_browser(first, &profile, pid, Path::new(SHELL), true, tx).unwrap();
             (root, profile, successor)
+        }
+
+        // macOS asks the process responsible for a child about the privacy
+        // permissions the child uses. A browser that answered as Sniper lost each
+        // grant at the next build, since Sniper's ad-hoc signature changes with it.
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn a_browser_answers_for_itself_on_macos() {
+            let symbol = unsafe {
+                libc::dlsym(
+                    libc::RTLD_DEFAULT,
+                    c"responsibility_get_pid_responsible_for_pid".as_ptr(),
+                )
+            };
+            assert!(!symbol.is_null());
+            let responsible: unsafe extern "C" fn(libc::pid_t) -> libc::pid_t =
+                unsafe { std::mem::transmute(symbol) };
+            let mut child = spawn_browser(
+                Path::new("/bin/sleep"),
+                &["5".to_string()],
+                &std::env::temp_dir(),
+                false,
+            )
+            .unwrap();
+            let pid = child.id() as libc::pid_t;
+            let answers = unsafe { responsible(pid) };
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            let _ = child.wait();
+            assert_eq!(answers, pid, "the browser answers as Sniper");
         }
 
         fn wait_until_gone(path: &Path, within: Duration) -> bool {
