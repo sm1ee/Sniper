@@ -71,8 +71,36 @@ use crate::{
     upstream_proxy::UpstreamProxyRouteSnapshot,
 };
 
-const REPLAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const REPLAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a request Sniper sends for the operator may take: to connect, to
+/// stay silent while the response is awaited or read, and in all.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RequestTimeouts {
+    pub connect: Duration,
+    pub idle: Duration,
+    pub total: Duration,
+}
+
+impl RequestTimeouts {
+    fn apply(self, builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+        builder
+            .connect_timeout(self.connect)
+            .read_timeout(self.idle)
+            .timeout(self.total)
+    }
+}
+
+/// Replay and Fuzzer. Silence is timed, not the whole exchange, so a large
+/// body still arriving is not cut off. Two minutes outlasts the gateways in
+/// front of most services (nginx and AWS ALB give up at 60 s, Cloudflare at
+/// 100 s), so their own 504 reaches the operator first, and leaves room for a
+/// time-based payload. Five minutes ends a response that trickles in forever.
+pub(crate) const REPLAY_TIMEOUTS: RequestTimeouts = RequestTimeouts {
+    connect: REPLAY_CONNECT_TIMEOUT,
+    idle: Duration::from_secs(120),
+    total: Duration::from_secs(300),
+};
 const PROXY_ACCEPT_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(50);
 const PROXY_ACCEPT_RETRY_MAX_DELAY: Duration = Duration::from_secs(1);
 const WEBSOCKET_CAPTURE_PREVIEW_BYTES: usize = 64 * 1024;
@@ -649,6 +677,7 @@ pub async fn try_send_replay_request_for_session(
         &request,
         target.as_ref(),
         requested_http_version,
+        REPLAY_TIMEOUTS,
     )
     .await
     .map_err(ReplaySendError::without_record)?;
@@ -677,6 +706,7 @@ pub async fn try_send_replay_request_for_session(
         SocketPeerCapture::Disabled,
         request_color,
         None,
+        Some(REPLAY_TIMEOUTS),
     )
     .await;
 
@@ -823,6 +853,7 @@ pub(crate) async fn send_template_scan_request(
         SocketPeerCapture::Disabled,
         request_color,
         None,
+        None,
     )
     .await;
     match exchange.response {
@@ -946,18 +977,25 @@ fn render_resource_content_type(headers: &HeaderMap) -> Option<String> {
 fn build_legacy_tls_client(
     upstream_insecure: bool,
     proxy: &crate::upstream_proxy::UpstreamProxy,
+    timeouts: Option<RequestTimeouts>,
 ) -> Option<ProxyClient> {
-    // A TLS compatibility retry must use the configured chain as well.
-    proxy
+    // A TLS compatibility retry must use the configured chain as well, and the
+    // limits of the attempt it repeats: browser traffic has none, a Replay has
+    // REPLAY_TIMEOUTS.
+    let builder = proxy
         .apply(Client::builder())
         .ok()?
         .redirect(Policy::none())
         .danger_accept_invalid_certs(upstream_insecure)
         .http1_only()
         .connect_timeout(REPLAY_CONNECT_TIMEOUT)
-        .use_native_tls()
-        .build()
-        .ok()
+        .use_native_tls();
+    match timeouts {
+        Some(timeouts) => timeouts.apply(builder),
+        None => builder,
+    }
+    .build()
+    .ok()
 }
 
 /// Whether a failed send is worth one more attempt over the platform TLS stack.
@@ -1005,14 +1043,15 @@ async fn build_replay_client(
     request: &EditableRequest,
     target: Option<&RequestTargetOverride>,
     http_version: Option<Version>,
+    timeouts: RequestTimeouts,
 ) -> Result<ProxyClient> {
-    let mut builder = proxy
-        .apply(Client::builder())?
-        .use_rustls_tls()
-        .redirect(Policy::none())
-        .danger_accept_invalid_certs(upstream_insecure)
-        .timeout(REPLAY_REQUEST_TIMEOUT)
-        .connect_timeout(REPLAY_CONNECT_TIMEOUT);
+    let mut builder = timeouts.apply(
+        proxy
+            .apply(Client::builder())?
+            .use_rustls_tls()
+            .redirect(Policy::none())
+            .danger_accept_invalid_certs(upstream_insecure),
+    );
 
     // Force HTTP version if specified
     match http_version {
@@ -3159,6 +3198,7 @@ async fn forward_http_request(
         SocketPeerCapture::ForwardedHttp(upstream_proxy.route_snapshot()),
         request_color,
         Some(response_rules),
+        None,
     )
     .await;
     let mut record = exchange.record.clone();
@@ -3313,6 +3353,7 @@ async fn forward_websocket_request(
             SocketPeerCapture::Disabled,
             request_color,
             None,
+            None,
         )
         .await;
         let record = exchange.record.clone();
@@ -3401,6 +3442,7 @@ async fn forward_websocket_request(
             None,
             SocketPeerCapture::Disabled,
             request_color,
+            None,
             None,
         )
         .await;
@@ -4309,7 +4351,8 @@ async fn execute_streaming_http_exchange(
         if should_retry_over_legacy_tls(error, absolute_uri.scheme_str()) {
             let upstream_insecure = session.runtime.upstream_insecure().await;
             let upstream_proxy = session.runtime.upstream_proxy().await;
-            if let Some(legacy_client) = build_legacy_tls_client(upstream_insecure, &upstream_proxy)
+            if let Some(legacy_client) =
+                build_legacy_tls_client(upstream_insecure, &upstream_proxy, None)
             {
                 peer_capture.use_attempt(upstream_proxy.route_snapshot());
                 let retried = build_outbound(&legacy_client).send().await;
@@ -4525,7 +4568,7 @@ fn stream_upstream_response_body(
                             break;
                         }
                         Some(Err(error)) => {
-                            let message = format!("Failed to read upstream response body: {error}");
+                            let message = format!("Failed to read upstream response body: {error:#}");
                             notes.push(message.clone());
                             let _ = tx.send(Err(std::io::Error::other(message))).await;
                             break;
@@ -4764,6 +4807,7 @@ async fn execute_http_exchange(
     peer_capture: SocketPeerCapture,
     request_color: Option<String>,
     response_rules: Option<Vec<MatchReplaceRule>>,
+    retry_timeouts: Option<RequestTimeouts>,
 ) -> ExecutedExchange {
     let rules = match response_rules {
         Some(rules) => rules,
@@ -4784,6 +4828,7 @@ async fn execute_http_exchange(
         outbound_uri_authority,
         peer_capture,
         rules,
+        retry_timeouts,
     )
     .await;
     exchange.record.color_tag = exchange.record.color_tag.or(request_color);
@@ -4805,6 +4850,7 @@ async fn execute_http_exchange_with_rules(
     outbound_uri_authority: Option<&str>,
     peer_capture: SocketPeerCapture,
     response_rules: Vec<MatchReplaceRule>,
+    retry_timeouts: Option<RequestTimeouts>,
 ) -> ExecutedExchange {
     let request_headers = header_map_from_records(&request.headers);
     let request_body = request.body_bytes();
@@ -4964,7 +5010,8 @@ async fn execute_http_exchange_with_rules(
         if should_retry_over_legacy_tls(error, absolute_uri.scheme_str()) {
             let upstream_insecure = session.runtime.upstream_insecure().await;
             let upstream_proxy = session.runtime.upstream_proxy().await;
-            if let Some(legacy_client) = build_legacy_tls_client(upstream_insecure, &upstream_proxy)
+            if let Some(legacy_client) =
+                build_legacy_tls_client(upstream_insecure, &upstream_proxy, retry_timeouts)
             {
                 peer_capture.use_attempt(upstream_proxy.route_snapshot());
                 let retried = build_outbound(&legacy_client).send().await;
@@ -5137,7 +5184,7 @@ async fn finish_buffered_http_exchange(
                     }
                 }
                 Err(error) => {
-                    let message = format!("Failed to read upstream response body: {error}");
+                    let message = format!("Failed to read upstream response body: {error:#}");
                     notes.push(message.clone());
                     session
                         .event_log
@@ -7851,8 +7898,135 @@ mod tests {
 
     #[test]
     fn a_legacy_tls_client_can_be_built() {
-        assert!(super::build_legacy_tls_client(true, &Default::default()).is_some());
-        assert!(super::build_legacy_tls_client(false, &Default::default()).is_some());
+        assert!(super::build_legacy_tls_client(true, &Default::default(), None).is_some());
+        assert!(super::build_legacy_tls_client(false, &Default::default(), None).is_some());
+    }
+
+    /// A server that reads the request and then says nothing.
+    async fn silent_upstream() -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4096];
+                    let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buffer).await;
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    drop(socket);
+                });
+            }
+        });
+        address
+    }
+
+    const SHORT_LIMITS: super::RequestTimeouts = super::RequestTimeouts {
+        connect: Duration::from_secs(2),
+        idle: Duration::from_millis(300),
+        total: Duration::from_secs(3),
+    };
+
+    #[test]
+    fn replay_waits_two_minutes_for_a_silent_server_and_five_for_any_answer() {
+        assert_eq!(super::REPLAY_TIMEOUTS.connect, Duration::from_secs(10));
+        assert_eq!(super::REPLAY_TIMEOUTS.idle, Duration::from_secs(120));
+        assert_eq!(super::REPLAY_TIMEOUTS.total, Duration::from_secs(300));
+    }
+
+    #[tokio::test]
+    async fn a_replay_to_a_server_that_stays_silent_ends_at_the_idle_limit() {
+        let address = silent_upstream().await;
+        let request = editable_request(&address.to_string());
+        let client = super::build_replay_client(
+            false,
+            &Default::default(),
+            &request,
+            None,
+            None,
+            SHORT_LIMITS,
+        )
+        .await
+        .unwrap();
+        let started = Instant::now();
+        let error = client
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_timeout(), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the idle limit ended it, not the total"
+        );
+    }
+
+    // The retry over the platform TLS stack is a second client: it once had
+    // only a connect limit, so a server that took the retry and went silent
+    // kept a Replay tab sending for good.
+    #[tokio::test]
+    async fn the_legacy_tls_retry_keeps_the_limits_of_the_first_attempt() {
+        let address = silent_upstream().await;
+        let client =
+            super::build_legacy_tls_client(false, &Default::default(), Some(SHORT_LIMITS)).unwrap();
+        let started = Instant::now();
+        let error = client
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_timeout(), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn a_response_that_never_stops_trickling_ends_at_the_total_limit() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buffer).await;
+            let head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, head).await;
+            // A byte every 100 ms: never idle, never finished.
+            loop {
+                if tokio::io::AsyncWriteExt::write_all(&mut socket, b"1\r\na\r\n")
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+        let limits = super::RequestTimeouts {
+            connect: Duration::from_secs(2),
+            idle: Duration::from_secs(1),
+            total: Duration::from_millis(1500),
+        };
+        let request = editable_request(&address.to_string());
+        let client =
+            super::build_replay_client(false, &Default::default(), &request, None, None, limits)
+                .await
+                .unwrap();
+        let started = Instant::now();
+        let response = client
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        let error = super::read_response_body_limited(response, 1 << 20)
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(1400) && elapsed < Duration::from_secs(4),
+            "{elapsed:?}"
+        );
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
     }
 
     #[test]
@@ -10493,9 +10667,16 @@ mod tests {
             port: "9443".to_string(),
         };
 
-        let error = build_replay_client(false, &Default::default(), &request, Some(&target), None)
-            .await
-            .unwrap_err();
+        let error = build_replay_client(
+            false,
+            &Default::default(),
+            &request,
+            Some(&target),
+            None,
+            REPLAY_TIMEOUTS,
+        )
+        .await
+        .unwrap_err();
 
         assert!(error.to_string().contains("request host is an IP address"));
     }
@@ -10509,9 +10690,16 @@ mod tests {
             port: "443".to_string(),
         };
 
-        build_replay_client(false, &Default::default(), &request, Some(&target), None)
-            .await
-            .expect("equivalent target override should be treated as a no-op");
+        build_replay_client(
+            false,
+            &Default::default(),
+            &request,
+            Some(&target),
+            None,
+            REPLAY_TIMEOUTS,
+        )
+        .await
+        .expect("equivalent target override should be treated as a no-op");
     }
 
     #[tokio::test]
@@ -10523,9 +10711,16 @@ mod tests {
             port: "9443".to_string(),
         };
 
-        let _error = build_replay_client(false, &Default::default(), &request, Some(&target), None)
-            .await
-            .unwrap_err();
+        let _error = build_replay_client(
+            false,
+            &Default::default(),
+            &request,
+            Some(&target),
+            None,
+            REPLAY_TIMEOUTS,
+        )
+        .await
+        .unwrap_err();
     }
 
     #[test]
@@ -10761,6 +10956,7 @@ mod tests {
             SocketPeerCapture::ForwardedHttp(
                 crate::upstream_proxy::UpstreamProxy::default().route_snapshot(),
             ),
+            None,
             None,
             None,
         )
