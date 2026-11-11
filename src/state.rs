@@ -320,9 +320,11 @@ impl AppState {
         }
     }
 
-    pub async fn configure_tcp_capture(
+    /// Adds, changes or removes a listener of the active session, and saves
+    /// the list with the session's small state.
+    pub async fn change_tcp_listeners(
         &self,
-        settings: Option<crate::tcp_capture::TcpSettings>,
+        change: crate::tcp_capture::ListenerChange,
         session_id: Option<uuid::Uuid>,
         expected_active_session_id: Option<uuid::Uuid>,
     ) -> Result<crate::tcp_capture::TcpStatus> {
@@ -335,16 +337,30 @@ impl AppState {
                     .unwrap_or(true),
             "active session changed; reload TCP settings"
         );
-        if let Some(settings) = settings {
-            anyhow::ensure!(
-                !self.tcp_shutdown.load(Ordering::Acquire),
-                "TCP capture cannot start while Sniper is shutting down"
-            );
-            session.tcp_capture.start(settings).await?;
-        } else {
-            session.tcp_capture.stop().await?;
-        }
+        anyhow::ensure!(
+            !change.starts() || !self.tcp_shutdown.load(Ordering::Acquire),
+            "TCP capture cannot start while Sniper is shutting down"
+        );
+        let operation_lock = self.session_operation_lock(session.id()).await;
+        let _operation_guard = operation_lock.lock_owned().await;
+        let changed = session.tcp_capture.apply(change).await;
+        // Saved even when the change failed part way, as turning every listener
+        // off does before reporting unsaved records: what runs is what is kept.
+        let saved = {
+            let _mutation_guard = session.mutation_guard().await;
+            self.persist_session_state_mutation_locked(&session).await
+        };
+        changed?;
+        saved?;
         Ok(session.tcp_capture.status().await)
+    }
+
+    /// Starts the active session's saved listeners once Sniper is up.
+    pub async fn start_saved_tcp_listeners(&self) {
+        let _guard = self.session_activation_lock.lock().await;
+        if !self.tcp_shutdown.load(Ordering::Acquire) {
+            self.session().await.tcp_capture.start_saved().await;
+        }
     }
 
     // Keep the activation guard through owner acknowledgement, so a decision
@@ -1021,6 +1037,11 @@ impl AppState {
                             *active_session = session.clone();
                         }
                         state.start_history_retention_worker(&session);
+                        // The old session's listeners stopped above; this one's
+                        // saved listeners take over.
+                        if !state.tcp_shutdown.load(Ordering::Acquire) {
+                            session.tcp_capture.start_saved().await;
+                        }
                         SessionActivationOutcome::Replaced {
                             summary: session
                                 .summary(commit.metadata.id == state.sessions.active_session_id()),
@@ -4654,26 +4675,44 @@ mod tests {
         };
         drop(reservation);
         let (_start, stop) = tokio::join!(
-            state.configure_tcp_capture(Some(settings.clone()), None, None),
+            state.change_tcp_listeners(
+                crate::tcp_capture::ListenerChange::Start(settings.clone()),
+                None,
+                None
+            ),
             state.stop_background_jobs()
         );
         stop.unwrap();
         assert!(!state.session().await.tcp_capture.status().await.enabled);
         let error = state
-            .configure_tcp_capture(Some(settings.clone()), None, None)
+            .change_tcp_listeners(
+                crate::tcp_capture::ListenerChange::Start(settings.clone()),
+                None,
+                None,
+            )
             .await
             .unwrap_err();
         assert_eq!(
             error.to_string(),
             "TCP capture cannot start while Sniper is shutting down"
         );
-        state.configure_tcp_capture(None, None, None).await.unwrap();
-        state.cancel_tcp_shutdown();
         state
-            .configure_tcp_capture(Some(settings), None, None)
+            .change_tcp_listeners(crate::tcp_capture::ListenerChange::StopAll, None, None)
             .await
             .unwrap();
-        state.configure_tcp_capture(None, None, None).await.unwrap();
+        state.cancel_tcp_shutdown();
+        state
+            .change_tcp_listeners(
+                crate::tcp_capture::ListenerChange::Start(settings),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        state
+            .change_tcp_listeners(crate::tcp_capture::ListenerChange::StopAll, None, None)
+            .await
+            .unwrap();
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -4689,8 +4728,8 @@ mod tests {
         let port = reservation.local_addr().unwrap().port();
         drop(reservation);
         state
-            .configure_tcp_capture(
-                Some(crate::tcp_capture::TcpSettings {
+            .change_tcp_listeners(
+                crate::tcp_capture::ListenerChange::Start(crate::tcp_capture::TcpSettings {
                     local_port: port,
                     target_host: "127.0.0.1".into(),
                     target_port: 1,
@@ -4701,7 +4740,11 @@ mod tests {
             .await
             .unwrap();
         assert!(state
-            .configure_tcp_capture(None, Some(target.id), Some(original.id()))
+            .change_tcp_listeners(
+                crate::tcp_capture::ListenerChange::StopAll,
+                Some(target.id),
+                Some(original.id())
+            )
             .await
             .is_err());
         assert!(original.tcp_capture.status().await.enabled);
@@ -4713,6 +4756,53 @@ mod tests {
         assert!(original.tcp_capture.status().await.enabled);
         state.activate_session(target.id).await.unwrap();
         assert!(!original.tcp_capture.status().await.enabled);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn tcp_listeners_are_saved_and_follow_the_active_session() {
+        let (data_dir, state) = activation_commit_test_state();
+        let original = state.session().await;
+        let target = state
+            .sessions
+            .create_session(Some("TCP target".to_owned()))
+            .unwrap();
+        let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let status = state
+            .change_tcp_listeners(
+                crate::tcp_capture::ListenerChange::Add(crate::tcp_capture::TcpListenerInput {
+                    enabled: true,
+                    settings: crate::tcp_capture::TcpSettings {
+                        local_port: port,
+                        target_host: "127.0.0.1".into(),
+                        target_port: 1,
+                    },
+                }),
+                Some(original.id()),
+                Some(original.id()),
+            )
+            .await
+            .unwrap();
+        let id = status.listeners[0].config.id;
+        assert!(status.listeners[0].running);
+        let saved = std::fs::read_to_string(
+            state
+                .session_storage_path(original.id())
+                .unwrap()
+                .join("state.json"),
+        )
+        .unwrap();
+        assert!(saved.contains(&id.to_string()));
+        state.activate_session(target.id).await.unwrap();
+        assert!(!original.tcp_capture.status().await.enabled);
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+        state.activate_session(original.id()).await.unwrap();
+        let back = state.session().await.tcp_capture.status().await;
+        assert_eq!(back.listeners[0].config.id, id);
+        assert!(back.listeners[0].running);
+        state.session().await.tcp_capture.stop().await.unwrap();
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

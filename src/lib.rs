@@ -89,6 +89,8 @@ pub async fn run_with_config(config: AppConfig) -> Result<()> {
         state.templates.clone(),
     ));
     tokio::spawn(vulndata::run_daily_update(state.vulndata.clone()));
+    let tcp_state = state.clone();
+    tokio::spawn(async move { tcp_state.start_saved_tcp_listeners().await });
 
     info!(
         proxy_addr = %config.proxy_addr,

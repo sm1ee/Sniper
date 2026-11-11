@@ -485,12 +485,63 @@ impl Default for InterceptRuntime {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TcpSettings {
     pub local_port: u16,
     pub target_host: String,
     pub target_port: u16,
+}
+
+pub const MAX_LISTENERS: usize = 16;
+pub const UNKNOWN_LISTENER: &str = "unknown TCP listener";
+
+/// A listener the session keeps. One that is on starts again when its session
+/// is opened, as the proxy listener does.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TcpListenerConfig {
+    pub id: Uuid,
+    pub enabled: bool,
+    pub settings: TcpSettings,
+}
+
+/// What adding or changing a listener takes.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TcpListenerInput {
+    pub enabled: bool,
+    pub settings: TcpSettings,
+}
+
+pub enum ListenerChange {
+    Add(TcpListenerInput),
+    Update(Uuid, TcpListenerInput),
+    Remove(Uuid),
+    /// `POST /api/tcp/start`: turns on the listener on this port, or adds one.
+    Start(TcpSettings),
+    /// `POST /api/tcp/stop`: turns every listener off.
+    StopAll,
+}
+
+impl ListenerChange {
+    pub fn starts(&self) -> bool {
+        match self {
+            Self::Add(input) | Self::Update(_, input) => input.enabled,
+            Self::Start(_) => true,
+            Self::Remove(_) | Self::StopAll => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TcpListenerStatus {
+    #[serde(flatten)]
+    pub config: TcpListenerConfig,
+    pub running: bool,
+    /// Why a listener that is on is not running, such as a port in use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 impl TcpSettings {
     fn validate(&self) -> anyhow::Result<()> {
@@ -621,6 +672,9 @@ pub struct TcpConnection {
     pub peer: String,
     #[serde(deserialize_with = "bounded_string::<_, MAX_TARGET_BYTES>")]
     pub target: String,
+    /// The listener's port; 0 in records saved before there could be several.
+    #[serde(default)]
+    pub local_port: u16,
     #[serde(deserialize_with = "bounded_string::<_, MAX_STATUS_BYTES>")]
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -902,8 +956,9 @@ fn read_stored_connection_in(
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TcpStatus {
+    /// Whether any listener is running.
     pub enabled: bool,
-    pub settings: Option<TcpSettings>,
+    pub listeners: Vec<TcpListenerStatus>,
     pub history_count: usize,
     pub history_limit: usize,
     pub active_count: usize,
@@ -930,14 +985,17 @@ struct History {
     persistence_error: bool,
 }
 struct Running {
-    settings: TcpSettings,
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
 pub struct TcpCapture {
     directory: PathBuf,
     history: Arc<std::sync::Mutex<History>>,
-    running: Mutex<Option<Running>>,
+    /// The session's listeners, in the order they were added.
+    listeners: std::sync::Mutex<Vec<TcpListenerConfig>>,
+    /// Running listeners by id. Starting and stopping happen under this lock.
+    running: Mutex<BTreeMap<Uuid, Running>>,
+    errors: std::sync::Mutex<BTreeMap<Uuid, String>>,
     active_count: AtomicUsize,
     intercept: std::sync::Mutex<InterceptRuntime>,
 }
@@ -1226,24 +1284,45 @@ impl TcpCapture {
         Self {
             directory,
             history: Arc::new(std::sync::Mutex::new(history)),
-            running: Mutex::new(None),
+            listeners: std::sync::Mutex::new(Vec::new()),
+            running: Mutex::new(BTreeMap::new()),
+            errors: std::sync::Mutex::new(BTreeMap::new()),
             active_count: AtomicUsize::new(0),
             intercept: std::sync::Mutex::new(InterceptRuntime::default()),
         }
     }
     pub async fn status(&self) -> TcpStatus {
         let running = self.running.lock().await;
+        let errors = self.errors.lock().unwrap().clone();
+        let listeners: Vec<_> = self
+            .listener_configs()
+            .into_iter()
+            .map(|config| {
+                let alive = running
+                    .get(&config.id)
+                    .is_some_and(|worker| !worker.task.is_finished());
+                TcpListenerStatus {
+                    running: alive,
+                    error: (!alive && config.enabled)
+                        .then(|| errors.get(&config.id).cloned())
+                        .flatten(),
+                    config,
+                }
+            })
+            .collect();
+        let live = running
+            .values()
+            .filter(|worker| !worker.task.is_finished())
+            .count();
         let history = self.history.lock().unwrap();
         TcpStatus {
-            enabled: running
-                .as_ref()
-                .map(|r| !r.task.is_finished())
-                .unwrap_or(false),
-            settings: running.as_ref().map(|r| r.settings.clone()),
+            enabled: live > 0,
+            listeners,
             history_count: history.records.len(),
             history_limit: MAX_CONNECTIONS,
             active_count: self.active_count.load(Ordering::Relaxed),
-            active_limit: MAX_ACTIVE,
+            // Each running listener admits its own MAX_ACTIVE.
+            active_limit: MAX_ACTIVE * live.max(1),
             load_error: history.load_error,
             persistence_error: history.persistence_error,
         }
@@ -1284,6 +1363,7 @@ impl TcpCapture {
                 ended_at: r.ended_at,
                 peer: r.peer.clone(),
                 target: r.target.clone(),
+                local_port: r.local_port,
                 status: r.status.clone(),
                 failure: r.failure,
                 client_bytes: r.client_bytes,
@@ -1359,23 +1439,166 @@ impl TcpCapture {
             }
         }
     }
-    pub async fn start(self: &Arc<Self>, mut settings: TcpSettings) -> anyhow::Result<()> {
+    pub async fn apply(self: &Arc<Self>, change: ListenerChange) -> anyhow::Result<()> {
+        match change {
+            ListenerChange::Add(input) => self.add_listener(input).await.map(drop),
+            ListenerChange::Update(id, input) => self.update_listener(id, input).await,
+            ListenerChange::Remove(id) => self.remove_listener(id).await,
+            ListenerChange::Start(settings) => {
+                let port = settings.local_port;
+                let input = TcpListenerInput {
+                    enabled: true,
+                    settings,
+                };
+                match self
+                    .listener_configs()
+                    .into_iter()
+                    .find(|listener| listener.settings.local_port == port)
+                {
+                    Some(listener) => self.update_listener(listener.id, input).await,
+                    None => self.add_listener(input).await.map(drop),
+                }
+            }
+            ListenerChange::StopAll => {
+                for listener in self.listeners.lock().unwrap().iter_mut() {
+                    listener.enabled = false;
+                }
+                Ok(self.stop().await?)
+            }
+        }
+    }
+    /// Restores the listeners a session saved, without starting them.
+    pub fn restore_listeners(&self, listeners: Vec<TcpListenerConfig>) {
+        *self.listeners.lock().unwrap() = listeners;
+    }
+    pub fn listener_configs(&self) -> Vec<TcpListenerConfig> {
+        self.listeners.lock().unwrap().clone()
+    }
+    /// Starts every listener that is on and not running. One that cannot start
+    /// keeps its reason for the status and leaves the others running.
+    pub async fn start_saved(self: &Arc<Self>) {
+        for listener in self.listener_configs() {
+            if !listener.enabled || self.running.lock().await.contains_key(&listener.id) {
+                continue;
+            }
+            if let Err(error) = self.start_listener(listener.id, listener.settings).await {
+                self.errors
+                    .lock()
+                    .unwrap()
+                    .insert(listener.id, error.to_string());
+            }
+        }
+    }
+    /// A listener that is on is started first, and kept only if it starts.
+    pub async fn add_listener(self: &Arc<Self>, input: TcpListenerInput) -> anyhow::Result<Uuid> {
+        let settings = self.checked_settings(None, input.settings)?;
+        anyhow::ensure!(
+            self.listeners.lock().unwrap().len() < MAX_LISTENERS,
+            "A session keeps at most {MAX_LISTENERS} TCP listeners."
+        );
+        let id = Uuid::new_v4();
+        if input.enabled {
+            self.start_listener(id, settings.clone()).await?;
+        }
+        self.listeners.lock().unwrap().push(TcpListenerConfig {
+            id,
+            enabled: input.enabled,
+            settings,
+        });
+        Ok(id)
+    }
+    /// A running listener is restarted with the new settings; if they cannot
+    /// start, the old ones are put back and the change is not kept.
+    pub async fn update_listener(
+        self: &Arc<Self>,
+        id: Uuid,
+        input: TcpListenerInput,
+    ) -> anyhow::Result<()> {
+        let settings = self.checked_settings(Some(id), input.settings)?;
+        let old = self
+            .listener_configs()
+            .into_iter()
+            .find(|listener| listener.id == id)
+            .ok_or_else(|| anyhow::anyhow!(UNKNOWN_LISTENER))?;
+        let was_running = self.running.lock().await.contains_key(&id);
+        if was_running {
+            self.stop_listener(id).await?;
+        }
+        if input.enabled {
+            if let Err(error) = self.start_listener(id, settings.clone()).await {
+                if was_running {
+                    let _ = self.start_listener(id, old.settings).await;
+                }
+                return Err(error);
+            }
+        }
+        if let Some(listener) = self
+            .listeners
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|listener| listener.id == id)
+        {
+            listener.enabled = input.enabled;
+            listener.settings = settings;
+        }
+        self.errors.lock().unwrap().remove(&id);
+        Ok(())
+    }
+    pub async fn remove_listener(&self, id: Uuid) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.listeners
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|listener| listener.id == id),
+            UNKNOWN_LISTENER
+        );
+        let stopped = self.stop_listener(id).await;
+        self.listeners
+            .lock()
+            .unwrap()
+            .retain(|listener| listener.id != id);
+        self.errors.lock().unwrap().remove(&id);
+        Ok(stopped?)
+    }
+    /// Valid settings with a normalized host, on a port no other listener of
+    /// this session uses.
+    fn checked_settings(
+        &self,
+        id: Option<Uuid>,
+        mut settings: TcpSettings,
+    ) -> anyhow::Result<TcpSettings> {
+        settings.validate()?;
+        settings.target_host = settings.normalized_host()?;
+        anyhow::ensure!(
+            !self.listeners.lock().unwrap().iter().any(|listener| {
+                Some(listener.id) != id && listener.settings.local_port == settings.local_port
+            }),
+            "Another listener already uses local port {}.",
+            settings.local_port
+        );
+        Ok(settings)
+    }
+    #[cfg(test)]
+    pub async fn start(self: &Arc<Self>, settings: TcpSettings) -> anyhow::Result<()> {
+        self.start_listener(Uuid::new_v4(), settings).await
+    }
+    async fn start_listener(
+        self: &Arc<Self>,
+        id: Uuid,
+        mut settings: TcpSettings,
+    ) -> anyhow::Result<()> {
         settings.validate()?;
         settings.target_host = settings.normalized_host()?;
         let mut running = self.running.lock().await;
         // A listener can exit on accept failure without an explicit stop. Reap
-        // only a completed owner, under the same lock used for start/stop, so
+        // only completed owners, under the same lock used for start/stop, so
         // concurrent starts cannot overlap or detach an in-flight shutdown.
-        if running
-            .as_ref()
-            .map(|worker| worker.task.is_finished())
-            .unwrap_or(false)
-        {
-            *running = None;
-        }
+        running.retain(|_, worker| !worker.task.is_finished());
         anyhow::ensure!(
-            running.is_none(),
-            "disable TCP capture before changing its listener"
+            !running.contains_key(&id),
+            "stop this TCP listener before starting it again"
         );
         {
             let history = self.history.lock().unwrap();
@@ -1403,27 +1626,39 @@ impl TcpCapture {
         })?;
         let (stop, receiver) = watch::channel(false);
         let capture = self.clone();
-        let worker_settings = settings.clone();
         let task = tokio::spawn(async move {
-            capture.serve(listener, worker_settings, receiver).await;
+            capture.serve(listener, settings, receiver).await;
         });
-        *running = Some(Running {
-            settings,
-            stop,
-            task,
-        });
+        running.insert(id, Running { stop, task });
+        self.errors.lock().unwrap().remove(&id);
         Ok(())
     }
-    /// Stops admission, cancels both directions, and waits for final persistence.
+    /// Stops admission on every listener, cancels both directions, and waits for
+    /// final persistence. No listener is turned off: a session switch or
+    /// shutdown stops them, and they start again with the session.
     pub async fn stop(&self) -> Result<(), TcpPersistenceError> {
         let mut running = self.running.lock().await;
-        if let Some(worker) = running.as_mut() {
+        for worker in running.values() {
             let _ = worker.stop.send(true);
+        }
+        for worker in running.values_mut() {
             // Preserve ownership if this caller is cancelled while joining. A
             // subsequent stop/session switch must still await the same worker.
             let _ = (&mut worker.task).await;
         }
-        *running = None;
+        running.clear();
+        // Keep start/stop serialized through the retry. Terminal records are
+        // immutable, so cancellation can only cause the same bytes to be saved
+        // again, never an older snapshot to overwrite a newer one.
+        self.retry_terminal_records().await
+    }
+    async fn stop_listener(&self, id: Uuid) -> Result<(), TcpPersistenceError> {
+        let mut running = self.running.lock().await;
+        if let Some(worker) = running.get_mut(&id) {
+            let _ = worker.stop.send(true);
+            let _ = (&mut worker.task).await;
+        }
+        running.remove(&id);
         // Keep start/stop serialized through the retry. Terminal records are
         // immutable, so cancellation can only cause the same bytes to be saved
         // again, never an older snapshot to overwrite a newer one.
@@ -1490,19 +1725,21 @@ impl TcpCapture {
     ) {
         let mut tasks = JoinSet::new();
         let (children_stop, children_receiver) = watch::channel(false);
+        // Occupied admission slots of every listener, including tasks finishing
+        // persistence; each listener admits at most MAX_ACTIVE of its own.
         loop {
-            // Count occupied admission slots, including tasks finishing persistence.
-            self.active_count.store(tasks.len(), Ordering::Relaxed);
             tokio::select! {
                 biased;
                 _ = stop.changed() => break,
-                Some(_) = tasks.join_next(), if !tasks.is_empty() => {},
+                Some(_) = tasks.join_next(), if !tasks.is_empty() => {
+                    self.active_count.fetch_sub(1, Ordering::Relaxed);
+                },
                 accepted = listener.accept(), if tasks.len() < MAX_ACTIVE => {
                     let Ok((client, peer)) = accepted else { break; };
                     let mut runtime = self.intercept.lock().unwrap();
                     let mut history = self.history.lock().unwrap();
                     if history.records.len() >= MAX_CONNECTIONS || history.persistence_error || history.load_error { drop(client); continue; }
-                    let record = TcpConnection { id: Uuid::new_v4(), started_at: Utc::now(), ended_at: None, peer: peer.to_string(), target: settings.target_label(), status: "connecting".into(), failure: None, client_bytes: 0, server_bytes: 0, captured_bytes: 0, capture_truncated: false, durable: false, chunks: vec![], client_received_bytes:0, server_received_bytes:0, intercept_events:vec![], intercept_captured_bytes:0, intercept_truncated:false, intercept_event_count:0, intercept_schema_version:1, pending_count:0,pending_directions:vec![] };
+                    let record = TcpConnection { id: Uuid::new_v4(), started_at: Utc::now(), ended_at: None, peer: peer.to_string(), target: settings.target_label(), local_port: settings.local_port, status: "connecting".into(), failure: None, client_bytes: 0, server_bytes: 0, captured_bytes: 0, capture_truncated: false, durable: false, chunks: vec![], client_received_bytes:0, server_received_bytes:0, intercept_events:vec![], intercept_captured_bytes:0, intercept_truncated:false, intercept_event_count:0, intercept_schema_version:1, pending_count:0,pending_directions:vec![] };
                     let (close, closed)=watch::channel(false);
                     runtime.connections.insert(record.id,close);
                     history.records.insert(record.id, record.clone());
@@ -1512,6 +1749,7 @@ impl TcpCapture {
                     let settings = settings.clone();
                     let stop = children_receiver.clone();
                     tasks.spawn(async move { capture.connection(client, record, settings, stop, closed).await; });
+                    self.active_count.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -1519,9 +1757,8 @@ impl TcpCapture {
         let _ = children_stop.send(true);
         // Dropping the sender is also cancellation; no detached relay tasks remain.
         while tasks.join_next().await.is_some() {
-            self.active_count.store(tasks.len(), Ordering::Relaxed);
+            self.active_count.fetch_sub(1, Ordering::Relaxed);
         }
-        self.active_count.store(0, Ordering::Relaxed);
     }
     async fn connection(
         self: Arc<Self>,
@@ -1779,6 +2016,7 @@ mod tests {
             ended_at: None,
             peer: "127.0.0.1:1".into(),
             target: "127.0.0.1:2".into(),
+            local_port: 0,
             status: "open".into(),
             failure: None,
             client_bytes: 0,
@@ -2929,33 +3167,31 @@ mod tests {
     #[tokio::test]
     async fn cancelled_stop_retains_the_join_owner() {
         let capture = temporary();
+        let id = Uuid::new_v4();
         let (release, blocked) = tokio::sync::oneshot::channel::<()>();
         let (stop, _receiver) = watch::channel(false);
         let task = tokio::spawn(async move {
             let _ = blocked.await;
         });
-        *capture.running.lock().await = Some(Running {
-            settings: TcpSettings {
-                local_port: 19999,
-                target_host: "127.0.0.1".into(),
-                target_port: 19998,
-            },
-            stop,
-            task,
-        });
+        capture
+            .running
+            .lock()
+            .await
+            .insert(id, Running { stop, task });
         assert!(
             tokio::time::timeout(Duration::from_millis(20), capture.stop())
                 .await
                 .is_err()
         );
-        assert!(capture.running.lock().await.is_some());
+        assert!(capture.running.lock().await.contains_key(&id));
         release.send(()).unwrap();
         capture.stop().await.unwrap();
-        assert!(capture.running.lock().await.is_none());
+        assert!(capture.running.lock().await.is_empty());
     }
     #[tokio::test]
     async fn completed_listener_can_restart_but_concurrent_starts_cannot_overlap() {
         let capture = temporary();
+        let id = Uuid::new_v4();
         let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
@@ -2974,22 +3210,25 @@ mod tests {
         })
         .await
         .unwrap();
-        *capture.running.lock().await = Some(Running {
-            settings: settings.clone(),
-            stop,
-            task,
-        });
+        capture
+            .running
+            .lock()
+            .await
+            .insert(id, Running { stop, task });
         assert!(!capture.status().await.enabled);
-        let (first, second) =
-            tokio::join!(capture.start(settings.clone()), capture.start(settings));
+        let (first, second) = tokio::join!(
+            capture.start_listener(id, settings.clone()),
+            capture.start_listener(id, settings)
+        );
         assert_ne!(first.is_ok(), second.is_ok());
         assert!(capture.status().await.enabled);
         capture.stop().await.unwrap();
-        assert!(capture.running.lock().await.is_none());
+        assert!(capture.running.lock().await.is_empty());
     }
     #[tokio::test]
     async fn start_does_not_reap_an_unfinished_worker_after_cancelled_stop() {
         let capture = temporary();
+        let id = Uuid::new_v4();
         let settings = TcpSettings {
             local_port: 19999,
             target_host: "127.0.0.1".into(),
@@ -3000,21 +3239,21 @@ mod tests {
         let task = tokio::spawn(async move {
             let _ = blocked.await;
         });
-        *capture.running.lock().await = Some(Running {
-            settings: settings.clone(),
-            stop,
-            task,
-        });
+        capture
+            .running
+            .lock()
+            .await
+            .insert(id, Running { stop, task });
         assert!(
             tokio::time::timeout(Duration::from_millis(20), capture.stop())
                 .await
                 .is_err()
         );
-        assert!(capture.start(settings).await.is_err());
-        assert!(capture.running.lock().await.is_some());
+        assert!(capture.start_listener(id, settings).await.is_err());
+        assert!(capture.running.lock().await.contains_key(&id));
         release.send(()).unwrap();
         capture.stop().await.unwrap();
-        assert!(capture.running.lock().await.is_none());
+        assert!(capture.running.lock().await.is_empty());
     }
     #[test]
     fn listener_host_syntax_and_labels() {
@@ -3143,7 +3382,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), format!("Local port {local_port} is already in use. Choose another Local port or stop the listener using it."));
-        assert!(capture.running.lock().await.is_none());
+        assert!(capture.running.lock().await.is_empty());
     }
     #[tokio::test]
     async fn bracketed_ipv6_start_relays_actual_loopback_bytes() {
@@ -3154,24 +3393,17 @@ mod tests {
         drop(probe);
         let capture = temporary();
         capture
-            .start(TcpSettings {
-                local_port,
-                target_host: "[::1]".into(),
-                target_port,
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: TcpSettings {
+                    local_port,
+                    target_host: "[::1]".into(),
+                    target_port,
+                },
             })
             .await
             .unwrap();
-        assert_eq!(
-            capture
-                .running
-                .lock()
-                .await
-                .as_ref()
-                .unwrap()
-                .settings
-                .target_host,
-            "::1"
-        );
+        assert_eq!(capture.listener_configs()[0].settings.target_host, "::1");
         let server = tokio::spawn(async move {
             let (mut socket, _) = upstream.accept().await.unwrap();
             let mut bytes = [0; 3];
@@ -3790,6 +4022,170 @@ mod tests {
         assert_eq!(record.intercept_events[0].written_bytes, 3);
         assert_eq!(record.intercept_events[0].state, "failed");
         assert_eq!(record.intercept_events[0].selected_length, 6);
+    }
+
+    async fn echo_server() -> u16 {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buffer = [0; 1024];
+                    while let Ok(read @ 1..) = socket.read(&mut buffer).await {
+                        if socket.write_all(&buffer[..read]).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+    fn loopback(local_port: u16, target_port: u16) -> TcpSettings {
+        TcpSettings {
+            local_port,
+            target_host: "127.0.0.1".into(),
+            target_port,
+        }
+    }
+    async fn echo_through(local_port: u16, bytes: &[u8]) -> Vec<u8> {
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, local_port))
+            .await
+            .unwrap();
+        client.write_all(bytes).await.unwrap();
+        let mut back = vec![0; bytes.len()];
+        tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut back))
+            .await
+            .unwrap()
+            .unwrap();
+        back
+    }
+    #[tokio::test]
+    async fn two_listeners_relay_at_once_and_name_their_port() {
+        let (first_target, second_target) = (echo_server().await, echo_server().await);
+        let (first, second) = (free_port(), free_port());
+        let capture = temporary();
+        for (local, target) in [(first, first_target), (second, second_target)] {
+            capture
+                .add_listener(TcpListenerInput {
+                    enabled: true,
+                    settings: loopback(local, target),
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(echo_through(first, b"one").await, b"one");
+        assert_eq!(echo_through(second, b"two").await, b"two");
+        assert!(capture.status().await.listeners.iter().all(|l| l.running));
+        capture.stop().await.unwrap();
+        let mut seen: Vec<_> = capture
+            .records()
+            .await
+            .into_iter()
+            .map(|record| (record.local_port, record.target))
+            .collect();
+        seen.sort();
+        let mut expected = vec![
+            (first, format!("127.0.0.1:{first_target}")),
+            (second, format!("127.0.0.1:{second_target}")),
+        ];
+        expected.sort();
+        assert_eq!(seen, expected);
+        assert!(capture.status().await.listeners.iter().all(|l| !l.running));
+    }
+    #[tokio::test]
+    async fn saved_listeners_start_again_and_a_taken_port_keeps_its_error() {
+        let target = echo_server().await;
+        let taken = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let taken_port = taken.local_addr().unwrap().port();
+        let open_port = free_port();
+        let saved = |local_port, enabled| TcpListenerConfig {
+            id: Uuid::new_v4(),
+            enabled,
+            settings: loopback(local_port, target),
+        };
+        let (blocked, open, off) = (
+            saved(taken_port, true),
+            saved(open_port, true),
+            saved(free_port(), false),
+        );
+        let capture = temporary();
+        capture.restore_listeners(vec![blocked.clone(), open.clone(), off.clone()]);
+        capture.start_saved().await;
+        assert_eq!(echo_through(open_port, b"back").await, b"back");
+        let status = capture.status().await;
+        let find = |id| status.listeners.iter().find(|l| l.config.id == id).unwrap();
+        assert!(!find(blocked.id).running);
+        assert_eq!(
+            find(blocked.id).error.as_deref(),
+            Some(format!("Local port {taken_port} is already in use. Choose another Local port or stop the listener using it.").as_str())
+        );
+        assert!(find(open.id).running && find(open.id).error.is_none());
+        assert!(!find(off.id).running && find(off.id).error.is_none());
+        assert_eq!(capture.listener_configs(), vec![blocked, open, off]);
+        capture.stop().await.unwrap();
+        drop(taken);
+    }
+    #[tokio::test]
+    async fn listeners_are_checked_changed_and_removed() {
+        let capture = temporary();
+        let port = free_port();
+        let off = |local_port, target_port| TcpListenerInput {
+            enabled: false,
+            settings: loopback(local_port, target_port),
+        };
+        let id = capture.add_listener(off(port, 1)).await.unwrap();
+        let error = capture.add_listener(off(port, 2)).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("Another listener already uses local port {port}.")
+        );
+        for extra in 1..MAX_LISTENERS {
+            capture
+                .add_listener(off(20000 + extra as u16, 1))
+                .await
+                .unwrap();
+        }
+        let error = capture.add_listener(off(30000, 1)).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("A session keeps at most {MAX_LISTENERS} TCP listeners.")
+        );
+        let target = echo_server().await;
+        capture
+            .update_listener(
+                id,
+                TcpListenerInput {
+                    enabled: true,
+                    settings: loopback(port, target),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(echo_through(port, b"changed").await, b"changed");
+        let saved = capture.listener_configs();
+        assert!(saved[0].enabled && saved[0].settings.target_port == target);
+        capture.remove_listener(id).await.unwrap();
+        assert!(!capture.listener_configs().iter().any(|l| l.id == id));
+        assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .is_err());
+        let error = capture.remove_listener(id).await.unwrap_err();
+        assert_eq!(error.to_string(), UNKNOWN_LISTENER);
+    }
+    #[test]
+    fn a_record_saved_before_listeners_had_ports_still_loads() {
+        let mut value = serde_json::to_value(record()).unwrap();
+        value.as_object_mut().unwrap().remove("local_port");
+        let loaded: TcpConnection = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.local_port, 0);
     }
 }
 

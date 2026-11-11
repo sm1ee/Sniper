@@ -459,6 +459,8 @@ struct StoredSessionSnapshot {
     recon: crate::recon::ReconSnapshot,
     #[serde(default)]
     template_scans: crate::templates::scan::TemplateScanSnapshot,
+    #[serde(default, deserialize_with = "deserialize_tcp_listeners_lossy")]
+    tcp_listeners: Vec<crate::tcp_capture::TcpListenerConfig>,
     #[serde(default)]
     oast_callbacks: Option<Vec<crate::oast::OastCallback>>,
     #[serde(default)]
@@ -556,6 +558,31 @@ where
         rule.normalize_restored_activation();
     }
     Ok(rules)
+}
+
+/// A listener this version cannot read, such as one a newer version saved with
+/// options it does not know, is left out rather than run as something else.
+fn deserialize_tcp_listeners_lossy<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<crate::tcp_capture::TcpListenerConfig>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?.unwrap_or_default();
+    Ok(values
+        .into_iter()
+        .filter_map(|value| match serde_json::from_value(value) {
+            Ok(listener) => Some(listener),
+            Err(error) => {
+                warn!(
+                    ?error,
+                    "leaving out a TCP listener this version cannot read"
+                );
+                None
+            }
+        })
+        .take(crate::tcp_capture::MAX_LISTENERS)
+        .collect())
 }
 
 fn deserialize_workspace_state_lossy<'de, D>(
@@ -765,10 +792,10 @@ impl SessionContext {
         if !enable_journal && snapshot.replayed_transaction_deletion {
             store.mark_retention_compaction_pending(transaction_event_sequence);
         }
+        let tcp_capture = crate::tcp_capture::TcpCapture::load(storage_dir.join("tcp-history"));
+        tcp_capture.restore_listeners(snapshot.tcp_listeners);
         Self {
-            tcp_capture: Arc::new(crate::tcp_capture::TcpCapture::load(
-                storage_dir.join("tcp-history"),
-            )),
+            tcp_capture: Arc::new(tcp_capture),
             upstream_peer_settings: Default::default(),
             history_retention: Default::default(),
             retention_writable: enable_journal,
@@ -1438,6 +1465,7 @@ impl SessionContext {
             sequence_runs: self.sequence.snapshot_runs(Some(self.max_entries)).await,
             recon: self.recon.snapshot(),
             template_scans: self.template_scans.snapshot(),
+            tcp_listeners: self.tcp_capture.listener_configs(),
             oast_callbacks: Some(self.oast.snapshot().await),
             oast_cleared_callback_keys: self.oast.snapshot_cleared_keys().await,
             oast_registration: self.oast.snapshot_registration().await,

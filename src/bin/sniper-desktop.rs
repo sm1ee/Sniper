@@ -343,6 +343,8 @@ fn run_desktop() -> Result<()> {
         state.templates.clone(),
     ));
     runtime.spawn(sniper::vulndata::run_daily_update(state.vulndata.clone()));
+    let tcp_state = state.clone();
+    runtime.spawn(async move { tcp_state.start_saved_tcp_listeners().await });
 
     let event_loop = EventLoopBuilder::<DesktopUserEvent>::with_user_event().build();
     let event_proxy = event_loop.create_proxy();

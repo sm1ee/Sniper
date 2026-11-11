@@ -389,6 +389,7 @@
                     <thead id="tcpHistoryHead">
                       <tr>
                         <th class="table-sortable active tcp-col-index" data-sort="index" aria-sort="descending"># <span class="table-sort-indicator" aria-hidden="true">↓</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                        <th class="table-sortable tcp-col-number" data-sort="local_port" aria-sort="none">Listener <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
                         <th class="table-sortable" data-sort="target" aria-sort="none">Target <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
                         <th class="table-sortable" data-sort="peer" aria-sort="none">Client <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
                         <th class="table-sortable" data-sort="status" aria-sort="none">Status <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
@@ -918,20 +919,41 @@
 
               <section class="capture-settings-section" id="tcpSettingsSection" aria-labelledby="tcpSettingsHeading">
                 <div class="capture-settings-head">
-                  <h2 id="tcpSettingsHeading">TCP listener</h2>
+                  <h2 id="tcpSettingsHeading">TCP listeners</h2>
                   <span class="capture-settings-status" id="tcpListenerStatus" role="status">Loading…</span>
+                  <button class="secondary-action" id="tcpAddListener" type="button" disabled>Add</button>
                 </div>
-                <form class="tcp-listener-form" id="tcpListenerForm" aria-describedby="tcpRoutingDisclosure">
+                <div class="history-table-shell tcp-listener-shell" id="tcpListenerShell" tabindex="0" aria-label="TCP listeners">
+                  <table class="mini-table tcp-listener-table" id="tcpListenerTable">
+                    <thead id="tcpListenerHead">
+                      <tr>
+                        <th class="tcp-col-on">On</th>
+                        <th class="table-sortable active" data-sort="local_port" aria-sort="ascending">Listen <span class="table-sort-indicator" aria-hidden="true">↑</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                        <th class="table-sortable" data-sort="target" aria-sort="none">Target <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                        <th class="table-sortable" data-sort="status" aria-sort="none">Status <span class="table-sort-indicator" aria-hidden="true">↕</span></th>
+                      </tr>
+                    </thead>
+                    <tbody id="tcpListenerRows"></tbody>
+                  </table>
+                </div>
+                <form class="tcp-listener-form" id="tcpListenerForm" aria-describedby="tcpRoutingDisclosure" hidden>
                   <small id="tcpRoutingDisclosure">Connects directly, without the proxy chain.</small>
                   <div class="tcp-listener-route">
                     <label class="tcp-listener-field"><span>Listen on 127.0.0.1</span><input id="tcpLocalPort" type="number" min="1" max="65535" step="1" value="9000" required aria-label="TCP listen port" /></label>
                     <span class="tcp-listener-arrow" aria-hidden="true">→</span>
                     <label class="tcp-listener-field tcp-listener-host"><span>Target host</span><input id="tcpTargetHost" type="text" placeholder="127.0.0.1" autocomplete="off" spellcheck="false" required /></label>
                     <label class="tcp-listener-field"><span>Port</span><input id="tcpTargetPort" type="number" min="1" max="65535" step="1" required aria-label="Target port" /></label>
-                    <span class="tcp-listener-actions"><button class="primary-action" id="tcpStart" type="submit" disabled>Start</button><button class="secondary-action" id="tcpStop" type="button" disabled>Stop</button></span>
                   </div>
-                  <p id="tcpSettingsError" class="tcp-error" role="alert"></p>
+                  <div class="tcp-listener-actions">
+                    <button class="secondary-action" id="tcpRemoveListener" type="button" hidden>Remove</button>
+                    <button class="secondary-action" id="tcpCancelListener" type="button">Cancel</button>
+                    <button class="primary-action" id="tcpSaveListener" type="submit">Save</button>
+                  </div>
                 </form>
+                <div class="tcp-settings-footer">
+                  <p id="tcpSettingsError" class="tcp-error" role="alert"></p>
+                  <button class="secondary-action" id="tcpRetrySaving" type="button" hidden>Stop and retry saving</button>
+                </div>
               </section>
 
               <section class="capture-settings-section" id="captureSettingsHistory" aria-labelledby="captureSettingsHistoryTitle">

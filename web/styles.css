@@ -9799,7 +9799,7 @@ button.utility-button.replay-tab-add {
 .tcp-history .filter-bar { grid-template-columns: minmax(0, 1fr) auto; }
 #tcpHistoryStatus { white-space: normal; overflow-wrap: anywhere; cursor: default; }
 .tcp-history .history-table-shell:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-.tcp-table { table-layout: fixed; min-width: 760px; }
+.tcp-table { table-layout: fixed; min-width: 856px; }
 .tcp-table th { position: relative; white-space: nowrap; cursor: pointer; }
 .tcp-table .tcp-col-index { width: 52px; }
 .tcp-table .tcp-col-number { width: 96px; }
@@ -9867,8 +9867,19 @@ button.utility-button.replay-tab-add {
 #proxySettingsPanel .tcp-listener-field input { width: 90px; }
 #proxySettingsPanel .tcp-listener-host input { width: 220px; }
 .tcp-listener-arrow { padding-bottom: 4px; color: var(--text-dim); }
-.tcp-listener-actions { display: inline-flex; gap: 8px; margin-left: auto; }
+.tcp-listener-actions { display: flex; justify-content: flex-end; gap: 8px; }
 #tcpSettingsError { padding: 0; }
+/* Listeners: a short list; a row click or Add opens the editor below it. */
+#tcpSettingsSection .capture-settings-head .capture-settings-status { margin-left: auto; }
+.tcp-listener-shell { height: auto; max-height: 240px; border: 1px solid var(--line); border-radius: var(--radius-md); }
+.tcp-listener-table { width: 100%; table-layout: fixed; }
+.tcp-listener-table th.tcp-col-on { width: 56px; }
+.tcp-listener-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tcp-listener-table tr[data-listener-id] { cursor: pointer; }
+.tcp-listener-error { color: var(--danger); }
+.tcp-listener-form[hidden], #tcpRetrySaving[hidden] { display: none; }
+.tcp-settings-footer { display: flex; align-items: center; gap: 8px; }
+.tcp-settings-footer #tcpSettingsError { flex: 1; }
 
 /* Only large Replay Hex payloads need another row; ordinary messages keep their layout. */
 .replay-hex-pager {

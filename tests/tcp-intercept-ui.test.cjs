@@ -152,11 +152,11 @@ test('TCP table scrolls sideways inside a keyboard-accessible area and keeps all
   const fs = require('node:fs'), path = require('node:path');
   const css = fs.readFileSync(path.join(__dirname, '../web/styles.css'), 'utf8');
   const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
-  assert.match(css, /\.tcp-table \{ table-layout: fixed; min-width: 760px; \}/);
+  assert.match(css, /\.tcp-table \{ table-layout: fixed; min-width: 856px; \}/);
   assert.match(css, /\.tcp-history \.history-table-shell \{ flex: 1; min-height: 0; overflow: auto; \}/);
   const panel = html.slice(html.indexOf('id="tcpPanel"'), html.indexOf('id="websocketPanel"'));
   assert.match(panel, /class="history-table-shell" tabindex="0" aria-label="TCP connections"/);
-  assert.equal((panel.match(/<th\b/g) || []).length, 8, 'all columns remain');
+  assert.equal((panel.match(/<th\b/g) || []).length, 9, 'all columns remain');
 });
 
 test('truncated intercept history discloses missing events as well as missing byte previews', async () => {

@@ -22,7 +22,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
-    routing::{any, delete, get, patch, post},
+    routing::{any, delete, get, patch, post, put},
     Json, Router,
 };
 use base64::Engine;
@@ -360,6 +360,11 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/api/tcp/status", get(tcp_status))
         .route("/api/tcp/start", post(tcp_start))
         .route("/api/tcp/stop", post(tcp_stop))
+        .route("/api/tcp/listeners", post(tcp_add_listener))
+        .route(
+            "/api/tcp/listeners/:id",
+            put(tcp_update_listener).delete(tcp_remove_listener),
+        )
         .route("/api/tcp/connections", get(tcp_connections))
         .route("/api/tcp/connections/:id", get(tcp_connection))
         .route(
@@ -27721,22 +27726,63 @@ async fn tcp_start(
     Query(query): Query<SessionWriteQuery>,
     Json(settings): Json<crate::tcp_capture::TcpSettings>,
 ) -> Result<Json<crate::tcp_capture::TcpStatus>, (StatusCode, String)> {
-    state
-        .configure_tcp_capture(
-            Some(settings),
-            query.session_id,
-            query.expected_active_session_id,
-        )
-        .await
-        .map(Json)
-        .map_err(tcp_configuration_error)
+    tcp_change(
+        &state,
+        crate::tcp_capture::ListenerChange::Start(settings),
+        query,
+    )
+    .await
 }
 async fn tcp_stop(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SessionWriteQuery>,
 ) -> Result<Json<crate::tcp_capture::TcpStatus>, (StatusCode, String)> {
+    tcp_change(&state, crate::tcp_capture::ListenerChange::StopAll, query).await
+}
+async fn tcp_add_listener(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionWriteQuery>,
+    Json(input): Json<crate::tcp_capture::TcpListenerInput>,
+) -> Result<Json<crate::tcp_capture::TcpStatus>, (StatusCode, String)> {
+    tcp_change(
+        &state,
+        crate::tcp_capture::ListenerChange::Add(input),
+        query,
+    )
+    .await
+}
+async fn tcp_update_listener(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<SessionWriteQuery>,
+    Json(input): Json<crate::tcp_capture::TcpListenerInput>,
+) -> Result<Json<crate::tcp_capture::TcpStatus>, (StatusCode, String)> {
+    tcp_change(
+        &state,
+        crate::tcp_capture::ListenerChange::Update(id, input),
+        query,
+    )
+    .await
+}
+async fn tcp_remove_listener(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<SessionWriteQuery>,
+) -> Result<Json<crate::tcp_capture::TcpStatus>, (StatusCode, String)> {
+    tcp_change(
+        &state,
+        crate::tcp_capture::ListenerChange::Remove(id),
+        query,
+    )
+    .await
+}
+async fn tcp_change(
+    state: &Arc<AppState>,
+    change: crate::tcp_capture::ListenerChange,
+    query: SessionWriteQuery,
+) -> Result<Json<crate::tcp_capture::TcpStatus>, (StatusCode, String)> {
     state
-        .configure_tcp_capture(None, query.session_id, query.expected_active_session_id)
+        .change_tcp_listeners(change, query.session_id, query.expected_active_session_id)
         .await
         .map(Json)
         .map_err(tcp_configuration_error)
@@ -27749,6 +27795,8 @@ fn tcp_configuration_error(error: anyhow::Error) -> (StatusCode, String) {
         StatusCode::SERVICE_UNAVAILABLE
     } else if message.starts_with("active session changed") {
         StatusCode::CONFLICT
+    } else if message == crate::tcp_capture::UNKNOWN_LISTENER {
+        StatusCode::NOT_FOUND
     } else {
         StatusCode::BAD_REQUEST
     };

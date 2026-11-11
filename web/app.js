@@ -1358,7 +1358,7 @@ function bindEvents() {
       rawExchange: (record) => ({ request: buildRawRequest(record), response: buildRawResponse(record) }),
     });
   }
-  document.querySelectorAll(".recon-table, .fuzzer-results-table, .tcp-table").forEach(bindTableColumnResizers);
+  document.querySelectorAll(".recon-table, .fuzzer-results-table, .tcp-table, .tcp-listener-table").forEach(bindTableColumnResizers);
   document.querySelectorAll(".list-detail-resizer").forEach(bindListDetailResizer);
   window.addEventListener("resize", resetLayoutTextareas);
   document.addEventListener("visibilitychange", flushWorkspaceStateBeforeHidden);

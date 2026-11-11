@@ -46,8 +46,13 @@
       if (message.length > 240) return fallback;
       if (response.status === 500 && /^TCP capture stopped, but [0-9]{1,8} connection record\(s\) are not saved\. Keep Sniper open, restore storage, then retry saving\.$/.test(message)) return message;
       if (response.status === 503 && message === "TCP capture cannot start while Sniper is shutting down") return message;
+      if (response.status === 404 && message === "unknown TCP listener") return "This listener was removed. Refresh and try again.";
       if (response.status !== 400) return fallback;
       if (/^Local port [0-9]{1,5} is already in use\. Choose another Local port or stop the listener using it\.$/.test(message)
+        || /^Another listener already uses local port [0-9]{1,5}\.$/.test(message)
+        || /^A session keeps at most [0-9]{1,3} TCP listeners\.$/.test(message)
+        || message === "TCP history requires recovery before capture can start"
+        || message === "TCP history is full; use a new session"
         || /^Could not bind local port [0-9]{1,5}\. Check the port and local permissions\.$/.test(message)
         || message === "Enter a hostname or IP address without a port; use Target port separately."
         || message === "invalid target host" || message === "ports must be 1–65535") return message;
@@ -132,11 +137,24 @@
     const seconds = Math.floor(elapsed / 1000);
     return seconds < 60 ? seconds + "s" : seconds < 3600 ? Math.floor(seconds / 60) + "m" : Math.floor(seconds / 3600) + "h " + Math.floor(seconds % 3600 / 60) + "m";
   }
+  const MAX_LISTENERS = 16;
+  function targetLabel(settings) {
+    const host = String(settings?.target_host || "");
+    return (host.includes(":") ? "[" + host + "]" : host) + ":" + settings?.target_port;
+  }
+  function listenerRoute(listener) {
+    return "127.0.0.1:" + listener.settings.local_port + " → " + targetLabel(listener.settings);
+  }
+  function listenerState(listener) {
+    return listener.running ? "Listening" : !listener.enabled ? "Off" : String(listener.error || "Not running");
+  }
   function createController({ document, sessionId, readPath, writePath, request, openSettings, intercept = false, arrowStep = () => 0, formatTime = clock, formatSize = byteSize }) {
     const interceptController = intercept ? createInterceptController({ document, sessionId, readPath, writePath, request, formatSize, onChanged: () => refresh() }) : null;
     const el = id => document.getElementById(id);
     let epoch = 0, selection = 0, detailRequest = 0, selectedId = null, detail = null, records = [], status = null;
     let reading = null, writing = false, mode = "hex", listKey = "", actionError = null, streamView = null;
+    // The listener being edited: null, "new", or a listener's id.
+    let editing = null, listenerSort = { key: "local_port", direction: "asc" }, shownListeners = [];
     let liveOnly = false, sort = { key: "index", direction: "desc" }, shown = [], indexById = new Map();
     const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
     const text = (id, value) => { if (el(id).textContent !== value) el(id).textContent = value; };
@@ -148,42 +166,34 @@
       if (!response.ok) throw new Error(await requestError(response));
       return response.json();
     }
-    function matchesSettings(actual, expected) {
-      if (!actual || typeof actual.target_host !== "string" || actual.local_port !== expected.local_port || actual.target_port !== expected.target_port) return false;
-      // Rust and URL spell IPv4-mapped IPv6 addresses differently. Compare
-      // both hosts using the same syntax-only parser used for the request.
-      try { return validateSettings(actual.local_port, actual.target_host, actual.target_port).target_host === expected.target_host; }
-      catch (_) { return false; }
-    }
+    const listeners = () => Array.isArray(status?.listeners) ? status.listeners : [];
     function renderStatus() {
-      const enabled = Boolean(status?.enabled);
+      const all = listeners(), running = all.filter(listener => listener.running);
       const unavailable = !status || writing;
       // Status and rows are separate snapshots. History only grows within a
       // session, so a newer list at the cap must not still look accepting.
       const count = Math.max(status?.history_count || 0, records.length);
       const full = Boolean(status && status.history_limit > 0 && count >= status.history_limit);
       const storageError = Boolean(status?.load_error || status?.persistence_error);
-      const atLimit = enabled && status.active_limit > 0 && status.active_count >= status.active_limit;
+      const atLimit = running.length > 0 && status.active_limit > 0 && status.active_count >= status.active_limit;
       const blocked = storageError ? "History storage unavailable"
         : full ? "History full (" + count + "/" + status.history_limit + ")"
         : atLimit ? status.active_count + " of " + status.active_limit + " connections; new ones wait" : "";
-      for (const id of ["tcpLocalPort", "tcpTargetHost", "tcpTargetPort"]) el(id).disabled = unavailable || enabled;
-      el("tcpStart").disabled = unavailable || enabled || storageError || full;
-      el("tcpStop").disabled = unavailable || (!enabled && !status?.persistence_error);
-      text("tcpStop", !enabled && status?.persistence_error ? "Retry saving" : "Stop");
-      text("tcpListenerStatus", !status ? "Unavailable" : blocked || (enabled ? "Listening" : "Stopped"));
-      if (enabled && status.settings) {
-        el("tcpLocalPort").value = status.settings.local_port;
-        el("tcpTargetHost").value = status.settings.target_host;
-        el("tcpTargetPort").value = status.settings.target_port;
-      }
-      text("tcpOpenSettings", enabled && status.settings
-        ? "127.0.0.1:" + status.settings.local_port + " → " + status.settings.target_host + ":" + status.settings.target_port
-        : "Listener off");
-      const warning = status?.persistence_error ? "TCP history is not saved. Restore storage, then " + (enabled ? "Stop" : "Retry saving") + "."
+      text("tcpListenerStatus", !status ? "Unavailable"
+        : blocked || (running.length ? running.length + " listening" : all.length ? "Off" : "No listeners"));
+      el("tcpAddListener").disabled = unavailable || all.length >= MAX_LISTENERS;
+      text("tcpOpenSettings", running.length === 1 ? listenerRoute(running[0])
+        : running.length ? running.length + " listeners" : "Listener off");
+      const warning = status?.persistence_error ? "TCP history is not saved. Restore storage, then stop and retry saving."
         : storageError ? "TCP history storage is unavailable."
         : full ? "History is full. Start a new session to capture more." : "";
       text("tcpSettingsError", actionError?.message || warning);
+      el("tcpRetrySaving").hidden = !status?.persistence_error;
+      el("tcpRetrySaving").disabled = unavailable;
+      renderListeners(all, unavailable);
+      el("tcpListenerForm").hidden = editing === null;
+      el("tcpRemoveListener").hidden = editing === null || editing === "new";
+      for (const id of ["tcpLocalPort", "tcpTargetHost", "tcpTargetPort", "tcpSaveListener", "tcpCancelListener", "tcpRemoveListener"]) el(id).disabled = unavailable;
       // Paused bytes are counted beside the Intercept switch, not here too.
       const live = records.filter(record => LIVE.has(record.status)).length;
       text("tcpHistoryStatus", [
@@ -191,6 +201,64 @@
         live ? live + " live" : "", blocked
       ].filter(Boolean).join(" · "));
     }
+    const LISTENER_SORT = {
+      local_port: listener => Number(listener.settings?.local_port) || 0,
+      target: listener => targetLabel(listener.settings), status: listenerState
+    };
+    function renderListeners(all, unavailable) {
+      const value = LISTENER_SORT[listenerSort.key] || LISTENER_SORT.local_port, factor = listenerSort.direction === "asc" ? 1 : -1;
+      shownListeners = [...all].sort((a, b) => {
+        const x = value(a), y = value(b);
+        return (typeof x === "number" && typeof y === "number" ? x - y : collator.compare(String(x), String(y))) * factor;
+      });
+      const body = el("tcpListenerRows");
+      body.replaceChildren();
+      for (const listener of shownListeners) {
+        const row = document.createElement("tr"), selected = listener.id === editing;
+        row.dataset.listenerId = listener.id;
+        row.classList.toggle("selected", selected);
+        row.setAttribute("aria-selected", String(selected));
+        const toggle = document.createElement("button");
+        toggle.className = "switch"; toggle.type = "button"; toggle.disabled = unavailable;
+        toggle.dataset.listenerToggle = listener.id;
+        toggle.setAttribute("role", "switch");
+        toggle.setAttribute("aria-checked", String(Boolean(listener.enabled)));
+        toggle.setAttribute("aria-label", "Listener on port " + listener.settings.local_port);
+        const on = document.createElement("td");
+        on.className = "tcp-col-on"; on.append(toggle); row.append(on);
+        const state = listenerState(listener);
+        for (const [content, className] of [["127.0.0.1:" + listener.settings.local_port, ""], [targetLabel(listener.settings), ""],
+          [state, listener.enabled && !listener.running ? "tcp-listener-error" : ""]]) {
+          const cell = document.createElement("td");
+          cell.textContent = content; cell.title = content;
+          if (className) cell.className = className;
+          row.append(cell);
+        }
+        body.append(row);
+      }
+      if (!shownListeners.length) {
+        const row = document.createElement("tr"), cell = document.createElement("td");
+        cell.colSpan = 4; cell.className = "tcp-empty"; cell.textContent = "No listeners";
+        row.append(cell); body.append(row);
+      }
+    }
+    function nextPort() {
+      const used = new Set(listeners().map(listener => listener.settings?.local_port));
+      let port = 9000;
+      while (used.has(port)) port++;
+      return port;
+    }
+    function openForm(target) {
+      const listener = listeners().find(item => item.id === target);
+      if (target !== "new" && !listener) return;
+      editing = target; actionError = null;
+      el("tcpLocalPort").value = String(listener ? listener.settings.local_port : nextPort());
+      el("tcpTargetHost").value = listener ? listener.settings.target_host : "";
+      el("tcpTargetPort").value = listener ? String(listener.settings.target_port) : "";
+      renderStatus();
+      el("tcpTargetHost").focus?.();
+    }
+    function closeForm() { editing = null; actionError = null; renderStatus(); }
     function statusText(record) {
       return [
         statusLabel(record),
@@ -201,6 +269,7 @@
     }
     const SORT_VALUES = {
       index: record => indexById.get(record.id) || 0,
+      local_port: record => Number(record.local_port) || 0,
       target: record => record.target, peer: record => record.peer, status: record => statusLabel(record),
       client_bytes: record => Number(record.client_bytes) || 0, server_bytes: record => Number(record.server_bytes) || 0,
       duration: durationMs, started_at: record => Date.parse(record.started_at) || 0
@@ -227,10 +296,10 @@
         row.dataset.tcpId = record.id;
         row.classList.toggle("selected", record.id === selectedId);
         row.setAttribute("aria-selected", String(record.id === selectedId));
-        const values = [indexById.get(record.id), record.target, record.peer, statusText(record), formatSize(record.client_bytes), formatSize(record.server_bytes), duration(record), formatTime(record.started_at)];
+        const values = [indexById.get(record.id), record.local_port ? record.local_port : "—", record.target, record.peer, statusText(record), formatSize(record.client_bytes), formatSize(record.server_bytes), duration(record), formatTime(record.started_at)];
         values.forEach((value, column) => {
           const cell = document.createElement("td");
-          if (column === 3) cell.className = "tcp-status tcp-status-" + record.status;
+          if (column === 4) cell.className = "tcp-status tcp-status-" + record.status;
           cell.textContent = String(value);
           row.append(cell);
         });
@@ -238,7 +307,7 @@
       }
       if (!shown.length) {
         const row = document.createElement("tr"), cell = document.createElement("td");
-        cell.colSpan = 8; cell.className = "tcp-empty";
+        cell.colSpan = 9; cell.className = "tcp-empty";
         cell.textContent = records.length ? "No live connections" : "No TCP connections";
         row.append(cell); body.append(row);
       }
@@ -327,17 +396,9 @@
           if (!current(stamp)) return;
           status = nextStatus; records = nextRecords;
           interceptController?.reconcileConnections(records);
-          // A different window may recover this operation. Match the failed
-          // request, not the editable form or just any running listener, and
-          // retain validation, session-conflict and unrelated request errors.
-          const attempted = actionError?.action === "start" ? actionError.settings : null;
-          const recoveredBind = attempted && status.enabled === true &&
-            matchesSettings(status.settings, attempted) &&
-            (actionError.message === "Local port " + attempted.local_port + " is already in use. Choose another Local port or stop the listener using it." ||
-              actionError.message === "Could not bind local port " + attempted.local_port + ". Check the port and local permissions.");
-          const recoveredPersistence = actionError?.action === "stop" && status.persistence_error === false &&
-            /^TCP capture stopped, but [0-9]{1,8} connection record\(s\) are not saved\. Keep Sniper open, restore storage, then retry saving\.$/.test(actionError.message);
-          if (recoveredBind || recoveredPersistence) actionError = null;
+          // Saving may be recovered from another window; other errors stay.
+          if (actionError?.action === "stop" && status.persistence_error === false) actionError = null;
+          if (editing !== null && editing !== "new" && !listeners().some(listener => listener.id === editing)) editing = null;
           if (selectedId && !records.some(r => r.id === selectedId)) { selectedId = null; selection++; detail = null; renderDetail(); }
           renderStatus(); renderList(); text("tcpHistoryError", "");
           await loadDetail(stamp);
@@ -348,28 +409,57 @@
       reading = pending;
       try { await pending; } finally { if (reading === pending) reading = null; }
     }
-    async function mutate(action) {
-      if (writing || !status) return;
-      let body = {};
-      try { if (action === "start") body = validateSettings(el("tcpLocalPort").value, el("tcpTargetHost").value, el("tcpTargetPort").value); }
-      catch (error) { actionError = { message: error.message }; renderStatus(); return; }
+    async function write(action, path, method, body) {
+      if (writing || !status) return false;
       // Invalidate reads already in flight, and do not poll until the write settles.
       epoch++; reading = null; actionError = null; writing = true;
       const stamp = snapshot();
       renderStatus();
+      let done = false;
       try {
-        await json(writePath("/api/tcp/" + action, stamp.session), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+        await json(writePath(path, stamp.session), { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
+        done = true;
       } catch (error) {
-        if (current(stamp)) actionError = { message: error.message, action, settings: body };
+        if (current(stamp)) actionError = { message: error.message, action };
       } finally {
         if (current(stamp)) { writing = false; await refresh(); renderStatus(); }
       }
+      return done;
+    }
+    async function saveListener() {
+      if (editing === null) return;
+      let settings;
+      try { settings = validateSettings(el("tcpLocalPort").value, el("tcpTargetHost").value, el("tcpTargetPort").value); }
+      catch (error) { actionError = { message: error.message }; renderStatus(); return; }
+      const existing = listeners().find(listener => listener.id === editing);
+      const saved = editing === "new"
+        ? await write("add", "/api/tcp/listeners", "POST", { enabled: true, settings })
+        : await write("update", "/api/tcp/listeners/" + encodeURIComponent(editing), "PUT", { enabled: existing ? Boolean(existing.enabled) : true, settings });
+      if (saved) closeForm();
+    }
+    async function toggleListener(id) {
+      const listener = listeners().find(item => item.id === id);
+      if (listener) await write("toggle", "/api/tcp/listeners/" + encodeURIComponent(id), "PUT", { enabled: !listener.enabled, settings: listener.settings });
+    }
+    async function removeListener() {
+      if (editing === null || editing === "new") return;
+      if (await write("remove", "/api/tcp/listeners/" + encodeURIComponent(editing), "DELETE")) closeForm();
     }
     function reset() {
       interceptController?.reset();
-      epoch++; selection++; reading = null; writing = false; actionError = null; selectedId = null; detail = null; records = []; status = null; listKey = "";
-      el("tcpTargetHost").value = ""; el("tcpTargetPort").value = ""; el("tcpLocalPort").value = "9000";
+      epoch++; selection++; reading = null; writing = false; actionError = null; selectedId = null; detail = null; records = []; status = null; listKey = ""; editing = null;
       renderStatus(); renderList(); renderDetail(); text("tcpHistoryError", "");
+    }
+    function sortListenersBy(key) {
+      listenerSort = listenerSort.key === key ? { key, direction: listenerSort.direction === "asc" ? "desc" : "asc" } : { key, direction: "asc" };
+      for (const header of el("tcpListenerHead")?.querySelectorAll?.("[data-sort]") || []) {
+        const active = header.dataset.sort === listenerSort.key;
+        header.classList.toggle("active", active);
+        header.setAttribute("aria-sort", active ? (listenerSort.direction === "asc" ? "ascending" : "descending") : "none");
+        const indicator = header.querySelector(".table-sort-indicator");
+        if (indicator) indicator.textContent = active ? (listenerSort.direction === "asc" ? "↑" : "↓") : "↕";
+      }
+      renderStatus();
     }
     function sortBy(key) {
       sort = sort.key === key ? { key, direction: sort.direction === "asc" ? "desc" : "asc" } : { key, direction: key === "index" || key === "started_at" ? "desc" : "asc" };
@@ -399,8 +489,33 @@
         document.addEventListener("mousemove", onMove); document.addEventListener("mouseup", onUp);
       });
     }
-    el("tcpListenerForm").addEventListener("submit", event => { event.preventDefault(); mutate("start"); });
-    el("tcpStop").addEventListener("click", () => mutate("stop"));
+    el("tcpListenerForm").addEventListener("submit", event => { event.preventDefault(); void saveListener(); });
+    el("tcpAddListener").addEventListener("click", () => openForm("new"));
+    el("tcpCancelListener").addEventListener("click", closeForm);
+    el("tcpRemoveListener").addEventListener("click", () => void removeListener());
+    el("tcpRetrySaving").addEventListener("click", () => void write("stop", "/api/tcp/stop", "POST", {}));
+    el("tcpListenerRows").addEventListener("click", event => {
+      const toggle = event.target.closest?.("[data-listener-toggle]");
+      if (toggle) { void toggleListener(toggle.dataset.listenerToggle); return; }
+      const row = event.target.closest?.("tr[data-listener-id]");
+      if (row) openForm(row.dataset.listenerId);
+    });
+    el("tcpListenerHead")?.addEventListener("click", event => {
+      if (event.target.closest?.(".table-col-resize")) return;
+      const header = event.target.closest?.("[data-sort]");
+      if (header) sortListenersBy(header.dataset.sort);
+    });
+    // ↑/↓ move through the listeners while their list has focus.
+    el("tcpListenerShell")?.addEventListener("keydown", event => {
+      const step = arrowStep(event);
+      if (!step || !shownListeners.length) return;
+      const at = shownListeners.findIndex(listener => listener.id === editing);
+      const next = at < 0 ? (step > 0 ? 0 : shownListeners.length - 1) : at + step;
+      if (next < 0 || next >= shownListeners.length) return;
+      event.preventDefault();
+      openForm(shownListeners[next].id);
+      el("tcpListenerShell").focus?.();
+    });
     el("tcpOpenSettings").addEventListener("click", openSettings);
     el("tcpLiveOnly")?.addEventListener("click", () => {
       liveOnly = !liveOnly;
