@@ -1329,6 +1329,7 @@ function bindEvents() {
       renderProxyPanels();
       document.getElementById("tcpSettingsSection")?.scrollIntoView({ block: "start" });
     },
+    confirm: showConfirmDialog,
     arrowStep: tableArrowStep,
     formatTime: formatTimestamp,
     formatSize,

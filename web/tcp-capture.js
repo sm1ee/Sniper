@@ -44,6 +44,7 @@
     try {
       const message = await response.text();
       if (message.length > 240) return fallback;
+      if (response.status === 500 && message === "Some TCP records could not be deleted. History requires recovery.") return message;
       if (response.status === 500 && /^TCP capture stopped, but [0-9]{1,8} connection record\(s\) are not saved\. Keep Sniper open, restore storage, then retry saving\.$/.test(message)) return message;
       if (response.status === 503 && message === "TCP capture cannot start while Sniper is shutting down") return message;
       if (response.status === 404 && message === "unknown TCP listener") return "This listener was removed. Refresh and try again.";
@@ -148,7 +149,7 @@
   function listenerState(listener) {
     return listener.running ? "Listening" : !listener.enabled ? "Off" : String(listener.error || "Not running");
   }
-  function createController({ document, sessionId, readPath, writePath, request, openSettings, intercept = false, arrowStep = () => 0, formatTime = clock, formatSize = byteSize }) {
+  function createController({ document, sessionId, readPath, writePath, request, openSettings, confirm = (message, run) => run(), intercept = false, arrowStep = () => 0, formatTime = clock, formatSize = byteSize }) {
     const interceptController = intercept ? createInterceptController({ document, sessionId, readPath, writePath, request, formatSize, onChanged: () => refresh() }) : null;
     const el = id => document.getElementById(id);
     let epoch = 0, selection = 0, detailRequest = 0, selectedId = null, detail = null, records = [], status = null;
@@ -186,7 +187,7 @@
         : running.length ? running.length + " listeners" : "Listener off");
       const warning = status?.persistence_error ? "TCP history is not saved. Restore storage, then stop and retry saving."
         : storageError ? "TCP history storage is unavailable."
-        : full ? "History is full. Start a new session to capture more." : "";
+        : full ? "History is full. New connections are relayed but not recorded; clear history to record them." : "";
       text("tcpSettingsError", actionError?.message || warning);
       el("tcpRetrySaving").hidden = !status?.persistence_error;
       el("tcpRetrySaving").disabled = unavailable;
@@ -196,10 +197,12 @@
       for (const id of ["tcpLocalPort", "tcpTargetHost", "tcpTargetPort", "tcpSaveListener", "tcpCancelListener", "tcpRemoveListener"]) el(id).disabled = unavailable;
       // Paused bytes are counted beside the Intercept switch, not here too.
       const live = records.filter(record => LIVE.has(record.status)).length;
+      const unrecorded = Number(status?.unrecorded_count) || 0;
       text("tcpHistoryStatus", [
         records.length === 1 ? "1 connection" : records.length + " connections",
-        live ? live + " live" : "", blocked
+        live ? live + " live" : "", blocked, unrecorded ? unrecorded + " not recorded" : ""
       ].filter(Boolean).join(" · "));
+      el("tcpClearHistory").disabled = unavailable || records.length === live;
     }
     const LISTENER_SORT = {
       local_port: listener => Number(listener.settings?.local_port) || 0,
@@ -491,6 +494,12 @@
     }
     el("tcpListenerForm").addEventListener("submit", event => { event.preventDefault(); void saveListener(); });
     el("tcpAddListener").addEventListener("click", () => openForm("new"));
+    el("tcpClearHistory").addEventListener("click", () => {
+      if (!status || writing) return;
+      confirm("Remove every ended TCP connection in this session? Live connections stay.",
+        () => void write("clear", "/api/tcp/connections", "DELETE"),
+        { title: "Clear TCP history", confirmLabel: "Clear" });
+    });
     el("tcpCancelListener").addEventListener("click", closeForm);
     el("tcpRemoveListener").addEventListener("click", () => void removeListener());
     el("tcpRetrySaving").addEventListener("click", () => void write("stop", "/api/tcp/stop", "POST", {}));

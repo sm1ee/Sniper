@@ -365,7 +365,10 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             "/api/tcp/listeners/:id",
             put(tcp_update_listener).delete(tcp_remove_listener),
         )
-        .route("/api/tcp/connections", get(tcp_connections))
+        .route(
+            "/api/tcp/connections",
+            get(tcp_connections).delete(tcp_clear_connections),
+        )
         .route("/api/tcp/connections/:id", get(tcp_connection))
         .route(
             "/api/tcp/intercept",
@@ -27789,7 +27792,9 @@ async fn tcp_change(
 }
 fn tcp_configuration_error(error: anyhow::Error) -> (StatusCode, String) {
     let message = error.to_string();
-    let status = if error.is::<crate::tcp_capture::TcpPersistenceError>() {
+    let status = if error.is::<crate::tcp_capture::TcpPersistenceError>()
+        || message.starts_with("Some TCP records could not be deleted")
+    {
         StatusCode::INTERNAL_SERVER_ERROR
     } else if message == "TCP capture cannot start while Sniper is shutting down" {
         StatusCode::SERVICE_UNAVAILABLE
@@ -27801,6 +27806,16 @@ fn tcp_configuration_error(error: anyhow::Error) -> (StatusCode, String) {
         StatusCode::BAD_REQUEST
     };
     (status, message)
+}
+async fn tcp_clear_connections(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionWriteQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .clear_tcp_history(query.session_id, query.expected_active_session_id)
+        .await
+        .map(|removed| Json(serde_json::json!({ "removed": removed })))
+        .map_err(tcp_configuration_error)
 }
 async fn tcp_connections(
     State(state): State<Arc<AppState>>,
@@ -27955,6 +27970,21 @@ mod tcp_intercept_api_tests {
             )
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn clearing_tcp_history_answers_with_how_many_records_went() {
+        let (state, path) = state();
+        let response = request(router(state), "DELETE", "/api/tcp/connections", "").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"removed": 0})
+        );
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[tokio::test]

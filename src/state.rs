@@ -355,6 +355,26 @@ impl AppState {
         Ok(session.tcp_capture.status().await)
     }
 
+    /// Removes the active session's ended TCP records.
+    pub async fn clear_tcp_history(
+        &self,
+        session_id: Option<uuid::Uuid>,
+        expected_active_session_id: Option<uuid::Uuid>,
+    ) -> Result<usize> {
+        let _guard = self.session_activation_lock.lock().await;
+        let session = self.session().await;
+        anyhow::ensure!(
+            session_id.map(|id| id == session.id()).unwrap_or(true)
+                && expected_active_session_id
+                    .map(|id| id == session.id())
+                    .unwrap_or(true),
+            "active session changed; reload TCP settings"
+        );
+        let operation_lock = self.session_operation_lock(session.id()).await;
+        let _operation_guard = operation_lock.lock_owned().await;
+        session.tcp_capture.clear().await
+    }
+
     /// Starts the active session's saved listeners once Sniper is up.
     pub async fn start_saved_tcp_listeners(&self) {
         let _guard = self.session_activation_lock.lock().await;

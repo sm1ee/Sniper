@@ -170,7 +170,7 @@ test("full history distinguishes listener on from new accepts and retains pendin
   assert.equal(f.get("tcpListenerStatus").textContent,"History full (256/256)");
   assert.match(f.get("tcpHistoryStatus").textContent,/History full/);
   assert.match(f.get("tcpHistoryRows").children[0].children[4].textContent,/2 paused/);
-  assert.match(f.get("tcpSettingsError").textContent,/Start a new session/);
+  assert.match(f.get("tcpSettingsError").textContent,/relayed but not recorded/);
   assert.equal(f.requests.length,2);
   assert.ok(f.requests.every(r => !r.options));
 });
@@ -440,4 +440,19 @@ test("↑/↓ move through listeners while their list has focus, and a header cl
   assert.deepEqual(listenerRows(f).map(row => row[0]), ["127.0.0.1:9002", "127.0.0.1:9001", "127.0.0.1:9000"]);
   sort("status");
   assert.deepEqual(listenerRows(f).map(row => row[2]).slice(0, 2), ["Listening", "Local port 9001 is already in use. Choose another Local port or stop the listener using it."]);
+});
+test("Clear asks first, then removes ended connections; unrecorded ones are counted", async () => {
+  const asked = [];
+  const f = fixture({confirm: (message, run, options) => asked.push({message, run, options})});
+  await pollStatus(f, {...runningStatus, history_count:256, unrecorded_count:3}, [{id:"a", status:"closed"}, {id:"b", status:"open"}]);
+  assert.match(f.get("tcpHistoryStatus").textContent, /3 not recorded/);
+  assert.equal(f.get("tcpClearHistory").disabled, false);
+  f.get("tcpClearHistory").listeners.click();
+  assert.equal(f.requests.length, 2, "nothing is removed before the answer");
+  assert.equal(asked[0].options.title, "Clear TCP history");
+  asked[0].run();
+  assert.match(f.requests[2].path, /^\/api\/tcp\/connections\?session_id=a&expected_active_session_id=a$/);
+  assert.equal(f.requests[2].options.method, "DELETE");
+  await pollStatus(f, runningStatus, [{id:"b", status:"open"}]);
+  assert.equal(f.get("tcpClearHistory").disabled, true, "live connections are not cleared");
 });

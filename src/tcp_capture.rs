@@ -11,7 +11,7 @@ use std::{
     net::{Ipv4Addr, Ipv6Addr},
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -965,6 +965,9 @@ pub struct TcpStatus {
     pub active_limit: usize,
     pub load_error: bool,
     pub persistence_error: bool,
+    /// Connections relayed but not recorded because the history was full,
+    /// since it was last cleared.
+    pub unrecorded_count: u64,
 }
 /// Captures remain owned in memory until an explicit retry saves every record.
 #[derive(Debug)]
@@ -997,6 +1000,7 @@ pub struct TcpCapture {
     running: Mutex<BTreeMap<Uuid, Running>>,
     errors: std::sync::Mutex<BTreeMap<Uuid, String>>,
     active_count: AtomicUsize,
+    unrecorded: AtomicU64,
     intercept: std::sync::Mutex<InterceptRuntime>,
 }
 impl TcpCapture {
@@ -1288,6 +1292,7 @@ impl TcpCapture {
             running: Mutex::new(BTreeMap::new()),
             errors: std::sync::Mutex::new(BTreeMap::new()),
             active_count: AtomicUsize::new(0),
+            unrecorded: AtomicU64::new(0),
             intercept: std::sync::Mutex::new(InterceptRuntime::default()),
         }
     }
@@ -1325,6 +1330,7 @@ impl TcpCapture {
             active_limit: MAX_ACTIVE * live.max(1),
             load_error: history.load_error,
             persistence_error: history.persistence_error,
+            unrecorded_count: self.unrecorded.load(Ordering::Relaxed),
         }
     }
     #[cfg(test)]
@@ -1467,6 +1473,48 @@ impl TcpCapture {
             }
         }
     }
+    /// Removes every ended, saved record from memory and disk. Live records and
+    /// ones still waiting to be saved stay.
+    pub async fn clear(&self) -> anyhow::Result<usize> {
+        let removed: Vec<Uuid> = {
+            let mut history = self.history.lock().unwrap();
+            let ids: Vec<_> = history
+                .records
+                .values()
+                .filter(|record| record.ended_at.is_some() && record.durable)
+                .map(|record| record.id)
+                .collect();
+            for id in &ids {
+                history.records.remove(id);
+            }
+            ids
+        };
+        self.unrecorded.store(0, Ordering::Relaxed);
+        let directory = self.directory.clone();
+        let names: Vec<String> = removed.iter().map(|id| format!("{id}.json")).collect();
+        let deleted = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let root = match HistoryDirectory::open(&directory) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                root => root?,
+            };
+            for name in names {
+                match root.remove_file(std::ffi::OsStr::new(&name)) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(error)
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        })
+        .await;
+        if !matches!(deleted, Ok(Ok(()))) {
+            // Files left behind would come back at the next load.
+            self.history.lock().unwrap().load_error = true;
+            anyhow::bail!("Some TCP records could not be deleted. History requires recovery.");
+        }
+        Ok(removed.len())
+    }
     /// Restores the listeners a session saved, without starting them.
     pub fn restore_listeners(&self, listeners: Vec<TcpListenerConfig>) {
         *self.listeners.lock().unwrap() = listeners;
@@ -1606,10 +1654,6 @@ impl TcpCapture {
                 !history.load_error && !history.persistence_error,
                 "TCP history requires recovery before capture can start"
             );
-            anyhow::ensure!(
-                history.records.len() < MAX_CONNECTIONS,
-                "TCP history is full; use a new session"
-            );
         }
         if let Err(error) = HistoryDirectory::open(&self.directory) {
             if error.kind() != std::io::ErrorKind::NotFound {
@@ -1738,7 +1782,19 @@ impl TcpCapture {
                     let Ok((client, peer)) = accepted else { break; };
                     let mut runtime = self.intercept.lock().unwrap();
                     let mut history = self.history.lock().unwrap();
-                    if history.records.len() >= MAX_CONNECTIONS || history.persistence_error || history.load_error { drop(client); continue; }
+                    if history.persistence_error || history.load_error { drop(client); continue; }
+                    // A full history must not break the app under test: relay
+                    // on, record nothing, and count it until the history is cleared.
+                    if history.records.len() >= MAX_CONNECTIONS {
+                        drop(history);
+                        drop(runtime);
+                        self.unrecorded.fetch_add(1, Ordering::Relaxed);
+                        let settings = settings.clone();
+                        let stop = children_receiver.clone();
+                        tasks.spawn(relay_unrecorded(client, settings, stop));
+                        self.active_count.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
                     let record = TcpConnection { id: Uuid::new_v4(), started_at: Utc::now(), ended_at: None, peer: peer.to_string(), target: settings.target_label(), local_port: settings.local_port, status: "connecting".into(), failure: None, client_bytes: 0, server_bytes: 0, captured_bytes: 0, capture_truncated: false, durable: false, chunks: vec![], client_received_bytes:0, server_received_bytes:0, intercept_events:vec![], intercept_captured_bytes:0, intercept_truncated:false, intercept_event_count:0, intercept_schema_version:1, pending_count:0,pending_directions:vec![] };
                     let (close, closed)=watch::channel(false);
                     runtime.connections.insert(record.id,close);
@@ -1777,37 +1833,8 @@ impl TcpCapture {
         }
         let result = connection_outcome(
             async {
-                let addresses: Vec<_> = connection_stage(
-                    tokio::net::lookup_host((settings.target_host.as_str(), settings.target_port)),
-                    Duration::from_secs(10),
-                    true,
-                )
-                .await?
-                .collect();
-                if addresses.is_empty() {
-                    return Err(TcpFailure::ResolutionFailed);
-                }
-                if addresses
-                    .iter()
-                    .any(|a| is_loopback(a.ip()) && a.port() == settings.local_port)
-                {
-                    return Err(TcpFailure::SelfTarget);
-                }
-                let upstream = connection_stage(
-                    TcpStream::connect(addresses.as_slice()),
-                    Duration::from_secs(10),
-                    false,
-                )
-                .await?;
-                // A self-target would recursively fill the connection budget.
                 let local = client.local_addr().map_err(|_| TcpFailure::ConnectFailed)?;
-                if upstream
-                    .peer_addr()
-                    .map_err(|_| TcpFailure::ConnectFailed)?
-                    == local
-                {
-                    return Err(TcpFailure::SelfTarget);
-                }
+                let upstream = open_upstream(&settings, local).await?;
                 if let Some(r) = self.history.lock().unwrap().records.get_mut(&id) {
                     r.status = "open".into();
                 }
@@ -1983,6 +2010,63 @@ impl TcpCapture {
         }
     }
 }
+/// Opens the connection to a listener's target, refusing one that comes back to
+/// the listener: a self-target would recursively fill the connection budget.
+async fn open_upstream(
+    settings: &TcpSettings,
+    listener: std::net::SocketAddr,
+) -> Result<TcpStream, TcpFailure> {
+    let addresses: Vec<_> = connection_stage(
+        tokio::net::lookup_host((settings.target_host.as_str(), settings.target_port)),
+        Duration::from_secs(10),
+        true,
+    )
+    .await?
+    .collect();
+    if addresses.is_empty() {
+        return Err(TcpFailure::ResolutionFailed);
+    }
+    if addresses
+        .iter()
+        .any(|a| is_loopback(a.ip()) && a.port() == settings.local_port)
+    {
+        return Err(TcpFailure::SelfTarget);
+    }
+    let upstream = connection_stage(
+        TcpStream::connect(addresses.as_slice()),
+        Duration::from_secs(10),
+        false,
+    )
+    .await?;
+    if upstream
+        .peer_addr()
+        .map_err(|_| TcpFailure::ConnectFailed)?
+        == listener
+    {
+        return Err(TcpFailure::SelfTarget);
+    }
+    Ok(upstream)
+}
+
+/// A connection past the history cap: relayed as it is, not recorded or held.
+async fn relay_unrecorded(
+    mut client: TcpStream,
+    settings: TcpSettings,
+    mut stop: watch::Receiver<bool>,
+) {
+    let relay = async {
+        let local = client.local_addr().ok()?;
+        let mut upstream = open_upstream(&settings, local).await.ok()?;
+        tokio::io::copy_bidirectional(&mut client, &mut upstream)
+            .await
+            .ok()
+    };
+    tokio::select! {
+        _ = wait_stop(&mut stop) => {}
+        _ = relay => {}
+    }
+}
+
 fn is_loopback(ip: std::net::IpAddr) -> bool {
     ip.is_loopback()
         || match ip {
@@ -3081,13 +3165,10 @@ mod tests {
                 .records
                 .insert(record.id, record);
         }
-        let settings = TcpSettings {
-            local_port: 19999,
-            target_host: "127.0.0.1".into(),
-            target_port: 19998,
-        };
-        assert!(capture.start(settings).await.is_err());
+        // A full history still starts: it relays without recording.
+        capture.start(loopback(free_port(), 1)).await.unwrap();
         assert_eq!(capture.records().await.len(), MAX_CONNECTIONS);
+        capture.stop().await.unwrap();
     }
     #[tokio::test]
     async fn stopped_receiver_is_immediately_observed() {
@@ -4186,6 +4267,89 @@ mod tests {
         value.as_object_mut().unwrap().remove("local_port");
         let loaded: TcpConnection = serde_json::from_value(value).unwrap();
         assert_eq!(loaded.local_port, 0);
+    }
+    async fn wait_saved(capture: &TcpCapture, count: usize) -> Vec<TcpConnection> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let saved: Vec<_> = capture
+                    .summaries()
+                    .await
+                    .into_iter()
+                    .filter(|record| record.ended_at.is_some() && record.durable)
+                    .collect();
+                if saved.len() >= count {
+                    return saved;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    #[tokio::test]
+    async fn a_full_history_still_relays_and_counts_what_it_did_not_record() {
+        let target = echo_server().await;
+        let capture = temporary();
+        {
+            let mut history = capture.history.lock().unwrap();
+            for _ in 0..MAX_CONNECTIONS {
+                let mut saved = record();
+                saved.status = "closed".into();
+                saved.ended_at = Some(Utc::now());
+                saved.durable = true;
+                history.records.insert(saved.id, saved);
+            }
+        }
+        let port = free_port();
+        capture
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: loopback(port, target),
+            })
+            .await
+            .unwrap();
+        assert_eq!(echo_through(port, b"still relayed").await, b"still relayed");
+        let status = capture.status().await;
+        assert_eq!(status.history_count, MAX_CONNECTIONS);
+        assert_eq!(status.unrecorded_count, 1);
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn clearing_history_removes_ended_records_and_keeps_live_ones() {
+        let target = echo_server().await;
+        let capture = temporary();
+        let port = free_port();
+        capture
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: loopback(port, target),
+            })
+            .await
+            .unwrap();
+        assert_eq!(echo_through(port, b"ended").await, b"ended");
+        let ended = wait_saved(&capture, 1).await.remove(0);
+        let mut live = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        live.write_all(b"live").await.unwrap();
+        let mut back = [0; 4];
+        live.read_exact(&mut back).await.unwrap();
+        capture.unrecorded.store(3, Ordering::Relaxed);
+        assert_eq!(capture.clear().await.unwrap(), 1);
+        let left = capture.summaries().await;
+        assert_eq!(left.len(), 1);
+        assert!(left[0].ended_at.is_none());
+        assert!(!capture
+            .directory
+            .join(format!("{}.json", ended.id))
+            .exists());
+        assert_eq!(capture.status().await.unrecorded_count, 0);
+        assert_eq!(
+            TcpCapture::load(capture.directory.clone()).connection_count(),
+            Some(1)
+        );
+        drop(live);
+        capture.stop().await.unwrap();
     }
 }
 
