@@ -18,6 +18,9 @@ validate_app_name() {
 validate_app_name "$APP_NAME"
 
 APP_BUNDLE="$ROOT_DIR/dist/${APP_NAME}.app"
+# The headless server. Not "sniper": APFS is case-insensitive by default, so it
+# would be the same file as the desktop app's "Sniper" beside it.
+SERVER_NAME="sniper-server"
 CONTENTS_DIR="$APP_BUNDLE/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -68,7 +71,7 @@ cargo_bin_path() {
 
 build_native_binaries() {
   echo "Building release binaries..."
-  if ! cargo build --locked --release --bin sniper-desktop --bin sniper-cli --message-format=json-render-diagnostics > "$CARGO_BUILD_LOG"; then
+  if ! cargo build --locked --release --bin sniper-desktop --bin sniper-cli --bin sniper --message-format=json-render-diagnostics > "$CARGO_BUILD_LOG"; then
     cat "$CARGO_BUILD_LOG" >&2
     exit 1
   fi
@@ -80,6 +83,10 @@ build_native_binaries() {
   CLI_BIN_PATH="$(cargo_bin_path sniper-cli)"
   cp "$CLI_BIN_PATH" "$MACOS_DIR/sniper-cli"
   chmod +x "$MACOS_DIR/sniper-cli"
+
+  SERVER_BIN_PATH="$(cargo_bin_path sniper)"
+  cp "$SERVER_BIN_PATH" "$MACOS_DIR/$SERVER_NAME"
+  chmod +x "$MACOS_DIR/$SERVER_NAME"
 }
 
 require_rust_target() {
@@ -110,8 +117,8 @@ build_universal_binaries() {
   require_rust_target "$intel_target"
 
   echo "Building universal release binaries..."
-  cargo build --locked --release --target "$arm_target" --bin sniper-desktop --bin sniper-cli
-  cargo build --locked --release --target "$intel_target" --bin sniper-desktop --bin sniper-cli
+  cargo build --locked --release --target "$arm_target" --bin sniper-desktop --bin sniper-cli --bin sniper
+  cargo build --locked --release --target "$intel_target" --bin sniper-desktop --bin sniper-cli --bin sniper
 
   /usr/bin/lipo -create \
     "$(target_binary_path "$arm_target" sniper-desktop)" \
@@ -124,6 +131,12 @@ build_universal_binaries() {
     "$(target_binary_path "$intel_target" sniper-cli)" \
     -output "$MACOS_DIR/sniper-cli"
   chmod +x "$MACOS_DIR/sniper-cli"
+
+  /usr/bin/lipo -create \
+    "$(target_binary_path "$arm_target" sniper)" \
+    "$(target_binary_path "$intel_target" sniper)" \
+    -output "$MACOS_DIR/$SERVER_NAME"
+  chmod +x "$MACOS_DIR/$SERVER_NAME"
 }
 
 case "$UNIVERSAL_APP" in

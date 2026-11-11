@@ -72,6 +72,20 @@ native Wayland and XWayland are not supported.
 [Linux installation](packaging/linux/README.md) lists the GTK 3 and
 WebKitGTK 4.1 requirements and how to build from source.
 
+### Without a window
+
+The headless server runs the proxy and serves the UI at `http://127.0.0.1:23001`
+with no window: `sniper-server` on macOS (inside the app, and on your `PATH`
+with Homebrew), `sniper` on Windows and Linux. `sniper-cli` finds it through the
+data directory. It stays in the foreground, so put it in the background yourself:
+
+```bash
+nohup sniper-server > ~/sniper-server.log 2>&1 &
+```
+
+One runtime uses a data directory at a time. To run it beside the desktop app,
+give it its own `SNIPER_DATA_DIR`.
+
 ### Build from source
 
 ```bash
