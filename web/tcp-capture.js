@@ -572,6 +572,51 @@
     if (compact.length > 32768) throw new Error("Pending bytes are limited to 16 KiB.");
     return Uint8Array.from(compact.match(/../g), pair => parseInt(pair, 16));
   }
+  const ESCAPES = new Map([[0x0d, "\\r"], [0x09, "\\t"], [0x5c, "\\\\"]]);
+  const STRICT_UTF8 = typeof TextDecoder === "function" ? new TextDecoder("utf-8", { fatal: true }) : null;
+  // Held bytes as text to edit: printable text as it is, a real line break for
+  // a line feed, and \r, \t, \\ or \xNN for every other byte, so that the text
+  // reads back as exactly the same bytes.
+  function encodeEditable(bytes) {
+    let out = "";
+    for (let i = 0; i < bytes.length;) {
+      const byte = bytes[i];
+      if (byte === 0x0a || (byte >= 0x20 && byte < 0x7f && byte !== 0x5c)) { out += String.fromCharCode(byte); i++; continue; }
+      if (ESCAPES.has(byte)) { out += ESCAPES.get(byte); i++; continue; }
+      const length = byte >= 0xc2 && byte < 0xe0 ? 2 : byte >= 0xe0 && byte < 0xf0 ? 3 : byte >= 0xf0 && byte < 0xf5 ? 4 : 0;
+      let char = "";
+      if (length && STRICT_UTF8 && i + length <= bytes.length) {
+        try { char = STRICT_UTF8.decode(bytes.subarray(i, i + length)); } catch (_) { char = ""; }
+      }
+      // Characters that look like nothing, or like a broken byte, are escaped.
+      if (char && !/^[\u0080-\u009f\u2028\u2029\ufeff\ufffd]$/.test(char)) { out += char; i += length; continue; }
+      out += "\\x" + byte.toString(16).padStart(2, "0"); i++;
+    }
+    return out;
+  }
+  function decodeEditable(text) {
+    const out = [], utf8 = new TextEncoder();
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] !== "\\") {
+        const char = String.fromCodePoint(text.codePointAt(i));
+        out.push(...utf8.encode(char));
+        i += char.length - 1;
+      } else {
+        const next = text[i + 1], pair = text.slice(i + 2, i + 4);
+        if (next === "\\") out.push(0x5c);
+        else if (next === "r") out.push(0x0d);
+        else if (next === "t") out.push(0x09);
+        else if (next === "n") out.push(0x0a);
+        else if (next === "x" && /^[0-9a-fA-F]{2}$/.test(pair)) { out.push(parseInt(pair, 16)); i += 2; }
+        else if (next === "x") throw new Error("Write a byte as \\x and two hex digits.");
+        else throw new Error("Unknown escape \\" + (next || "") + ". Write \\\\ for a backslash.");
+        i++;
+      }
+      if (out.length > 16384) throw new Error("Pending bytes are limited to 16 KiB.");
+    }
+    if (!out.length) throw new Error("Enter some bytes. Drop removes the bytes.");
+    return Uint8Array.from(out);
+  }
   function rawHex(base64) { return Array.from(atob(base64), c => c.charCodeAt(0).toString(16).padStart(2, "0")).join(" "); }
   function createInterceptController({ document, sessionId, readPath, writePath, request, formatSize = byteSize, onChanged = () => {} }) {
     const el = id => document.getElementById(id), text = (id, value) => { el(id).textContent = value; };
@@ -585,6 +630,13 @@
     const EDIT_NOT_KEPT = "Edit not kept:";
     const draftKey = (id, pendingId) => JSON.stringify([id, pendingId]);
     const originalText = item => typeof item?.original_base64 === "string" ? rawHex(item.original_base64) : "";
+    // The editor shows bytes as Hex or as Text; a draft remembers which it was typed in.
+    let pendingMode = "hex";
+    const hexOf = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join(" ");
+    const shownAs = (bytes, mode) => mode === "text" ? encodeEditable(bytes) : hexOf(bytes);
+    const readAs = (value, mode) => mode === "text" ? decodeEditable(value) : parseHex(value);
+    const originalIn = item => typeof item?.original_base64 === "string"
+      ? shownAs(Uint8Array.from(atob(item.original_base64), c => c.charCodeAt(0)), pendingMode) : "";
     function selectedText(item) {
       if (typeof item.selected_base64 === "string") return rawHex(item.selected_base64);
       // Unchanged forwarding has no replacement payload. Only reuse complete,
@@ -593,9 +645,29 @@
         && item.original_length === item.selected_length && typeof item.original_base64 === "string"
         && atob(item.original_base64).length === item.original_length ? originalText(item) : "";
     }
-    const editorText = item => !item ? "" : item.state === "pending"
-      ? drafts.get(draftKey(connection?.id, item.pending_id))?.text ?? originalText(item)
-      : item.state === "forwarding" ? selectedText(item) : "";
+    function editorText(item) {
+      if (!item) return "";
+      if (item.state === "pending") return drafts.get(draftKey(connection?.id, item.pending_id))?.text ?? originalIn(item);
+      const forwarded = item.state === "forwarding" ? selectedText(item) : "";
+      return forwarded && pendingMode === "text" ? encodeEditable(parseHex(forwarded)) : forwarded;
+    }
+    // A draft typed in the other mode is shown in this one; one that does not
+    // read as bytes keeps its own mode rather than being lost.
+    function alignDraft(item) {
+      const key = item?.state === "pending" ? draftKey(connection?.id, item.pending_id) : null, draft = key && drafts.get(key);
+      if (!draft || draft.mode === pendingMode) return;
+      try { drafts.set(key, {...draft, text: shownAs(readAs(draft.text, draft.mode), pendingMode), mode: pendingMode}); }
+      catch (_) { pendingMode = draft.mode; }
+    }
+    function setPendingMode(mode) {
+      if (mode === pendingMode) return;
+      const item = chosen(), key = item?.state === "pending" ? draftKey(connection?.id, item.pending_id) : null, draft = key && drafts.get(key);
+      if (draft) {
+        try { drafts.set(key, {...draft, text: shownAs(readAs(draft.text, draft.mode), mode), mode}); }
+        catch (error) { showError(error.message); return; }
+      }
+      pendingMode = mode; showError(""); render();
+    }
     function forgetConnection(id) {
       for (const [key, draft] of drafts) if (draft.connectionId === id) drafts.delete(key);
     }
@@ -608,7 +680,7 @@
       const item = chosen(), editor = el("tcpPendingHex");
       if (!fresh || busy || !LIVE.has(connection?.status) || item?.state !== "pending") return;
       const key = draftKey(connection.id, item.pending_id), value = editor.value;
-      if (value === originalText(item)) { drafts.delete(key); if (actionError.startsWith(EDIT_NOT_KEPT)) showError(""); return; }
+      if (value === originalIn(item)) { drafts.delete(key); if (actionError.startsWith(EDIT_NOT_KEPT)) showError(""); return; }
       if (value.length > maxDraftText || (!drafts.has(key) && drafts.size >= maxDrafts)) {
         editor.value = editorText(item);
         showError(value.length > maxDraftText
@@ -616,7 +688,7 @@
           : EDIT_NOT_KEPT + " too many unsent edits. Forward, drop or reset one first.");
         return;
       }
-      drafts.set(key, {connectionId: connection.id, pendingId: item.pending_id, text: value});
+      drafts.set(key, {connectionId: connection.id, pendingId: item.pending_id, text: value, mode: pendingMode});
       if (actionError.startsWith(EDIT_NOT_KEPT)) showError("");
     }
     let readError = "", actionError = "", closeWait = null, connectionEpoch = 0;
@@ -674,6 +746,10 @@
         text("tcpInterceptNotice", "");
       }
       const item = chosen(), live = connection && LIVE.has(connection.status);
+      alignDraft(item);
+      for (const [id, mode] of [["tcpPendingHexMode", "hex"], ["tcpPendingTextMode", "text"]]) {
+        el(id).classList.toggle("active", pendingMode === mode); el(id).setAttribute("aria-pressed", String(pendingMode === mode));
+      }
       el("tcpInterceptToggle").disabled = busy || !policy;
       el("tcpInterceptToggle").setAttribute("aria-checked", String(Boolean(policy?.enabled)));
       // Which direction to hold matters only while holding.
@@ -728,7 +804,7 @@
       if (editor.value !== draft) editor.value = draft;
       editor.readOnly = !editable;
       editor.disabled = !editable && !(fresh && live && forwarding && draft && !busy);
-      editor.setAttribute("aria-label", forwarding ? "Bytes being forwarded, as hex" : "Pending bytes as hex");
+      editor.setAttribute("aria-label", (forwarding ? "Bytes being forwarded, as " : "Pending bytes as ") + pendingMode);
       editor.placeholder = !connection ? "Select a connection" : !fresh ? "Pending bytes unavailable"
         : forwarding ? "Preview unavailable" : dropped ? "Dropped"
         : item && item.state !== "pending" ? "Preview unavailable"
@@ -859,7 +935,7 @@
           body = {action, expected_revision: item.revision};
           if (action === "forward") {
             try {
-              const bytes = parseHex(el("tcpPendingHex").value);
+              const bytes = readAs(el("tcpPendingHex").value, pendingMode);
               const encoded = btoa(String.fromCharCode(...bytes));
               if (encoded !== item.original_base64) body.replacement_base64 = encoded;
             } catch (error) { showError(error.message); return; }
@@ -900,6 +976,8 @@
     el("tcpInterceptMatch").addEventListener("change", () => mutate("policy"));
     el("tcpInterceptMatchKind").addEventListener("change", () => { if (el("tcpInterceptMatch").value.trim()) mutate("policy"); });
     el("tcpForwardAll").addEventListener("click", () => mutate("forward-all"));
+    el("tcpPendingHexMode").addEventListener("click", () => setPendingMode("hex"));
+    el("tcpPendingTextMode").addEventListener("click", () => setPendingMode("text"));
     el("tcpDropAll").addEventListener("click", () => mutate("drop-all"));
     el("tcpPendingPicker").addEventListener("change", () => { selected = el("tcpPendingPicker").value; autoSelect = false; showError(""); render(); });
     el("tcpPendingHex").addEventListener("input", saveDraft);
@@ -910,7 +988,7 @@
     return {refresh, reset, setConnection, reconcileConnections};
   }
 
-  const api = { statusLabel, requestError, validateSettings, conversation, streamBytes, formatHex, formatText, parseHex, createInterceptController, createController };
+  const api = { statusLabel, requestError, validateSettings, conversation, streamBytes, formatHex, formatText, parseHex, encodeEditable, decodeEditable, createInterceptController, createController };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.SniperTcpCapture = api;
 })(typeof window === "undefined" ? globalThis : window);

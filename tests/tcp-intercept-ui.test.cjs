@@ -484,3 +484,40 @@ test('a hold filter goes with the policy, shows only while holding, and clears t
   assert.equal(f.get('tcpInterceptMatch').hidden, true);
   assert.equal(f.get('tcpInterceptMatchKind').hidden, true);
 });
+
+test('text editing round-trips every byte, shows lines, and refuses unknown escapes', () => {
+  const every = Uint8Array.from({length: 256}, (_, i) => i);
+  assert.deepEqual([...tcp.decodeEditable(tcp.encodeEditable(every))], [...every]);
+  for (let i = 0; i < 256; i++) assert.deepEqual([...tcp.decodeEditable(tcp.encodeEditable(Uint8Array.of(i)))], [i]);
+  // Valid UTF-8 shows as text; a broken sequence shows as escapes and comes back the same.
+  for (const bytes of [[0xc3, 0xa9], [0xe2, 0x82, 0xac], [0xc3], [0xe2, 0x28, 0xa1], [0xef, 0xbf, 0xbd], [0xf0, 0x9f, 0x98, 0x80]]) {
+    assert.deepEqual([...tcp.decodeEditable(tcp.encodeEditable(Uint8Array.from(bytes)))], bytes);
+  }
+  assert.equal(tcp.encodeEditable(Uint8Array.from(Buffer.from('a\r\nb\\'))), 'a\\r\nb\\\\');
+  assert.equal(tcp.encodeEditable(Uint8Array.from([0xc3, 0xa9, 0x00])), 'é\\x00');
+  assert.throws(() => tcp.decodeEditable('a\\q'), /\\\\/);
+  assert.throws(() => tcp.decodeEditable('a\\x4'), /\\x/);
+});
+test('the pending editor switches between Hex and Text and keeps an unsent edit', async () => {
+  const f = fixture(); await ready(f);
+  f.get('tcpPendingHex').value = '41 0d 0a'; f.get('tcpPendingHex').listeners.input();
+  f.get('tcpPendingTextMode').listeners.click();
+  assert.equal(f.get('tcpPendingHex').value, 'A\\r\n');
+  assert.equal(f.get('tcpPendingHex').attributes['aria-label'], 'Pending bytes as text');
+  f.get('tcpPendingHex').value = 'B\\x00'; f.get('tcpPendingHex').listeners.input();
+  f.get('tcpPendingHexMode').listeners.click();
+  assert.equal(f.get('tcpPendingHex').value, '42 00');
+  f.get('tcpPendingTextMode').listeners.click();
+  f.get('tcpForward').listeners.click();
+  assert.deepEqual(JSON.parse(f.requests[2].options.body), {action:'forward', expected_revision:0, replacement_base64:'QgA='});
+});
+test('a text edit that does not parse stays put and says why', async () => {
+  const f = fixture(); await ready(f);
+  f.get('tcpPendingTextMode').listeners.click();
+  f.get('tcpPendingHex').value = 'x\\q'; f.get('tcpPendingHex').listeners.input();
+  f.get('tcpPendingHexMode').listeners.click();
+  assert.equal(f.get('tcpPendingHex').value, 'x\\q', 'the edit is not converted or lost');
+  assert.match(f.get('tcpInterceptError').textContent, /\\\\/);
+  f.get('tcpForward').listeners.click();
+  assert.equal(f.requests.length, 2, 'nothing is sent');
+});
