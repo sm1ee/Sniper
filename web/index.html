@@ -943,7 +943,7 @@
                   </table>
                 </div>
                 <form class="tcp-listener-form" id="tcpListenerForm" aria-describedby="tcpRoutingDisclosure" hidden>
-                  <small id="tcpRoutingDisclosure">Connects directly, without the proxy chain.</small>
+                  <small id="tcpRoutingDisclosure">Uses the upstream proxy when it is on; this machine and bypassed hosts go direct.</small>
                   <div class="tcp-listener-route">
                     <label class="tcp-listener-field"><span>Listen on 127.0.0.1</span><input id="tcpLocalPort" type="number" min="1" max="65535" step="1" value="9000" required aria-label="TCP listen port" /></label>
                     <span class="tcp-listener-arrow" aria-hidden="true">→</span>

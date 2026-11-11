@@ -250,7 +250,7 @@ test("a new listener's bind conflict is shown and nothing is retried",async()=>{
 });
 
 test("failure labels are fixed, contextual and unknown-safe", () => {
-  for (const [code, label] of [["resolution_timeout","Name lookup timed out"],["resolution_failed","Name lookup failed"],["connect_timeout","Connection timed out"],["connection_refused","Connection refused"],["connect_failed","Connection failed"],["self_target","Target is this listener"],["relay_failed","Stream interrupted"],["storage_failed","History storage failed"]]) {
+  for (const [code, label] of [["proxy_failed","Upstream proxy failed"],["resolution_timeout","Name lookup timed out"],["resolution_failed","Name lookup failed"],["connect_timeout","Connection timed out"],["connection_refused","Connection refused"],["connect_failed","Connection failed"],["self_target","Target is this listener"],["relay_failed","Stream interrupted"],["storage_failed","History storage failed"]]) {
     assert.equal(tcp.statusLabel({status:"failed",failure:code}),"Failed · "+label);
     assert.equal(tcp.statusLabel({status:"stopped",failure:code}),"Stopped");
   }
@@ -455,4 +455,13 @@ test("Clear asks first, then removes ended connections; unrecorded ones are coun
   assert.equal(f.requests[2].options.method, "DELETE");
   await pollStatus(f, runningStatus, [{id:"b", status:"open"}]);
   assert.equal(f.get("tcpClearHistory").disabled, true, "live connections are not cleared");
+});
+test("detail says when a connection went through the proxy, and what a self-target means", async () => {
+  const f = fixture(); f.get("tcpDirection").value = "both";
+  let selected = f.controller.select("p");
+  f.requests[0].resolve({id:"p", target:"db.example.com:5432", status:"closed", durable:true, via_proxy:true, client_bytes:0, server_bytes:0, chunks:[]}); await selected;
+  assert.match(f.get("tcpStreamMeta").textContent, /Through the upstream proxy/);
+  selected = f.controller.select("s");
+  f.requests[1].resolve({id:"s", target:"db.example.com:5432", status:"failed", failure:"self_target", durable:true, client_bytes:0, server_bytes:0, chunks:[]}); await selected;
+  assert.match(f.get("tcpStreamMeta").textContent, /hosts entry/);
 });

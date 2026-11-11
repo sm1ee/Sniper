@@ -794,6 +794,9 @@ impl SessionContext {
         }
         let tcp_capture = crate::tcp_capture::TcpCapture::load(storage_dir.join("tcp-history"));
         tcp_capture.restore_listeners(snapshot.tcp_listeners);
+        let runtime = Arc::new(RuntimeSettings::from_snapshot(runtime_snapshot.clone()));
+        // Relayed connections follow the session's upstream proxy as it is now.
+        tcp_capture.use_runtime(runtime.clone());
         Self {
             tcp_capture: Arc::new(tcp_capture),
             upstream_peer_settings: Default::default(),
@@ -803,7 +806,7 @@ impl SessionContext {
             storage_dir,
             max_entries,
             store,
-            runtime: Arc::new(RuntimeSettings::from_snapshot(runtime_snapshot.clone())),
+            runtime,
             intercepts: Arc::new(InterceptQueue::new()),
             response_intercepts: Arc::new(ResponseInterceptQueue::new()),
             intercept_rules: Arc::new(crate::intercept::InterceptRuleStore::from_rules(

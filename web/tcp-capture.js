@@ -9,7 +9,8 @@
     ["resolution_timeout", "Name lookup timed out"], ["resolution_failed", "Name lookup failed"],
     ["connect_timeout", "Connection timed out"], ["connection_refused", "Connection refused"],
     ["connect_failed", "Connection failed"], ["self_target", "Target is this listener"],
-    ["relay_failed", "Stream interrupted"], ["storage_failed", "History storage failed"]
+    ["relay_failed", "Stream interrupted"], ["storage_failed", "History storage failed"],
+    ["proxy_failed", "Upstream proxy failed"]
   ]);
   const DIRECTIONS = ["client_to_server", "server_to_client"];
   const MAX_DISPLAY_BYTES = 256 * 1024;
@@ -330,7 +331,9 @@
       return [
         formatSize(record.client_bytes) + " sent", formatSize(record.server_bytes) + " received",
         record.capture_truncated ? "Partial capture" : "",
-        !LIVE.has(record.status) && !record.durable ? "Not saved" : ""
+        !LIVE.has(record.status) && !record.durable ? "Not saved" : "",
+        record.via_proxy ? "Through the upstream proxy" : "",
+        record.failure === "self_target" ? "The target resolves to this listener. If a hosts entry sends the name here, enter the server's IP as the target." : ""
       ].filter(Boolean).join(" · ");
     }
     function renderDetail() {

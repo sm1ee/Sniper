@@ -684,6 +684,7 @@ pub enum TcpFailure {
     SelfTarget,
     RelayFailed,
     StorageFailed,
+    ProxyFailed,
     #[serde(other)]
     Unknown,
 }
@@ -741,6 +742,9 @@ pub struct TcpConnection {
     /// The listener's port; 0 in records saved before there could be several.
     #[serde(default)]
     pub local_port: u16,
+    /// Opened through the session's upstream proxy.
+    #[serde(default)]
+    pub via_proxy: bool,
     #[serde(deserialize_with = "bounded_string::<_, MAX_STATUS_BYTES>")]
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1057,6 +1061,12 @@ struct Running {
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
+/// What a listener does with a connection it accepted.
+enum Admission {
+    Refused,
+    Unrecorded,
+    Recorded(Box<TcpConnection>, watch::Receiver<bool>),
+}
 pub struct TcpCapture {
     directory: PathBuf,
     history: Arc<std::sync::Mutex<History>>,
@@ -1067,6 +1077,8 @@ pub struct TcpCapture {
     errors: std::sync::Mutex<BTreeMap<Uuid, String>>,
     active_count: AtomicUsize,
     unrecorded: AtomicU64,
+    /// The session's settings, for its upstream proxy; absent in unit tests.
+    runtime: std::sync::OnceLock<Arc<crate::runtime::RuntimeSettings>>,
     intercept: std::sync::Mutex<InterceptRuntime>,
 }
 impl TcpCapture {
@@ -1403,6 +1415,7 @@ impl TcpCapture {
             errors: std::sync::Mutex::new(BTreeMap::new()),
             active_count: AtomicUsize::new(0),
             unrecorded: AtomicU64::new(0),
+            runtime: std::sync::OnceLock::new(),
             intercept: std::sync::Mutex::new(InterceptRuntime::default()),
         }
     }
@@ -1480,6 +1493,7 @@ impl TcpCapture {
                 peer: r.peer.clone(),
                 target: r.target.clone(),
                 local_port: r.local_port,
+                via_proxy: r.via_proxy,
                 status: r.status.clone(),
                 failure: r.failure,
                 client_bytes: r.client_bytes,
@@ -1624,6 +1638,15 @@ impl TcpCapture {
             anyhow::bail!("Some TCP records could not be deleted. History requires recovery.");
         }
         Ok(removed.len())
+    }
+    pub fn use_runtime(&self, runtime: Arc<crate::runtime::RuntimeSettings>) {
+        let _ = self.runtime.set(runtime);
+    }
+    async fn upstream_proxy(&self) -> Option<crate::upstream_proxy::UpstreamProxy> {
+        match self.runtime.get() {
+            Some(runtime) => Some(runtime.upstream_proxy().await),
+            None => None,
+        }
     }
     /// Restores the listeners a session saved, without starting them.
     pub fn restore_listeners(&self, listeners: Vec<TcpListenerConfig>) {
@@ -1890,31 +1913,38 @@ impl TcpCapture {
                 },
                 accepted = listener.accept(), if tasks.len() < MAX_ACTIVE => {
                     let Ok((client, peer)) = accepted else { break; };
-                    let mut runtime = self.intercept.lock().unwrap();
-                    let mut history = self.history.lock().unwrap();
-                    if history.persistence_error || history.load_error { drop(client); continue; }
-                    // A full history must not break the app under test: relay
-                    // on, record nothing, and count it until the history is cleared.
-                    if history.records.len() >= MAX_CONNECTIONS {
-                        drop(history);
-                        drop(runtime);
-                        self.unrecorded.fetch_add(1, Ordering::Relaxed);
-                        let settings = settings.clone();
-                        let stop = children_receiver.clone();
-                        tasks.spawn(relay_unrecorded(client, settings, stop));
-                        self.active_count.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    }
-                    let record = TcpConnection { id: Uuid::new_v4(), started_at: Utc::now(), ended_at: None, peer: peer.to_string(), target: settings.target_label(), local_port: settings.local_port, status: "connecting".into(), failure: None, client_bytes: 0, server_bytes: 0, captured_bytes: 0, capture_truncated: false, durable: false, chunks: vec![], client_received_bytes:0, server_received_bytes:0, intercept_events:vec![], intercept_captured_bytes:0, intercept_truncated:false, intercept_event_count:0, intercept_schema_version:1, pending_count:0,pending_directions:vec![] };
-                    let (close, closed)=watch::channel(false);
-                    runtime.connections.insert(record.id,close);
-                    history.records.insert(record.id, record.clone());
-                    drop(history);
-                    drop(runtime);
-                    let capture = self.clone();
+                    // The locks end with this block, before anything awaits.
+                    let admitted = {
+                        let mut runtime = self.intercept.lock().unwrap();
+                        let mut history = self.history.lock().unwrap();
+                        if history.persistence_error || history.load_error {
+                            Admission::Refused
+                        } else if history.records.len() >= MAX_CONNECTIONS {
+                            // A full history must not break the app under test:
+                            // relay on, record nothing, and count it until cleared.
+                            Admission::Unrecorded
+                        } else {
+                            let record = TcpConnection { id: Uuid::new_v4(), started_at: Utc::now(), ended_at: None, peer: peer.to_string(), target: settings.target_label(), local_port: settings.local_port, via_proxy: false, status: "connecting".into(), failure: None, client_bytes: 0, server_bytes: 0, captured_bytes: 0, capture_truncated: false, durable: false, chunks: vec![], client_received_bytes:0, server_received_bytes:0, intercept_events:vec![], intercept_captured_bytes:0, intercept_truncated:false, intercept_event_count:0, intercept_schema_version:1, pending_count:0,pending_directions:vec![] };
+                            let (close, closed) = watch::channel(false);
+                            runtime.connections.insert(record.id, close);
+                            history.records.insert(record.id, record.clone());
+                            Admission::Recorded(Box::new(record), closed)
+                        }
+                    };
                     let settings = settings.clone();
                     let stop = children_receiver.clone();
-                    tasks.spawn(async move { capture.connection(client, record, settings, stop, closed).await; });
+                    match admitted {
+                        Admission::Refused => { drop(client); continue; }
+                        Admission::Unrecorded => {
+                            self.unrecorded.fetch_add(1, Ordering::Relaxed);
+                            let proxy = self.upstream_proxy().await;
+                            tasks.spawn(relay_unrecorded(client, settings, proxy, stop));
+                        }
+                        Admission::Recorded(record, closed) => {
+                            let capture = self.clone();
+                            tasks.spawn(async move { capture.connection(client, *record, settings, stop, closed).await; });
+                        }
+                    }
                     self.active_count.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -1944,9 +1974,11 @@ impl TcpCapture {
         let result = connection_outcome(
             async {
                 let local = client.local_addr().map_err(|_| TcpFailure::ConnectFailed)?;
-                let upstream = open_upstream(&settings, local).await?;
+                let proxy = self.upstream_proxy().await;
+                let (upstream, via_proxy) = open_upstream(&settings, local, proxy.as_ref()).await?;
                 if let Some(r) = self.history.lock().unwrap().records.get_mut(&id) {
                     r.status = "open".into();
+                    r.via_proxy = via_proxy;
                 }
                 let (client_read, client_write) = client.into_split();
                 let (server_read, server_write) = upstream.into_split();
@@ -2120,12 +2152,34 @@ impl TcpCapture {
         }
     }
 }
-/// Opens the connection to a listener's target, refusing one that comes back to
-/// the listener: a self-target would recursively fill the connection budget.
+/// Whether a target goes through the upstream proxy: only while it is on, and
+/// never for a bypassed host or this machine, which a proxy elsewhere cannot
+/// reach.
+fn routes_through(proxy: &crate::upstream_proxy::UpstreamProxy, host: &str) -> bool {
+    let local = host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(is_loopback);
+    proxy.enabled && !local && !proxy.bypasses(host)
+}
+
+/// Opens the connection to a listener's target, through the upstream proxy when
+/// it applies, and says whether it did. A direct connection that comes back to
+/// the listener is refused: it would recursively fill the connection budget.
 async fn open_upstream(
     settings: &TcpSettings,
     listener: std::net::SocketAddr,
-) -> Result<TcpStream, TcpFailure> {
+    proxy: Option<&crate::upstream_proxy::UpstreamProxy>,
+) -> Result<(TcpStream, bool), TcpFailure> {
+    if let Some(proxy) = proxy.filter(|proxy| routes_through(proxy, &settings.target_host)) {
+        // The proxy's own errors can name hosts; only the code is kept.
+        return proxy
+            .connect(&settings.target_host, settings.target_port)
+            .await
+            .map(|stream| (stream, true))
+            .map_err(|_| TcpFailure::ProxyFailed);
+    }
     let addresses: Vec<_> = connection_stage(
         tokio::net::lookup_host((settings.target_host.as_str(), settings.target_port)),
         Duration::from_secs(10),
@@ -2155,18 +2209,19 @@ async fn open_upstream(
     {
         return Err(TcpFailure::SelfTarget);
     }
-    Ok(upstream)
+    Ok((upstream, false))
 }
 
 /// A connection past the history cap: relayed as it is, not recorded or held.
 async fn relay_unrecorded(
     mut client: TcpStream,
     settings: TcpSettings,
+    proxy: Option<crate::upstream_proxy::UpstreamProxy>,
     mut stop: watch::Receiver<bool>,
 ) {
     let relay = async {
         let local = client.local_addr().ok()?;
-        let mut upstream = open_upstream(&settings, local).await.ok()?;
+        let (mut upstream, _) = open_upstream(&settings, local, proxy.as_ref()).await.ok()?;
         tokio::io::copy_bidirectional(&mut client, &mut upstream)
             .await
             .ok()
@@ -2211,6 +2266,7 @@ mod tests {
             peer: "127.0.0.1:1".into(),
             target: "127.0.0.1:2".into(),
             local_port: 0,
+            via_proxy: false,
             status: "open".into(),
             failure: None,
             client_bytes: 0,
@@ -4600,6 +4656,109 @@ mod tests {
                 Err(InterceptError::BadRequest(_))
             ));
         }
+    }
+    /// A CONNECT proxy that sends every tunnel to `target` and reports the
+    /// authority each CONNECT asked for.
+    async fn connect_proxy(target: u16) -> (u16, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (asked, seen) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut client, _)) = listener.accept().await {
+                let asked = asked.clone();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    while !head.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0; 1];
+                        if client.read_exact(&mut byte).await.is_err() {
+                            return;
+                        }
+                        head.push(byte[0]);
+                    }
+                    let line = String::from_utf8_lossy(&head)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
+                    let _ = asked.send(line);
+                    let mut upstream = TcpStream::connect((Ipv4Addr::LOCALHOST, target))
+                        .await
+                        .unwrap();
+                    client
+                        .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                        .await
+                        .unwrap();
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                });
+            }
+        });
+        (port, seen)
+    }
+    fn proxied(proxy_port: u16, bypass: &[&str]) -> Arc<crate::runtime::RuntimeSettings> {
+        Arc::new(crate::runtime::RuntimeSettings::from_snapshot(
+            crate::runtime::RuntimeSettingsSnapshot {
+                upstream_proxy: crate::upstream_proxy::UpstreamProxy {
+                    enabled: true,
+                    url: format!("http://127.0.0.1:{proxy_port}"),
+                    ..Default::default()
+                },
+                upstream_bypass_hosts: bypass.iter().map(|host| host.to_string()).collect(),
+                ..Default::default()
+            },
+        ))
+    }
+    #[tokio::test]
+    async fn a_connection_goes_through_the_upstream_proxy_when_it_is_on() {
+        let target = echo_server().await;
+        let (proxy_port, mut seen) = connect_proxy(target).await;
+        let capture = temporary();
+        capture.use_runtime(proxied(proxy_port, &[]));
+        let port = free_port();
+        capture
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: TcpSettings {
+                    local_port: port,
+                    target_host: "relay.example.com".into(),
+                    target_port: 5432,
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(echo_through(port, b"through").await, b"through");
+        assert_eq!(
+            seen.recv().await.unwrap(),
+            "CONNECT relay.example.com:5432 HTTP/1.1"
+        );
+        let record = wait_saved(&capture, 1).await.remove(0);
+        assert!(record.via_proxy);
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn this_machine_and_bypassed_hosts_go_direct() {
+        let target = echo_server().await;
+        let (proxy_port, mut seen) = connect_proxy(target).await;
+        let capture = temporary();
+        let runtime = proxied(proxy_port, &["*.internal.example.com"]);
+        capture.use_runtime(runtime.clone());
+        let port = free_port();
+        capture
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: loopback(port, target),
+            })
+            .await
+            .unwrap();
+        assert_eq!(echo_through(port, b"direct").await, b"direct");
+        let record = wait_saved(&capture, 1).await.remove(0);
+        assert!(!record.via_proxy);
+        assert!(seen.try_recv().is_err(), "the proxy saw nothing");
+        let proxy = runtime.upstream_proxy().await;
+        assert!(!routes_through(&proxy, "db.internal.example.com"));
+        assert!(!routes_through(&proxy, "localhost"));
+        assert!(!routes_through(&proxy, "::1"));
+        assert!(routes_through(&proxy, "relay.example.com"));
+        capture.stop().await.unwrap();
     }
 }
 
