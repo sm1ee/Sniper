@@ -382,6 +382,8 @@
                       <button class="switch" id="tcpInterceptToggle" type="button" role="switch" aria-checked="false" aria-labelledby="tcpInterceptLabel" disabled></button>
                     </span>
                     <select id="tcpInterceptDirection" aria-label="Intercept direction" hidden disabled><option value="both">Both directions</option><option value="client_to_server">Client → Server</option><option value="server_to_client">Server → Client</option></select>
+                    <input id="tcpInterceptMatch" type="text" placeholder="Hold only when it contains" aria-label="Hold only reads that contain" spellcheck="false" autocomplete="off" hidden disabled />
+                    <select id="tcpInterceptMatchKind" aria-label="Match as" hidden disabled><option value="text">Text</option><option value="hex">Hex</option><option value="regex">Regex</option></select>
                     <span id="tcpInterceptStatus" role="status"></span>
                   </div>
                 </div>
@@ -428,6 +430,8 @@
                   <div class="tcp-pending-bar">
                     <select id="tcpPendingPicker" aria-label="Pending bytes" disabled></select>
                     <span id="tcpPendingMeta"></span>
+                    <button id="tcpDropAll" class="secondary-action" type="button" title="Drop every held read in this session" disabled>Drop all</button>
+                    <button id="tcpForwardAll" class="secondary-action" type="button" title="Forward every held read in this session unchanged" disabled>Forward all</button>
                     <button id="tcpPendingReset" class="secondary-action" type="button" disabled>Reset</button>
                     <button id="tcpDrop" class="secondary-action" type="button" disabled>Drop</button>
                     <button id="tcpForward" class="primary-action" type="button" disabled>Forward</button>

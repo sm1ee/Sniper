@@ -680,6 +680,14 @@
       el("tcpInterceptDirection").hidden = !policy?.enabled;
       el("tcpInterceptDirection").disabled = busy || !policy;
       el("tcpInterceptDirection").value = policy?.direction || "both";
+      const match = el("tcpInterceptMatch"), matchKind = el("tcpInterceptMatchKind");
+      for (const field of [match, matchKind]) { field.hidden = !policy?.enabled; field.disabled = busy || !policy; }
+      // A poll must not overwrite what is being typed.
+      if (document.activeElement !== match && document.activeElement !== matchKind) {
+        match.value = policy?.filter?.value || "";
+        matchKind.value = policy?.filter?.kind || "text";
+      }
+      for (const id of ["tcpForwardAll", "tcpDropAll"]) el(id).disabled = busy || !(policy?.paused_count > 0);
       // The legacy pending total includes already-approved writes. Do not infer
       // global state from this connection's separately fetched pending items.
       const split = policy && Number.isInteger(policy.paused_count) && Number.isInteger(policy.forwarding_count) && policy.paused_count >= 0 && policy.forwarding_count >= 0 && policy.paused_count + policy.forwarding_count <= policy.pending_count;
@@ -835,7 +843,11 @@
       const item = chosen(), id = connection?.id;
       let path = "/api/tcp/intercept", method = "PUT", body;
       if (action === "policy" || action === "toggle") {
-        body = { enabled: action === "toggle" ? !policy.enabled : policy.enabled, direction: el("tcpInterceptDirection").value, expected_revision: policy.revision };
+        const value = el("tcpInterceptMatch").value;
+        body = { enabled: action === "toggle" ? !policy.enabled : policy.enabled, direction: el("tcpInterceptDirection").value, expected_revision: policy.revision,
+          filter: value.trim() ? { kind: el("tcpInterceptMatchKind").value || "text", value } : null };
+      } else if (action === "forward-all" || action === "drop-all") {
+        path = "/api/tcp/intercept/" + action; method = "POST"; body = {};
       } else {
         if (!fresh || !connection || !LIVE.has(connection.status)) return;
         path = "/api/tcp/connections/" + encodeURIComponent(id);
@@ -857,7 +869,7 @@
       if (action === "forward" || action === "drop") autoSelect = false;
       generation++; version++; reading = null; busy = true; fresh = false;
       const token = stamp(), owner = connectionEpoch;
-      const trigger = el({toggle: "tcpInterceptToggle", policy: "tcpInterceptDirection", forward: "tcpForward", drop: "tcpDrop", close: "tcpCloseConnection"}[action]);
+      const trigger = el({toggle: "tcpInterceptToggle", policy: "tcpInterceptDirection", forward: "tcpForward", drop: "tcpDrop", close: "tcpCloseConnection", "forward-all": "tcpForwardAll", "drop-all": "tcpDropAll"}[action]);
       actionFocus = document.activeElement === trigger ? {element: trigger, action, token, owner, id, pendingId: item?.pending_id} : null;
       closeWait = null; showError(""); text("tcpInterceptNotice", ""); render();
       try {
@@ -873,7 +885,8 @@
       } catch (error) {
         // Only a conflict says the decision was refused; any other failure may
         // have reached the socket, and the bytes are not sent again.
-        if (current(token) && owner === connectionEpoch && id === connection?.id) showError(error.status === 409 ? error.message : error.message + " Outcome unknown; not retried.");
+        if (current(token) && action === "policy" && error.status === 400) showError("The hold filter was not accepted. Check it.");
+        else if (current(token) && owner === connectionEpoch && id === connection?.id) showError(error.status === 409 ? error.message : error.message + " Outcome unknown; not retried.");
       } finally {
         if (current(token)) { busy = false; render(); await refresh(); onChanged(); }
       }
@@ -884,6 +897,10 @@
     }
     el("tcpInterceptToggle").addEventListener("click", () => mutate("toggle"));
     el("tcpInterceptDirection").addEventListener("change", () => mutate("policy"));
+    el("tcpInterceptMatch").addEventListener("change", () => mutate("policy"));
+    el("tcpInterceptMatchKind").addEventListener("change", () => { if (el("tcpInterceptMatch").value.trim()) mutate("policy"); });
+    el("tcpForwardAll").addEventListener("click", () => mutate("forward-all"));
+    el("tcpDropAll").addEventListener("click", () => mutate("drop-all"));
     el("tcpPendingPicker").addEventListener("change", () => { selected = el("tcpPendingPicker").value; autoSelect = false; showError(""); render(); });
     el("tcpPendingHex").addEventListener("input", saveDraft);
     el("tcpPendingReset").addEventListener("click", () => { const item = chosen(); if (item && !busy && fresh) { drafts.delete(draftKey(connection.id, item.pending_id)); showError(""); render(); } });

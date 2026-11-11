@@ -44,10 +44,10 @@ test('unchanged forward omits replacement, drop never sends editor content',asyn
     f.requests[2].resolve({});await tick();await resolveRefresh(f);
   }
 });
-test('Off only changes policy, retains pending, and does not forward bytes',async()=>{
+test('Off is one policy change; the client sends no forwards of its own',async()=>{
   const f=fixture();await ready(f);f.get('tcpInterceptToggle').listeners.click();
   assert.match(f.requests[2].path,/\/api\/tcp\/intercept\?/);
-  assert.deepEqual(JSON.parse(f.requests[2].options.body),{enabled:false,direction:'both',expected_revision:7});
+  assert.deepEqual(JSON.parse(f.requests[2].options.body),{enabled:false,direction:'both',expected_revision:7,filter:null});
   f.requests[2].resolve({...policy,enabled:false,revision:8});await tick();
   await resolveRefresh(f,[pending],{...policy,enabled:false,revision:8});
   assert.equal(f.get('tcpPendingHex').value,'00 ff');assert.equal(f.get('tcpForward').disabled,false);
@@ -452,4 +452,35 @@ test('draft capacity rejects a new edit visibly and never evicts unsent edits; r
   assert.equal(f.get('tcpInterceptError').textContent, '');
   f.session('new'); f.controller.reset();
   await selectDraftConnection(f, 'overflow'); assert.equal(f.get('tcpPendingHex').value, '00 ff');
+});
+
+test('Forward all and Drop all act on every held read, and only while something is held', async () => {
+  const f = fixture(); await ready(f);
+  assert.equal(f.get('tcpForwardAll').disabled, false);
+  f.get('tcpForwardAll').listeners.click();
+  assert.match(f.requests[2].path, /^\/api\/tcp\/intercept\/forward-all\?session_id=a&expected_active_session_id=a$/);
+  assert.equal(f.requests[2].options.method, 'POST');
+  f.requests[2].resolve({count:1}); await tick();
+  await resolveRefresh(f, [], {...policy, pending_count:0, paused_count:0});
+  assert.equal(f.get('tcpForwardAll').disabled, true);
+  assert.equal(f.get('tcpDropAll').disabled, true);
+  await resolveRefresh(f, [pending], policy);
+  f.get('tcpDropAll').listeners.click();
+  assert.match(f.requests.at(-1).path, /^\/api\/tcp\/intercept\/drop-all\?/);
+});
+test('a hold filter goes with the policy, shows only while holding, and clears to none', async () => {
+  const f = fixture(); await ready(f);
+  assert.equal(f.get('tcpInterceptMatch').hidden, false);
+  f.get('tcpInterceptMatch').value = 'PING'; f.get('tcpInterceptMatchKind').value = 'text';
+  f.get('tcpInterceptMatch').listeners.change();
+  assert.deepEqual(JSON.parse(f.requests[2].options.body), {enabled:true, direction:'both', expected_revision:7, filter:{kind:'text', value:'PING'}});
+  f.requests[2].resolve({...policy, revision:8, filter:{kind:'text', value:'PING'}}); await tick();
+  await resolveRefresh(f, [pending], {...policy, revision:8, filter:{kind:'text', value:'PING'}});
+  f.get('tcpInterceptMatch').value = '';
+  f.get('tcpInterceptMatch').listeners.change();
+  assert.equal(JSON.parse(f.requests.at(-1).options.body).filter, null);
+  f.requests.at(-1).resolve({...policy, enabled:false}); await tick();
+  await resolveRefresh(f, [], {...policy, enabled:false, pending_count:0, paused_count:0});
+  assert.equal(f.get('tcpInterceptMatch').hidden, true);
+  assert.equal(f.get('tcpInterceptMatchKind').hidden, true);
 });

@@ -356,6 +356,9 @@ pub struct InterceptPolicy {
     pub pending_count: usize,
     pub paused_count: usize,
     pub forwarding_count: usize,
+    /// Only reads that match are held. A match across two reads is not found:
+    /// reads are not messages.
+    pub filter: Option<InterceptFilter>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -363,6 +366,66 @@ pub struct PolicyUpdate {
     pub enabled: bool,
     pub direction: PolicyDirection,
     pub expected_revision: u64,
+    #[serde(default)]
+    pub filter: Option<InterceptFilter>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InterceptFilter {
+    pub kind: FilterKind,
+    pub value: String,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterKind {
+    Text,
+    Hex,
+    Regex,
+}
+enum Matcher {
+    Bytes(Vec<u8>),
+    Pattern(regex::bytes::Regex),
+}
+impl Matcher {
+    fn compile(filter: &InterceptFilter) -> Result<Self, InterceptError> {
+        let bad = |message: &str| InterceptError::BadRequest(message.into());
+        if filter.value.is_empty() || filter.value.len() > 1024 {
+            return Err(bad("A hold filter is 1 to 1024 characters."));
+        }
+        Ok(match filter.kind {
+            FilterKind::Text => Self::Bytes(filter.value.as_bytes().to_vec()),
+            FilterKind::Hex => {
+                let compact: Vec<u8> = filter
+                    .value
+                    .bytes()
+                    .filter(|byte| !byte.is_ascii_whitespace())
+                    .collect();
+                if compact.len() % 2 != 0 || !compact.iter().all(u8::is_ascii_hexdigit) {
+                    return Err(bad("Enter whole hex byte pairs."));
+                }
+                Self::Bytes(
+                    compact
+                        .chunks(2)
+                        .map(|pair| {
+                            u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap()
+                        })
+                        .collect(),
+                )
+            }
+            FilterKind::Regex => Self::Pattern(
+                regex::bytes::RegexBuilder::new(&filter.value)
+                    .size_limit(1 << 20)
+                    .build()
+                    .map_err(|_| bad("The hold filter is not a valid regular expression."))?,
+            ),
+        })
+    }
+    fn matches(&self, bytes: &[u8]) -> bool {
+        match self {
+            Self::Bytes(needle) => bytes.windows(needle.len()).any(|window| window == needle),
+            Self::Pattern(pattern) => pattern.is_match(bytes),
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -447,6 +510,7 @@ struct PendingRange {
 }
 struct InterceptRuntime {
     policy: InterceptPolicy,
+    matcher: Option<Matcher>,
     pending: BTreeMap<Uuid, PendingRange>,
     connections: BTreeMap<Uuid, watch::Sender<bool>>,
 }
@@ -478,7 +542,9 @@ impl Default for InterceptRuntime {
                 pending_count: 0,
                 paused_count: 0,
                 forwarding_count: 0,
+                filter: None,
             },
+            matcher: None,
             pending: BTreeMap::new(),
             connections: BTreeMap::new(),
         }
@@ -1018,6 +1084,7 @@ impl TcpCapture {
             .revision
             .checked_add(1)
             .ok_or_else(|| InterceptError::Conflict("policy revision exhausted".into()))?;
+        let matcher = update.filter.as_ref().map(Matcher::compile).transpose()?;
         runtime.policy = InterceptPolicy {
             enabled: update.enabled,
             direction: update.direction,
@@ -1025,8 +1092,47 @@ impl TcpCapture {
             pending_count: 0,
             paused_count: 0,
             forwarding_count: 0,
+            filter: update.filter,
         };
+        runtime.matcher = matcher;
         Ok(runtime.policy_snapshot())
+    }
+    /// Turning intercept off lets go of what it held, as HTTP intercept does.
+    pub async fn update_policy(
+        &self,
+        update: PolicyUpdate,
+    ) -> Result<InterceptPolicy, InterceptError> {
+        let off = !update.enabled;
+        self.set_policy(update)?;
+        if off {
+            self.release_all(DecisionAction::Forward).await;
+        }
+        Ok(self.policy())
+    }
+    /// Forwards unchanged, or drops, every read held in this session.
+    pub async fn release_all(&self, action: DecisionAction) -> usize {
+        let held: Vec<(Uuid, Uuid, u64)> = self
+            .intercept
+            .lock()
+            .unwrap()
+            .pending
+            .iter()
+            .filter(|(_, range)| range.event.state == "pending")
+            .map(|(id, range)| (range.connection_id, *id, range.event.revision))
+            .collect();
+        let mut released = 0;
+        for (connection, pending, expected_revision) in held {
+            let request = DecisionRequest {
+                action,
+                replacement_base64: None,
+                expected_revision,
+            };
+            // One that ended or was decided meanwhile is not counted.
+            if self.decide(connection, pending, request).await.is_ok() {
+                released += 1;
+            }
+        }
+        released
     }
     pub fn pending(&self, id: Uuid) -> Result<PendingResponse, InterceptError> {
         let runtime = self.intercept.lock().unwrap();
@@ -1156,6 +1262,10 @@ impl TcpCapture {
                     | (PolicyDirection::ClientToServer, Direction::ClientToServer)
                     | (PolicyDirection::ServerToClient, Direction::ServerToClient)
             )
+            || runtime
+                .matcher
+                .as_ref()
+                .is_some_and(|matcher| !matcher.matches(bytes))
         {
             return None;
         }
@@ -3531,6 +3641,7 @@ mod tests {
                 enabled: true,
                 direction: PolicyDirection::Both,
                 expected_revision: 0,
+                filter: None,
             })
             .unwrap();
     }
@@ -3667,6 +3778,7 @@ mod tests {
                 enabled: false,
                 direction: PolicyDirection::Both,
                 expected_revision: 1,
+                filter: None,
             })
             .unwrap();
         assert_eq!(capture.policy().pending_count, 1);
@@ -3732,6 +3844,7 @@ mod tests {
                 enabled: false,
                 direction: PolicyDirection::Both,
                 expected_revision: 1,
+                filter: None,
             })
             .unwrap();
         assert_eq!(
@@ -3812,7 +3925,8 @@ mod tests {
             .set_policy(PolicyUpdate {
                 enabled: false,
                 direction: PolicyDirection::Both,
-                expected_revision: 0
+                expected_revision: 0,
+                filter: None,
             })
             .is_err());
         for (action, replacement, revision) in [
@@ -3897,6 +4011,7 @@ mod tests {
                 enabled: true,
                 direction: PolicyDirection::ServerToClient,
                 expected_revision: 1,
+                filter: None,
             })
             .unwrap();
         // Direction changes cannot release either already-held range.
@@ -4350,6 +4465,141 @@ mod tests {
         );
         drop(live);
         capture.stop().await.unwrap();
+    }
+    fn holding(capture: &TcpCapture, filter: Option<InterceptFilter>) {
+        let expected_revision = capture.policy().revision;
+        capture
+            .set_policy(PolicyUpdate {
+                enabled: true,
+                direction: PolicyDirection::ClientToServer,
+                expected_revision,
+                filter,
+            })
+            .unwrap();
+    }
+    async fn wait_paused(capture: &TcpCapture, count: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while capture.policy().paused_count < count {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    async fn send_to(port: u16, bytes: &[u8]) -> TcpStream {
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        client.write_all(bytes).await.unwrap();
+        client
+    }
+    async fn read_back(client: &mut TcpStream, length: usize) -> Vec<u8> {
+        let mut back = vec![0; length];
+        tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut back))
+            .await
+            .unwrap()
+            .unwrap();
+        back
+    }
+    async fn relaying() -> (Arc<TcpCapture>, u16) {
+        let target = echo_server().await;
+        let capture = temporary();
+        let port = free_port();
+        capture
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: loopback(port, target),
+            })
+            .await
+            .unwrap();
+        (capture, port)
+    }
+    async fn turn_off(capture: &TcpCapture) {
+        let expected_revision = capture.policy().revision;
+        capture
+            .update_policy(PolicyUpdate {
+                enabled: false,
+                direction: PolicyDirection::Both,
+                expected_revision,
+                filter: None,
+            })
+            .await
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn forward_all_and_turning_off_release_every_held_read() {
+        let (capture, port) = relaying().await;
+        holding(&capture, None);
+        let (mut first, mut second) = (send_to(port, b"one").await, send_to(port, b"two").await);
+        wait_paused(&capture, 2).await;
+        assert_eq!(capture.release_all(DecisionAction::Forward).await, 2);
+        assert_eq!(read_back(&mut first, 3).await, b"one");
+        assert_eq!(read_back(&mut second, 3).await, b"two");
+        let mut third = send_to(port, b"off").await;
+        wait_paused(&capture, 1).await;
+        turn_off(&capture).await;
+        assert_eq!(read_back(&mut third, 3).await, b"off");
+        assert_eq!(capture.policy().pending_count, 0);
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn drop_all_discards_every_held_read() {
+        let (capture, port) = relaying().await;
+        holding(&capture, None);
+        let mut client = send_to(port, b"gone").await;
+        wait_paused(&capture, 1).await;
+        assert_eq!(capture.release_all(DecisionAction::Drop).await, 1);
+        turn_off(&capture).await;
+        client.write_all(b"kept").await.unwrap();
+        assert_eq!(read_back(&mut client, 4).await, b"kept");
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn a_filter_holds_only_the_reads_that_match() {
+        let (capture, port) = relaying().await;
+        holding(
+            &capture,
+            Some(InterceptFilter {
+                kind: FilterKind::Text,
+                value: "PING".into(),
+            }),
+        );
+        assert_eq!(capture.policy().filter.as_ref().unwrap().value, "PING");
+        let mut passing = send_to(port, b"PONG").await;
+        assert_eq!(read_back(&mut passing, 4).await, b"PONG");
+        let _held = send_to(port, b"xPINGx").await;
+        wait_paused(&capture, 1).await;
+        capture.stop().await.unwrap();
+    }
+    #[test]
+    fn filters_match_text_hex_and_patterns_and_refuse_bad_ones() {
+        let compile = |kind, value: &str| {
+            Matcher::compile(&InterceptFilter {
+                kind,
+                value: value.into(),
+            })
+        };
+        assert!(compile(FilterKind::Hex, "50 49 4e 47")
+            .unwrap()
+            .matches(b"xPINGx"));
+        assert!(!compile(FilterKind::Hex, "50494e47")
+            .unwrap()
+            .matches(b"PONG"));
+        assert!(compile(FilterKind::Regex, "^P.NG$")
+            .unwrap()
+            .matches(b"PANG"));
+        assert!(compile(FilterKind::Text, "ING").unwrap().matches(b"PING"));
+        for (kind, value) in [
+            (FilterKind::Hex, "5"),
+            (FilterKind::Hex, "zz"),
+            (FilterKind::Regex, "("),
+            (FilterKind::Text, ""),
+        ] {
+            assert!(matches!(
+                compile(kind, value),
+                Err(InterceptError::BadRequest(_))
+            ));
+        }
     }
 }
 

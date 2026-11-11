@@ -397,7 +397,20 @@ impl AppState {
         let session = self
             .checked_tcp_write_session(session_id, expected_active_session_id)
             .await?;
-        session.tcp_capture.set_policy(update)
+        session.tcp_capture.update_policy(update).await
+    }
+
+    pub async fn release_tcp_intercepts(
+        &self,
+        action: crate::tcp_capture::DecisionAction,
+        session_id: Option<uuid::Uuid>,
+        expected_active_session_id: Option<uuid::Uuid>,
+    ) -> std::result::Result<usize, crate::tcp_capture::InterceptError> {
+        let _guard = self.session_activation_lock.lock().await;
+        let session = self
+            .checked_tcp_write_session(session_id, expected_active_session_id)
+            .await?;
+        Ok(session.tcp_capture.release_all(action).await)
     }
 
     pub async fn decide_tcp_intercept(

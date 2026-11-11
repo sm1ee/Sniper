@@ -377,6 +377,11 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
                 .layer(axum::extract::DefaultBodyLimit::max(24 * 1024)),
         )
         .route(
+            "/api/tcp/intercept/forward-all",
+            post(tcp_intercept_forward_all),
+        )
+        .route("/api/tcp/intercept/drop-all", post(tcp_intercept_drop_all))
+        .route(
             "/api/tcp/connections/:id/pending",
             get(tcp_intercept_pending),
         )
@@ -27862,6 +27867,32 @@ async fn tcp_intercept_set_policy(
         .configure_tcp_intercept(update, query.session_id, query.expected_active_session_id)
         .await
         .map(Json)
+        .map_err(tcp_intercept_error)
+}
+
+async fn tcp_intercept_forward_all(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionWriteQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    tcp_intercept_release(&state, crate::tcp_capture::DecisionAction::Forward, query).await
+}
+
+async fn tcp_intercept_drop_all(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionWriteQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    tcp_intercept_release(&state, crate::tcp_capture::DecisionAction::Drop, query).await
+}
+
+async fn tcp_intercept_release(
+    state: &Arc<AppState>,
+    action: crate::tcp_capture::DecisionAction,
+    query: SessionWriteQuery,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .release_tcp_intercepts(action, query.session_id, query.expected_active_session_id)
+        .await
+        .map(|count| Json(serde_json::json!({ "count": count })))
         .map_err(tcp_intercept_error)
 }
 
