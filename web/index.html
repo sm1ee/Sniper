@@ -969,11 +969,15 @@
                 <form class="tcp-listener-form" id="tcpListenerForm" aria-describedby="tcpRoutingDisclosure" hidden>
                   <small id="tcpRoutingDisclosure">Uses the upstream proxy when it is on; this machine and bypassed hosts go direct.</small>
                   <div class="tcp-listener-route">
-                    <label class="tcp-listener-field"><span>Listen on 127.0.0.1</span><input id="tcpLocalPort" type="number" min="1" max="65535" step="1" value="9000" required aria-label="TCP listen port" /></label>
+                    <label class="tcp-listener-field"><span id="tcpListenAddress">Listen on 127.0.0.1</span><input id="tcpLocalPort" type="number" min="1" max="65535" step="1" value="9000" required aria-label="TCP listen port" /></label>
                     <span class="tcp-listener-arrow" aria-hidden="true">→</span>
                     <label class="tcp-listener-field tcp-listener-host"><span>Target host</span><input id="tcpTargetHost" type="text" placeholder="127.0.0.1" autocomplete="off" spellcheck="false" required /></label>
                     <label class="tcp-listener-field"><span>Port</span><input id="tcpTargetPort" type="number" min="1" max="65535" step="1" required aria-label="Target port" /></label>
                     <label class="tcp-listener-field" title="Decrypt: a client that starts TLS gets a certificate from Sniper's CA. To target only: the client speaks plain text and Sniper adds TLS."><span>TLS</span><select id="tcpListenerTls"><option value="off">None</option><option value="decrypt">Decrypt</option><option value="upstream">To target only</option></select></label>
+                  </div>
+                  <div class="tcp-listener-route">
+                    <label class="tcp-listener-check"><input id="tcpListenerRemote" type="checkbox" /> Other devices can connect</label>
+                    <label class="tcp-listener-field tcp-listener-allowed" id="tcpListenerAllowedField" hidden><span>Allowed devices</span><textarea id="tcpListenerAllowed" rows="2" placeholder="192.0.2.0/24" spellcheck="false" autocomplete="off" aria-label="Addresses or networks that may connect, one per line"></textarea></label>
                   </div>
                   <div class="tcp-listener-actions">
                     <button class="secondary-action" id="tcpRemoveListener" type="button" hidden>Remove</button>

@@ -563,6 +563,82 @@ pub struct TcpSettings {
     /// Left out when off, so a plain listener reads the same to an older Sniper.
     #[serde(default, skip_serializing_if = "TlsMode::is_off")]
     pub tls: TlsMode,
+    /// Other devices may connect, from the addresses in `allowed_clients`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remote: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_clients: Vec<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// An address or network: `192.0.2.7`, `192.0.2.0/24`, `2001:db8::/32`.
+fn parse_network(entry: &str) -> Option<(std::net::IpAddr, u8)> {
+    let entry = entry.trim();
+    let (address, prefix) = match entry.split_once('/') {
+        Some((address, prefix)) => (address, Some(prefix.parse::<u8>().ok()?)),
+        None => (entry, None),
+    };
+    let ip = address.parse::<std::net::IpAddr>().ok()?.to_canonical();
+    let bits = if ip.is_ipv4() { 32 } else { 128 };
+    let prefix = prefix.unwrap_or(bits);
+    (prefix <= bits).then_some((ip, prefix))
+}
+
+fn in_network(ip: std::net::IpAddr, network: std::net::IpAddr, prefix: u8) -> bool {
+    use std::net::IpAddr::{V4, V6};
+    match (ip, network) {
+        (V4(ip), V4(network)) => {
+            let mask = u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0);
+            u32::from(ip) & mask == u32::from(network) & mask
+        }
+        (V6(ip), V6(network)) => {
+            let mask = u128::MAX.checked_shl(128 - u32::from(prefix)).unwrap_or(0);
+            u128::from(ip) & mask == u128::from(network) & mask
+        }
+        _ => false,
+    }
+}
+
+/// This machine, or a listed device. IPv4 arrives v4-mapped on a dual-stack socket.
+fn client_allowed(peer: std::net::IpAddr, allowed: &[String]) -> bool {
+    let peer = peer.to_canonical();
+    peer.is_loopback()
+        || allowed
+            .iter()
+            .filter_map(|entry| parse_network(entry))
+            .any(|(network, prefix)| in_network(peer, network, prefix))
+}
+
+/// Whether any of `addresses` is one of Sniper's own guarded listeners.
+fn reaches_guarded(addresses: &[std::net::SocketAddr], guarded: &[std::net::SocketAddr]) -> bool {
+    addresses.iter().any(|address| {
+        guarded.iter().any(|listener| {
+            address.port() == listener.port()
+                && crate::proxy::ip_belongs_to_this_machine(
+                    address.ip().to_canonical(),
+                    listener.ip(),
+                )
+        })
+    })
+}
+
+/// Every interface, IPv6 and IPv4 on one socket.
+fn bind_every_interface(port: u16) -> std::io::Result<TcpListener> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_only_v6(false)?;
+    #[cfg(unix)]
+    socket.set_reuse_address(true)?;
+    socket.bind(&std::net::SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+    socket.listen(1024)?;
+    socket.set_nonblocking(true)?;
+    TcpListener::from_std(socket.into())
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -676,6 +752,8 @@ pub struct TcpListenerStatus {
     #[serde(flatten)]
     pub config: TcpListenerConfig,
     pub running: bool,
+    /// Clients refused because they are not on the listener's list.
+    pub refused: u64,
     /// Why a listener that is on is not running, such as a port in use.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -696,6 +774,20 @@ impl TcpSettings {
             "invalid target host"
         );
         self.normalized_host()?;
+        if self.remote {
+            anyhow::ensure!(
+                !self.allowed_clients.is_empty(),
+                "Name the devices that may connect: IP addresses or networks such as 192.0.2.0/24."
+            );
+            anyhow::ensure!(
+                self.allowed_clients.len() <= 32
+                    && self
+                        .allowed_clients
+                        .iter()
+                        .all(|entry| entry.len() <= 64 && parse_network(entry).is_some()),
+                "Each device is an IP address or a network such as 192.0.2.0/24, at most 32 of them."
+            );
+        }
         Ok(())
     }
     fn normalized_host(&self) -> anyhow::Result<String> {
@@ -757,6 +849,9 @@ pub enum TcpFailure {
     StorageFailed,
     ProxyFailed,
     TlsFailed,
+    /// A client on another device aimed at Sniper's own UI, proxy or a browser
+    /// it drives, which trust connections from this machine.
+    GuardedTarget,
     #[serde(other)]
     Unknown,
 }
@@ -1141,6 +1236,7 @@ struct History {
     persistence_error: bool,
 }
 struct Running {
+    refused: Arc<AtomicU64>,
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -1164,6 +1260,8 @@ pub struct TcpCapture {
     runtime: std::sync::OnceLock<Arc<crate::runtime::RuntimeSettings>>,
     /// Sniper's CA, for listeners that decrypt TLS.
     certificates: std::sync::OnceLock<Arc<crate::certificate::CertificateAuthority>>,
+    /// Sniper's UI and proxy listeners, which a remote client must not reach.
+    own_addresses: std::sync::Mutex<Vec<std::net::SocketAddr>>,
     intercept: std::sync::Mutex<InterceptRuntime>,
 }
 impl TcpCapture {
@@ -1502,6 +1600,7 @@ impl TcpCapture {
             unrecorded: AtomicU64::new(0),
             runtime: std::sync::OnceLock::new(),
             certificates: std::sync::OnceLock::new(),
+            own_addresses: std::sync::Mutex::new(Vec::new()),
             intercept: std::sync::Mutex::new(InterceptRuntime::default()),
         }
     }
@@ -1516,6 +1615,9 @@ impl TcpCapture {
                     .get(&config.id)
                     .is_some_and(|worker| !worker.task.is_finished());
                 TcpListenerStatus {
+                    refused: running
+                        .get(&config.id)
+                        .map_or(0, |worker| worker.refused.load(Ordering::Relaxed)),
                     running: alive,
                     error: (!alive && config.enabled)
                         .then(|| errors.get(&config.id).cloned())
@@ -1732,6 +1834,26 @@ impl TcpCapture {
     pub fn use_runtime(&self, runtime: Arc<crate::runtime::RuntimeSettings>) {
         let _ = self.runtime.set(runtime);
     }
+    pub fn use_own_addresses(&self, addresses: Vec<std::net::SocketAddr>) {
+        *self.own_addresses.lock().unwrap() = addresses;
+    }
+    /// What `client` may not be relayed to: nothing for this machine.
+    fn guarded_for(&self, client: &TcpStream) -> Vec<std::net::SocketAddr> {
+        match client.peer_addr() {
+            Ok(peer) if peer.ip().to_canonical().is_loopback() => Vec::new(),
+            _ => self.guarded(),
+        }
+    }
+    /// What a client on another device may not be relayed to.
+    fn guarded(&self) -> Vec<std::net::SocketAddr> {
+        let mut guarded = self.own_addresses.lock().unwrap().clone();
+        guarded.extend(
+            crate::browser::driver_ports()
+                .into_iter()
+                .map(|port| std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, port))),
+        );
+        guarded
+    }
     pub fn use_certificates(&self, certificates: Arc<crate::certificate::CertificateAuthority>) {
         let _ = self.certificates.set(certificates);
     }
@@ -1935,7 +2057,12 @@ impl TcpCapture {
                 anyhow::bail!("TCP history requires recovery before capture can start");
             }
         }
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, settings.local_port)).await.map_err(|error| {
+        let bound = if settings.remote {
+            bind_every_interface(settings.local_port)
+        } else {
+            TcpListener::bind((Ipv4Addr::LOCALHOST, settings.local_port)).await
+        };
+        let listener = bound.map_err(|error| {
             if error.kind() == std::io::ErrorKind::AddrInUse {
                 anyhow::anyhow!("Local port {} is already in use. Choose another Local port or stop the listener using it.", settings.local_port)
             } else {
@@ -1944,10 +2071,19 @@ impl TcpCapture {
         })?;
         let (stop, receiver) = watch::channel(false);
         let capture = self.clone();
+        let refused = Arc::new(AtomicU64::new(0));
+        let counted = refused.clone();
         let task = tokio::spawn(async move {
-            capture.serve(listener, settings, receiver).await;
+            capture.serve(listener, settings, counted, receiver).await;
         });
-        running.insert(id, Running { stop, task });
+        running.insert(
+            id,
+            Running {
+                refused,
+                stop,
+                task,
+            },
+        );
         self.errors.lock().unwrap().remove(&id);
         Ok(())
     }
@@ -2039,6 +2175,7 @@ impl TcpCapture {
         self: Arc<Self>,
         listener: TcpListener,
         settings: TcpSettings,
+        refused: Arc<AtomicU64>,
         mut stop: watch::Receiver<bool>,
     ) {
         let mut tasks = JoinSet::new();
@@ -2054,6 +2191,11 @@ impl TcpCapture {
                 },
                 accepted = listener.accept(), if tasks.len() < MAX_ACTIVE => {
                     let Ok((client, peer)) = accepted else { break; };
+                    if settings.remote && !client_allowed(peer.ip(), &settings.allowed_clients) {
+                        refused.fetch_add(1, Ordering::Relaxed);
+                        drop(client);
+                        continue;
+                    }
                     // The locks end with this block, before anything awaits.
                     let admitted = {
                         let mut runtime = self.intercept.lock().unwrap();
@@ -2079,7 +2221,8 @@ impl TcpCapture {
                         Admission::Unrecorded => {
                             self.unrecorded.fetch_add(1, Ordering::Relaxed);
                             let proxy = self.upstream_proxy().await;
-                            tasks.spawn(relay_unrecorded(client, settings, proxy, stop));
+                            let guarded = self.guarded_for(&client);
+                            tasks.spawn(relay_unrecorded(client, settings, proxy, guarded, stop));
                         }
                         Admission::Recorded(record, closed) => {
                             let capture = self.clone();
@@ -2116,7 +2259,9 @@ impl TcpCapture {
             async {
                 let local = client.local_addr().map_err(|_| TcpFailure::ConnectFailed)?;
                 let proxy = self.upstream_proxy().await;
-                let (upstream, via_proxy) = open_upstream(&settings, local, proxy.as_ref()).await?;
+                let guarded = self.guarded_for(&client);
+                let (upstream, via_proxy) =
+                    open_upstream(&settings, local, proxy.as_ref(), &guarded).await?;
                 let (client, upstream, client_tls, server_tls) =
                     self.secure(&settings, client, upstream).await?;
                 if let Some(r) = self.history.lock().unwrap().records.get_mut(&id) {
@@ -2175,6 +2320,7 @@ impl TcpCapture {
             } else {
                 TlsMode::Off
             },
+            ..Default::default()
         };
         settings
             .validate()
@@ -2218,7 +2364,7 @@ impl TcpCapture {
                     let proxy = self.upstream_proxy().await;
                     let unspecified = std::net::SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
                     let (upstream, via_proxy) =
-                        open_upstream(&settings, unspecified, proxy.as_ref()).await?;
+                        open_upstream(&settings, unspecified, proxy.as_ref(), &[]).await?;
                     let stream: Box<dyn Io> = if request.tls {
                         let insecure = self.upstream_insecure().await;
                         Box::new(connect_tls(upstream, &settings.target_host, insecure).await?)
@@ -2592,6 +2738,7 @@ async fn open_upstream(
     settings: &TcpSettings,
     listener: std::net::SocketAddr,
     proxy: Option<&crate::upstream_proxy::UpstreamProxy>,
+    guarded: &[std::net::SocketAddr],
 ) -> Result<(TcpStream, bool), TcpFailure> {
     if let Some(proxy) = proxy.filter(|proxy| routes_through(proxy, &settings.target_host)) {
         // The proxy's own errors can name hosts; only the code is kept.
@@ -2617,6 +2764,9 @@ async fn open_upstream(
     {
         return Err(TcpFailure::SelfTarget);
     }
+    if reaches_guarded(&addresses, guarded) {
+        return Err(TcpFailure::GuardedTarget);
+    }
     let upstream = connection_stage(
         TcpStream::connect(addresses.as_slice()),
         Duration::from_secs(10),
@@ -2638,11 +2788,14 @@ async fn relay_unrecorded(
     mut client: TcpStream,
     settings: TcpSettings,
     proxy: Option<crate::upstream_proxy::UpstreamProxy>,
+    guarded: Vec<std::net::SocketAddr>,
     mut stop: watch::Receiver<bool>,
 ) {
     let relay = async {
         let local = client.local_addr().ok()?;
-        let (mut upstream, _) = open_upstream(&settings, local, proxy.as_ref()).await.ok()?;
+        let (mut upstream, _) = open_upstream(&settings, local, proxy.as_ref(), &guarded)
+            .await
+            .ok()?;
         tokio::io::copy_bidirectional(&mut client, &mut upstream)
             .await
             .ok()
@@ -3316,7 +3469,9 @@ mod tests {
             };
             let (stop, rx) = watch::channel(false);
             let copy = capture.clone();
-            let relay = tokio::spawn(async move { copy.serve(listener, settings, rx).await });
+            let relay = tokio::spawn(async move {
+                copy.serve(listener, settings, Default::default(), rx).await
+            });
             let mut client = TcpStream::connect(address).await.unwrap();
             let mut bytes = vec![];
             let _ = tokio::time::timeout(Duration::from_secs(3), client.read_to_end(&mut bytes))
@@ -3788,7 +3943,8 @@ mod tests {
         let (stop, receiver) = watch::channel(false);
         let copy = capture.clone();
         let relay = tokio::spawn(async move {
-            copy.serve(listener, settings, receiver).await;
+            copy.serve(listener, settings, Default::default(), receiver)
+                .await;
         });
         let server = tokio::spawn(async move {
             let (mut socket, _) = upstream.accept().await.unwrap();
@@ -3849,11 +4005,14 @@ mod tests {
         let task = tokio::spawn(async move {
             let _ = blocked.await;
         });
-        capture
-            .running
-            .lock()
-            .await
-            .insert(id, Running { stop, task });
+        capture.running.lock().await.insert(
+            id,
+            Running {
+                refused: Default::default(),
+                stop,
+                task,
+            },
+        );
         assert!(
             tokio::time::timeout(Duration::from_millis(20), capture.stop())
                 .await
@@ -3887,11 +4046,14 @@ mod tests {
         })
         .await
         .unwrap();
-        capture
-            .running
-            .lock()
-            .await
-            .insert(id, Running { stop, task });
+        capture.running.lock().await.insert(
+            id,
+            Running {
+                refused: Default::default(),
+                stop,
+                task,
+            },
+        );
         assert!(!capture.status().await.enabled);
         let (first, second) = tokio::join!(
             capture.start_listener(id, settings.clone()),
@@ -3917,11 +4079,14 @@ mod tests {
         let task = tokio::spawn(async move {
             let _ = blocked.await;
         });
-        capture
-            .running
-            .lock()
-            .await
-            .insert(id, Running { stop, task });
+        capture.running.lock().await.insert(
+            id,
+            Running {
+                refused: Default::default(),
+                stop,
+                task,
+            },
+        );
         assert!(
             tokio::time::timeout(Duration::from_millis(20), capture.stop())
                 .await
@@ -4492,7 +4657,10 @@ mod tests {
         };
         let (stop, rx) = watch::channel(false);
         let copy = capture.clone();
-        let relay = tokio::spawn(async move { copy.serve(listener, settings, rx).await });
+        let relay =
+            tokio::spawn(
+                async move { copy.serve(listener, settings, Default::default(), rx).await },
+            );
         let mut client = TcpStream::connect(address).await.unwrap();
         let (mut server, _) = upstream.accept().await.unwrap();
         client.write_all(b"client").await.unwrap();
@@ -4582,7 +4750,9 @@ mod tests {
             };
             let (stop, rx) = watch::channel(false);
             let copy = capture.clone();
-            let relay = tokio::spawn(async move { copy.serve(listener, settings, rx).await });
+            let relay = tokio::spawn(async move {
+                copy.serve(listener, settings, Default::default(), rx).await
+            });
             let mut client = TcpStream::connect(address).await.unwrap();
             let (mut server, _) = upstream.accept().await.unwrap();
             client.write_all(b"held").await.unwrap();
@@ -5264,6 +5434,7 @@ mod tests {
                     target_host: "127.0.0.1".into(),
                     target_port,
                     tls,
+                    ..Default::default()
                 },
             })
             .await
@@ -5538,6 +5709,125 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+    fn remote(local_port: u16, target_port: u16, allowed: &[&str]) -> TcpSettings {
+        TcpSettings {
+            remote: true,
+            allowed_clients: allowed.iter().map(|entry| entry.to_string()).collect(),
+            ..loopback(local_port, target_port)
+        }
+    }
+    #[tokio::test]
+    async fn a_listener_open_to_other_devices_names_them() {
+        let capture = temporary();
+        let add = |settings| {
+            let capture = capture.clone();
+            async move {
+                capture
+                    .add_listener(TcpListenerInput {
+                        enabled: false,
+                        settings,
+                    })
+                    .await
+            }
+        };
+        let error = add(remote(free_port(), 1, &[])).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Name the devices that may connect: IP addresses or networks such as 192.0.2.0/24."
+        );
+        assert!(add(remote(free_port(), 1, &["nope"])).await.is_err());
+        assert!(add(remote(free_port(), 1, &["192.0.2.0/33"]))
+            .await
+            .is_err());
+        assert!(add(remote(free_port(), 1, &["192.0.2.7", "2001:db8::/32"]))
+            .await
+            .is_ok());
+    }
+    #[test]
+    fn listed_devices_and_this_machine_are_let_in() {
+        let allowed: Vec<String> = ["192.0.2.0/24", "2001:db8::1"].map(String::from).to_vec();
+        let ip = |text: &str| text.parse::<std::net::IpAddr>().unwrap();
+        assert!(client_allowed(ip("192.0.2.200"), &allowed));
+        assert!(
+            client_allowed(ip("::ffff:192.0.2.9"), &allowed),
+            "IPv4 on a dual-stack socket"
+        );
+        assert!(client_allowed(ip("2001:db8::1"), &allowed));
+        assert!(client_allowed(ip("127.0.0.1"), &allowed), "this machine");
+        assert!(!client_allowed(ip("198.51.100.1"), &allowed));
+        assert!(!client_allowed(ip("2001:db8::2"), &allowed));
+    }
+    #[test]
+    fn a_target_on_a_guarded_port_of_this_machine_is_recognised() {
+        let guarded = [std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 23001))];
+        let at = |text: &str| text.parse::<std::net::SocketAddr>().unwrap();
+        assert!(reaches_guarded(&[at("127.0.0.1:23001")], &guarded));
+        assert!(reaches_guarded(&[at("[::ffff:127.0.0.1]:23001")], &guarded));
+        assert!(!reaches_guarded(&[at("127.0.0.1:23002")], &guarded));
+        assert!(!reaches_guarded(&[at("192.0.2.1:23001")], &guarded));
+    }
+    /// macOS gives lo0 the link-local fe80::1: a client bound to it reaches the
+    /// listener from an address that is not loopback, as another device would.
+    #[cfg(target_os = "macos")]
+    async fn from_another_device(port: u16) -> std::io::Result<TcpStream> {
+        let device = std::net::SocketAddrV6::new("fe80::1".parse().unwrap(), 0, 0, 1);
+        let socket = tokio::net::TcpSocket::new_v6()?;
+        socket.bind(device.into())?;
+        socket
+            .connect(std::net::SocketAddrV6::new("fe80::1".parse().unwrap(), port, 0, 1).into())
+            .await
+    }
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn only_listed_devices_reach_a_remote_listener_and_never_sniper_itself() {
+        let target = echo_server().await;
+        let capture = temporary();
+        let guarded = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let guarded_port = guarded.local_addr().unwrap().port();
+        capture.use_own_addresses(vec![guarded.local_addr().unwrap()]);
+        let (open, closed, onto_sniper) = (free_port(), free_port(), free_port());
+        for settings in [
+            remote(open, target, &["fe80::1"]),
+            remote(closed, target, &["192.0.2.0/24"]),
+            remote(onto_sniper, guarded_port, &["fe80::1"]),
+        ] {
+            capture
+                .add_listener(TcpListenerInput {
+                    enabled: true,
+                    settings,
+                })
+                .await
+                .unwrap();
+        }
+        let mut client = from_another_device(open).await.unwrap();
+        client.write_all(b"device").await.unwrap();
+        assert_eq!(read_back(&mut client, 6).await, b"device");
+        drop(client);
+        let mut refused = from_another_device(closed).await.unwrap();
+        let mut nothing = [0; 1];
+        assert_eq!(
+            refused.read(&mut nothing).await.unwrap_or(0),
+            0,
+            "closed at once"
+        );
+        let status = capture.status().await;
+        let of = |port: u16| {
+            status
+                .listeners
+                .iter()
+                .find(|l| l.config.settings.local_port == port)
+                .unwrap()
+        };
+        assert_eq!(of(closed).refused, 1);
+        let mut looping = from_another_device(onto_sniper).await.unwrap();
+        let _ = looping.read(&mut nothing).await;
+        let failed = wait_saved(&capture, 2).await;
+        assert!(failed
+            .iter()
+            .any(|record| record.failure == Some(TcpFailure::GuardedTarget)));
+        drop(guarded);
+        capture.stop().await.unwrap();
     }
 }
 

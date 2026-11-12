@@ -9890,7 +9890,9 @@ button.utility-button.replay-tab-add {
 .tcp-listener-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tcp-listener-table tr[data-listener-id] { cursor: pointer; }
 .tcp-listener-error { color: var(--danger); }
-.tcp-listener-form[hidden], #tcpRetrySaving[hidden] { display: none; }
+.tcp-listener-form[hidden], #tcpRetrySaving[hidden], .tcp-listener-allowed[hidden] { display: none; }
+.tcp-listener-check { display: inline-flex; align-items: center; gap: 6px; color: var(--text-soft); font-size: var(--font-sm); }
+#proxySettingsPanel .tcp-listener-allowed textarea { width: 260px; resize: vertical; font-family: var(--font-mono, monospace); }
 .tcp-settings-footer { display: flex; align-items: center; gap: 8px; }
 .tcp-settings-footer #tcpSettingsError { flex: 1; }
 

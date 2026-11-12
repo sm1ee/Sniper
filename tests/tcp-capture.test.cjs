@@ -250,7 +250,7 @@ test("a new listener's bind conflict is shown and nothing is retried",async()=>{
 });
 
 test("failure labels are fixed, contextual and unknown-safe", () => {
-  for (const [code, label] of [["tls_failed","TLS handshake failed"],["proxy_failed","Upstream proxy failed"],["resolution_timeout","Name lookup timed out"],["resolution_failed","Name lookup failed"],["connect_timeout","Connection timed out"],["connection_refused","Connection refused"],["connect_failed","Connection failed"],["self_target","Target is this listener"],["relay_failed","Stream interrupted"],["storage_failed","History storage failed"]]) {
+  for (const [code, label] of [["guarded_target","Target is Sniper itself"],["tls_failed","TLS handshake failed"],["proxy_failed","Upstream proxy failed"],["resolution_timeout","Name lookup timed out"],["resolution_failed","Name lookup failed"],["connect_timeout","Connection timed out"],["connection_refused","Connection refused"],["connect_failed","Connection failed"],["self_target","Target is this listener"],["relay_failed","Stream interrupted"],["storage_failed","History storage failed"]]) {
     assert.equal(tcp.statusLabel({status:"failed",failure:code}),"Failed · "+label);
     assert.equal(tcp.statusLabel({status:"stopped",failure:code}),"Stopped");
   }
@@ -515,5 +515,26 @@ test("the stream's ⋯ menu saves one direction's bytes and copies the stream as
   f.get("tcpCopyHex").listeners.click();
   assert.match(copied[0], /^→ 00000000  00 ff/m);
   assert.match(copied[0], /^← 00000000  41/m);
+});
+
+
+test("a listener for other devices: the editor sends its list, the row shows every interface and refusals", async () => {
+  const f = fixture();
+  await pollStatus(f, status);
+  f.get("tcpAddListener").listeners.click();
+  assert.equal(f.get("tcpListenerAllowedField").hidden, true);
+  f.get("tcpListenerRemote").checked = true; f.get("tcpListenerRemote").listeners.change();
+  assert.equal(f.get("tcpListenerAllowedField").hidden, false);
+  assert.equal(f.get("tcpListenAddress").textContent, "Listen on every interface");
+  f.get("tcpListenerAllowed").value = "192.0.2.0/24\n 2001:db8::1 ";
+  f.get("tcpTargetHost").value = "127.0.0.1"; f.get("tcpTargetPort").value = "5432";
+  f.get("tcpListenerForm").listeners.submit({preventDefault(){}});
+  const settings = JSON.parse(f.requests[2].options.body).settings;
+  assert.equal(settings.remote, true);
+  assert.deepEqual(settings.allowed_clients, ["192.0.2.0/24", "2001:db8::1"]);
+  const open = listener("d1", 9000, {refused: 2, settings: {local_port: 9000, target_host: "127.0.0.1", target_port: 5432, remote: true, allowed_clients: ["192.0.2.0/24"]}});
+  f.requests[2].resolve({...status, enabled: true, listeners: [open]}); await tick();
+  f.requests[3].resolve({...status, enabled: true, listeners: [open]}); f.requests[4].resolve([]); await tick(); await tick();
+  assert.deepEqual(listenerRows(f)[0], ["*:9000", "127.0.0.1:5432", "Listening · 2 refused"]);
 });
 

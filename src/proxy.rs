@@ -1962,7 +1962,7 @@ fn host_belongs_to_this_machine(host: &str, bound_ip: IpAddr) -> bool {
     ip_belongs_to_this_machine(ip, bound_ip)
 }
 
-fn ip_belongs_to_this_machine(ip: IpAddr, bound_ip: IpAddr) -> bool {
+pub(crate) fn ip_belongs_to_this_machine(ip: IpAddr, bound_ip: IpAddr) -> bool {
     if ip.is_loopback() || ip.is_unspecified() {
         return true;
     }

@@ -343,9 +343,7 @@ impl AppState {
         );
         let operation_lock = self.session_operation_lock(session.id()).await;
         let _operation_guard = operation_lock.lock_owned().await;
-        session
-            .tcp_capture
-            .use_certificates(self.certificates.clone());
+        self.arm_tcp_capture(&session).await;
         let changed = session.tcp_capture.apply(change).await;
         // Saved even when the change failed part way, as turning every listener
         // off does before reporting unsaved records: what runs is what is kept.
@@ -378,14 +376,24 @@ impl AppState {
         session.tcp_capture.clear().await
     }
 
+    /// What a session's TCP listeners need from Sniper: its CA to decrypt TLS,
+    /// and its own listeners, which a client on another device must not reach.
+    async fn arm_tcp_capture(&self, session: &SessionContext) {
+        session
+            .tcp_capture
+            .use_certificates(self.certificates.clone());
+        session.tcp_capture.use_own_addresses(vec![
+            self.get_active_ui_addr().await,
+            self.get_active_proxy_addr().await,
+        ]);
+    }
+
     /// Starts the active session's saved listeners once Sniper is up.
     pub async fn start_saved_tcp_listeners(&self) {
         let _guard = self.session_activation_lock.lock().await;
         if !self.tcp_shutdown.load(Ordering::Acquire) {
             let session = self.session().await;
-            session
-                .tcp_capture
-                .use_certificates(self.certificates.clone());
+            self.arm_tcp_capture(&session).await;
             session.tcp_capture.start_saved().await;
         }
     }
@@ -1098,9 +1106,7 @@ impl AppState {
                         // The old session's listeners stopped above; this one's
                         // saved listeners take over.
                         if !state.tcp_shutdown.load(Ordering::Acquire) {
-                            session
-                                .tcp_capture
-                                .use_certificates(state.certificates.clone());
+                            state.arm_tcp_capture(&session).await;
                             session.tcp_capture.start_saved().await;
                         }
                         SessionActivationOutcome::Replaced {

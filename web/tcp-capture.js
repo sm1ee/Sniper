@@ -10,7 +10,8 @@
     ["connect_timeout", "Connection timed out"], ["connection_refused", "Connection refused"],
     ["connect_failed", "Connection failed"], ["self_target", "Target is this listener"],
     ["relay_failed", "Stream interrupted"], ["storage_failed", "History storage failed"],
-    ["proxy_failed", "Upstream proxy failed"], ["tls_failed", "TLS handshake failed"]
+    ["proxy_failed", "Upstream proxy failed"], ["tls_failed", "TLS handshake failed"],
+    ["guarded_target", "Target is Sniper itself"]
   ]);
   const DIRECTIONS = ["client_to_server", "server_to_client"];
   const MAX_DISPLAY_BYTES = 1024 * 1024;
@@ -54,6 +55,8 @@
         || /^Another listener already uses local port [0-9]{1,5}\.$/.test(message)
         || /^A session keeps at most [0-9]{1,3} TCP listeners\.$/.test(message)
         || message === "TCP history requires recovery before capture can start"
+        || message === "Name the devices that may connect: IP addresses or networks such as 192.0.2.0/24."
+        || message === "Each device is an IP address or a network such as 192.0.2.0/24, at most 32 of them."
         || message === "A pattern is 1 to 1024 characters." || message === "Enter whole hex byte pairs."
         || message === "The pattern is not a valid regular expression."
         || message === "TCP history is full; use a new session"
@@ -152,11 +155,13 @@
     return targetLabel(settings) + (tls ? " · " + tls : "");
   }
   function listenerRoute(listener) {
-    return "127.0.0.1:" + listener.settings.local_port + " → " + targetLabel(listener.settings);
+    return listenAddress(listener.settings) + " → " + targetLabel(listener.settings);
   }
   function listenerState(listener) {
-    return listener.running ? "Listening" : !listener.enabled ? "Off" : String(listener.error || "Not running");
+    const state = listener.running ? "Listening" : !listener.enabled ? "Off" : String(listener.error || "Not running");
+    return listener.refused > 0 ? state + " · " + listener.refused + " refused" : state;
   }
+  const listenAddress = settings => (settings?.remote ? "*:" : "127.0.0.1:") + settings?.local_port;
   function createController({ document, sessionId, readPath, writePath, request, openSettings, confirm = (message, run) => run(),
     download = url => { const link = document.createElement("a"); link.href = url; link.download = ""; link.click?.(); },
     copy = text => globalThis.navigator?.clipboard?.writeText(text), intercept = false, arrowStep = () => 0, formatTime = clock, formatSize = byteSize }) {
@@ -210,7 +215,7 @@
       renderListeners(all, unavailable);
       el("tcpListenerForm").hidden = editing === null;
       el("tcpRemoveListener").hidden = editing === null || editing === "new";
-      for (const id of ["tcpLocalPort", "tcpTargetHost", "tcpTargetPort", "tcpListenerTls", "tcpSaveListener", "tcpCancelListener", "tcpRemoveListener"]) el(id).disabled = unavailable;
+      for (const id of ["tcpLocalPort", "tcpTargetHost", "tcpTargetPort", "tcpListenerTls", "tcpListenerRemote", "tcpListenerAllowed", "tcpSaveListener", "tcpCancelListener", "tcpRemoveListener"]) el(id).disabled = unavailable;
       // Paused bytes are counted beside the Intercept switch, not here too.
       const live = records.filter(record => LIVE.has(record.status)).length;
       const unrecorded = Number(status?.unrecorded_count) || 0;
@@ -248,7 +253,7 @@
         const on = document.createElement("td");
         on.className = "tcp-col-on"; on.append(toggle); row.append(on);
         const state = listenerState(listener);
-        for (const [content, className] of [["127.0.0.1:" + listener.settings.local_port, ""], [listenerTarget(listener.settings), ""],
+        for (const [content, className] of [[listenAddress(listener.settings), ""], [listenerTarget(listener.settings), ""],
           [state, listener.enabled && !listener.running ? "tcp-listener-error" : ""]]) {
           const cell = document.createElement("td");
           cell.textContent = content; cell.title = content;
@@ -277,10 +282,19 @@
       el("tcpTargetHost").value = listener ? listener.settings.target_host : "";
       el("tcpTargetPort").value = listener ? String(listener.settings.target_port) : "";
       el("tcpListenerTls").value = listener?.settings?.tls || "off";
+      el("tcpListenerRemote").checked = Boolean(listener?.settings?.remote);
+      el("tcpListenerAllowed").value = (listener?.settings?.allowed_clients || []).join("\n");
+      syncRemote();
       renderStatus();
       el("tcpTargetHost").focus?.();
     }
     function closeForm() { editing = null; actionError = null; renderStatus(); }
+    // Other devices: the list of who may connect shows once that is on.
+    function syncRemote() {
+      const remote = Boolean(el("tcpListenerRemote").checked);
+      el("tcpListenerAllowedField").hidden = !remote;
+      text("tcpListenAddress", remote ? "Listen on every interface" : "Listen on 127.0.0.1");
+    }
     function statusText(record) {
       return [
         statusLabel(record),
@@ -459,6 +473,10 @@
       catch (error) { actionError = { message: error.message }; renderStatus(); return; }
       const tls = el("tcpListenerTls").value;
       if (tls && tls !== "off") settings.tls = tls;
+      if (el("tcpListenerRemote").checked) {
+        settings.remote = true;
+        settings.allowed_clients = String(el("tcpListenerAllowed").value).split(/[\s,]+/).filter(Boolean);
+      }
       const existing = listeners().find(listener => listener.id === editing);
       const saved = editing === "new"
         ? await write("add", "/api/tcp/listeners", "POST", { enabled: true, settings })
@@ -520,6 +538,7 @@
     }
     el("tcpListenerForm").addEventListener("submit", event => { event.preventDefault(); void saveListener(); });
     el("tcpAddListener").addEventListener("click", () => openForm("new"));
+    el("tcpListenerRemote").addEventListener("change", syncRemote);
     async function runSearch() {
       const value = el("tcpSearch").value, kind = el("tcpSearchKind").value || "text", token = ++searchRequest;
       if (!value) { search = null; listKey = ""; renderStatus(); renderList(); return; }
