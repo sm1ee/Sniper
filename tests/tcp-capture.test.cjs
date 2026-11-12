@@ -103,7 +103,7 @@ test("a listener's switch turns it off for this session, and a late answer is ig
 });
 test("invalid or excessive captured bytes fail closed",()=>{
   assert.throws(()=>tcp.streamBytes({chunks:[{direction:"client_to_server",offset:0,data_base64:"%%%"}]},"client_to_server"));
-  assert.throws(()=>tcp.streamBytes({chunks:[{direction:"client_to_server",offset:0,data_base64:Buffer.alloc(262145).toString("base64")}]},"client_to_server"),/too large/);
+  assert.throws(()=>tcp.streamBytes({chunks:[{direction:"client_to_server",offset:0,data_base64:Buffer.alloc(1048577).toString("base64")}]},"client_to_server"),/too large/);
 });
 test("newer poll detail wins over older selection detail for the same connection",async()=>{
   const f=fixture(), first=f.controller.select("x"), poll=f.controller.refresh();
@@ -483,3 +483,37 @@ test("a listener can decrypt TLS: the editor sends it, the list and the detail s
   f.requests.at(-1).resolve({id:"x", target:"db.example.com:5432", status:"closed", durable:true, client_tls:true, server_tls:true, client_bytes:0, server_bytes:0, chunks:[]}); await selected;
   assert.match(f.get("tcpStreamMeta").textContent, /TLS decrypted/);
 });
+test("search asks the server, lists only matching connections, and says when it stopped early", async () => {
+  const f = fixture();
+  await pollStatus(f, status, [{id:"a", target:"example.com:1", status:"closed"}, {id:"b", target:"example.com:2", status:"closed"}]);
+  f.get("tcpSearch").value = "PI NG"; f.get("tcpSearchKind").value = "text";
+  f.get("tcpSearch").listeners.change();
+  const asked = f.requests.at(-1);
+  assert.equal(asked.path, "/api/tcp/search?session_id=a&contains=PI%20NG&kind=text");
+  asked.resolve({ids:["b"], truncated:false}); await tick(); await tick();
+  assert.deepEqual(f.get("tcpHistoryRows").children.map(row => row.children[2].textContent), ["example.com:2"]);
+  assert.match(f.get("tcpHistoryStatus").textContent, /1 match/);
+  f.get("tcpSearch").value = "zz"; f.get("tcpSearch").listeners.change();
+  f.requests.at(-1).resolve({ids:[], truncated:true}); await tick(); await tick();
+  assert.match(f.get("tcpHistoryStatus").textContent, /search stopped early/);
+  const count = f.requests.length;
+  f.get("tcpSearch").value = ""; f.get("tcpSearch").listeners.change();
+  assert.equal(f.requests.length, count, "clearing the search asks nothing");
+  assert.equal(f.get("tcpHistoryRows").children.length, 2);
+});
+test("the stream's ⋯ menu saves one direction's bytes and copies the stream as hex", async () => {
+  const saved = [], copied = [];
+  const f = fixture({download: url => saved.push(url), copy: text => copied.push(text)});
+  f.get("tcpDirection").value = "both";
+  const selected = f.controller.select("x");
+  f.requests[0].resolve({id:"x", target:"example.com:1", status:"closed", durable:true, client_bytes:2, server_bytes:1,
+    chunks:[{sequence:0, direction:"client_to_server", offset:0, data_base64:"AP8="}, {sequence:1, direction:"server_to_client", offset:0, data_base64:"QQ=="}]});
+  await selected;
+  f.get("tcpSaveClient").listeners.click();
+  f.get("tcpSaveServer").listeners.click();
+  assert.deepEqual(saved, ["/api/tcp/connections/x/raw?session_id=a&direction=client_to_server", "/api/tcp/connections/x/raw?session_id=a&direction=server_to_client"]);
+  f.get("tcpCopyHex").listeners.click();
+  assert.match(copied[0], /^→ 00000000  00 ff/m);
+  assert.match(copied[0], /^← 00000000  41/m);
+});
+

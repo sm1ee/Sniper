@@ -374,6 +374,8 @@
                 <div class="filter-bar">
                   <div class="filter-summary" id="tcpHistoryStatus" role="status" aria-live="polite">No TCP connections</div>
                   <div class="filter-actions">
+                    <input id="tcpSearch" type="search" placeholder="Search bytes" aria-label="Search captured bytes" spellcheck="false" autocomplete="off" />
+                    <select id="tcpSearchKind" aria-label="Search as"><option value="text">Text</option><option value="hex">Hex</option><option value="regex">Regex</option></select>
                     <button class="scope-pill" id="tcpLiveOnly" type="button" aria-pressed="false">Live only</button>
                     <button class="secondary-action" id="tcpClearHistory" type="button" title="Remove every ended TCP connection in this session" disabled>Clear</button>
                     <button class="tcp-listener-link" id="tcpOpenSettings" type="button">Listener off</button>
@@ -420,6 +422,14 @@
                     <button class="view-tab active" id="tcpHexView" type="button" aria-pressed="true">Hex</button>
                     <button class="view-tab" id="tcpTextView" type="button" aria-pressed="false">Text</button>
                     <button class="secondary-action tcp-close" id="tcpCloseConnection" type="button" title="Close both directions" disabled>Close connection</button>
+                    <details class="more-menu" id="tcpStreamMore" hidden>
+                      <summary class="secondary-action" aria-label="More">⋯</summary>
+                      <div class="context-menu more-menu-list" role="menu">
+                        <button class="context-menu-item" id="tcpSaveClient" type="button" role="menuitem">Save client bytes</button>
+                        <button class="context-menu-item" id="tcpSaveServer" type="button" role="menuitem">Save server bytes</button>
+                        <button class="context-menu-item" id="tcpCopyHex" type="button" role="menuitem">Copy as hex</button>
+                      </div>
+                    </details>
                   </div>
                 </header>
                 <div id="tcpStreamSurface" class="tcp-stream-surface">

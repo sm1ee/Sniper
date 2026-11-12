@@ -370,6 +370,8 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             get(tcp_connections).delete(tcp_clear_connections),
         )
         .route("/api/tcp/connections/:id", get(tcp_connection))
+        .route("/api/tcp/connections/:id/raw", get(tcp_connection_raw))
+        .route("/api/tcp/search", get(tcp_search))
         .route(
             "/api/tcp/intercept",
             get(tcp_intercept_policy)
@@ -27815,6 +27817,65 @@ fn tcp_configuration_error(error: anyhow::Error) -> (StatusCode, String) {
         StatusCode::BAD_REQUEST
     };
     (status, message)
+}
+#[derive(Deserialize)]
+struct TcpSearchQuery {
+    session_id: Option<Uuid>,
+    contains: String,
+    #[serde(default = "default_tcp_search_kind")]
+    kind: crate::tcp_capture::FilterKind,
+}
+fn default_tcp_search_kind() -> crate::tcp_capture::FilterKind {
+    crate::tcp_capture::FilterKind::Text
+}
+async fn tcp_search(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TcpSearchQuery>,
+) -> Result<Json<serde_json::Value>, Response> {
+    let session = resolve_read_session_for_optional_id(&state, query.session_id).await?;
+    let matcher = crate::tcp_capture::Matcher::compile(&crate::tcp_capture::InterceptFilter {
+        kind: query.kind,
+        value: query.contains,
+    })
+    .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()).into_response())?;
+    let (ids, truncated) = session.tcp_capture.search(&matcher).await;
+    Ok(Json(
+        serde_json::json!({ "ids": ids, "truncated": truncated }),
+    ))
+}
+#[derive(Deserialize)]
+struct TcpRawQuery {
+    session_id: Option<Uuid>,
+    direction: crate::tcp_capture::Direction,
+}
+async fn tcp_connection_raw(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<TcpRawQuery>,
+) -> Result<Response, Response> {
+    let session = resolve_read_session_for_optional_id(&state, query.session_id).await?;
+    let bytes = session
+        .tcp_capture
+        .raw(id, query.direction)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response())?
+        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
+    let side = match query.direction {
+        crate::tcp_capture::Direction::ClientToServer => "client",
+        crate::tcp_capture::Direction::ServerToClient => "server",
+    };
+    let name = format!("tcp-{}-{side}.bin", &id.to_string()[..8]);
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{name}\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 async fn tcp_clear_connections(
     State(state): State<Arc<AppState>>,

@@ -26,9 +26,12 @@ use uuid::Uuid;
 
 pub const MAX_CONNECTIONS: usize = 256;
 pub const MAX_ACTIVE: usize = 32;
-pub const MAX_CAPTURE_BYTES: usize = 256 * 1024;
-pub const MAX_CHUNKS: usize = 1024;
-const MAX_RECORD_FILE_BYTES: u64 = 3 * 1024 * 1024;
+pub const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+pub const MAX_CHUNKS: usize = 4096;
+// Base64 of a full capture, chunk metadata, and intercept previews, with room.
+const MAX_RECORD_FILE_BYTES: u64 = 6 * 1024 * 1024;
+/// Saved records a search may read, in bytes of record files.
+pub const SEARCH_READ_BUDGET: u64 = 64 * 1024 * 1024;
 // Leave room for crash leftovers without allowing an unbounded directory scan.
 const MAX_HISTORY_DIRECTORY_ENTRIES: usize = 4 * MAX_CONNECTIONS;
 pub const MAX_PENDING_BYTES: usize = 16 * 1024;
@@ -382,15 +385,15 @@ pub enum FilterKind {
     Hex,
     Regex,
 }
-enum Matcher {
+pub enum Matcher {
     Bytes(Vec<u8>),
     Pattern(regex::bytes::Regex),
 }
 impl Matcher {
-    fn compile(filter: &InterceptFilter) -> Result<Self, InterceptError> {
+    pub fn compile(filter: &InterceptFilter) -> Result<Self, InterceptError> {
         let bad = |message: &str| InterceptError::BadRequest(message.into());
         if filter.value.is_empty() || filter.value.len() > 1024 {
-            return Err(bad("A hold filter is 1 to 1024 characters."));
+            return Err(bad("A pattern is 1 to 1024 characters."));
         }
         Ok(match filter.kind {
             FilterKind::Text => Self::Bytes(filter.value.as_bytes().to_vec()),
@@ -416,7 +419,7 @@ impl Matcher {
                 regex::bytes::RegexBuilder::new(&filter.value)
                     .size_limit(1 << 20)
                     .build()
-                    .map_err(|_| bad("The hold filter is not a valid regular expression."))?,
+                    .map_err(|_| bad("The pattern is not a valid regular expression."))?,
             ),
         })
     }
@@ -1745,6 +1748,47 @@ impl TcpCapture {
             None => None,
         }
     }
+    /// The records whose bytes in either direction match, even across reads,
+    /// and whether the search stopped early: saved records are read from disk
+    /// within `SEARCH_READ_BUDGET`.
+    pub async fn search(&self, matcher: &Matcher) -> (Vec<Uuid>, bool) {
+        let mut records: Vec<_> = self
+            .history
+            .lock()
+            .unwrap()
+            .records
+            .values()
+            .map(|record| (record.started_at, record.id))
+            .collect();
+        records.sort_by(|a, b| b.cmp(a));
+        let (mut found, mut budget) = (Vec::new(), SEARCH_READ_BUDGET);
+        for (_, id) in records {
+            let size = tokio::fs::metadata(self.directory.join(format!("{id}.json")))
+                .await
+                .map_or(0, |metadata| metadata.len());
+            if size > budget {
+                return (found, true);
+            }
+            budget -= size;
+            let Ok(Some(record)) = self.detail(id).await else {
+                continue;
+            };
+            if [Direction::ClientToServer, Direction::ServerToClient]
+                .into_iter()
+                .any(|direction| matcher.matches(&stream_of(&record, direction)))
+            {
+                found.push(id);
+            }
+        }
+        (found, false)
+    }
+    /// One direction's captured bytes, joined in the order they were read.
+    pub async fn raw(&self, id: Uuid, direction: Direction) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self
+            .detail(id)
+            .await?
+            .map(|record| stream_of(&record, direction)))
+    }
     /// Restores the listeners a session saved, without starting them.
     pub fn restore_listeners(&self, listeners: Vec<TcpListenerConfig>) {
         *self.listeners.lock().unwrap() = listeners;
@@ -2470,6 +2514,19 @@ impl TcpCapture {
         }
     }
 }
+fn stream_of(record: &TcpConnection, direction: Direction) -> Vec<u8> {
+    let mut chunks: Vec<_> = record
+        .chunks
+        .iter()
+        .filter(|chunk| chunk.direction == direction)
+        .collect();
+    chunks.sort_by_key(|chunk| chunk.sequence);
+    chunks
+        .into_iter()
+        .flat_map(|chunk| STANDARD.decode(&chunk.data_base64).unwrap_or_default())
+        .collect()
+}
+
 /// A relayed stream, plain or in TLS.
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
@@ -5395,6 +5452,92 @@ mod tests {
             refused(replay_of(9, &[b"x"])).await,
             InterceptError::Conflict(_)
         ));
+    }
+    #[tokio::test]
+    async fn a_large_exchange_is_kept_whole() {
+        let (capture, port) = relaying().await;
+        let big = vec![b'x'; 400 * 1024];
+        assert_eq!(echo_through(port, &big).await, big);
+        let record = wait_saved(&capture, 1).await.remove(0);
+        assert_eq!(record.captured_bytes, 2 * big.len());
+        assert!(!record.capture_truncated);
+        capture.stop().await.unwrap();
+    }
+    fn needle(kind: FilterKind, value: &str) -> Matcher {
+        Matcher::compile(&InterceptFilter {
+            kind,
+            value: value.into(),
+        })
+        .unwrap()
+    }
+    #[tokio::test]
+    async fn search_finds_records_by_their_bytes_even_across_reads() {
+        let (capture, port) = relaying().await;
+        let mut split = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        split.write_all(b"ab").await.unwrap();
+        assert_eq!(read_back(&mut split, 2).await, b"ab");
+        split.write_all(b"cd").await.unwrap();
+        assert_eq!(read_back(&mut split, 2).await, b"cd");
+        drop(split);
+        assert_eq!(echo_through(port, b"other").await, b"other");
+        let saved = wait_saved(&capture, 2).await;
+        let split_id = saved
+            .iter()
+            .find(|record| record.client_bytes == 4)
+            .unwrap()
+            .id;
+        assert_eq!(
+            capture.search(&needle(FilterKind::Text, "bc")).await,
+            (vec![split_id], false)
+        );
+        assert_eq!(
+            capture.search(&needle(FilterKind::Hex, "62 63")).await,
+            (vec![split_id], false)
+        );
+        assert_eq!(
+            capture
+                .search(&needle(FilterKind::Regex, "^oth"))
+                .await
+                .0
+                .len(),
+            1
+        );
+        assert_eq!(
+            capture.search(&needle(FilterKind::Text, "zz")).await,
+            (vec![], false)
+        );
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn raw_bytes_come_back_exactly_one_direction_at_a_time() {
+        let capture = temporary();
+        let record = capture
+            .replay(replay_of(echo_server().await, &[b"\x00\xffab"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            capture
+                .raw(record.id, Direction::ClientToServer)
+                .await
+                .unwrap(),
+            Some(b"\x00\xffab".to_vec())
+        );
+        assert_eq!(
+            capture
+                .raw(record.id, Direction::ServerToClient)
+                .await
+                .unwrap(),
+            Some(b"\x00\xffab".to_vec())
+        );
+        assert_eq!(
+            capture
+                .raw(Uuid::new_v4(), Direction::ClientToServer)
+                .await
+                .unwrap(),
+            None
+        );
     }
 }
 

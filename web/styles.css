@@ -9815,11 +9815,13 @@ button.utility-button.replay-tab-add {
 .tcp-intercept-control { display: inline-flex; align-items: center; gap: 8px; color: var(--text-soft); font-size: var(--font-sm); }
 #tcpInterceptStatus { color: var(--warning); font-size: var(--font-sm); white-space: nowrap; }
 #tcpInterceptStatus:empty { display: none; }
-#tcpInterceptDirection, #tcpInterceptMatchKind, #tcpDirection, #tcpPendingPicker {
+#tcpInterceptDirection, #tcpInterceptMatchKind, #tcpSearchKind, #tcpDirection, #tcpPendingPicker {
   height: var(--control-h); padding: 0 8px; border: 1px solid var(--line); border-radius: 4px;
   background: var(--panel); color: var(--text-soft); font: inherit; max-width: 100%;
 }
 #tcpInterceptMatch { width: 190px; height: var(--control-h); }
+#tcpSearch { width: 160px; height: var(--control-h); }
+#tcpStreamMore[hidden] { display: none; }
 #tcpInterceptMatch[hidden], #tcpInterceptMatchKind[hidden] { display: none; }
 .tcp-stream .pane-header { gap: 12px; }
 .tcp-stream-title { flex: 1; min-width: 0; overflow: hidden; color: var(--text-dim); font-size: var(--font-sm); text-overflow: ellipsis; white-space: nowrap; }

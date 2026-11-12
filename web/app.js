@@ -1330,6 +1330,7 @@ function bindEvents() {
       document.getElementById("tcpSettingsSection")?.scrollIntoView({ block: "start" });
     },
     confirm: showConfirmDialog,
+    copy: text => copyTextToClipboard(text),
     arrowStep: tableArrowStep,
     formatTime: formatTimestamp,
     formatSize,

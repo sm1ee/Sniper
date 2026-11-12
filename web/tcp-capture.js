@@ -13,7 +13,7 @@
     ["proxy_failed", "Upstream proxy failed"], ["tls_failed", "TLS handshake failed"]
   ]);
   const DIRECTIONS = ["client_to_server", "server_to_client"];
-  const MAX_DISPLAY_BYTES = 256 * 1024;
+  const MAX_DISPLAY_BYTES = 1024 * 1024;
   const GAP = "Missing bytes in this capture.";
   const MALFORMED = "This capture is malformed.";
   const TOO_LARGE = "This capture is too large to show.";
@@ -54,6 +54,8 @@
         || /^Another listener already uses local port [0-9]{1,5}\.$/.test(message)
         || /^A session keeps at most [0-9]{1,3} TCP listeners\.$/.test(message)
         || message === "TCP history requires recovery before capture can start"
+        || message === "A pattern is 1 to 1024 characters." || message === "Enter whole hex byte pairs."
+        || message === "The pattern is not a valid regular expression."
         || message === "TCP history is full; use a new session"
         || /^Could not bind local port [0-9]{1,5}\. Check the port and local permissions\.$/.test(message)
         || message === "Enter a hostname or IP address without a port; use Target port separately."
@@ -155,7 +157,9 @@
   function listenerState(listener) {
     return listener.running ? "Listening" : !listener.enabled ? "Off" : String(listener.error || "Not running");
   }
-  function createController({ document, sessionId, readPath, writePath, request, openSettings, confirm = (message, run) => run(), intercept = false, arrowStep = () => 0, formatTime = clock, formatSize = byteSize }) {
+  function createController({ document, sessionId, readPath, writePath, request, openSettings, confirm = (message, run) => run(),
+    download = url => { const link = document.createElement("a"); link.href = url; link.download = ""; link.click?.(); },
+    copy = text => globalThis.navigator?.clipboard?.writeText(text), intercept = false, arrowStep = () => 0, formatTime = clock, formatSize = byteSize }) {
     const replayController = createReplayController({ document, sessionId, writePath, request, onSent: async record => {
       await refresh(); await select(record.id); interceptController?.showStream();
     } });
@@ -166,6 +170,8 @@
     let reading = null, writing = false, mode = "hex", listKey = "", actionError = null, streamView = null;
     // The listener being edited: null, "new", or a listener's id.
     let editing = null, listenerSort = { key: "local_port", direction: "asc" }, shownListeners = [];
+    // A content search: the ids it found, or null when no search is on.
+    let search = null, searchRequest = 0;
     let liveOnly = false, sort = { key: "index", direction: "desc" }, shown = [], indexById = new Map();
     const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
     const text = (id, value) => { if (el(id).textContent !== value) el(id).textContent = value; };
@@ -210,7 +216,9 @@
       const unrecorded = Number(status?.unrecorded_count) || 0;
       text("tcpHistoryStatus", [
         records.length === 1 ? "1 connection" : records.length + " connections",
-        live ? live + " live" : "", blocked, unrecorded ? unrecorded + " not recorded" : ""
+        live ? live + " live" : "", blocked, unrecorded ? unrecorded + " not recorded" : "",
+        search ? search.ids.size + (search.ids.size === 1 ? " match" : " matches") : "",
+        search?.truncated ? "search stopped early" : ""
       ].filter(Boolean).join(" · "));
       el("tcpClearHistory").disabled = unavailable || records.length === live;
     }
@@ -299,8 +307,8 @@
     function renderList() {
       // The list comes newest first; # counts from the oldest, as in HTTP history.
       indexById = new Map(records.map((record, position) => [record.id, records.length - position]));
-      shown = sortedRecords().filter(record => !liveOnly || LIVE.has(record.status));
-      const key = JSON.stringify([shown, selectedId, sort, liveOnly, shown.some(r => LIVE.has(r.status)) ? Math.floor(Date.now() / 1000) : 0]);
+      shown = sortedRecords().filter(record => (!liveOnly || LIVE.has(record.status)) && (!search || search.ids.has(record.id)));
+      const key = JSON.stringify([shown, selectedId, sort, liveOnly, search ? [...search.ids] : null, shown.some(r => LIVE.has(r.status)) ? Math.floor(Date.now() / 1000) : 0]);
       if (key === listKey) return;
       listKey = key;
       const body = el("tcpHistoryRows");
@@ -322,7 +330,7 @@
       if (!shown.length) {
         const row = document.createElement("tr"), cell = document.createElement("td");
         cell.colSpan = 9; cell.className = "tcp-empty";
-        cell.textContent = records.length ? "No live connections" : "No TCP connections";
+        cell.textContent = search ? "No connection contains it" : records.length ? "No live connections" : "No TCP connections";
         row.append(cell); body.append(row);
       }
     }
@@ -349,6 +357,7 @@
     }
     function renderDetail() {
       interceptController?.setConnection(detail);
+      el("tcpStreamMore").hidden = !detail;
       text("tcpStreamTitle", detail ? detail.target : "");
       const surface = el("tcpStreamBytes");
       if (!detail) {
@@ -467,6 +476,7 @@
     function reset() {
       interceptController?.reset();
       epoch++; selection++; reading = null; writing = false; actionError = null; selectedId = null; detail = null; records = []; status = null; listKey = ""; editing = null;
+      search = null; searchRequest++; el("tcpSearch").value = "";
       renderStatus(); renderList(); renderDetail(); text("tcpHistoryError", "");
     }
     function sortListenersBy(key) {
@@ -510,6 +520,37 @@
     }
     el("tcpListenerForm").addEventListener("submit", event => { event.preventDefault(); void saveListener(); });
     el("tcpAddListener").addEventListener("click", () => openForm("new"));
+    async function runSearch() {
+      const value = el("tcpSearch").value, kind = el("tcpSearchKind").value || "text", token = ++searchRequest;
+      if (!value) { search = null; listKey = ""; renderStatus(); renderList(); return; }
+      const stamp = snapshot();
+      try {
+        const found = await json(readPath("/api/tcp/search", stamp.session) + "&contains=" + encodeURIComponent(value) + "&kind=" + encodeURIComponent(kind));
+        if (!current(stamp) || token !== searchRequest) return;
+        search = { ids: new Set(found.ids || []), truncated: Boolean(found.truncated) };
+        text("tcpHistoryError", "");
+      } catch (error) {
+        if (current(stamp) && token === searchRequest) text("tcpHistoryError", error.message);
+        return;
+      }
+      listKey = ""; renderStatus(); renderList();
+    }
+    el("tcpSearch").addEventListener("change", () => void runSearch());
+    el("tcpSearchKind").addEventListener("change", () => { if (el("tcpSearch").value) void runSearch(); });
+    function saveRaw(direction) {
+      if (!detail) return;
+      download(readPath("/api/tcp/connections/" + encodeURIComponent(detail.id) + "/raw", sessionId()) + "&direction=" + direction);
+      el("tcpStreamMore").open = false;
+    }
+    el("tcpSaveClient").addEventListener("click", () => saveRaw("client_to_server"));
+    el("tcpSaveServer").addEventListener("click", () => saveRaw("server_to_client"));
+    el("tcpCopyHex").addEventListener("click", () => {
+      if (!detail) return;
+      let parts;
+      try { parts = conversation(detail, el("tcpDirection").value); } catch (error) { text("tcpHistoryError", error.message); return; }
+      void copy(parts.map(part => (part.direction === "client_to_server" ? "→ " : "← ") + formatHex(part.bytes, part.offset)).join("\n\n"));
+      el("tcpStreamMore").open = false;
+    });
     el("tcpClearHistory").addEventListener("click", () => {
       if (!status || writing) return;
       confirm("Remove every ended TCP connection in this session? Live connections stay.",
