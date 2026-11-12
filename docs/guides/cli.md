@@ -31,7 +31,11 @@ sniper-cli findings list --limit 20
 sniper-cli findings get --id <finding-uuid>
 sniper-cli findings count
 sniper-cli event-log list --limit 20
+sniper-cli --output compact tcp list --contains PING
 ```
+
+The TCP and UDP relay is under `sniper-cli tcp`; see the
+[TCP and UDP relay guide](tcp-relay.md).
 
 ## Reads, writes and the manifest
 

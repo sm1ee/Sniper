@@ -91,7 +91,7 @@ given change, including the parts that are easy to miss.
 | Opening a pre-wired browser | `src/browser.rs` (launch, SPKI trust, profile, which browser `auto` picks), `launch_browser` and `set_browser_preference` in `src/api.rs`, the saved default in `src/ui_settings.rs`, `capture browser` in `src/bin/sniper-cli.rs`, the launcher in `web/` (one component mounted by `[data-browser-launcher]`) |
 | Scope matching | `src/scope.rs` — **the only matcher**; do not add a second one |
 | Intercept queues | `src/intercept.rs` |
-| TCP relay, its history and intercept | `src/tcp_capture.rs`, `src/tcp_capture/history_io.rs`, `web/tcp-capture.js`; its listener form sits in Capture ▸ Settings (`web/index.html`) |
+| TCP and UDP relay, its history, intercept and replay | `src/tcp_capture.rs`, `src/tcp_capture/history_io.rs`, `web/tcp-capture.js`; its listener form sits in Capture ▸ Settings (`web/index.html`); CONNECT tunnels reach it from `serve_connect_tunnel` in `src/proxy.rs`; `sniper-cli tcp` in `src/bin/sniper-cli.rs` |
 | Frontend | `web/app.js`, `web/index.html`, `web/styles.css` |
 
 Changes that must land in more than one place:

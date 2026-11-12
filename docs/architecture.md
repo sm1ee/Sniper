@@ -66,10 +66,14 @@ works.
   the match & replace rules.
 - `src/fuzzer.rs`, `src/websocket.rs`: the payload fuzzer engine and WebSocket
   capture.
-- `src/tcp_capture.rs`, `web/tcp-capture.js`: the TCP relay. It listens on
-  127.0.0.1 only, forwards to one target, records each direction's reads with
-  bounded previews, holds read ranges for Intercept, and keeps one record per
-  connection under the session's `tcp-history/`.
+- `src/tcp_capture.rs`, `web/tcp-capture.js`: the TCP and UDP relay. Each
+  session's listeners relay to one target each, on loopback or, for listed
+  devices, every interface; they can decrypt TLS with Sniper's CA. The proxy
+  hands it CONNECT tunnels that carry neither TLS nor HTTP, and passthrough
+  tunnels (`serve_connect_tunnel` in `src/proxy.rs`). It records each
+  direction's reads with bounded previews, holds read ranges for Intercept,
+  replays a conversation, and keeps one record per connection under the
+  session's `tcp-history/`.
 - `src/service_map*.rs`, `web/service-map.js`: the Service Map, a bounded,
   on-demand projection of retained history. It starts no network discovery and
   keeps no persistent index; see [Service Map](integrations/service-map.md).
