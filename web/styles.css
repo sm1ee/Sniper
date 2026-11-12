@@ -9825,7 +9825,16 @@ button.utility-button.replay-tab-add {
 .tcp-stream-title { flex: 1; min-width: 0; overflow: hidden; color: var(--text-dim); font-size: var(--font-sm); text-overflow: ellipsis; white-space: nowrap; }
 .tcp-stream .tcp-close { min-height: var(--control-h); padding: 0 10px; border-radius: 6px; font-size: var(--font-sm); }
 .tcp-stream .tcp-close:disabled { display: none; }
-.tcp-stream-surface, .tcp-pending-surface { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.tcp-stream-surface, .tcp-pending-surface, .tcp-replay-surface { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.tcp-replay-surface[hidden] { display: none; }
+.tcp-replay-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; }
+.tcp-replay-bar #tcpReplayHost { flex: 1 1 160px; min-width: 0; }
+.tcp-replay-bar #tcpReplayPort { width: 90px; }
+.tcp-replay-bar #tcpReplayWait { width: 80px; }
+.tcp-replay-option { display: inline-flex; align-items: center; gap: 4px; color: var(--text-soft); font-size: var(--font-sm); }
+.tcp-replay-messages { flex: 1; min-height: 0; overflow: auto; display: grid; align-content: start; gap: 8px; padding: 0 12px; }
+.tcp-replay-message { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; }
+.tcp-replay-message textarea { min-height: 64px; resize: vertical; font-family: var(--font-mono, monospace); font-size: var(--font-sm); }
 .tcp-stream-surface[hidden], .tcp-pending-surface[hidden] { display: none; }
 /* Expanded original bytes scroll inside Pending, never over Forward or Drop. */
 .tcp-pending-surface { overflow-y: auto; }

@@ -412,6 +412,7 @@
                   <div class="view-tabs">
                     <button class="view-tab active" id="tcpStreamTab" type="button" aria-pressed="true">Stream</button>
                     <button class="view-tab" id="tcpPendingTab" type="button" aria-pressed="false" hidden>Pending</button>
+                    <button class="view-tab" id="tcpReplayTab" type="button" aria-pressed="false" hidden>Replay</button>
                   </div>
                   <span class="tcp-stream-title" id="tcpStreamTitle"></span>
                   <div class="view-tabs">
@@ -439,6 +440,19 @@
                   </div>
                   <textarea id="tcpPendingHex" aria-label="Pending bytes as hex" spellcheck="false" autocomplete="off" autocapitalize="off" disabled placeholder="No pending bytes"></textarea>
                   <details id="tcpPendingOriginal" hidden><summary>Original bytes</summary><pre id="tcpPendingOriginalHex" tabindex="0" aria-label="Original bytes as hex"></pre></details>
+                </div>
+                <div id="tcpReplaySurface" class="tcp-replay-surface" hidden>
+                  <div class="tcp-replay-bar">
+                    <input id="tcpReplayHost" type="text" aria-label="Replay target host" spellcheck="false" autocomplete="off" />
+                    <input id="tcpReplayPort" type="number" min="1" max="65535" aria-label="Replay target port" />
+                    <label class="tcp-replay-option"><input id="tcpReplayTls" type="checkbox" /> TLS</label>
+                    <label class="tcp-replay-option" title="How long the target may stay silent before the next message goes">Wait <input id="tcpReplayWait" type="number" min="50" max="30000" value="1000" aria-label="Wait for replies in milliseconds" /> ms</label>
+                    <span class="view-tabs"><button class="view-tab active" id="tcpReplayHexMode" type="button" aria-pressed="true">Hex</button><button class="view-tab" id="tcpReplayTextMode" type="button" aria-pressed="false">Text</button></span>
+                    <button class="primary-action" id="tcpReplaySend" type="button">Send</button>
+                  </div>
+                  <div id="tcpReplayMessages" class="tcp-replay-messages"></div>
+                  <div class="tcp-replay-bar"><button class="secondary-action" id="tcpReplayAdd" type="button">Add message</button></div>
+                  <p id="tcpReplayError" class="tcp-error" role="alert"></p>
                 </div>
                 <p id="tcpInterceptNotice" class="tcp-notice" role="status"></p>
                 <p id="tcpInterceptError" class="tcp-error" role="alert"></p>

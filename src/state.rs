@@ -420,6 +420,24 @@ impl AppState {
         Ok(session.tcp_capture.release_all(action).await)
     }
 
+    /// Replays on the active session. The session is checked, then let go of:
+    /// a replay can take two minutes and must not hold up a session switch, and
+    /// one that outlasts a switch stays in the session it was started from.
+    pub async fn replay_tcp(
+        &self,
+        request: crate::tcp_capture::ReplayRequest,
+        session_id: Option<uuid::Uuid>,
+        expected_active_session_id: Option<uuid::Uuid>,
+    ) -> std::result::Result<crate::tcp_capture::TcpConnection, crate::tcp_capture::InterceptError>
+    {
+        let session = {
+            let _guard = self.session_activation_lock.lock().await;
+            self.checked_tcp_write_session(session_id, expected_active_session_id)
+                .await?
+        };
+        session.tcp_capture.replay(request).await
+    }
+
     pub async fn decide_tcp_intercept(
         &self,
         connection_id: uuid::Uuid,

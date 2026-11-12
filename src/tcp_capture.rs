@@ -604,6 +604,50 @@ pub struct TcpListenerInput {
     pub settings: TcpSettings,
 }
 
+/// Where a recorded connection came from.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TcpSource {
+    /// A client of one of the session's listeners.
+    #[default]
+    Listener,
+    /// Sent by TCP Replay.
+    Replay,
+    #[serde(other)]
+    Unknown,
+}
+
+impl TcpSource {
+    fn is_listener(&self) -> bool {
+        *self == Self::Listener
+    }
+}
+
+pub const MAX_REPLAY_MESSAGES: usize = 64;
+/// However much the target keeps talking, a replay ends after this.
+const REPLAY_LIMIT: Duration = Duration::from_secs(120);
+
+/// `POST /api/tcp/replay`: messages to send, one at a time, to a target.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayRequest {
+    pub target_host: String,
+    pub target_port: u16,
+    #[serde(default)]
+    pub tls: bool,
+    /// Each message as standard base64.
+    pub messages: Vec<String>,
+    /// How long the target may stay silent before the next message goes.
+    #[serde(default = "default_replay_wait")]
+    pub wait_ms: u64,
+    #[serde(default)]
+    pub from: Option<Uuid>,
+}
+
+fn default_replay_wait() -> u64 {
+    1000
+}
+
 pub enum ListenerChange {
     Add(TcpListenerInput),
     Update(Uuid, TcpListenerInput),
@@ -776,6 +820,11 @@ pub struct TcpConnection {
     /// The target was reached over TLS.
     #[serde(default)]
     pub server_tls: bool,
+    #[serde(default, skip_serializing_if = "TcpSource::is_listener")]
+    pub source: TcpSource,
+    /// The connection a replay was made from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replayed_from: Option<Uuid>,
     #[serde(deserialize_with = "bounded_string::<_, MAX_STATUS_BYTES>")]
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1530,6 +1579,8 @@ impl TcpCapture {
                 via_proxy: r.via_proxy,
                 client_tls: r.client_tls,
                 server_tls: r.server_tls,
+                source: r.source,
+                replayed_from: r.replayed_from,
                 status: r.status.clone(),
                 failure: r.failure,
                 client_bytes: r.client_bytes,
@@ -1970,7 +2021,7 @@ impl TcpCapture {
                             // relay on, record nothing, and count it until cleared.
                             Admission::Unrecorded
                         } else {
-                            let record = TcpConnection { id: Uuid::new_v4(), started_at: Utc::now(), ended_at: None, peer: peer.to_string(), target: settings.target_label(), local_port: settings.local_port, via_proxy: false, client_tls: false, server_tls: false, status: "connecting".into(), failure: None, client_bytes: 0, server_bytes: 0, captured_bytes: 0, capture_truncated: false, durable: false, chunks: vec![], client_received_bytes:0, server_received_bytes:0, intercept_events:vec![], intercept_captured_bytes:0, intercept_truncated:false, intercept_event_count:0, intercept_schema_version:1, pending_count:0,pending_directions:vec![] };
+                            let record = self.new_record(Uuid::new_v4(), peer.to_string(), &settings);
                             let (close, closed) = watch::channel(false);
                             runtime.connections.insert(record.id, close);
                             history.records.insert(record.id, record.clone());
@@ -2044,6 +2095,174 @@ impl TcpCapture {
         )
         .await;
         self.finish(id, result.0, result.1).await;
+    }
+    /// Sends a request's messages to its target over a new connection, one at a
+    /// time, and records the exchange like a listener's: after each message the
+    /// replies are read until `wait_ms` passes without any, or the target closes.
+    pub async fn replay(&self, request: ReplayRequest) -> Result<TcpConnection, InterceptError> {
+        let bad = |message: &str| InterceptError::BadRequest(message.into());
+        if request.messages.is_empty() || request.messages.len() > MAX_REPLAY_MESSAGES {
+            return Err(bad("A replay sends 1 to 64 messages."));
+        }
+        if !(50..=30_000).contains(&request.wait_ms) {
+            return Err(bad("The wait is 50 to 30000 ms."));
+        }
+        let messages = request
+            .messages
+            .iter()
+            .map(|message| STANDARD.decode(message))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| bad("Each message is standard base64."))?;
+        if messages.iter().any(Vec::is_empty) {
+            return Err(bad("A message cannot be empty."));
+        }
+        if messages.iter().map(Vec::len).sum::<usize>() > MAX_CAPTURE_BYTES {
+            return Err(InterceptError::TooLarge(
+                "A replay sends at most what one connection records.".into(),
+            ));
+        }
+        let mut settings = TcpSettings {
+            // Validation wants a port; a replay has no listener.
+            local_port: 1,
+            target_host: request.target_host,
+            target_port: request.target_port,
+            tls: if request.tls {
+                TlsMode::Upstream
+            } else {
+                TlsMode::Off
+            },
+        };
+        settings
+            .validate()
+            .map_err(|error| bad(&error.to_string()))?;
+        settings.target_host = settings
+            .normalized_host()
+            .map_err(|error| bad(&error.to_string()))?;
+        settings.local_port = 0;
+        let id = Uuid::new_v4();
+        let mut record = self.new_record(id, "replay".into(), &settings);
+        record.source = TcpSource::Replay;
+        record.replayed_from = request.from;
+        let closed = {
+            let mut runtime = self.intercept.lock().unwrap();
+            let mut history = self.history.lock().unwrap();
+            if history.load_error || history.persistence_error {
+                return Err(InterceptError::Conflict(
+                    "TCP history requires recovery before a replay.".into(),
+                ));
+            }
+            if history.records.len() >= MAX_CONNECTIONS {
+                return Err(InterceptError::Conflict(
+                    "TCP history is full. Clear it to replay.".into(),
+                ));
+            }
+            let (close, closed) = watch::channel(false);
+            runtime.connections.insert(id, close);
+            history.records.insert(id, record.clone());
+            closed
+        };
+        if !self.persist(&record).await {
+            self.finish(id, "failed", Some(TcpFailure::StorageFailed))
+                .await;
+        } else {
+            // A replay is stopped by closing it, not by a listener.
+            let (_running, mut stop) = watch::channel(false);
+            let mut closed = closed;
+            let wait = Duration::from_millis(request.wait_ms);
+            let result = connection_outcome(
+                async {
+                    let proxy = self.upstream_proxy().await;
+                    let unspecified = std::net::SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
+                    let (upstream, via_proxy) =
+                        open_upstream(&settings, unspecified, proxy.as_ref()).await?;
+                    let stream: Box<dyn Io> = if request.tls {
+                        let insecure = self.upstream_insecure().await;
+                        Box::new(connect_tls(upstream, &settings.target_host, insecure).await?)
+                    } else {
+                        Box::new(upstream)
+                    };
+                    if let Some(r) = self.history.lock().unwrap().records.get_mut(&id) {
+                        r.status = "open".into();
+                        r.via_proxy = via_proxy;
+                        r.server_tls = request.tls;
+                    }
+                    tokio::time::timeout(REPLAY_LIMIT, self.exchange(id, stream, messages, wait))
+                        .await
+                        .unwrap_or(Ok(()))
+                },
+                &mut stop,
+                &mut closed,
+            )
+            .await;
+            self.finish(id, result.0, result.1).await;
+        }
+        self.detail(id)
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(|| InterceptError::Conflict("The replay record could not be read.".into()))
+    }
+    async fn exchange(
+        &self,
+        id: Uuid,
+        mut stream: Box<dyn Io>,
+        messages: Vec<Vec<u8>>,
+        wait: Duration,
+    ) -> Result<(), TcpFailure> {
+        let mut buffer = vec![0u8; 16 * 1024];
+        for message in messages {
+            stream
+                .write_all(&message)
+                .await
+                .map_err(|_| TcpFailure::RelayFailed)?;
+            self.capture(id, Direction::ClientToServer, &message);
+            loop {
+                match tokio::time::timeout(wait, stream.read(&mut buffer)).await {
+                    // Silence: the target has said what it will for now.
+                    Err(_) => break,
+                    Ok(Ok(0)) => return Ok(()),
+                    Ok(Ok(read)) => self.capture(id, Direction::ServerToClient, &buffer[..read]),
+                    Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        return Ok(())
+                    }
+                    Ok(Err(_)) => return Err(TcpFailure::RelayFailed),
+                }
+            }
+        }
+        let _ = stream.shutdown().await;
+        Ok(())
+    }
+    fn new_record(&self, id: Uuid, peer: String, settings: &TcpSettings) -> TcpConnection {
+        TcpConnection {
+            id,
+            started_at: Utc::now(),
+            ended_at: None,
+            peer,
+            target: settings.target_label(),
+            local_port: settings.local_port,
+            via_proxy: false,
+            client_tls: false,
+            server_tls: false,
+            source: TcpSource::Listener,
+            replayed_from: None,
+            status: "connecting".into(),
+            failure: None,
+            client_bytes: 0,
+            server_bytes: 0,
+            captured_bytes: 0,
+            capture_truncated: false,
+            durable: false,
+            chunks: vec![],
+            client_received_bytes: 0,
+            server_received_bytes: 0,
+            intercept_events: vec![],
+            intercept_captured_bytes: 0,
+            intercept_truncated: false,
+            intercept_event_count: 0,
+            intercept_schema_version: 1,
+            pending_count: 0,
+            pending_directions: vec![],
+        }
     }
     /// Applies the listener's TLS mode to an opened connection pair, and says
     /// which side ended up in TLS.
@@ -2414,6 +2633,8 @@ mod tests {
             via_proxy: false,
             client_tls: false,
             server_tls: false,
+            source: TcpSource::Listener,
+            replayed_from: None,
             status: "open".into(),
             failure: None,
             client_bytes: 0,
@@ -5061,6 +5282,119 @@ mod tests {
         let record = wait_saved(&capture, 1).await.remove(0);
         assert!(!record.client_tls && record.server_tls);
         capture.stop().await.unwrap();
+    }
+    fn replay_of(target_port: u16, messages: &[&[u8]]) -> ReplayRequest {
+        ReplayRequest {
+            target_host: "127.0.0.1".into(),
+            target_port,
+            tls: false,
+            messages: messages
+                .iter()
+                .map(|message| STANDARD.encode(message))
+                .collect(),
+            wait_ms: 200,
+            from: None,
+        }
+    }
+    fn exchange_of(record: &TcpConnection) -> Vec<(Direction, Vec<u8>)> {
+        record
+            .chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    chunk.direction,
+                    STANDARD.decode(&chunk.data_base64).unwrap(),
+                )
+            })
+            .collect()
+    }
+    #[tokio::test]
+    async fn a_replay_sends_each_message_and_records_the_replies_in_order() {
+        let capture = temporary();
+        let from = Uuid::new_v4();
+        let record = capture
+            .replay(ReplayRequest {
+                from: Some(from),
+                ..replay_of(echo_server().await, &[b"one", b"two"])
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            exchange_of(&record),
+            vec![
+                (Direction::ClientToServer, b"one".to_vec()),
+                (Direction::ServerToClient, b"one".to_vec()),
+                (Direction::ClientToServer, b"two".to_vec()),
+                (Direction::ServerToClient, b"two".to_vec()),
+            ]
+        );
+        assert_eq!(record.source, TcpSource::Replay);
+        assert_eq!(record.replayed_from, Some(from));
+        assert_eq!((record.status.as_str(), record.durable), ("closed", true));
+        assert_eq!(capture.summaries().await.len(), 1, "kept in the history");
+    }
+    #[tokio::test]
+    async fn a_replay_ends_when_the_target_closes() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut first = [0; 3];
+            socket.read_exact(&mut first).await.unwrap();
+            socket.write_all(b"bye").await.unwrap();
+        });
+        let record = temporary()
+            .replay(replay_of(port, &[b"one", b"two"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            exchange_of(&record),
+            vec![
+                (Direction::ClientToServer, b"one".to_vec()),
+                (Direction::ServerToClient, b"bye".to_vec()),
+            ]
+        );
+        assert_eq!(record.status, "closed");
+    }
+    #[tokio::test]
+    async fn replays_are_checked_before_anything_is_sent() {
+        let capture = temporary();
+        let refused = |request| {
+            let capture = capture.clone();
+            async move { capture.replay(request).await.unwrap_err() }
+        };
+        for request in [
+            replay_of(9, &[]),
+            replay_of(9, &[b"x".as_slice(); MAX_REPLAY_MESSAGES + 1]),
+            ReplayRequest {
+                wait_ms: 10,
+                ..replay_of(9, &[b"x"])
+            },
+            ReplayRequest {
+                messages: vec!["%%".into()],
+                ..replay_of(9, &[b"x"])
+            },
+            ReplayRequest {
+                target_host: "http://example.com".into(),
+                ..replay_of(9, &[b"x"])
+            },
+        ] {
+            assert!(matches!(
+                refused(request).await,
+                InterceptError::BadRequest(_)
+            ));
+        }
+        {
+            let mut history = capture.history.lock().unwrap();
+            for _ in 0..MAX_CONNECTIONS {
+                let saved = record();
+                history.records.insert(saved.id, saved);
+            }
+        }
+        assert!(matches!(
+            refused(replay_of(9, &[b"x"])).await,
+            InterceptError::Conflict(_)
+        ));
     }
 }
 

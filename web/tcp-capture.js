@@ -156,7 +156,11 @@
     return listener.running ? "Listening" : !listener.enabled ? "Off" : String(listener.error || "Not running");
   }
   function createController({ document, sessionId, readPath, writePath, request, openSettings, confirm = (message, run) => run(), intercept = false, arrowStep = () => 0, formatTime = clock, formatSize = byteSize }) {
-    const interceptController = intercept ? createInterceptController({ document, sessionId, readPath, writePath, request, formatSize, onChanged: () => refresh() }) : null;
+    const replayController = createReplayController({ document, sessionId, writePath, request, onSent: async record => {
+      await refresh(); await select(record.id); interceptController?.showStream();
+    } });
+    const interceptController = intercept ? createInterceptController({ document, sessionId, readPath, writePath, request, formatSize,
+      onChanged: () => refresh(), onReplay: () => replayController.load(detail) }) : null;
     const el = id => document.getElementById(id);
     let epoch = 0, selection = 0, detailRequest = 0, selectedId = null, detail = null, records = [], status = null;
     let reading = null, writing = false, mode = "hex", listKey = "", actionError = null, streamView = null;
@@ -630,7 +634,7 @@
     return Uint8Array.from(out);
   }
   function rawHex(base64) { return Array.from(atob(base64), c => c.charCodeAt(0).toString(16).padStart(2, "0")).join(" "); }
-  function createInterceptController({ document, sessionId, readPath, writePath, request, formatSize = byteSize, onChanged = () => {} }) {
+  function createInterceptController({ document, sessionId, readPath, writePath, request, formatSize = byteSize, onChanged = () => {}, onReplay = () => {} }) {
     const el = id => document.getElementById(id), text = (id, value) => { el(id).textContent = value; };
     let generation = 0, version = 0, connection = null, policy = null, items = [], selected = null;
     let fresh = false, busy = false, tab = "stream", reading = null, historyKey = "", historyOwner = "", pickerKey = "", autoSelect = true;
@@ -787,9 +791,13 @@
       el("tcpPendingTab").hidden = !(policy?.enabled || items.length);
       if (el("tcpPendingTab").hidden && tab === "pending") tab = "stream";
       text("tcpPendingTab", "Pending" + (items.length ? " " + items.length : ""));
+      // Replay starts from a connection.
+      el("tcpReplayTab").hidden = !connection;
+      if (!connection && tab === "replay") tab = "stream";
       el("tcpStreamSurface").hidden = tab !== "stream";
       el("tcpPendingSurface").hidden = tab !== "pending";
-      for (const [id, active] of [["tcpStreamTab", tab === "stream"], ["tcpPendingTab", tab === "pending"]]) {
+      el("tcpReplaySurface").hidden = tab !== "replay";
+      for (const [id, active] of [["tcpStreamTab", tab === "stream"], ["tcpPendingTab", tab === "pending"], ["tcpReplayTab", tab === "replay"]]) {
         el(id).classList.toggle("active", active); el(id).setAttribute("aria-pressed", String(active));
       }
       for (const id of ["tcpDirection", "tcpHexView", "tcpTextView"]) el(id).hidden = tab !== "stream";
@@ -996,11 +1004,100 @@
     el("tcpPendingReset").addEventListener("click", () => { const item = chosen(); if (item && !busy && fresh) { drafts.delete(draftKey(connection.id, item.pending_id)); showError(""); render(); } });
     for (const [id, action] of [["tcpForward", "forward"], ["tcpDrop", "drop"], ["tcpCloseConnection", "close"]]) el(id).addEventListener("click", () => mutate(action));
     for (const [id, next] of [["tcpStreamTab", "stream"], ["tcpPendingTab", "pending"]]) el(id).addEventListener("click", () => { tab = next; render(); });
+    el("tcpReplayTab").addEventListener("click", () => { if (tab !== "replay") onReplay(); tab = "replay"; render(); });
+    function showStream() { tab = "stream"; render(); }
     reset();
-    return {refresh, reset, setConnection, reconcileConnections};
+    return {refresh, reset, setConnection, reconcileConnections, showStream};
   }
 
-  const api = { statusLabel, requestError, validateSettings, conversation, streamBytes, formatHex, formatText, parseHex, encodeEditable, decodeEditable, createInterceptController, createController };
+  function splitTarget(target) {
+    const text = String(target || "");
+    const match = /^\[(.*)\]:(\d+)$/.exec(text) || /^(.*):(\d+)$/.exec(text);
+    return match ? { host: match[1], port: match[2] } : { host: text, port: "" };
+  }
+  // TCP Replay: a target, and messages to send it one at a time. It starts from
+  // a connection's client reads; the result is a new connection in the history.
+  function createReplayController({ document, sessionId, writePath, request, onSent = () => {} }) {
+    const el = id => document.getElementById(id);
+    let messages = [""], mode = "hex", source = null, busy = false;
+    const view = (bytes, as) => as === "text" ? encodeEditable(bytes) : Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join(" ");
+    const read = (value, as) => as === "text" ? decodeEditable(value) : parseHex(value);
+    const showError = message => { el("tcpReplayError").textContent = message; };
+    function render() {
+      el("tcpReplayMessages").replaceChildren(...messages.map((value, index) => {
+        const block = document.createElement("div"), editor = document.createElement("textarea"), remove = document.createElement("button");
+        block.className = "tcp-replay-message";
+        editor.value = value; editor.spellcheck = false;
+        editor.setAttribute("aria-label", "Message " + (index + 1) + " as " + mode);
+        editor.addEventListener("input", () => { messages[index] = editor.value; });
+        remove.type = "button"; remove.className = "secondary-action"; remove.textContent = "Remove";
+        remove.dataset.replayRemove = String(index); remove.disabled = messages.length < 2;
+        block.append(editor, remove);
+        return block;
+      }));
+      for (const [id, value] of [["tcpReplayHexMode", "hex"], ["tcpReplayTextMode", "text"]]) {
+        el(id).classList.toggle("active", mode === value); el(id).setAttribute("aria-pressed", String(mode === value));
+      }
+      el("tcpReplaySend").disabled = busy;
+    }
+    function load(record) {
+      if (!record) return;
+      const target = splitTarget(record.target);
+      el("tcpReplayHost").value = target.host; el("tcpReplayPort").value = target.port;
+      el("tcpReplayTls").checked = Boolean(record.server_tls || record.client_tls);
+      source = record.id || null;
+      let parts = [];
+      try { parts = conversation(record, "client_to_server"); } catch (_) { parts = []; }
+      messages = parts.length ? parts.map(part => view(part.bytes, mode)) : [""];
+      showError(""); render();
+    }
+    function setMode(next) {
+      if (next === mode) return;
+      try { messages = messages.map(value => value ? view(read(value, mode), next) : ""); }
+      catch (error) { showError(error.message); return; }
+      mode = next; showError(""); render();
+    }
+    async function send() {
+      if (busy) return;
+      let encoded;
+      try {
+        encoded = messages.map((value, index) => {
+          try {
+            let binary = "";
+            for (const byte of read(value, mode)) binary += String.fromCharCode(byte);
+            return btoa(binary);
+          } catch (error) { throw new Error("Message " + (index + 1) + ": " + error.message); }
+        });
+      } catch (error) { showError(error.message); return; }
+      const body = { target_host: String(el("tcpReplayHost").value).trim(), target_port: Number(el("tcpReplayPort").value),
+        tls: Boolean(el("tcpReplayTls").checked), wait_ms: Number(el("tcpReplayWait").value || 1000), messages: encoded };
+      if (source) body.from = source;
+      busy = true; showError(""); render();
+      try {
+        const response = await request(writePath("/api/tcp/replay", sessionId()), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+        if (!response.ok) {
+          const message = await response.text().catch(() => "");
+          // Only short, fixed server messages are shown, never arbitrary output.
+          throw new Error([400, 409, 413].includes(response.status) && message.length < 200 && !/[<>]/.test(message) ? message : "Replay failed (" + response.status + ").");
+        }
+        const record = await response.json();
+        busy = false; render();
+        await onSent(record);
+      } catch (error) { busy = false; showError(error.message); render(); }
+    }
+    el("tcpReplaySend").addEventListener("click", () => void send());
+    el("tcpReplayAdd").addEventListener("click", () => { messages.push(""); render(); });
+    el("tcpReplayHexMode").addEventListener("click", () => setMode("hex"));
+    el("tcpReplayTextMode").addEventListener("click", () => setMode("text"));
+    el("tcpReplayMessages").addEventListener("click", event => {
+      const remove = event.target.closest?.("[data-replay-remove]");
+      if (!remove || messages.length < 2) return;
+      messages.splice(Number(remove.dataset.replayRemove), 1); render();
+    });
+    render();
+    return { load, render };
+  }
+  const api = { statusLabel, requestError, validateSettings, conversation, streamBytes, formatHex, formatText, parseHex, encodeEditable, decodeEditable, createInterceptController, createReplayController, createController };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.SniperTcpCapture = api;
 })(typeof window === "undefined" ? globalThis : window);

@@ -382,6 +382,10 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         )
         .route("/api/tcp/intercept/drop-all", post(tcp_intercept_drop_all))
         .route(
+            "/api/tcp/replay",
+            post(tcp_replay).layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
+        .route(
             "/api/tcp/connections/:id/pending",
             get(tcp_intercept_pending),
         )
@@ -27865,6 +27869,18 @@ async fn tcp_intercept_set_policy(
 ) -> Result<Json<crate::tcp_capture::InterceptPolicy>, (StatusCode, String)> {
     state
         .configure_tcp_intercept(update, query.session_id, query.expected_active_session_id)
+        .await
+        .map(Json)
+        .map_err(tcp_intercept_error)
+}
+
+async fn tcp_replay(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionWriteQuery>,
+    Json(request): Json<crate::tcp_capture::ReplayRequest>,
+) -> Result<Json<crate::tcp_capture::TcpConnection>, (StatusCode, String)> {
+    state
+        .replay_tcp(request, query.session_id, query.expected_active_session_id)
         .await
         .map(Json)
         .map_err(tcp_intercept_error)
