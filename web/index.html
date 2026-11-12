@@ -975,6 +975,7 @@
                     <span class="tcp-listener-arrow" aria-hidden="true">→</span>
                     <label class="tcp-listener-field tcp-listener-host"><span>Target host</span><input id="tcpTargetHost" type="text" placeholder="127.0.0.1" autocomplete="off" spellcheck="false" required /></label>
                     <label class="tcp-listener-field"><span>Port</span><input id="tcpTargetPort" type="number" min="1" max="65535" step="1" required aria-label="Target port" /></label>
+                    <label class="tcp-listener-field"><span>Protocol</span><select id="tcpListenerProtocol"><option value="tcp">TCP</option><option value="udp">UDP</option></select></label>
                     <label class="tcp-listener-field" title="Decrypt: a client that starts TLS gets a certificate from Sniper's CA. To target only: the client speaks plain text and Sniper adds TLS."><span>TLS</span><select id="tcpListenerTls"><option value="off">None</option><option value="decrypt">Decrypt</option><option value="upstream">To target only</option></select></label>
                   </div>
                   <div class="tcp-listener-route">

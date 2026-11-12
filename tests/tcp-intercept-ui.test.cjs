@@ -521,3 +521,10 @@ test('a text edit that does not parse stays put and says why', async () => {
   f.get('tcpForward').listeners.click();
   assert.equal(f.requests.length, 2, 'nothing is sent');
 });
+test("Replay is offered for TCP connections and not for UDP flows", async () => {
+  const f = fixture(); await ready(f);
+  assert.equal(f.get('tcpReplayTab').hidden, false);
+  f.controller.setConnection({...connection, protocol:'udp'});
+  assert.equal(f.get('tcpReplayTab').hidden, true);
+});
+

@@ -572,4 +572,24 @@ test("Split by in the detail view redraws the stream as messages", async () => {
   f.get("tcpSplit").value = "u16be"; f.get("tcpSplit").listeners.change();
   assert.match(shown(f.get("tcpStreamBytes")), /partial/);
 });
+test("a UDP listener: the editor sends it without TLS, the list and the detail say UDP", async () => {
+  const f = fixture();
+  await pollStatus(f, status);
+  f.get("tcpAddListener").listeners.click();
+  f.get("tcpListenerProtocol").value = "udp"; f.get("tcpListenerProtocol").listeners.change();
+  assert.equal(f.get("tcpListenerTls").disabled, true);
+  assert.equal(f.get("tcpListenerTls").value, "off");
+  f.get("tcpTargetHost").value = "127.0.0.1"; f.get("tcpTargetPort").value = "53";
+  f.get("tcpListenerForm").listeners.submit({preventDefault(){}});
+  const settings = JSON.parse(f.requests[2].options.body).settings;
+  assert.equal(settings.protocol, "udp");
+  assert.equal(settings.tls, undefined);
+  const udp = listener("u1", 9053, {settings: {local_port: 9053, target_host: "127.0.0.1", target_port: 53, protocol: "udp"}});
+  f.requests[2].resolve({...status, enabled: true, listeners: [udp]}); await tick();
+  f.requests[3].resolve({...status, enabled: true, listeners: [udp]}); f.requests[4].resolve([]); await tick(); await tick();
+  assert.equal(listenerRows(f)[0][1], "127.0.0.1:53 · UDP");
+  const selected = f.controller.select("x");
+  f.requests.at(-1).resolve({id:"x", target:"127.0.0.1:53", status:"closed", durable:true, protocol:"udp", client_bytes:0, server_bytes:0, chunks:[]}); await selected;
+  assert.match(f.get("tcpStreamMeta").textContent, /UDP/);
+});
 

@@ -568,6 +568,23 @@ pub struct TcpSettings {
     pub remote: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_clients: Vec<String>,
+    #[serde(default, skip_serializing_if = "Protocol::is_tcp")]
+    pub protocol: Protocol,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Protocol {
+    #[default]
+    Tcp,
+    /// One flow per client address; each datagram is one chunk.
+    Udp,
+}
+
+impl Protocol {
+    fn is_tcp(&self) -> bool {
+        *self == Self::Tcp
+    }
 }
 
 fn is_false(value: &bool) -> bool {
@@ -623,6 +640,48 @@ fn reaches_guarded(addresses: &[std::net::SocketAddr], guarded: &[std::net::Sock
                 )
         })
     })
+}
+
+/// The socket a UDP flow reaches its target from. A target that resolves to
+/// the listener itself is refused.
+async fn open_udp_upstream(settings: &TcpSettings) -> Result<tokio::net::UdpSocket, TcpFailure> {
+    let target = connection_stage(
+        tokio::net::lookup_host((settings.target_host.as_str(), settings.target_port)),
+        Duration::from_secs(10),
+        true,
+    )
+    .await?
+    .next()
+    .ok_or(TcpFailure::ResolutionFailed)?;
+    if is_loopback(target.ip()) && target.port() == settings.local_port {
+        return Err(TcpFailure::SelfTarget);
+    }
+    let local = if target.is_ipv6() {
+        std::net::SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
+    } else {
+        std::net::SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
+    };
+    let socket = tokio::net::UdpSocket::bind(local)
+        .await
+        .map_err(|_| TcpFailure::ConnectFailed)?;
+    socket
+        .connect(target)
+        .await
+        .map_err(|_| TcpFailure::ConnectFailed)?;
+    Ok(socket)
+}
+
+/// Every interface for a UDP listener, IPv6 and IPv4 on one socket.
+fn bind_udp_every_interface(port: u16) -> std::io::Result<tokio::net::UdpSocket> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    socket.set_only_v6(false)?;
+    socket.bind(&std::net::SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+    socket.set_nonblocking(true)?;
+    tokio::net::UdpSocket::from_std(socket.into())
 }
 
 /// Every interface, IPv6 and IPv4 on one socket.
@@ -774,6 +833,10 @@ impl TcpSettings {
             "invalid target host"
         );
         self.normalized_host()?;
+        anyhow::ensure!(
+            self.protocol == Protocol::Tcp || self.tls == TlsMode::Off,
+            "TLS is for TCP listeners."
+        );
         if self.remote {
             anyhow::ensure!(
                 !self.allowed_clients.is_empty(),
@@ -920,6 +983,8 @@ pub struct TcpConnection {
     pub server_tls: bool,
     #[serde(default, skip_serializing_if = "TcpSource::is_listener")]
     pub source: TcpSource,
+    #[serde(default, skip_serializing_if = "Protocol::is_tcp")]
+    pub protocol: Protocol,
     /// The connection a replay was made from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replayed_from: Option<Uuid>,
@@ -1240,6 +1305,11 @@ struct Running {
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
+enum Bound {
+    Tcp(TcpListener),
+    Udp(tokio::net::UdpSocket),
+}
+
 /// What a listener does with a connection it accepted.
 enum Admission {
     Refused,
@@ -1262,6 +1332,8 @@ pub struct TcpCapture {
     certificates: std::sync::OnceLock<Arc<crate::certificate::CertificateAuthority>>,
     /// Sniper's UI and proxy listeners, which a remote client must not reach.
     own_addresses: std::sync::Mutex<Vec<std::net::SocketAddr>>,
+    /// How long a UDP flow may go without a datagram before it ends.
+    udp_idle: std::sync::Mutex<Duration>,
     intercept: std::sync::Mutex<InterceptRuntime>,
 }
 impl TcpCapture {
@@ -1601,6 +1673,7 @@ impl TcpCapture {
             runtime: std::sync::OnceLock::new(),
             certificates: std::sync::OnceLock::new(),
             own_addresses: std::sync::Mutex::new(Vec::new()),
+            udp_idle: std::sync::Mutex::new(Duration::from_secs(60)),
             intercept: std::sync::Mutex::new(InterceptRuntime::default()),
         }
     }
@@ -1685,6 +1758,7 @@ impl TcpCapture {
                 client_tls: r.client_tls,
                 server_tls: r.server_tls,
                 source: r.source,
+                protocol: r.protocol,
                 replayed_from: r.replayed_from,
                 status: r.status.clone(),
                 failure: r.failure,
@@ -1833,6 +1907,10 @@ impl TcpCapture {
     }
     pub fn use_runtime(&self, runtime: Arc<crate::runtime::RuntimeSettings>) {
         let _ = self.runtime.set(runtime);
+    }
+    #[cfg(test)]
+    fn set_udp_idle(&self, idle: Duration) {
+        *self.udp_idle.lock().unwrap() = idle;
     }
     pub fn use_own_addresses(&self, addresses: Vec<std::net::SocketAddr>) {
         *self.own_addresses.lock().unwrap() = addresses;
@@ -2057,10 +2135,19 @@ impl TcpCapture {
                 anyhow::bail!("TCP history requires recovery before capture can start");
             }
         }
-        let bound = if settings.remote {
-            bind_every_interface(settings.local_port)
+        let bound = if settings.protocol == Protocol::Udp {
+            if settings.remote {
+                bind_udp_every_interface(settings.local_port)
+            } else {
+                tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, settings.local_port)).await
+            }
+            .map(Bound::Udp)
+        } else if settings.remote {
+            bind_every_interface(settings.local_port).map(Bound::Tcp)
         } else {
-            TcpListener::bind((Ipv4Addr::LOCALHOST, settings.local_port)).await
+            TcpListener::bind((Ipv4Addr::LOCALHOST, settings.local_port))
+                .await
+                .map(Bound::Tcp)
         };
         let listener = bound.map_err(|error| {
             if error.kind() == std::io::ErrorKind::AddrInUse {
@@ -2074,7 +2161,10 @@ impl TcpCapture {
         let refused = Arc::new(AtomicU64::new(0));
         let counted = refused.clone();
         let task = tokio::spawn(async move {
-            capture.serve(listener, settings, counted, receiver).await;
+            match listener {
+                Bound::Tcp(listener) => capture.serve(listener, settings, counted, receiver).await,
+                Bound::Udp(socket) => capture.serve_udp(socket, settings, counted, receiver).await,
+            }
         });
         running.insert(
             id,
@@ -2240,6 +2330,178 @@ impl TcpCapture {
         // Dropping the sender is also cancellation; no detached relay tasks remain.
         while tasks.join_next().await.is_some() {
             self.active_count.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+    /// A UDP listener: datagrams from each client address go to that client's
+    /// flow, which has its own socket towards the target.
+    async fn serve_udp(
+        self: Arc<Self>,
+        socket: tokio::net::UdpSocket,
+        settings: TcpSettings,
+        refused: Arc<AtomicU64>,
+        mut stop: watch::Receiver<bool>,
+    ) {
+        use tokio::sync::mpsc::error::TrySendError;
+        let socket = Arc::new(socket);
+        let mut flows: std::collections::HashMap<
+            std::net::SocketAddr,
+            tokio::sync::mpsc::Sender<Vec<u8>>,
+        > = std::collections::HashMap::new();
+        let mut tasks = JoinSet::new();
+        let (children_stop, children_receiver) = watch::channel(false);
+        let mut buffer = vec![0u8; 65536];
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop.changed() => break,
+                Some(done) = tasks.join_next(), if !tasks.is_empty() => {
+                    self.active_count.fetch_sub(1, Ordering::Relaxed);
+                    if let Ok(peer) = done {
+                        flows.remove(&peer);
+                    }
+                },
+                received = socket.recv_from(&mut buffer) => {
+                    // A target's "port unreachable" can surface here; it is not ours.
+                    let Ok((length, peer)) = received else { continue; };
+                    if settings.remote && !client_allowed(peer.ip(), &settings.allowed_clients) {
+                        refused.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    let mut datagram = buffer[..length].to_vec();
+                    if let Some(flow) = flows.get(&peer) {
+                        match flow.try_send(datagram) {
+                            // A flow that cannot keep up loses the datagram, as UDP may.
+                            Ok(()) | Err(TrySendError::Full(_)) => continue,
+                            Err(TrySendError::Closed(back)) => {
+                                flows.remove(&peer);
+                                datagram = back;
+                            }
+                        }
+                    }
+                    if tasks.len() >= MAX_ACTIVE {
+                        continue;
+                    }
+                    let (sender, receiver) = tokio::sync::mpsc::channel(256);
+                    let _ = sender.try_send(datagram);
+                    flows.insert(peer, sender);
+                    let flow = self.clone();
+                    let (socket, settings, stop) = (socket.clone(), settings.clone(), children_receiver.clone());
+                    tasks.spawn(async move {
+                        flow.udp_flow(socket, peer, settings, receiver, stop).await;
+                        peer
+                    });
+                    self.active_count.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        let _ = children_stop.send(true);
+        while tasks.join_next().await.is_some() {
+            self.active_count.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+    /// One client's datagrams to the target and its replies back, until the
+    /// flow is idle for `udp_idle`, closed, or its listener stops.
+    async fn udp_flow(
+        self: Arc<Self>,
+        listener: Arc<tokio::net::UdpSocket>,
+        reply_to: std::net::SocketAddr,
+        settings: TcpSettings,
+        mut datagrams: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        mut stop: watch::Receiver<bool>,
+    ) {
+        let peer = std::net::SocketAddr::new(reply_to.ip().to_canonical(), reply_to.port());
+        let admitted = {
+            let mut runtime = self.intercept.lock().unwrap();
+            let mut history = self.history.lock().unwrap();
+            if history.persistence_error || history.load_error {
+                Admission::Refused
+            } else if history.records.len() >= MAX_CONNECTIONS {
+                Admission::Unrecorded
+            } else {
+                let record = self.new_record(Uuid::new_v4(), peer.to_string(), &settings);
+                let (close, closed) = watch::channel(false);
+                runtime.connections.insert(record.id, close);
+                history.records.insert(record.id, record.clone());
+                Admission::Recorded(Box::new(record), closed)
+            }
+        };
+        let (id, mut closed, _unrecorded) = match admitted {
+            Admission::Refused => return,
+            Admission::Unrecorded => {
+                self.unrecorded.fetch_add(1, Ordering::Relaxed);
+                let (keep, closed) = watch::channel(false);
+                (None, closed, Some(keep))
+            }
+            Admission::Recorded(record, closed) => {
+                if !self.persist(&record).await {
+                    self.finish(record.id, "failed", Some(TcpFailure::StorageFailed))
+                        .await;
+                    return;
+                }
+                (Some(record.id), closed, None)
+            }
+        };
+        let idle = *self.udp_idle.lock().unwrap();
+        let relay = async {
+            let upstream = open_udp_upstream(&settings).await?;
+            if let Some(id) = id {
+                if let Some(r) = self.history.lock().unwrap().records.get_mut(&id) {
+                    r.status = "open".into();
+                }
+            }
+            let mut buffer = vec![0u8; 65536];
+            loop {
+                tokio::select! {
+                    datagram = datagrams.recv() => {
+                        let Some(datagram) = datagram else { return Ok(()) };
+                        let Some((ticket, selected)) = self.hold(id, Direction::ClientToServer, &datagram).await? else { continue };
+                        let bytes = selected.as_deref().unwrap_or(&datagram);
+                        upstream.send(bytes).await.map_err(|_| TcpFailure::RelayFailed)?;
+                        self.sent(id, Direction::ClientToServer, bytes, ticket);
+                    }
+                    received = upstream.recv(&mut buffer) => {
+                        // Nothing listens there yet: the next datagram may find it.
+                        let Ok(length) = received else { continue };
+                        let reply = buffer[..length].to_vec();
+                        let Some((ticket, selected)) = self.hold(id, Direction::ServerToClient, &reply).await? else { continue };
+                        let bytes = selected.as_deref().unwrap_or(&reply);
+                        listener.send_to(bytes, reply_to).await.map_err(|_| TcpFailure::RelayFailed)?;
+                        self.sent(id, Direction::ServerToClient, bytes, ticket);
+                    }
+                    _ = tokio::time::sleep(idle) => return Ok::<(), TcpFailure>(()),
+                }
+            }
+        };
+        let result = connection_outcome(relay, &mut stop, &mut closed).await;
+        if let Some(id) = id {
+            self.finish(id, result.0, result.1).await;
+        }
+    }
+    /// `decide_read` for a flow that may have no record.
+    async fn hold(
+        &self,
+        id: Option<Uuid>,
+        direction: Direction,
+        datagram: &[u8],
+    ) -> Result<Option<(Option<Uuid>, Option<Arc<[u8]>>)>, TcpFailure> {
+        match id {
+            Some(id) => self
+                .decide_read(id, direction, datagram)
+                .await
+                .map_err(|_| TcpFailure::RelayFailed),
+            None => Ok(Some((None, None))),
+        }
+    }
+    /// Records a datagram that went out and closes its held range.
+    fn sent(&self, id: Option<Uuid>, direction: Direction, bytes: &[u8], ticket: Option<Uuid>) {
+        if let Some(id) = id {
+            self.capture(id, direction, bytes);
+        }
+        if let Some(ticket) = ticket {
+            if let Some(range) = self.intercept.lock().unwrap().pending.get_mut(&ticket) {
+                range.event.written_bytes += bytes.len();
+            }
+            self.end_range(ticket, "forwarded");
         }
     }
     async fn connection(
@@ -2436,6 +2698,7 @@ impl TcpCapture {
             client_tls: false,
             server_tls: false,
             source: TcpSource::Listener,
+            protocol: settings.protocol,
             replayed_from: None,
             status: "connecting".into(),
             failure: None,
@@ -2544,6 +2807,72 @@ impl TcpCapture {
             record.release_durable_payload();
         }
     }
+    /// Holds a read when intercept says so and waits for its decision: the
+    /// range it is accounted to, if held, and its replacement, if one was made;
+    /// `None` when it was dropped. A connection that goes before the decision
+    /// is an error. A held range is at most 16 KiB, so a larger datagram passes.
+    async fn decide_read(
+        &self,
+        id: Uuid,
+        direction: Direction,
+        read: &[u8],
+    ) -> std::io::Result<Option<(Option<Uuid>, Option<Arc<[u8]>>)>> {
+        let admitted = if read.len() > MAX_PENDING_BYTES {
+            self.count_received(id, direction, read.len());
+            None
+        } else {
+            self.admit(id, direction, read)
+        };
+        let Some((pending_id, mut decisions)) = admitted else {
+            return Ok(Some((None, None)));
+        };
+        let mut selected: Option<Arc<[u8]>> = None;
+        let Some(decision) = decisions.recv().await else {
+            return Err(std::io::ErrorKind::ConnectionAborted.into());
+        };
+        let receipt = {
+            let mut runtime = self.intercept.lock().unwrap();
+            let pending = runtime
+                .pending
+                .get_mut(&pending_id)
+                .expect("owner retains admitted range");
+            pending.event.decided_at = Some(Utc::now());
+            pending.event.revision += 1;
+            match decision.request.action {
+                DecisionAction::Drop => {
+                    pending.event.state = "dropped".into();
+                    pending.event.selected_length = 0;
+                }
+                DecisionAction::Forward => {
+                    pending.event.state = "forwarding".into();
+                    pending.selected = decision.selected.map(Arc::from);
+                    pending.event.edited = pending.selected.is_some();
+                    if let Some(bytes) = &pending.selected {
+                        pending.event.selected_length = bytes.len();
+                    }
+                    selected = pending.selected.clone();
+                }
+            }
+            DecisionReceipt {
+                pending_id,
+                state: pending.event.state.clone(),
+            }
+        };
+        let _ = decision.ack.send(Ok(receipt));
+        if matches!(decision.request.action, DecisionAction::Drop) {
+            self.end_range(pending_id, "dropped");
+            return Ok(None);
+        }
+        Ok(Some((Some(pending_id), selected)))
+    }
+    fn count_received(&self, id: Uuid, direction: Direction, length: usize) {
+        if let Some(record) = self.history.lock().unwrap().records.get_mut(&id) {
+            match direction {
+                Direction::ClientToServer => record.client_received_bytes += length as u64,
+                Direction::ServerToClient => record.server_received_bytes += length as u64,
+            }
+        }
+    }
     async fn pump<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         &self,
         id: Uuid,
@@ -2563,48 +2892,11 @@ impl TcpCapture {
                 writer.shutdown().await?;
                 return Ok(());
             }
-            let admitted = self.admit(id, direction, &buffer[..count]);
-            let mut selected: Option<Arc<[u8]>> = None;
-            let mut ticket = None;
-            if let Some((pending_id, mut decisions)) = admitted {
-                ticket = Some(pending_id);
-                let Some(decision) = decisions.recv().await else {
-                    return Err(std::io::ErrorKind::ConnectionAborted.into());
-                };
-                let receipt = {
-                    let mut runtime = self.intercept.lock().unwrap();
-                    let pending = runtime
-                        .pending
-                        .get_mut(&pending_id)
-                        .expect("owner retains admitted range");
-                    pending.event.decided_at = Some(Utc::now());
-                    pending.event.revision += 1;
-                    match decision.request.action {
-                        DecisionAction::Drop => {
-                            pending.event.state = "dropped".into();
-                            pending.event.selected_length = 0;
-                        }
-                        DecisionAction::Forward => {
-                            pending.event.state = "forwarding".into();
-                            pending.selected = decision.selected.map(Arc::from);
-                            pending.event.edited = pending.selected.is_some();
-                            if let Some(bytes) = &pending.selected {
-                                pending.event.selected_length = bytes.len();
-                            }
-                            selected = pending.selected.clone();
-                        }
-                    }
-                    DecisionReceipt {
-                        pending_id,
-                        state: pending.event.state.clone(),
-                    }
-                };
-                let _ = decision.ack.send(Ok(receipt));
-                if matches!(decision.request.action, DecisionAction::Drop) {
-                    self.end_range(pending_id, "dropped");
-                    continue;
-                }
-            }
+            let Some((ticket, selected)) =
+                self.decide_read(id, direction, &buffer[..count]).await?
+            else {
+                continue;
+            };
             let bytes = selected.as_deref().unwrap_or(&buffer[..count]);
             let mut offset = 0;
             while offset < bytes.len() {
@@ -2846,6 +3138,7 @@ mod tests {
             client_tls: false,
             server_tls: false,
             source: TcpSource::Listener,
+            protocol: Protocol::Tcp,
             replayed_from: None,
             status: "open".into(),
             failure: None,
@@ -5839,6 +6132,115 @@ mod tests {
             .any(|record| record.failure == Some(TcpFailure::GuardedTarget)));
         drop(guarded);
         capture.stop().await.unwrap();
+    }
+    async fn udp_echo() -> u16 {
+        let socket = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = socket.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut buffer = [0; 2048];
+            while let Ok((read, from)) = socket.recv_from(&mut buffer).await {
+                let _ = socket.send_to(&buffer[..read], from).await;
+            }
+        });
+        port
+    }
+    fn free_udp_port() -> u16 {
+        std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+    async fn udp_listener(capture: &Arc<TcpCapture>, target: u16) -> u16 {
+        let port = free_udp_port();
+        capture
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: TcpSettings {
+                    protocol: Protocol::Udp,
+                    ..loopback(port, target)
+                },
+            })
+            .await
+            .unwrap();
+        port
+    }
+    async fn udp_client(port: u16) -> tokio::net::UdpSocket {
+        let socket = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        socket.connect((Ipv4Addr::LOCALHOST, port)).await.unwrap();
+        socket
+    }
+    async fn reply(socket: &tokio::net::UdpSocket) -> Option<Vec<u8>> {
+        let mut buffer = [0; 2048];
+        let read = tokio::time::timeout(Duration::from_millis(1500), socket.recv(&mut buffer))
+            .await
+            .ok()?
+            .ok()?;
+        Some(buffer[..read].to_vec())
+    }
+    #[tokio::test]
+    async fn udp_clients_get_their_own_flows_and_datagrams_keep_their_bounds() {
+        let capture = temporary();
+        capture.set_udp_idle(Duration::from_millis(300));
+        let port = udp_listener(&capture, udp_echo().await).await;
+        let (first, second) = (udp_client(port).await, udp_client(port).await);
+        first.send(b"ab").await.unwrap();
+        assert_eq!(reply(&first).await.unwrap(), b"ab");
+        first.send(b"cd").await.unwrap();
+        assert_eq!(reply(&first).await.unwrap(), b"cd");
+        second.send(b"other").await.unwrap();
+        assert_eq!(reply(&second).await.unwrap(), b"other");
+        let flows = wait_saved(&capture, 2).await;
+        assert!(flows
+            .iter()
+            .all(|flow| flow.protocol == Protocol::Udp && flow.status == "closed"));
+        let first_flow = flows.iter().find(|flow| flow.client_bytes == 4).unwrap();
+        let detail = capture.detail(first_flow.id).await.unwrap().unwrap();
+        assert_eq!(
+            exchange_of(&detail),
+            vec![
+                (Direction::ClientToServer, b"ab".to_vec()),
+                (Direction::ServerToClient, b"ab".to_vec()),
+                (Direction::ClientToServer, b"cd".to_vec()),
+                (Direction::ServerToClient, b"cd".to_vec()),
+            ]
+        );
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn a_held_udp_datagram_can_be_dropped() {
+        let capture = temporary();
+        let port = udp_listener(&capture, udp_echo().await).await;
+        holding(&capture, None);
+        let client = udp_client(port).await;
+        client.send(b"gone").await.unwrap();
+        wait_paused(&capture, 1).await;
+        assert_eq!(capture.release_all(DecisionAction::Drop).await, 1);
+        assert_eq!(reply(&client).await, None, "nothing came back");
+        turn_off(&capture).await;
+        client.send(b"kept").await.unwrap();
+        assert_eq!(reply(&client).await.unwrap(), b"kept");
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn udp_listeners_refuse_tls() {
+        let capture = temporary();
+        let error = capture
+            .add_listener(TcpListenerInput {
+                enabled: false,
+                settings: TcpSettings {
+                    protocol: Protocol::Udp,
+                    tls: TlsMode::Decrypt,
+                    ..loopback(free_udp_port(), 1)
+                },
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "TLS is for TCP listeners.");
     }
 }
 

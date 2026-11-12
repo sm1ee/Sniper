@@ -197,7 +197,7 @@
   const TLS_LABELS = { decrypt: "decrypt TLS", upstream: "TLS to target" };
   function listenerTarget(settings) {
     const tls = TLS_LABELS[settings?.tls];
-    return targetLabel(settings) + (tls ? " · " + tls : "");
+    return targetLabel(settings) + (settings?.protocol === "udp" ? " · UDP" : "") + (tls ? " · " + tls : "");
   }
   function listenerRoute(listener) {
     return listenAddress(listener.settings) + " → " + targetLabel(listener.settings);
@@ -257,10 +257,12 @@
       text("tcpSettingsError", actionError?.message || warning);
       el("tcpRetrySaving").hidden = !status?.persistence_error;
       el("tcpRetrySaving").disabled = unavailable;
+      // TLS is for TCP; the field stays off and still for UDP.
+      if (el("tcpListenerProtocol").value === "udp") el("tcpListenerTls").disabled = true;
       renderListeners(all, unavailable);
       el("tcpListenerForm").hidden = editing === null;
       el("tcpRemoveListener").hidden = editing === null || editing === "new";
-      for (const id of ["tcpLocalPort", "tcpTargetHost", "tcpTargetPort", "tcpListenerTls", "tcpListenerRemote", "tcpListenerAllowed", "tcpSaveListener", "tcpCancelListener", "tcpRemoveListener"]) el(id).disabled = unavailable;
+      for (const id of ["tcpLocalPort", "tcpTargetHost", "tcpTargetPort", "tcpListenerProtocol", "tcpListenerTls", "tcpListenerRemote", "tcpListenerAllowed", "tcpSaveListener", "tcpCancelListener", "tcpRemoveListener"]) el(id).disabled = unavailable;
       // Paused bytes are counted beside the Intercept switch, not here too.
       const live = records.filter(record => LIVE.has(record.status)).length;
       const unrecorded = Number(status?.unrecorded_count) || 0;
@@ -327,6 +329,8 @@
       el("tcpTargetHost").value = listener ? listener.settings.target_host : "";
       el("tcpTargetPort").value = listener ? String(listener.settings.target_port) : "";
       el("tcpListenerTls").value = listener?.settings?.tls || "off";
+      el("tcpListenerProtocol").value = listener?.settings?.protocol || "tcp";
+      syncProtocol();
       el("tcpListenerRemote").checked = Boolean(listener?.settings?.remote);
       el("tcpListenerAllowed").value = (listener?.settings?.allowed_clients || []).join("\n");
       syncRemote();
@@ -334,6 +338,11 @@
       el("tcpTargetHost").focus?.();
     }
     function closeForm() { editing = null; actionError = null; renderStatus(); }
+    function syncProtocol() {
+      const udp = el("tcpListenerProtocol").value === "udp";
+      if (udp) el("tcpListenerTls").value = "off";
+      el("tcpListenerTls").disabled = udp;
+    }
     // Other devices: the list of who may connect shows once that is on.
     function syncRemote() {
       const remote = Boolean(el("tcpListenerRemote").checked);
@@ -411,6 +420,7 @@
         !LIVE.has(record.status) && !record.durable ? "Not saved" : "",
         record.via_proxy ? "Through the upstream proxy" : "",
         record.client_tls ? "TLS decrypted" : record.server_tls ? "TLS to the target" : "",
+        record.protocol === "udp" ? "UDP, one chunk per datagram" : "",
         record.failure === "self_target" ? "The target resolves to this listener. If a hosts entry sends the name here, enter the server's IP as the target." : ""
       ].filter(Boolean).join(" · ");
     }
@@ -520,8 +530,9 @@
       let settings;
       try { settings = validateSettings(el("tcpLocalPort").value, el("tcpTargetHost").value, el("tcpTargetPort").value); }
       catch (error) { actionError = { message: error.message }; renderStatus(); return; }
-      const tls = el("tcpListenerTls").value;
-      if (tls && tls !== "off") settings.tls = tls;
+      const tls = el("tcpListenerTls").value, protocol = el("tcpListenerProtocol").value;
+      if (protocol === "udp") settings.protocol = "udp";
+      else if (tls && tls !== "off") settings.tls = tls;
       if (el("tcpListenerRemote").checked) {
         settings.remote = true;
         settings.allowed_clients = String(el("tcpListenerAllowed").value).split(/[\s,]+/).filter(Boolean);
@@ -588,6 +599,7 @@
     el("tcpListenerForm").addEventListener("submit", event => { event.preventDefault(); void saveListener(); });
     el("tcpAddListener").addEventListener("click", () => openForm("new"));
     el("tcpListenerRemote").addEventListener("change", syncRemote);
+    el("tcpListenerProtocol").addEventListener("change", syncProtocol);
     async function runSearch() {
       const value = el("tcpSearch").value, kind = el("tcpSearchKind").value || "text", token = ++searchRequest;
       if (!value) { search = null; listKey = ""; renderStatus(); renderList(); return; }
@@ -903,8 +915,8 @@
       if (el("tcpPendingTab").hidden && tab === "pending") tab = "stream";
       text("tcpPendingTab", "Pending" + (items.length ? " " + items.length : ""));
       // Replay starts from a connection.
-      el("tcpReplayTab").hidden = !connection;
-      if (!connection && tab === "replay") tab = "stream";
+      el("tcpReplayTab").hidden = !connection || connection.protocol === "udp";
+      if (el("tcpReplayTab").hidden && tab === "replay") tab = "stream";
       el("tcpStreamSurface").hidden = tab !== "stream";
       el("tcpPendingSurface").hidden = tab !== "pending";
       el("tcpReplaySurface").hidden = tab !== "replay";
