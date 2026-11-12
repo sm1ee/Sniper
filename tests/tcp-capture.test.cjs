@@ -250,7 +250,7 @@ test("a new listener's bind conflict is shown and nothing is retried",async()=>{
 });
 
 test("failure labels are fixed, contextual and unknown-safe", () => {
-  for (const [code, label] of [["proxy_failed","Upstream proxy failed"],["resolution_timeout","Name lookup timed out"],["resolution_failed","Name lookup failed"],["connect_timeout","Connection timed out"],["connection_refused","Connection refused"],["connect_failed","Connection failed"],["self_target","Target is this listener"],["relay_failed","Stream interrupted"],["storage_failed","History storage failed"]]) {
+  for (const [code, label] of [["tls_failed","TLS handshake failed"],["proxy_failed","Upstream proxy failed"],["resolution_timeout","Name lookup timed out"],["resolution_failed","Name lookup failed"],["connect_timeout","Connection timed out"],["connection_refused","Connection refused"],["connect_failed","Connection failed"],["self_target","Target is this listener"],["relay_failed","Stream interrupted"],["storage_failed","History storage failed"]]) {
     assert.equal(tcp.statusLabel({status:"failed",failure:code}),"Failed · "+label);
     assert.equal(tcp.statusLabel({status:"stopped",failure:code}),"Stopped");
   }
@@ -464,4 +464,22 @@ test("detail says when a connection went through the proxy, and what a self-targ
   selected = f.controller.select("s");
   f.requests[1].resolve({id:"s", target:"db.example.com:5432", status:"failed", failure:"self_target", durable:true, client_bytes:0, server_bytes:0, chunks:[]}); await selected;
   assert.match(f.get("tcpStreamMeta").textContent, /hosts entry/);
+});
+test("a listener can decrypt TLS: the editor sends it, the list and the detail show it", async () => {
+  const f = fixture();
+  await pollStatus(f, status);
+  f.get("tcpAddListener").listeners.click();
+  assert.equal(f.get("tcpListenerTls").value, "off");
+  f.get("tcpTargetHost").value = "db.example.com"; f.get("tcpTargetPort").value = "5432"; f.get("tcpListenerTls").value = "decrypt";
+  f.get("tcpListenerForm").listeners.submit({preventDefault(){}});
+  assert.equal(JSON.parse(f.requests[2].options.body).settings.tls, "decrypt");
+  const tlsListener = listener("t1", 9000, {settings:{local_port:9000, target_host:"db.example.com", target_port:5432, tls:"decrypt"}});
+  f.requests[2].resolve({...status, enabled:true, listeners:[tlsListener]}); await tick();
+  f.requests[3].resolve({...status, enabled:true, listeners:[tlsListener]}); f.requests[4].resolve([]); await tick(); await tick();
+  assert.equal(listenerRows(f)[0][1], "db.example.com:5432 · decrypt TLS");
+  f.get("tcpListenerRows").listeners.click({target:{closest: selector => selector === "tr[data-listener-id]" ? {dataset:{listenerId:"t1"}} : null}});
+  assert.equal(f.get("tcpListenerTls").value, "decrypt");
+  const selected = f.controller.select("x");
+  f.requests.at(-1).resolve({id:"x", target:"db.example.com:5432", status:"closed", durable:true, client_tls:true, server_tls:true, client_bytes:0, server_bytes:0, chunks:[]}); await selected;
+  assert.match(f.get("tcpStreamMeta").textContent, /TLS decrypted/);
 });

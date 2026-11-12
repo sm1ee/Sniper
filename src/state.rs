@@ -343,6 +343,9 @@ impl AppState {
         );
         let operation_lock = self.session_operation_lock(session.id()).await;
         let _operation_guard = operation_lock.lock_owned().await;
+        session
+            .tcp_capture
+            .use_certificates(self.certificates.clone());
         let changed = session.tcp_capture.apply(change).await;
         // Saved even when the change failed part way, as turning every listener
         // off does before reporting unsaved records: what runs is what is kept.
@@ -379,7 +382,11 @@ impl AppState {
     pub async fn start_saved_tcp_listeners(&self) {
         let _guard = self.session_activation_lock.lock().await;
         if !self.tcp_shutdown.load(Ordering::Acquire) {
-            self.session().await.tcp_capture.start_saved().await;
+            let session = self.session().await;
+            session
+                .tcp_capture
+                .use_certificates(self.certificates.clone());
+            session.tcp_capture.start_saved().await;
         }
     }
 
@@ -1073,6 +1080,9 @@ impl AppState {
                         // The old session's listeners stopped above; this one's
                         // saved listeners take over.
                         if !state.tcp_shutdown.load(Ordering::Acquire) {
+                            session
+                                .tcp_capture
+                                .use_certificates(state.certificates.clone());
                             session.tcp_capture.start_saved().await;
                         }
                         SessionActivationOutcome::Replaced {
@@ -4705,6 +4715,7 @@ mod tests {
             local_port: reservation.local_addr().unwrap().port(),
             target_host: "127.0.0.1".into(),
             target_port: 1,
+            ..Default::default()
         };
         drop(reservation);
         let (_start, stop) = tokio::join!(
@@ -4766,6 +4777,7 @@ mod tests {
                     local_port: port,
                     target_host: "127.0.0.1".into(),
                     target_port: 1,
+                    ..Default::default()
                 }),
                 Some(original.id()),
                 Some(original.id()),
@@ -4811,6 +4823,7 @@ mod tests {
                         local_port: port,
                         target_host: "127.0.0.1".into(),
                         target_port: 1,
+                        ..Default::default()
                     },
                 }),
                 Some(original.id()),

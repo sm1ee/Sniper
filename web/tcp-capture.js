@@ -10,7 +10,7 @@
     ["connect_timeout", "Connection timed out"], ["connection_refused", "Connection refused"],
     ["connect_failed", "Connection failed"], ["self_target", "Target is this listener"],
     ["relay_failed", "Stream interrupted"], ["storage_failed", "History storage failed"],
-    ["proxy_failed", "Upstream proxy failed"]
+    ["proxy_failed", "Upstream proxy failed"], ["tls_failed", "TLS handshake failed"]
   ]);
   const DIRECTIONS = ["client_to_server", "server_to_client"];
   const MAX_DISPLAY_BYTES = 256 * 1024;
@@ -144,6 +144,11 @@
     const host = String(settings?.target_host || "");
     return (host.includes(":") ? "[" + host + "]" : host) + ":" + settings?.target_port;
   }
+  const TLS_LABELS = { decrypt: "decrypt TLS", upstream: "TLS to target" };
+  function listenerTarget(settings) {
+    const tls = TLS_LABELS[settings?.tls];
+    return targetLabel(settings) + (tls ? " · " + tls : "");
+  }
   function listenerRoute(listener) {
     return "127.0.0.1:" + listener.settings.local_port + " → " + targetLabel(listener.settings);
   }
@@ -195,7 +200,7 @@
       renderListeners(all, unavailable);
       el("tcpListenerForm").hidden = editing === null;
       el("tcpRemoveListener").hidden = editing === null || editing === "new";
-      for (const id of ["tcpLocalPort", "tcpTargetHost", "tcpTargetPort", "tcpSaveListener", "tcpCancelListener", "tcpRemoveListener"]) el(id).disabled = unavailable;
+      for (const id of ["tcpLocalPort", "tcpTargetHost", "tcpTargetPort", "tcpListenerTls", "tcpSaveListener", "tcpCancelListener", "tcpRemoveListener"]) el(id).disabled = unavailable;
       // Paused bytes are counted beside the Intercept switch, not here too.
       const live = records.filter(record => LIVE.has(record.status)).length;
       const unrecorded = Number(status?.unrecorded_count) || 0;
@@ -231,7 +236,7 @@
         const on = document.createElement("td");
         on.className = "tcp-col-on"; on.append(toggle); row.append(on);
         const state = listenerState(listener);
-        for (const [content, className] of [["127.0.0.1:" + listener.settings.local_port, ""], [targetLabel(listener.settings), ""],
+        for (const [content, className] of [["127.0.0.1:" + listener.settings.local_port, ""], [listenerTarget(listener.settings), ""],
           [state, listener.enabled && !listener.running ? "tcp-listener-error" : ""]]) {
           const cell = document.createElement("td");
           cell.textContent = content; cell.title = content;
@@ -259,6 +264,7 @@
       el("tcpLocalPort").value = String(listener ? listener.settings.local_port : nextPort());
       el("tcpTargetHost").value = listener ? listener.settings.target_host : "";
       el("tcpTargetPort").value = listener ? String(listener.settings.target_port) : "";
+      el("tcpListenerTls").value = listener?.settings?.tls || "off";
       renderStatus();
       el("tcpTargetHost").focus?.();
     }
@@ -333,6 +339,7 @@
         record.capture_truncated ? "Partial capture" : "",
         !LIVE.has(record.status) && !record.durable ? "Not saved" : "",
         record.via_proxy ? "Through the upstream proxy" : "",
+        record.client_tls ? "TLS decrypted" : record.server_tls ? "TLS to the target" : "",
         record.failure === "self_target" ? "The target resolves to this listener. If a hosts entry sends the name here, enter the server's IP as the target." : ""
       ].filter(Boolean).join(" · ");
     }
@@ -437,6 +444,8 @@
       let settings;
       try { settings = validateSettings(el("tcpLocalPort").value, el("tcpTargetHost").value, el("tcpTargetPort").value); }
       catch (error) { actionError = { message: error.message }; renderStatus(); return; }
+      const tls = el("tcpListenerTls").value;
+      if (tls && tls !== "off") settings.tls = tls;
       const existing = listeners().find(listener => listener.id === editing);
       const saved = editing === "new"
         ? await write("add", "/api/tcp/listeners", "POST", { enabled: true, settings })

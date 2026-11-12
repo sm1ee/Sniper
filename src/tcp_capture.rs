@@ -551,12 +551,36 @@ impl Default for InterceptRuntime {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TcpSettings {
     pub local_port: u16,
     pub target_host: String,
     pub target_port: u16,
+    /// Left out when off, so a plain listener reads the same to an older Sniper.
+    #[serde(default, skip_serializing_if = "TlsMode::is_off")]
+    pub tls: TlsMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsMode {
+    /// Bytes are relayed as they are.
+    #[default]
+    Off,
+    /// A client that starts TLS is answered with a certificate from Sniper's CA
+    /// and the target is reached over TLS; both sides are captured in plain
+    /// text. A client that does not start TLS, or a server that speaks first,
+    /// is relayed as it is.
+    Decrypt,
+    /// The client speaks plain text and Sniper adds TLS towards the target.
+    Upstream,
+}
+
+impl TlsMode {
+    fn is_off(&self) -> bool {
+        *self == Self::Off
+    }
 }
 
 pub const MAX_LISTENERS: usize = 16;
@@ -685,6 +709,7 @@ pub enum TcpFailure {
     RelayFailed,
     StorageFailed,
     ProxyFailed,
+    TlsFailed,
     #[serde(other)]
     Unknown,
 }
@@ -745,6 +770,12 @@ pub struct TcpConnection {
     /// Opened through the session's upstream proxy.
     #[serde(default)]
     pub via_proxy: bool,
+    /// The client's TLS was decrypted with a certificate from Sniper's CA.
+    #[serde(default)]
+    pub client_tls: bool,
+    /// The target was reached over TLS.
+    #[serde(default)]
+    pub server_tls: bool,
     #[serde(deserialize_with = "bounded_string::<_, MAX_STATUS_BYTES>")]
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1079,6 +1110,8 @@ pub struct TcpCapture {
     unrecorded: AtomicU64,
     /// The session's settings, for its upstream proxy; absent in unit tests.
     runtime: std::sync::OnceLock<Arc<crate::runtime::RuntimeSettings>>,
+    /// Sniper's CA, for listeners that decrypt TLS.
+    certificates: std::sync::OnceLock<Arc<crate::certificate::CertificateAuthority>>,
     intercept: std::sync::Mutex<InterceptRuntime>,
 }
 impl TcpCapture {
@@ -1416,6 +1449,7 @@ impl TcpCapture {
             active_count: AtomicUsize::new(0),
             unrecorded: AtomicU64::new(0),
             runtime: std::sync::OnceLock::new(),
+            certificates: std::sync::OnceLock::new(),
             intercept: std::sync::Mutex::new(InterceptRuntime::default()),
         }
     }
@@ -1494,6 +1528,8 @@ impl TcpCapture {
                 target: r.target.clone(),
                 local_port: r.local_port,
                 via_proxy: r.via_proxy,
+                client_tls: r.client_tls,
+                server_tls: r.server_tls,
                 status: r.status.clone(),
                 failure: r.failure,
                 client_bytes: r.client_bytes,
@@ -1641,6 +1677,16 @@ impl TcpCapture {
     }
     pub fn use_runtime(&self, runtime: Arc<crate::runtime::RuntimeSettings>) {
         let _ = self.runtime.set(runtime);
+    }
+    pub fn use_certificates(&self, certificates: Arc<crate::certificate::CertificateAuthority>) {
+        let _ = self.certificates.set(certificates);
+    }
+    /// Whether the target's certificate goes unchecked, as for HTTP.
+    async fn upstream_insecure(&self) -> bool {
+        match self.runtime.get() {
+            Some(runtime) => runtime.upstream_insecure().await,
+            None => true,
+        }
     }
     async fn upstream_proxy(&self) -> Option<crate::upstream_proxy::UpstreamProxy> {
         match self.runtime.get() {
@@ -1924,7 +1970,7 @@ impl TcpCapture {
                             // relay on, record nothing, and count it until cleared.
                             Admission::Unrecorded
                         } else {
-                            let record = TcpConnection { id: Uuid::new_v4(), started_at: Utc::now(), ended_at: None, peer: peer.to_string(), target: settings.target_label(), local_port: settings.local_port, via_proxy: false, status: "connecting".into(), failure: None, client_bytes: 0, server_bytes: 0, captured_bytes: 0, capture_truncated: false, durable: false, chunks: vec![], client_received_bytes:0, server_received_bytes:0, intercept_events:vec![], intercept_captured_bytes:0, intercept_truncated:false, intercept_event_count:0, intercept_schema_version:1, pending_count:0,pending_directions:vec![] };
+                            let record = TcpConnection { id: Uuid::new_v4(), started_at: Utc::now(), ended_at: None, peer: peer.to_string(), target: settings.target_label(), local_port: settings.local_port, via_proxy: false, client_tls: false, server_tls: false, status: "connecting".into(), failure: None, client_bytes: 0, server_bytes: 0, captured_bytes: 0, capture_truncated: false, durable: false, chunks: vec![], client_received_bytes:0, server_received_bytes:0, intercept_events:vec![], intercept_captured_bytes:0, intercept_truncated:false, intercept_event_count:0, intercept_schema_version:1, pending_count:0,pending_directions:vec![] };
                             let (close, closed) = watch::channel(false);
                             runtime.connections.insert(record.id, close);
                             history.records.insert(record.id, record.clone());
@@ -1976,12 +2022,16 @@ impl TcpCapture {
                 let local = client.local_addr().map_err(|_| TcpFailure::ConnectFailed)?;
                 let proxy = self.upstream_proxy().await;
                 let (upstream, via_proxy) = open_upstream(&settings, local, proxy.as_ref()).await?;
+                let (client, upstream, client_tls, server_tls) =
+                    self.secure(&settings, client, upstream).await?;
                 if let Some(r) = self.history.lock().unwrap().records.get_mut(&id) {
                     r.status = "open".into();
                     r.via_proxy = via_proxy;
+                    r.client_tls = client_tls;
+                    r.server_tls = server_tls;
                 }
-                let (client_read, client_write) = client.into_split();
-                let (server_read, server_write) = upstream.into_split();
+                let (client_read, client_write) = tokio::io::split(client);
+                let (server_read, server_write) = tokio::io::split(upstream);
                 tokio::try_join!(
                     self.pump(id, Direction::ClientToServer, client_read, server_write),
                     self.pump(id, Direction::ServerToClient, server_read, client_write)
@@ -1994,6 +2044,50 @@ impl TcpCapture {
         )
         .await;
         self.finish(id, result.0, result.1).await;
+    }
+    /// Applies the listener's TLS mode to an opened connection pair, and says
+    /// which side ended up in TLS.
+    async fn secure(
+        &self,
+        settings: &TcpSettings,
+        client: TcpStream,
+        upstream: TcpStream,
+    ) -> Result<(Box<dyn Io>, Box<dyn Io>, bool, bool), TcpFailure> {
+        let insecure = self.upstream_insecure().await;
+        match settings.tls {
+            TlsMode::Off => Ok((Box::new(client), Box::new(upstream), false, false)),
+            TlsMode::Upstream => {
+                let server = connect_tls(upstream, &settings.target_host, insecure).await?;
+                Ok((Box::new(client), Box::new(server), false, true))
+            }
+            TlsMode::Decrypt => {
+                if !client_starts_tls(&client, &upstream).await {
+                    return Ok((Box::new(client), Box::new(upstream), false, false));
+                }
+                let certificates = self.certificates.get().ok_or(TcpFailure::TlsFailed)?;
+                let start = tokio_rustls::LazyConfigAcceptor::new(
+                    rustls::server::Acceptor::default(),
+                    client,
+                )
+                .await
+                .map_err(|_| TcpFailure::TlsFailed)?;
+                // The name the client asked for, or the target's, names both ends.
+                let name = start
+                    .client_hello()
+                    .server_name()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| settings.target_host.clone());
+                let server = connect_tls(upstream, &name, insecure).await?;
+                let config = certificates
+                    .server_config_for_host(&name)
+                    .map_err(|_| TcpFailure::TlsFailed)?;
+                let client = start
+                    .into_stream(config)
+                    .await
+                    .map_err(|_| TcpFailure::TlsFailed)?;
+                Ok((Box::new(client), Box::new(server), true, true))
+            }
+        }
     }
     async fn finish(&self, id: Uuid, status: &str, failure: Option<TcpFailure>) {
         let tickets: Vec<_> = {
@@ -2152,6 +2246,52 @@ impl TcpCapture {
         }
     }
 }
+/// A relayed stream, plain or in TLS.
+trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+
+/// Whether the client's first bytes are a TLS handshake record (16 03 0x). A
+/// server that speaks first, as SMTP or MySQL do, decides it: not TLS.
+async fn client_starts_tls(client: &TcpStream, upstream: &TcpStream) -> bool {
+    let first = async {
+        let mut head = [0u8; 3];
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let read = client.peek(&mut head).await.unwrap_or(0);
+            if read == 0 || head[0] != 0x16 {
+                return false;
+            }
+            if read >= 3 {
+                return head[1] == 0x03 && head[2] <= 0x04;
+            }
+            // The rest of the record header is still on its way.
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        biased;
+        starts = first => starts,
+        _ = upstream.readable() => false,
+    }
+}
+
+/// TLS towards the target, named by SNI where the name is a host name.
+async fn connect_tls(
+    upstream: TcpStream,
+    name: &str,
+    insecure: bool,
+) -> Result<tokio_rustls26::client::TlsStream<TcpStream>, TcpFailure> {
+    let name = rustls23::pki_types::ServerName::try_from(name.trim_matches(['[', ']']).to_owned())
+        .map_err(|_| TcpFailure::TlsFailed)?;
+    tokio_rustls26::TlsConnector::from(crate::ws_tls::client_config(insecure))
+        .connect(name, upstream)
+        .await
+        .map_err(|_| TcpFailure::TlsFailed)
+}
+
 /// Whether a target goes through the upstream proxy: only while it is on, and
 /// never for a bypassed host or this machine, which a proxy elsewhere cannot
 /// reach.
@@ -2267,6 +2407,8 @@ mod tests {
             target: "127.0.0.1:2".into(),
             local_port: 0,
             via_proxy: false,
+            client_tls: false,
+            server_tls: false,
             status: "open".into(),
             failure: None,
             client_bytes: 0,
@@ -2371,6 +2513,7 @@ mod tests {
                 local_port,
                 target_host: "127.0.0.1".into(),
                 target_port: 9,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -2444,6 +2587,7 @@ mod tests {
                 local_port: 12345,
                 target_host: "127.0.0.1".into(),
                 target_port: 9,
+                ..Default::default()
             })
             .await
             .unwrap_err()
@@ -2885,6 +3029,7 @@ mod tests {
                 } else {
                     address.port()
                 },
+                ..Default::default()
             };
             let (stop, rx) = watch::channel(false);
             let copy = capture.clone();
@@ -3355,6 +3500,7 @@ mod tests {
             local_port: address.port(),
             target_host: "127.0.0.1".into(),
             target_port,
+            ..Default::default()
         };
         let (stop, receiver) = watch::channel(false);
         let copy = capture.clone();
@@ -3446,6 +3592,7 @@ mod tests {
             local_port: port,
             target_host: "127.0.0.1".into(),
             target_port: 1,
+            ..Default::default()
         };
         let (stop, _receiver) = watch::channel(false);
         // Model the completed owner left behind when serve exits on accept failure.
@@ -3480,6 +3627,7 @@ mod tests {
             local_port: 19999,
             target_host: "127.0.0.1".into(),
             target_port: 19998,
+            ..Default::default()
         };
         let (release, blocked) = tokio::sync::oneshot::channel::<()>();
         let (stop, _receiver) = watch::channel(false);
@@ -3509,6 +3657,7 @@ mod tests {
                 local_port: 9000,
                 target_host: host.into(),
                 target_port: 9100,
+                ..Default::default()
             };
             settings.validate().unwrap();
             settings.target_host = settings.normalized_host().unwrap();
@@ -3529,6 +3678,7 @@ mod tests {
                 local_port: 9000,
                 target_host: host.into(),
                 target_port: 9100,
+                ..Default::default()
             };
             assert!(settings.validate().is_err(), "{host}");
         }
@@ -3548,6 +3698,7 @@ mod tests {
                 local_port,
                 target_host: "127.0.0.1".into(),
                 target_port,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -3625,6 +3776,7 @@ mod tests {
                 local_port,
                 target_host: "127.0.0.1".into(),
                 target_port: 1,
+                ..Default::default()
             })
             .await
             .unwrap_err();
@@ -3646,6 +3798,7 @@ mod tests {
                     local_port,
                     target_host: "[::1]".into(),
                     target_port,
+                    ..Default::default()
                 },
             })
             .await
@@ -3679,14 +3832,16 @@ mod tests {
         assert!(TcpSettings {
             local_port: 0,
             target_host: "127.0.0.1".into(),
-            target_port: 12
+            target_port: 12,
+            ..Default::default()
         }
         .validate()
         .is_err());
         assert!(TcpSettings {
             local_port: 12,
             target_host: "http://example.com".into(),
-            target_port: 12
+            target_port: 12,
+            ..Default::default()
         }
         .validate()
         .is_err());
@@ -4050,6 +4205,7 @@ mod tests {
             local_port: address.port(),
             target_host: "127.0.0.1".into(),
             target_port: upstream.local_addr().unwrap().port(),
+            ..Default::default()
         };
         let (stop, rx) = watch::channel(false);
         let copy = capture.clone();
@@ -4139,6 +4295,7 @@ mod tests {
                 local_port: address.port(),
                 target_host: "127.0.0.1".into(),
                 target_port: upstream.local_addr().unwrap().port(),
+                ..Default::default()
             };
             let (stop, rx) = watch::channel(false);
             let copy = capture.clone();
@@ -4305,6 +4462,7 @@ mod tests {
             local_port,
             target_host: "127.0.0.1".into(),
             target_port,
+            ..Default::default()
         }
     }
     async fn echo_through(local_port: u16, bytes: &[u8]) -> Vec<u8> {
@@ -4721,6 +4879,7 @@ mod tests {
                     local_port: port,
                     target_host: "relay.example.com".into(),
                     target_port: 5432,
+                    ..Default::default()
                 },
             })
             .await
@@ -4758,6 +4917,142 @@ mod tests {
         assert!(!routes_through(&proxy, "localhost"));
         assert!(!routes_through(&proxy, "::1"));
         assert!(routes_through(&proxy, "relay.example.com"));
+        capture.stop().await.unwrap();
+    }
+    fn test_ca() -> Arc<crate::certificate::CertificateAuthority> {
+        let dir = std::env::temp_dir().join(format!("sniper-tcp-ca-{}", Uuid::new_v4()));
+        Arc::new(crate::certificate::CertificateAuthority::load_or_create(&dir).unwrap())
+    }
+    /// A TLS server with a certificate from `ca`: says `banner` first when it is
+    /// not empty, then echoes.
+    async fn tls_server(
+        ca: &crate::certificate::CertificateAuthority,
+        banner: &'static [u8],
+    ) -> u16 {
+        let acceptor = ca.tls_acceptor_for_host("db.example.com").unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(mut tls) = acceptor.accept(socket).await else {
+                        return;
+                    };
+                    if !banner.is_empty() && tls.write_all(banner).await.is_err() {
+                        return;
+                    }
+                    let mut buffer = [0; 1024];
+                    while let Ok(read @ 1..) = tls.read(&mut buffer).await {
+                        if tls.write_all(&buffer[..read]).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+    fn trusting(ca: &crate::certificate::CertificateAuthority) -> tokio_rustls26::TlsConnector {
+        let mut roots = rustls23::RootCertStore::empty();
+        roots
+            .add(rustls23::pki_types::CertificateDer::from(
+                ca.root_der_bytes().to_vec(),
+            ))
+            .unwrap();
+        let config = rustls23::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        tokio_rustls26::TlsConnector::from(Arc::new(config))
+    }
+    async fn tls_listener(
+        ca: &Arc<crate::certificate::CertificateAuthority>,
+        target_port: u16,
+        tls: TlsMode,
+    ) -> (Arc<TcpCapture>, u16) {
+        let capture = temporary();
+        capture.use_certificates(ca.clone());
+        let port = free_port();
+        capture
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: TcpSettings {
+                    local_port: port,
+                    target_host: "127.0.0.1".into(),
+                    target_port,
+                    tls,
+                },
+            })
+            .await
+            .unwrap();
+        (capture, port)
+    }
+    fn sent(record: &TcpConnection) -> Vec<u8> {
+        record
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.direction == Direction::ClientToServer)
+            .flat_map(|chunk| STANDARD.decode(&chunk.data_base64).unwrap())
+            .collect()
+    }
+    #[tokio::test]
+    async fn a_tls_client_is_decrypted_and_the_target_reached_over_tls() {
+        let ca = test_ca();
+        let server = tls_server(&ca, b"").await;
+        let (capture, port) = tls_listener(&ca, server, TlsMode::Decrypt).await;
+        let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        let name = rustls23::pki_types::ServerName::try_from("db.example.com").unwrap();
+        let mut tls = trusting(&ca).connect(name, stream).await.unwrap();
+        tls.write_all(b"secret").await.unwrap();
+        let mut back = [0; 6];
+        tokio::time::timeout(Duration::from_secs(5), tls.read_exact(&mut back))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&back, b"secret");
+        drop(tls);
+        let record = wait_saved(&capture, 1).await.remove(0);
+        assert!(record.client_tls && record.server_tls);
+        let detail = capture.detail(record.id).await.unwrap().unwrap();
+        assert_eq!(sent(&detail), b"secret", "captured in plain text");
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn a_server_that_speaks_first_is_relayed_as_it_is() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let server = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(b"220 ready\r\n").await.unwrap();
+            let mut hold = [0; 1];
+            let _ = socket.read(&mut hold).await;
+        });
+        let (capture, port) = tls_listener(&test_ca(), server, TlsMode::Decrypt).await;
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        assert_eq!(read_back(&mut client, 11).await, b"220 ready\r\n");
+        drop(client);
+        let record = wait_saved(&capture, 1).await.remove(0);
+        assert!(!record.client_tls && !record.server_tls);
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn a_plain_client_on_a_decrypting_listener_is_relayed_as_it_is() {
+        let (capture, port) = tls_listener(&test_ca(), echo_server().await, TlsMode::Decrypt).await;
+        assert_eq!(echo_through(port, b"plain").await, b"plain");
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn upstream_mode_adds_tls_towards_the_target_only() {
+        let ca = test_ca();
+        let server = tls_server(&ca, b"").await;
+        let (capture, port) = tls_listener(&ca, server, TlsMode::Upstream).await;
+        assert_eq!(echo_through(port, b"wrapped").await, b"wrapped");
+        let record = wait_saved(&capture, 1).await.remove(0);
+        assert!(!record.client_tls && record.server_tls);
         capture.stop().await.unwrap();
     }
 }

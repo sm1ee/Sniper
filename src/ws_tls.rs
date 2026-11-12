@@ -9,16 +9,26 @@ use rustls23::{
 use tokio_tungstenite::Connector;
 
 pub fn insecure_connector(accept_invalid: bool) -> Option<Connector> {
-    if !accept_invalid {
-        return None;
-    }
-    let provider = Arc::new(rustls23::crypto::ring::default_provider());
+    accept_invalid.then(|| Connector::Rustls(client_config(true)))
+}
 
-    let config = rustls23::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(AcceptInvalidServerCerts { provider }))
-        .with_no_client_auth();
-    Some(Connector::Rustls(Arc::new(config)))
+/// A TLS client for an upstream connection: certificates are checked against
+/// the public roots unless the session accepts invalid ones, as HTTP does.
+pub(crate) fn client_config(accept_invalid: bool) -> Arc<rustls23::ClientConfig> {
+    let config = if accept_invalid {
+        let provider = Arc::new(rustls23::crypto::ring::default_provider());
+        rustls23::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptInvalidServerCerts { provider }))
+            .with_no_client_auth()
+    } else {
+        let roots =
+            rustls23::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        rustls23::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+    };
+    Arc::new(config)
 }
 
 struct AcceptInvalidServerCerts {

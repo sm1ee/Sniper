@@ -152,7 +152,7 @@ impl CertificateAuthority {
         Ok(config.config)
     }
 
-    fn server_config_for_host(&self, host: &str) -> Result<Arc<ServerConfig>> {
+    pub(crate) fn server_config_for_host(&self, host: &str) -> Result<Arc<ServerConfig>> {
         let normalized_host = normalize_certificate_host(host);
         if normalized_host.eq_ignore_ascii_case(SPECIAL_HOST) {
             return self.special_host_server_config();
