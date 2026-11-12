@@ -2142,7 +2142,12 @@ impl TcpCapture {
     ) -> std::io::Result<()> {
         let mut buffer = [0u8; 16 * 1024];
         loop {
-            let count = reader.read(&mut buffer).await?;
+            let count = match reader.read(&mut buffer).await {
+                // A TLS peer that closes without close_notify, as many clients
+                // do, has ended its side all the same. Plain TCP never says this.
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => 0,
+                read => read?,
+            };
             if count == 0 {
                 writer.shutdown().await?;
                 return Ok(());
@@ -5015,6 +5020,8 @@ mod tests {
         drop(tls);
         let record = wait_saved(&capture, 1).await.remove(0);
         assert!(record.client_tls && record.server_tls);
+        // Dropped without close_notify, as many clients close: still a clean end.
+        assert_eq!((record.status.as_str(), record.failure), ("closed", None));
         let detail = capture.detail(record.id).await.unwrap().unwrap();
         assert_eq!(sent(&detail), b"secret", "captured in plain text");
         capture.stop().await.unwrap();
