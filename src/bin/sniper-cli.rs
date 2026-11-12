@@ -208,6 +208,12 @@ enum Command {
         #[command(subcommand)]
         command: VulndataCommand,
     },
+    /// The TCP and UDP relay: listeners, recorded connections, intercept and
+    /// replay. CONNECT tunnels that are neither TLS nor HTTP land here too.
+    Tcp {
+        #[command(subcommand)]
+        command: TcpCommand,
+    },
     /// Read stored session event messages.
     #[command(name = "event-log")]
     EventLog {
@@ -860,6 +866,766 @@ fn vulndata_lookup_path(args: &VulndataLookupArgs) -> String {
         ("version".to_string(), args.version.clone()),
     ];
     format!("/api/vulndata/lookup?{}", encode_query(params))
+}
+
+#[derive(Subcommand, Debug)]
+enum TcpCommand {
+    /// The relay's listeners, whether each runs and why not, history counts,
+    /// and connections relayed without being recorded.
+    Status(TcpSessionArgs),
+    /// Add, change or remove where Sniper listens and what it relays to.
+    Listeners {
+        #[command(subcommand)]
+        command: TcpListenersCommand,
+    },
+    /// Recorded connections, newest first, without their bytes.
+    List(TcpListArgs),
+    /// One connection with its captured bytes as base64 chunks.
+    Get(TcpIdArgs),
+    /// One direction's captured bytes, as base64.
+    Raw(TcpRawArgs),
+    /// Delete every connection that has ended from TCP history.
+    Clear(TcpSessionArgs),
+    /// Hold reads before they are relayed.
+    Intercept {
+        #[command(subcommand)]
+        command: TcpInterceptCommand,
+    },
+    /// The reads one connection has on hold.
+    Pending(TcpIdArgs),
+    /// Forward one held read, as it is or replaced, or drop it.
+    Decide(TcpDecideArgs),
+    /// Forward every held read as it is.
+    ForwardAll(TcpSessionArgs),
+    /// Drop every held read.
+    DropAll(TcpSessionArgs),
+    /// Close a live connection.
+    Close(TcpIdArgs),
+    /// Send messages over a new connection, one at a time, and record the
+    /// replies.
+    Replay(TcpReplayArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum TcpListenersCommand {
+    List(TcpSessionArgs),
+    Add(TcpListenerAddArgs),
+    /// Change the given fields of a listener; the others stay.
+    Set(TcpListenerSetArgs),
+    Remove(TcpIdArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum TcpInterceptCommand {
+    Get(TcpSessionArgs),
+    /// Replace the policy: what is held, in which direction.
+    Set(TcpInterceptSetArgs),
+}
+
+#[derive(Args, Debug)]
+struct TcpSessionArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpIdArgs {
+    #[arg(long)]
+    id: Uuid,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpListArgs {
+    /// Only connections whose captured bytes contain this.
+    #[arg(long)]
+    contains: Option<String>,
+    #[arg(long, value_parser = TCP_FILTER_KINDS, default_value = "text")]
+    kind: String,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpRawArgs {
+    #[arg(long)]
+    id: Uuid,
+    #[arg(long, value_parser = TCP_DIRECTIONS)]
+    direction: String,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpListenerAddArgs {
+    #[arg(long)]
+    local_port: u16,
+    #[arg(long)]
+    target_host: String,
+    #[arg(long)]
+    target_port: u16,
+    /// decrypt: clients' TLS with Sniper's CA; upstream: TLS to the target only.
+    #[arg(long, value_parser = TCP_TLS_MODES, default_value = "off")]
+    tls: String,
+    #[arg(long, value_parser = TCP_PROTOCOLS, default_value = "tcp")]
+    protocol: String,
+    /// Listen on every interface for the devices given with --allow.
+    #[arg(long, action = ArgAction::Set, default_value_t = false)]
+    remote: bool,
+    /// An address or CIDR network that may connect while --remote is on.
+    #[arg(long = "allow")]
+    allowed_clients: Vec<String>,
+    /// Add it turned off.
+    #[arg(long)]
+    disabled: bool,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpListenerSetArgs {
+    #[arg(long)]
+    id: Uuid,
+    #[arg(long, action = ArgAction::Set)]
+    enabled: Option<bool>,
+    #[arg(long)]
+    local_port: Option<u16>,
+    #[arg(long)]
+    target_host: Option<String>,
+    #[arg(long)]
+    target_port: Option<u16>,
+    #[arg(long, value_parser = TCP_TLS_MODES)]
+    tls: Option<String>,
+    #[arg(long, value_parser = TCP_PROTOCOLS)]
+    protocol: Option<String>,
+    #[arg(long, action = ArgAction::Set)]
+    remote: Option<bool>,
+    /// Replaces the list of who may connect; repeat for more.
+    #[arg(long = "allow")]
+    allowed_clients: Option<Vec<String>>,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpInterceptSetArgs {
+    #[arg(long, action = ArgAction::Set, required = true)]
+    enabled: bool,
+    #[arg(long, value_parser = ["client_to_server", "server_to_client", "both"], default_value = "client_to_server")]
+    direction: String,
+    /// Hold only reads that contain this; every read when left out.
+    #[arg(long)]
+    filter: Option<String>,
+    #[arg(long, value_parser = TCP_FILTER_KINDS, default_value = "text")]
+    filter_kind: String,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpDecideArgs {
+    /// The connection.
+    #[arg(long)]
+    id: Uuid,
+    /// The held read, from `tcp pending`.
+    #[arg(long)]
+    pending_id: Uuid,
+    #[arg(long, value_parser = ["forward", "drop"])]
+    action: String,
+    /// Forward these bytes, as standard base64, instead of the held ones.
+    #[arg(long)]
+    replacement_base64: Option<String>,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpReplayArgs {
+    #[arg(long)]
+    target_host: String,
+    #[arg(long)]
+    target_port: u16,
+    /// Reach the target over TLS.
+    #[arg(long, action = ArgAction::Set, default_value_t = false)]
+    tls: bool,
+    /// A message, sent in the order given; repeat for more.
+    #[arg(long = "message", required = true)]
+    messages: Vec<String>,
+    /// The messages are standard base64, for bytes text cannot carry.
+    #[arg(long)]
+    base64: bool,
+    /// How long the target may stay silent before the next message goes.
+    #[arg(long, default_value_t = 1000)]
+    wait_ms: u64,
+    /// The connection this replay was made from.
+    #[arg(long)]
+    from: Option<Uuid>,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+const TCP_FILTER_KINDS: [&str; 3] = ["text", "hex", "regex"];
+const TCP_DIRECTIONS: [&str; 2] = ["client_to_server", "server_to_client"];
+const TCP_TLS_MODES: [&str; 3] = ["off", "decrypt", "upstream"];
+const TCP_PROTOCOLS: [&str; 2] = ["tcp", "udp"];
+
+impl TcpCommand {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            Self::Status(_) => "tcp.status",
+            Self::Listeners { command } => match command {
+                TcpListenersCommand::List(_) => "tcp.listeners.list",
+                TcpListenersCommand::Add(_) => "tcp.listeners.add",
+                TcpListenersCommand::Set(_) => "tcp.listeners.set",
+                TcpListenersCommand::Remove(_) => "tcp.listeners.remove",
+            },
+            Self::List(_) => "tcp.list",
+            Self::Get(_) => "tcp.get",
+            Self::Raw(_) => "tcp.raw",
+            Self::Clear(_) => "tcp.clear",
+            Self::Intercept { command } => match command {
+                TcpInterceptCommand::Get(_) => "tcp.intercept.get",
+                TcpInterceptCommand::Set(_) => "tcp.intercept.set",
+            },
+            Self::Pending(_) => "tcp.pending",
+            Self::Decide(_) => "tcp.decide",
+            Self::ForwardAll(_) => "tcp.forward_all",
+            Self::DropAll(_) => "tcp.drop_all",
+            Self::Close(_) => "tcp.close",
+            Self::Replay(_) => "tcp.replay",
+        }
+    }
+
+    fn session_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Status(args)
+            | Self::Clear(args)
+            | Self::ForwardAll(args)
+            | Self::DropAll(args) => args.session_id,
+            Self::Listeners { command } => match command {
+                TcpListenersCommand::List(args) => args.session_id,
+                TcpListenersCommand::Add(args) => args.session_id,
+                TcpListenersCommand::Set(args) => args.session_id,
+                TcpListenersCommand::Remove(args) => args.session_id,
+            },
+            Self::List(args) => args.session_id,
+            Self::Get(args) | Self::Pending(args) | Self::Close(args) => args.session_id,
+            Self::Raw(args) => args.session_id,
+            Self::Intercept { command } => match command {
+                TcpInterceptCommand::Get(args) => args.session_id,
+                TcpInterceptCommand::Set(args) => args.session_id,
+            },
+            Self::Decide(args) => args.session_id,
+            Self::Replay(args) => args.session_id,
+        }
+    }
+
+    /// Refuses what the API would refuse, before anything is sent.
+    fn validate(&self) -> Result<()> {
+        let base64 = |value: &str, what: &str| {
+            STANDARD
+                .decode(value)
+                .map(|_| ())
+                .map_err(|_| anyhow!("{what} must be standard base64"))
+        };
+        match self {
+            Self::Replay(args) => {
+                if args.messages.is_empty() || args.messages.len() > 64 {
+                    bail!("a replay sends 1 to 64 messages");
+                }
+                if args.base64 {
+                    for message in &args.messages {
+                        base64(message, "each message")?;
+                    }
+                }
+            }
+            Self::Decide(args) => {
+                if let Some(replacement) = &args.replacement_base64 {
+                    if args.action != "forward" {
+                        bail!("a replacement is forwarded; it cannot go with drop");
+                    }
+                    base64(replacement, "the replacement")?;
+                }
+            }
+            Self::Listeners {
+                command: TcpListenersCommand::Set(args),
+            } => {
+                if args.enabled.is_none()
+                    && args.local_port.is_none()
+                    && args.target_host.is_none()
+                    && args.target_port.is_none()
+                    && args.tls.is_none()
+                    && args.protocol.is_none()
+                    && args.remote.is_none()
+                    && args.allowed_clients.is_none()
+                {
+                    bail!("give at least one field to change");
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn input_preview(&self) -> Value {
+        match self {
+            Self::Listeners {
+                command: TcpListenersCommand::Add(args),
+            } => tcp_listener_add_body(args),
+            Self::Listeners {
+                command: TcpListenersCommand::Set(args),
+            } => json!({"id": args.id, "changes": tcp_listener_changes(args)}),
+            Self::Intercept {
+                command: TcpInterceptCommand::Set(args),
+            } => tcp_policy_body(args),
+            Self::Replay(args) => tcp_replay_body(args),
+            Self::Decide(args) => json!({
+                "id": args.id, "pending_id": args.pending_id, "action": args.action,
+                "replacement_base64": args.replacement_base64,
+            }),
+            Self::Raw(args) => json!({"id": args.id, "direction": args.direction}),
+            Self::List(args) => json!({"contains": args.contains, "kind": args.kind}),
+            Self::Get(args)
+            | Self::Pending(args)
+            | Self::Close(args)
+            | Self::Listeners {
+                command: TcpListenersCommand::Remove(args),
+            } => json!({"id": args.id}),
+            _ => json!({}),
+        }
+        .as_object()
+        .cloned()
+        .map(|mut input| {
+            input.insert("session_id".into(), json!(self.session_id()));
+            Value::Object(input)
+        })
+        .unwrap_or_default()
+    }
+
+    fn api_preview(&self) -> Value {
+        let path = |path: &str| session_query_path(path, self.session_id());
+        match self {
+            Self::Status(_)
+            | Self::Listeners {
+                command: TcpListenersCommand::List(_),
+            } => api_preview("GET", path("/api/tcp/status"), None),
+            Self::Listeners { command } => match command {
+                TcpListenersCommand::List(_) => unreachable!(),
+                TcpListenersCommand::Add(args) => api_preview(
+                    "POST",
+                    path("/api/tcp/listeners"),
+                    Some(tcp_listener_add_body(args)),
+                ),
+                TcpListenersCommand::Set(args) => api_preview(
+                    "PUT",
+                    path(&format!("/api/tcp/listeners/{}", args.id)),
+                    Some(
+                        json!({"note": "the listener's current settings with these changes", "changes": tcp_listener_changes(args)}),
+                    ),
+                ),
+                TcpListenersCommand::Remove(args) => api_preview(
+                    "DELETE",
+                    path(&format!("/api/tcp/listeners/{}", args.id)),
+                    None,
+                ),
+            },
+            Self::List(args) => match &args.contains {
+                Some(contains) => {
+                    api_preview("GET", path(&tcp_search_path(contains, &args.kind)), None)
+                }
+                None => api_preview("GET", path("/api/tcp/connections"), None),
+            },
+            Self::Get(args) => api_preview(
+                "GET",
+                path(&format!("/api/tcp/connections/{}", args.id)),
+                None,
+            ),
+            Self::Raw(args) => api_preview(
+                "GET",
+                path(&format!(
+                    "/api/tcp/connections/{}/raw?direction={}",
+                    args.id, args.direction
+                )),
+                None,
+            ),
+            Self::Clear(_) => api_preview("DELETE", path("/api/tcp/connections"), None),
+            Self::Intercept { command } => match command {
+                TcpInterceptCommand::Get(_) => api_preview("GET", path("/api/tcp/intercept"), None),
+                TcpInterceptCommand::Set(args) => {
+                    let mut body = tcp_policy_body(args);
+                    body["expected_revision"] = json!("<fetched intercept revision>");
+                    api_preview("PUT", path("/api/tcp/intercept"), Some(body))
+                }
+            },
+            Self::Pending(args) => api_preview(
+                "GET",
+                path(&format!("/api/tcp/connections/{}/pending", args.id)),
+                None,
+            ),
+            Self::Decide(args) => api_preview(
+                "POST",
+                path(&format!(
+                    "/api/tcp/connections/{}/pending/{}/decision",
+                    args.id, args.pending_id
+                )),
+                Some(json!({
+                    "action": args.action,
+                    "replacement_base64": args.replacement_base64,
+                    "expected_revision": "<fetched revision of the held read>",
+                })),
+            ),
+            Self::ForwardAll(_) => api_preview(
+                "POST",
+                path("/api/tcp/intercept/forward-all"),
+                Some(json!({})),
+            ),
+            Self::DropAll(_) => {
+                api_preview("POST", path("/api/tcp/intercept/drop-all"), Some(json!({})))
+            }
+            Self::Close(args) => api_preview(
+                "POST",
+                path(&format!("/api/tcp/connections/{}/close", args.id)),
+                None,
+            ),
+            Self::Replay(args) => {
+                api_preview("POST", path("/api/tcp/replay"), Some(tcp_replay_body(args)))
+            }
+        }
+    }
+}
+
+fn tcp_listener_add_body(args: &TcpListenerAddArgs) -> Value {
+    json!({
+        "enabled": !args.disabled,
+        "settings": {
+            "local_port": args.local_port,
+            "target_host": args.target_host,
+            "target_port": args.target_port,
+            "tls": args.tls,
+            "protocol": args.protocol,
+            "remote": args.remote,
+            "allowed_clients": args.allowed_clients,
+        },
+    })
+}
+
+/// The fields `tcp listeners set` changes, by their settings names.
+fn tcp_listener_changes(args: &TcpListenerSetArgs) -> Value {
+    let mut changes = serde_json::Map::new();
+    let mut put = |key: &str, value: Option<Value>| {
+        if let Some(value) = value {
+            changes.insert(key.into(), value);
+        }
+    };
+    put("local_port", args.local_port.map(Value::from));
+    put("target_host", args.target_host.clone().map(Value::from));
+    put("target_port", args.target_port.map(Value::from));
+    put("tls", args.tls.clone().map(Value::from));
+    put("protocol", args.protocol.clone().map(Value::from));
+    put("remote", args.remote.map(Value::from));
+    put(
+        "allowed_clients",
+        args.allowed_clients.clone().map(Value::from),
+    );
+    Value::Object(changes)
+}
+
+fn tcp_policy_body(args: &TcpInterceptSetArgs) -> Value {
+    json!({
+        "enabled": args.enabled,
+        "direction": args.direction,
+        "filter": args.filter.as_ref().map(|value| json!({"kind": args.filter_kind, "value": value})),
+    })
+}
+
+fn tcp_replay_body(args: &TcpReplayArgs) -> Value {
+    let messages: Vec<String> = if args.base64 {
+        args.messages.clone()
+    } else {
+        args.messages
+            .iter()
+            .map(|message| STANDARD.encode(message))
+            .collect()
+    };
+    json!({
+        "target_host": args.target_host,
+        "target_port": args.target_port,
+        "tls": args.tls,
+        "messages": messages,
+        "wait_ms": args.wait_ms,
+        "from": args.from,
+    })
+}
+
+fn tcp_search_path(contains: &str, kind: &str) -> String {
+    let params = vec![
+        ("contains".to_string(), contains.to_string()),
+        ("kind".to_string(), kind.to_string()),
+    ];
+    format!("/api/tcp/search?{}", encode_query(params))
+}
+
+fn tcp_manifest_operations() -> Vec<CliOperationSpec> {
+    use CliSideEffect::{Read, Write};
+    let id = "22222222-2222-2222-2222-222222222222";
+    vec![
+        op("tcp.status", "tcp status", "Read the TCP and UDP relay: each listener with its settings, whether it runs and why not, connections refused to other devices; history count and limit, connections relayed unrecorded because history was full, and storage errors. Local; contacts nothing.", Read, false, &[], vec![json!({})]),
+        op("tcp.listeners.list", "tcp listeners list", "Read the session's listeners: id, on or off, settings (local_port, target_host, target_port, tls, protocol, remote, allowed_clients), whether each runs, and its error. Local; contacts nothing.", Read, false, &[], vec![json!({})]),
+        op("tcp.listeners.add", "tcp listeners add --local-port <port> --target-host <host> --target-port <port>", "Add a listener that relays each connection to the target and records it. tls decrypt answers clients' TLS with Sniper's CA and reaches the target over TLS; upstream adds TLS towards the target only. protocol udp relays datagrams, one flow per client. remote listens on every interface for the addresses in allowed_clients; Sniper's own ports stay out of reach. Saved with the session and started again with it.", Write, true, &["local_port", "target_host", "target_port"], vec![json!({"local_port":9000,"target_host":"db.example.com","target_port":5432}), json!({"local_port":9443,"target_host":"api.example.com","target_port":443,"tls":"decrypt"}), json!({"local_port":9053,"target_host":"127.0.0.1","target_port":53,"protocol":"udp","enabled":false})]),
+        op("tcp.listeners.set", "tcp listeners set --id <uuid>", "Change the given fields of one listener; the others stay as tcp status shows them. enabled false stops it and keeps its settings. Reads the listener first, then replaces it.", Write, true, &["id"], vec![json!({"id":id,"enabled":false}), json!({"id":id,"target_port":5433})]),
+        op("tcp.listeners.remove", "tcp listeners remove --id <uuid>", "Stop and delete one listener. Its recorded connections stay in history.", Write, true, &["id"], vec![json!({"id":id})]),
+        op("tcp.list", "tcp list [--contains <text>]", "List recorded connections newest first without their bytes: target, client, listener port or source (replay, connect for a CONNECT tunnel that was neither TLS nor HTTP, passthrough), status, failure, bytes each way. contains keeps the connections whose captured bytes hold it, as text, hex or a regex; truncated says the search stopped at its read limit. Local; contacts nothing.", Read, false, &[], vec![json!({}), json!({"contains":"PING"}), json!({"contains":"16 03","kind":"hex"})]),
+        op("tcp.get", "tcp get --id <uuid>", "Read one connection with its captured bytes as base64 chunks in the order they were read, each with its direction and offset, and the reads intercept held. Bytes are captured traffic and can hold credentials. Local; contacts nothing.", Read, false, &["id"], vec![json!({"id":id})]),
+        op("tcp.raw", "tcp raw --id <uuid> --direction <client_to_server|server_to_client>", "Read one direction's captured bytes exactly as relayed, as base64 with their length: up to 1 MiB per connection. Local; contacts nothing.", Read, false, &["id", "direction"], vec![json!({"id":id,"direction":"client_to_server"})]),
+        op("tcp.clear", "tcp clear", "Delete every connection that has ended from TCP history and reset the unrecorded count. Live connections stay. Cannot be undone.", Write, true, &[], vec![json!({})]),
+        op("tcp.intercept.get", "tcp intercept get", "Read the intercept policy: on or off, direction, filter, revision, and how many reads are held. Local; contacts nothing.", Read, false, &[], vec![json!({})]),
+        op("tcp.intercept.set", "tcp intercept set --enabled <true|false>", "Replace the intercept policy. While on, reads in the direction (client_to_server by default) that match the filter, or every read without one, wait for a decision before they are relayed. Turning it off forwards what is held. Passthrough tunnels are never held.", Write, true, &["enabled"], vec![json!({"enabled":true}), json!({"enabled":true,"direction":"both","filter":"PING"}), json!({"enabled":false})]),
+        op("tcp.pending", "tcp pending --id <uuid>", "Read the reads one connection has on hold: pending_id, direction, revision, the bytes as base64 and whether they were edited. Local; contacts nothing.", Read, false, &["id"], vec![json!({"id":id})]),
+        op("tcp.decide", "tcp decide --id <uuid> --pending-id <uuid> --action <forward|drop>", "Forward one held read, as it is or replaced by replacement_base64, or drop it. Reads the held read's revision first, so a read already decided elsewhere is refused.", Write, true, &["id", "pending_id", "action"], vec![json!({"id":id,"pending_id":id,"action":"forward"}), json!({"id":id,"pending_id":id,"action":"forward","replacement_base64":"UElORw=="}), json!({"id":id,"pending_id":id,"action":"drop"})]),
+        op("tcp.forward_all", "tcp forward-all", "Forward every held read as it is.", Write, true, &[], vec![json!({})]),
+        op("tcp.drop_all", "tcp drop-all", "Drop every held read.", Write, true, &[], vec![json!({})]),
+        op("tcp.close", "tcp close --id <uuid>", "Close one live connection, as its client and target both see it closed. Held reads are dropped.", Write, true, &["id"], vec![json!({"id":id})]),
+        op("tcp.replay", "tcp replay --target-host <host> --target-port <port> --message <text>", "Open a new connection to the target, through the upstream proxy when that applies, and send each message in order; after each, replies are read until the target stays silent for wait_ms (default 1000) or closes. Records the exchange as a replay connection and returns it. messages are text, or base64 with base64 true; 1 to 64 of them, 1 MiB in all.", Write, true, &["target_host", "target_port", "messages"], vec![json!({"target_host":"db.example.com","target_port":5432,"messages":["PING"]}), json!({"target_host":"api.example.com","target_port":443,"tls":true,"messages":["AAEC"],"base64":true,"wait_ms":500})]),
+    ]
+}
+
+fn tcp_call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
+    Some(match operation {
+        "tcp.status" | "tcp.listeners.list" | "tcp.clear" | "tcp.intercept.get"
+        | "tcp.forward_all" | "tcp.drop_all" => &["session_id"],
+        "tcp.listeners.add" => &[
+            "local_port",
+            "target_host",
+            "target_port",
+            "tls",
+            "protocol",
+            "remote",
+            "allowed_clients",
+            "enabled",
+            "session_id",
+        ],
+        "tcp.listeners.set" => &[
+            "id",
+            "enabled",
+            "local_port",
+            "target_host",
+            "target_port",
+            "tls",
+            "protocol",
+            "remote",
+            "allowed_clients",
+            "session_id",
+        ],
+        "tcp.listeners.remove" | "tcp.get" | "tcp.pending" | "tcp.close" => &["id", "session_id"],
+        "tcp.list" => &["contains", "kind", "session_id"],
+        "tcp.raw" => &["id", "direction", "session_id"],
+        "tcp.intercept.set" => &[
+            "enabled",
+            "direction",
+            "filter",
+            "filter_kind",
+            "session_id",
+        ],
+        "tcp.decide" => &[
+            "id",
+            "pending_id",
+            "action",
+            "replacement_base64",
+            "session_id",
+        ],
+        "tcp.replay" => &[
+            "target_host",
+            "target_port",
+            "tls",
+            "messages",
+            "base64",
+            "wait_ms",
+            "from",
+            "session_id",
+        ],
+        _ => return None,
+    })
+}
+
+fn tcp_input_schema(operation: &str, required: &[&str]) -> Option<Value> {
+    let fields = tcp_call_allowed_fields(operation)?;
+    let uuid =
+        |description: &str| json!({"type":"string","format":"uuid","description":description});
+    let port = json!({"type":"integer","minimum":1,"maximum":65535});
+    let mut properties = serde_json::Map::new();
+    for field in fields {
+        let schema = match *field {
+            "session_id" => {
+                json!({"type":["string","null"],"format":"uuid","description":"Explicit session; omission uses the active session, pinned once."})
+            }
+            "id" if operation.starts_with("tcp.listeners.") => {
+                uuid("The listener, from tcp status.")
+            }
+            "id" => uuid("The connection, from tcp list."),
+            "pending_id" => uuid("The held read, from tcp pending."),
+            "from" => uuid("The connection this replay was made from."),
+            "local_port" | "target_port" => port.clone(),
+            "target_host" => {
+                json!({"type":"string","minLength":1,"maxLength":253,"description":"A host name or IP address, without a port."})
+            }
+            "tls" if operation == "tcp.replay" => {
+                json!({"type":"boolean","description":"Reach the target over TLS."})
+            }
+            "tls" => json!({"type":"string","enum":TCP_TLS_MODES}),
+            "protocol" => json!({"type":"string","enum":TCP_PROTOCOLS}),
+            "remote" | "enabled" | "base64" => json!({"type":"boolean"}),
+            "allowed_clients" => {
+                json!({"type":"array","items":{"type":"string","minLength":1},"description":"Addresses or CIDR networks that may connect while remote is on."})
+            }
+            "contains" | "filter" => json!({"type":"string","minLength":1}),
+            "kind" | "filter_kind" => {
+                json!({"type":"string","enum":TCP_FILTER_KINDS,"default":"text"})
+            }
+            "direction" if operation == "tcp.intercept.set" => {
+                json!({"type":"string","enum":["client_to_server","server_to_client","both"],"default":"client_to_server"})
+            }
+            "direction" => json!({"type":"string","enum":TCP_DIRECTIONS}),
+            "action" => json!({"type":"string","enum":["forward","drop"]}),
+            "replacement_base64" => {
+                json!({"type":"string","description":"Standard base64; only with forward."})
+            }
+            "messages" => {
+                json!({"type":"array","minItems":1,"maxItems":64,"items":{"type":"string","minLength":1}})
+            }
+            "wait_ms" => json!({"type":"integer","minimum":50,"maximum":30000,"default":1000}),
+            _ => json!({}),
+        };
+        properties.insert((*field).to_string(), schema);
+    }
+    Some(json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": required,
+        "properties": properties,
+    }))
+}
+
+/// Maps `call` input to a TCP command; `None` for operations it does not own.
+fn tcp_command_from_input(operation: &str, input: &Value) -> Result<Option<Command>> {
+    let session_id = || call_optional::<Uuid>(operation, input, "session_id");
+    let session = || -> Result<TcpSessionArgs> {
+        Ok(TcpSessionArgs {
+            session_id: session_id()?,
+        })
+    };
+    let by_id = || -> Result<TcpIdArgs> {
+        Ok(TcpIdArgs {
+            id: call_required(operation, input, "id")?,
+            session_id: session_id()?,
+        })
+    };
+    let one_of = |field: &str, allowed: &[&str], default: Option<&str>| -> Result<String> {
+        let value: String = match default {
+            Some(default) => {
+                call_optional(operation, input, field)?.unwrap_or_else(|| default.to_string())
+            }
+            None => call_required(operation, input, field)?,
+        };
+        if !allowed.contains(&value.as_str()) {
+            bail!("invalid field `{field}` for `{operation}`; expected one of {allowed:?}");
+        }
+        Ok(value)
+    };
+    let optional_one_of = |field: &str, allowed: &[&str]| -> Result<Option<String>> {
+        match call_optional::<String>(operation, input, field)? {
+            Some(_) => one_of(field, allowed, None).map(Some),
+            None => Ok(None),
+        }
+    };
+    let command = match operation {
+        "tcp.status" => TcpCommand::Status(session()?),
+        "tcp.listeners.list" => TcpCommand::Listeners {
+            command: TcpListenersCommand::List(session()?),
+        },
+        "tcp.listeners.add" => TcpCommand::Listeners {
+            command: TcpListenersCommand::Add(TcpListenerAddArgs {
+                local_port: call_required(operation, input, "local_port")?,
+                target_host: call_required(operation, input, "target_host")?,
+                target_port: call_required(operation, input, "target_port")?,
+                tls: one_of("tls", &TCP_TLS_MODES, Some("off"))?,
+                protocol: one_of("protocol", &TCP_PROTOCOLS, Some("tcp"))?,
+                remote: call_bool(operation, input, "remote")?,
+                allowed_clients: call_optional(operation, input, "allowed_clients")?
+                    .unwrap_or_default(),
+                disabled: !call_optional(operation, input, "enabled")?.unwrap_or(true),
+                session_id: session_id()?,
+            }),
+        },
+        "tcp.listeners.set" => TcpCommand::Listeners {
+            command: TcpListenersCommand::Set(TcpListenerSetArgs {
+                id: call_required(operation, input, "id")?,
+                enabled: call_optional(operation, input, "enabled")?,
+                local_port: call_optional(operation, input, "local_port")?,
+                target_host: call_optional(operation, input, "target_host")?,
+                target_port: call_optional(operation, input, "target_port")?,
+                tls: optional_one_of("tls", &TCP_TLS_MODES)?,
+                protocol: optional_one_of("protocol", &TCP_PROTOCOLS)?,
+                remote: call_optional(operation, input, "remote")?,
+                allowed_clients: call_optional(operation, input, "allowed_clients")?,
+                session_id: session_id()?,
+            }),
+        },
+        "tcp.listeners.remove" => TcpCommand::Listeners {
+            command: TcpListenersCommand::Remove(by_id()?),
+        },
+        "tcp.list" => TcpCommand::List(TcpListArgs {
+            contains: call_optional(operation, input, "contains")?,
+            kind: one_of("kind", &TCP_FILTER_KINDS, Some("text"))?,
+            session_id: session_id()?,
+        }),
+        "tcp.get" => TcpCommand::Get(by_id()?),
+        "tcp.raw" => TcpCommand::Raw(TcpRawArgs {
+            id: call_required(operation, input, "id")?,
+            direction: one_of("direction", &TCP_DIRECTIONS, None)?,
+            session_id: session_id()?,
+        }),
+        "tcp.clear" => TcpCommand::Clear(session()?),
+        "tcp.intercept.get" => TcpCommand::Intercept {
+            command: TcpInterceptCommand::Get(session()?),
+        },
+        "tcp.intercept.set" => TcpCommand::Intercept {
+            command: TcpInterceptCommand::Set(TcpInterceptSetArgs {
+                enabled: call_required(operation, input, "enabled")?,
+                direction: one_of(
+                    "direction",
+                    &["client_to_server", "server_to_client", "both"],
+                    Some("client_to_server"),
+                )?,
+                filter: call_optional(operation, input, "filter")?,
+                filter_kind: one_of("filter_kind", &TCP_FILTER_KINDS, Some("text"))?,
+                session_id: session_id()?,
+            }),
+        },
+        "tcp.pending" => TcpCommand::Pending(by_id()?),
+        "tcp.decide" => TcpCommand::Decide(TcpDecideArgs {
+            id: call_required(operation, input, "id")?,
+            pending_id: call_required(operation, input, "pending_id")?,
+            action: one_of("action", &["forward", "drop"], None)?,
+            replacement_base64: call_optional(operation, input, "replacement_base64")?,
+            session_id: session_id()?,
+        }),
+        "tcp.forward_all" => TcpCommand::ForwardAll(session()?),
+        "tcp.drop_all" => TcpCommand::DropAll(session()?),
+        "tcp.close" => TcpCommand::Close(by_id()?),
+        "tcp.replay" => TcpCommand::Replay(TcpReplayArgs {
+            target_host: call_required(operation, input, "target_host")?,
+            target_port: call_required(operation, input, "target_port")?,
+            tls: call_bool(operation, input, "tls")?,
+            messages: call_required(operation, input, "messages")?,
+            base64: call_bool(operation, input, "base64")?,
+            wait_ms: call_optional(operation, input, "wait_ms")?.unwrap_or(1000),
+            from: call_optional(operation, input, "from")?,
+            session_id: session_id()?,
+        }),
+        _ => return Ok(None),
+    };
+    Ok(Some(Command::Tcp { command }))
 }
 
 #[derive(Args, Debug, Default, Clone)]
@@ -3246,6 +4012,26 @@ impl ApiClient {
         Ok(status)
     }
 
+    /// A GET whose answer is bytes, not JSON.
+    async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let response = self
+            .client
+            .get(self.url(path))
+            .send()
+            .await
+            .map_err(|error| {
+                api_request_error(error, &Method::GET, format!("failed to GET {path}"))
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ReadHttpStatusError { status }.into());
+        }
+        let bytes = response.bytes().await.map_err(|error| {
+            api_request_error(error, &Method::GET, format!("failed to read {path}"))
+        })?;
+        Ok(bytes.to_vec())
+    }
+
     async fn delete_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         self.request_json_with_client::<(), T>(&self.client, Method::DELETE, path, None)
             .await
@@ -3587,6 +4373,7 @@ impl Command {
             Command::Scanner { command } => command.operation_name(),
             Command::Templates { command } => command.operation_name(),
             Command::Vulndata { command } => command.operation_name(),
+            Command::Tcp { command } => command.operation_name(),
             Command::EventLog { command } => command.operation_name(),
             Command::Scope { command } => command.operation_name(),
             Command::Replay { command } => command.operation_name(),
@@ -4808,6 +5595,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
     ];
     operations.extend(service_map_manifest_operations());
     operations.extend(recon_manifest_operations());
+    operations.extend(tcp_manifest_operations());
     operations.extend(scanner_manifest_operations());
     operations.extend(saved_manifest_operations());
     operations
@@ -7160,6 +7948,9 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
     if let Some(schema) = vulndata_input_schema(operation) {
         return schema;
     }
+    if let Some(schema) = tcp_input_schema(operation, required_fields) {
+        return schema;
+    }
     let mut properties = serde_json::Map::new();
     let fields = call_allowed_fields(operation).unwrap_or(required_fields);
     for field in fields {
@@ -7309,6 +8100,9 @@ fn operation_spec(operation: &str) -> Option<CliOperationSpec> {
 }
 
 fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
+    if let Some(fields) = tcp_call_allowed_fields(operation) {
+        return Some(fields);
+    }
     Some(match operation {
         "manifest" | "session.list" => &[],
         "schema" => &["kind", "operation"],
@@ -7672,6 +8466,7 @@ fn command_input_preview(command: &Command) -> Value {
         Command::Scanner { command } => scanner_input_preview(command),
         Command::Templates { command } => templates_input_preview(command),
         Command::Vulndata { command } => command.input_preview(),
+        Command::Tcp { command } => command.input_preview(),
         Command::Findings { command } => match command {
             FindingsCommand::List(args) => json!({"session_id":args.session_id,"limit":args.limit}),
             FindingsCommand::Get(args) => json!({"session_id":args.session_id,"id":args.id}),
@@ -8105,6 +8900,7 @@ fn command_api_preview(command: &Command) -> Result<Value> {
         Command::Scanner { command } => scanner_api_preview(command),
         Command::Templates { command } => templates_api_preview(command),
         Command::Vulndata { command } => command.api_preview(),
+        Command::Tcp { command } => command.api_preview(),
         Command::Findings { command } => findings_api_preview(command),
         Command::EventLog {
             command: EventLogCommand::List(args),
@@ -8772,7 +9568,7 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
     }
     if matches!(
         command.operation_name(),
-        "replay.send" | "fuzzer.run" | "sequence.run"
+        "replay.send" | "fuzzer.run" | "sequence.run" | "tcp.replay"
     ) {
         notes.push("This operation may send traffic; failed sends should not be retried blindly.");
     }
@@ -8850,6 +9646,9 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
         bail!("unknown operation `{operation}`");
     };
     validate_call_known_fields(operation, input)?;
+    if let Some(command) = tcp_command_from_input(operation, input)? {
+        return Ok(command);
+    }
     Ok(match operation {
         "manifest" => Command::Manifest,
         "schema" => Command::Schema {
@@ -10851,6 +11650,7 @@ async fn run(cli: Cli) -> Result<()> {
                 Command::Scanner { command } => handle_scanner(api, command).await,
                 Command::Templates { command } => handle_templates(api, command).await,
                 Command::Vulndata { command } => handle_vulndata(api, command).await,
+                Command::Tcp { command } => handle_tcp(api, command).await,
                 Command::Findings { command } => handle_findings(api, command).await,
                 Command::EventLog { command } => handle_event_log(api, command).await,
                 Command::Scope { command } => handle_target(api, command).await,
@@ -10889,6 +11689,9 @@ fn validate_skill_root_selection(
 }
 
 fn validate_command_preflight(command: &Command) -> Result<()> {
+    if let Command::Tcp { command } = command {
+        command.validate()?;
+    }
     if let Command::Recon {
         command: ReconCommand::Start(args),
     } = command
@@ -11151,6 +11954,202 @@ async fn handle_vulndata(api: ApiClient, command: VulndataCommand) -> Result<()>
             print_json(&api.get_json::<Value>(&vulndata_lookup_path(&args)).await?)
         }
     }
+}
+
+async fn handle_tcp(api: ApiClient, command: TcpCommand) -> Result<()> {
+    let explicit = command.session_id();
+    // Reads pin the active session once; writes also guard that it is still
+    // the active one, as the relay runs only there.
+    let client = &api;
+    let read = |path: String| async move {
+        let session_id = resolve_session_id_arg(client, explicit).await?;
+        anyhow::Ok(session_query_path(&path, session_id))
+    };
+    let (session_id, expected) = if command_is_tcp_write(&command) {
+        runtime_write_session_ids(&api, explicit).await?
+    } else {
+        (None, None)
+    };
+    let write = |path: String| session_query_path_with_expected_active(&path, session_id, expected);
+    let read_in_write = |path: String| session_query_path(&path, session_id);
+    match command {
+        TcpCommand::Status(_) => print_json(
+            &api.get_json::<Value>(&read("/api/tcp/status".into()).await?)
+                .await?,
+        ),
+        TcpCommand::Listeners { command } => match command {
+            TcpListenersCommand::List(_) => {
+                let status: Value = api.get_json(&read("/api/tcp/status".into()).await?).await?;
+                print_json(&json!({ "listeners": status["listeners"] }))
+            }
+            TcpListenersCommand::Add(args) => print_json(
+                &api.post_json::<_, Value>(
+                    &write("/api/tcp/listeners".into()),
+                    &tcp_listener_add_body(&args),
+                )
+                .await?,
+            ),
+            TcpListenersCommand::Set(args) => {
+                let status: Value = api
+                    .get_json(&read_in_write("/api/tcp/status".into()))
+                    .await?;
+                let listener = status["listeners"]
+                    .as_array()
+                    .and_then(|listeners| listeners.iter().find(|l| l["id"] == json!(args.id)))
+                    .ok_or_else(|| anyhow!("no listener {} in this session", args.id))?;
+                let mut settings = listener["settings"].clone();
+                if let (Value::Object(settings), Value::Object(changes)) =
+                    (&mut settings, tcp_listener_changes(&args))
+                {
+                    settings.extend(changes);
+                }
+                let body = json!({
+                    "enabled": args.enabled.unwrap_or(listener["enabled"] == json!(true)),
+                    "settings": settings,
+                });
+                print_json(
+                    &api.request_json::<_, Value>(
+                        Method::PUT,
+                        &write(format!("/api/tcp/listeners/{}", args.id)),
+                        Some(&body),
+                    )
+                    .await?,
+                )
+            }
+            TcpListenersCommand::Remove(args) => print_json(
+                &api.delete_json::<Value>(&write(format!("/api/tcp/listeners/{}", args.id)))
+                    .await?,
+            ),
+        },
+        TcpCommand::List(args) => {
+            let mut connections: Vec<Value> = api
+                .get_json(&read("/api/tcp/connections".into()).await?)
+                .await?;
+            let mut truncated = false;
+            if let Some(contains) = &args.contains {
+                let found: Value = api
+                    .get_json(&read(tcp_search_path(contains, &args.kind)).await?)
+                    .await?;
+                let ids = found["ids"].as_array().cloned().unwrap_or_default();
+                connections.retain(|connection| ids.contains(&connection["id"]));
+                truncated = found["truncated"] == json!(true);
+            }
+            print_json(&json!({ "connections": connections, "truncated": truncated }))
+        }
+        TcpCommand::Get(args) => print_json(
+            &api.get_json::<Value>(&read(format!("/api/tcp/connections/{}", args.id)).await?)
+                .await?,
+        ),
+        TcpCommand::Raw(args) => {
+            let bytes = api
+                .get_bytes(
+                    &read(format!(
+                        "/api/tcp/connections/{}/raw?direction={}",
+                        args.id, args.direction
+                    ))
+                    .await?,
+                )
+                .await?;
+            print_json(&json!({
+                "id": args.id,
+                "direction": args.direction,
+                "length": bytes.len(),
+                "data_base64": STANDARD.encode(&bytes),
+            }))
+        }
+        TcpCommand::Clear(_) => print_json(
+            &api.delete_json::<Value>(&write("/api/tcp/connections".into()))
+                .await?,
+        ),
+        TcpCommand::Intercept { command } => match command {
+            TcpInterceptCommand::Get(_) => print_json(
+                &api.get_json::<Value>(&read("/api/tcp/intercept".into()).await?)
+                    .await?,
+            ),
+            TcpInterceptCommand::Set(args) => {
+                let current: Value = api
+                    .get_json(&read_in_write("/api/tcp/intercept".into()))
+                    .await?;
+                let mut body = tcp_policy_body(&args);
+                body["expected_revision"] = current["revision"].clone();
+                print_json(
+                    &api.request_json::<_, Value>(
+                        Method::PUT,
+                        &write("/api/tcp/intercept".into()),
+                        Some(&body),
+                    )
+                    .await?,
+                )
+            }
+        },
+        TcpCommand::Pending(args) => print_json(
+            &api.get_json::<Value>(
+                &read(format!("/api/tcp/connections/{}/pending", args.id)).await?,
+            )
+            .await?,
+        ),
+        TcpCommand::Decide(args) => {
+            let pending: Value = api
+                .get_json(&read_in_write(format!(
+                    "/api/tcp/connections/{}/pending",
+                    args.id
+                )))
+                .await?;
+            let held = pending["items"]
+                .as_array()
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|item| item["pending_id"] == json!(args.pending_id))
+                })
+                .ok_or_else(|| {
+                    anyhow!("connection {} holds no read {}", args.id, args.pending_id)
+                })?;
+            let body = json!({
+                "action": args.action,
+                "replacement_base64": args.replacement_base64,
+                "expected_revision": held["revision"],
+            });
+            print_json(
+                &api.post_json::<_, Value>(
+                    &write(format!(
+                        "/api/tcp/connections/{}/pending/{}/decision",
+                        args.id, args.pending_id
+                    )),
+                    &body,
+                )
+                .await?,
+            )
+        }
+        TcpCommand::ForwardAll(_) => print_json(
+            &api.post_json::<_, Value>(&write("/api/tcp/intercept/forward-all".into()), &json!({}))
+                .await?,
+        ),
+        TcpCommand::DropAll(_) => print_json(
+            &api.post_json::<_, Value>(&write("/api/tcp/intercept/drop-all".into()), &json!({}))
+                .await?,
+        ),
+        TcpCommand::Close(args) => {
+            api.post_status(
+                &write(format!("/api/tcp/connections/{}/close", args.id)),
+                &json!({}),
+            )
+            .await?;
+            print_json(&json!({ "closed": args.id }))
+        }
+        TcpCommand::Replay(args) => print_json(
+            &api.post_json_long::<_, Value>(
+                &write("/api/tcp/replay".into()),
+                &tcp_replay_body(&args),
+            )
+            .await?,
+        ),
+    }
+}
+
+fn command_is_tcp_write(command: &TcpCommand) -> bool {
+    operation_spec(command.operation_name())
+        .is_some_and(|spec| spec.side_effect == CliSideEffect::Write)
 }
 
 async fn handle_templates(api: ApiClient, command: TemplatesCommand) -> Result<()> {
@@ -22451,6 +23450,108 @@ mod tests {
         assert!(
             Cli::try_parse_from(["sniper-cli", "templates", "library", "auto-update"]).is_err()
         );
+    }
+
+    #[test]
+    fn tcp_commands_build_the_requests_the_relay_api_takes() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(["sniper-cli", "tcp"].iter().chain(args))
+                .unwrap()
+                .command
+        };
+        let add = parse(&[
+            "listeners",
+            "add",
+            "--local-port",
+            "9000",
+            "--target-host",
+            "db.example.com",
+            "--target-port",
+            "5432",
+            "--tls",
+            "decrypt",
+        ]);
+        assert_eq!(add.operation_name(), "tcp.listeners.add");
+        assert!(add.requires_confirmation());
+        let preview = super::command_api_preview(&add).unwrap();
+        assert_eq!(preview["method"], "POST");
+        assert_eq!(preview["path"], "/api/tcp/listeners");
+        assert_eq!(
+            preview["body"],
+            json!({"enabled":true,"settings":{"local_port":9000,"target_host":"db.example.com","target_port":5432,"tls":"decrypt","protocol":"tcp","remote":false,"allowed_clients":[]}})
+        );
+
+        let udp = command_from_operation_input(
+            "tcp.listeners.add",
+            &json!({"local_port":9053,"target_host":"127.0.0.1","target_port":53,"protocol":"udp","enabled":false}),
+        )
+        .unwrap();
+        let body = super::command_api_preview(&udp).unwrap()["body"].clone();
+        assert_eq!(body["enabled"], false);
+        assert_eq!(body["settings"]["protocol"], "udp");
+
+        let id = "22222222-2222-2222-2222-222222222222";
+        let raw = parse(&["raw", "--id", id, "--direction", "server_to_client"]);
+        assert!(!raw.requires_confirmation());
+        assert_eq!(
+            super::command_api_preview(&raw).unwrap()["path"],
+            format!("/api/tcp/connections/{id}/raw?direction=server_to_client")
+        );
+
+        let search = parse(&["list", "--contains", "50 49", "--kind", "hex"]);
+        assert_eq!(
+            super::command_api_preview(&search).unwrap()["path"],
+            "/api/tcp/search?contains=50+49&kind=hex"
+        );
+
+        let replay = command_from_operation_input(
+            "tcp.replay",
+            &json!({"target_host":"db.example.com","target_port":5432,"messages":["PING","PONG"]}),
+        )
+        .unwrap();
+        assert!(replay.requires_confirmation());
+        let body = super::command_api_preview(&replay).unwrap()["body"].clone();
+        assert_eq!(body["messages"], json!(["UElORw==", "UE9ORw=="]));
+        assert_eq!(body["wait_ms"], 1000);
+        assert_eq!(body["tls"], false);
+
+        let decide = parse(&[
+            "decide",
+            "--id",
+            id,
+            "--pending-id",
+            id,
+            "--action",
+            "forward",
+            "--replacement-base64",
+            "UElORw==",
+        ]);
+        assert_eq!(
+            super::command_api_preview(&decide).unwrap()["path"],
+            format!("/api/tcp/connections/{id}/pending/{id}/decision")
+        );
+
+        for (operation, input) in [
+            (
+                "tcp.replay",
+                json!({"target_host":"db.example.com","target_port":5432}),
+            ),
+            (
+                "tcp.replay",
+                json!({"target_host":"db.example.com","target_port":5432,"messages":["%%"],"base64":true}),
+            ),
+            (
+                "tcp.decide",
+                json!({"id":id,"pending_id":id,"action":"drop","replacement_base64":"UElORw=="}),
+            ),
+            ("tcp.listeners.set", json!({"id":id})),
+            ("tcp.raw", json!({"id":id,"direction":"sideways"})),
+            ("tcp.status", json!({"verbose":true})),
+        ] {
+            let refused = command_from_operation_input(operation, &input)
+                .and_then(|command| validate_command_preflight(&command));
+            assert!(refused.is_err(), "{operation} {input}");
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 ---
 name: sniper-operator
-description: Inspect captured HTTP/HTTPS traffic and debug APIs through a local Sniper proxy with sniper-cli. Covers captured requests and responses, replay with changes, holding and editing live traffic, scope, authorized Recon endpoint discovery, fuzzer runs, WebSocket frames, match-replace rules, tags and notes, session switching, and opening a browser wired to Sniper (ego lite, Aside, BrowserOS neo, Chrome): open it here first, then drive it with ego-browser. Not for routing LLM API calls or hosting a reverse proxy.
+description: Inspect captured HTTP/HTTPS traffic and debug APIs through a local Sniper proxy with sniper-cli. Covers captured requests and responses, replay with changes, holding and editing live traffic, TCP and UDP relay connections, scope, authorized Recon endpoint discovery, fuzzer runs, WebSocket frames, match-replace rules, tags and notes, session switching, and opening a browser wired to Sniper (ego lite, Aside, BrowserOS neo, Chrome): open it here first, then drive it with ego-browser. Not for routing LLM API calls or hosting a reverse proxy.
 ---
 
 # Sniper Operator
@@ -34,6 +34,15 @@ For a browser that sends its traffic through Sniper, run `sniper-cli capture bro
 - Act on the page as a person does (snapshot, click an `@ref`, wait for the URL). Do not jump to URLs.
 - A browser already open on the profile with the same settings gives you another window (`"reused": true`). Different settings are refused with the reason. A DevTools port cannot be added to a running browser: quit it first, or add `--fresh` for a throwaway profile (up to eight).
 - Read every `warnings` entry and any `hint` before you rely on the browser. A browser that could not start still returns 200, and `control` is absent once it has ended.
+
+## TCP and UDP relay
+
+Traffic that is not HTTP is under `sniper-cli tcp`. A listener relays each connection from a local port to one target and records it. CONNECT tunnels through the HTTP proxy that are neither TLS nor HTTP join the same history as `source: "connect"`, and passthrough hosts' tunnels as `source: "passthrough"`.
+
+- `tcp status` shows the listeners and why one is not running. Add one with `tcp listeners add --local-port <port> --target-host <host> --target-port <port>`, then point the app at the local port. `--tls decrypt` answers the client's TLS with Sniper's CA; `--protocol udp` relays datagrams.
+- `tcp list --contains <text>` finds connections by their bytes (`--kind hex|regex`). `tcp get --id <uuid>` returns base64 chunks in read order; `tcp raw` returns one direction's bytes.
+- Intercept holds reads, not messages: `tcp intercept set --enabled true [--filter <text>]`, then `tcp pending --id <uuid>` and `tcp decide --id <uuid> --pending-id <uuid> --action forward|drop`. Turning it off forwards what is held. Passthrough tunnels are never held.
+- `tcp replay` opens a new connection and sends traffic. Use it only on an authorized target, after `--dry-run`.
 
 ## Recon endpoint discovery
 
@@ -255,6 +264,10 @@ sniper-cli --output compact templates scan get --id <scan-id>
 sniper-cli templates scan stop --id <scan-id> --yes
 sniper-cli --output compact vulndata status
 sniper-cli --output compact vulndata lookup --product jquery --version 3.4.1
+sniper-cli --output compact tcp status
+sniper-cli tcp listeners add --local-port 9000 --target-host db.example.com --target-port 5432 --dry-run
+sniper-cli --output compact tcp list --contains PING
+sniper-cli tcp replay --target-host db.example.com --target-port 5432 --message PING --dry-run
 sniper-cli skills install --claude --dry-run
 ```
 
