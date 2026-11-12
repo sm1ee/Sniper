@@ -1694,6 +1694,7 @@ mod tests {
 
     #[test]
     fn desktop_persist_blocks_on_tcp_failure_and_reopens_start_after_recovery() {
+        use sniper::tcp_capture::ListenerChange::{Start, StopAll};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -1717,10 +1718,11 @@ mod tests {
                 local_port: probe.local_addr().unwrap().port(),
                 target_host: "127.0.0.1".into(),
                 target_port: upstream.local_addr().unwrap().port(),
+                ..Default::default()
             };
             drop(probe);
             state
-                .configure_tcp_capture(Some(settings.clone()), None, None)
+                .change_tcp_listeners(Start(settings.clone()), None, None)
                 .await
                 .unwrap();
             let mut client = tokio::net::TcpStream::connect((
@@ -1756,13 +1758,19 @@ mod tests {
         std::fs::remove_file(&directory).unwrap();
         std::fs::rename(&held, &directory).unwrap();
         runtime.block_on(async {
-            state.configure_tcp_capture(None, None, None).await.unwrap();
-            // A blocked close must not leave the continuing desktop in shutdown.
             state
-                .configure_tcp_capture(Some(settings), None, None)
+                .change_tcp_listeners(StopAll, None, None)
                 .await
                 .unwrap();
-            state.configure_tcp_capture(None, None, None).await.unwrap();
+            // A blocked close must not leave the continuing desktop in shutdown.
+            state
+                .change_tcp_listeners(Start(settings), None, None)
+                .await
+                .unwrap();
+            state
+                .change_tcp_listeners(StopAll, None, None)
+                .await
+                .unwrap();
             assert!(state.session().await.tcp_capture.summaries().await[0].durable);
         });
         drop((client, server));
