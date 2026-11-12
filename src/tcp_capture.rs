@@ -2191,6 +2191,8 @@ impl TcpCapture {
                 },
                 accepted = listener.accept(), if tasks.len() < MAX_ACTIVE => {
                     let Ok((client, peer)) = accepted else { break; };
+                    // IPv4 on a dual-stack socket arrives v4-mapped; record it as IPv4.
+                    let peer = std::net::SocketAddr::new(peer.ip().to_canonical(), peer.port());
                     if settings.remote && !client_allowed(peer.ip(), &settings.allowed_clients) {
                         refused.fetch_add(1, Ordering::Relaxed);
                         drop(client);
@@ -5804,6 +5806,15 @@ mod tests {
         client.write_all(b"device").await.unwrap();
         assert_eq!(read_back(&mut client, 6).await, b"device");
         drop(client);
+        // This machine on a dual-stack socket is recorded as plain IPv4.
+        assert_eq!(echo_through(open, b"here").await, b"here");
+        let local = wait_saved(&capture, 2).await;
+        assert!(
+            local
+                .iter()
+                .any(|record| record.peer.starts_with("127.0.0.1:")),
+            "{local:?}"
+        );
         let mut refused = from_another_device(closed).await.unwrap();
         let mut nothing = [0; 1];
         assert_eq!(
@@ -5822,7 +5833,7 @@ mod tests {
         assert_eq!(of(closed).refused, 1);
         let mut looping = from_another_device(onto_sniper).await.unwrap();
         let _ = looping.read(&mut nothing).await;
-        let failed = wait_saved(&capture, 2).await;
+        let failed = wait_saved(&capture, 3).await;
         assert!(failed
             .iter()
             .any(|record| record.failure == Some(TcpFailure::GuardedTarget)));
