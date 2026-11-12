@@ -25,6 +25,9 @@ use tokio::{
 use uuid::Uuid;
 
 pub const MAX_CONNECTIONS: usize = 256;
+/// How much of the history passthrough tunnels may hold. A browser opens many
+/// to the hosts left alone, and they must not crowd out listeners' connections.
+pub const MAX_PASSTHROUGH_RECORDS: usize = MAX_CONNECTIONS / 4;
 pub const MAX_ACTIVE: usize = 32;
 pub const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 pub const MAX_CHUNKS: usize = 4096;
@@ -403,7 +406,12 @@ impl Matcher {
                     .bytes()
                     .filter(|byte| !byte.is_ascii_whitespace())
                     .collect();
-                if compact.len() % 2 != 0 || !compact.iter().all(u8::is_ascii_hexdigit) {
+                // Spaces alone leave nothing to look for, and an empty needle
+                // would panic while the intercept and history locks are held.
+                if compact.is_empty()
+                    || compact.len() % 2 != 0
+                    || !compact.iter().all(u8::is_ascii_hexdigit)
+                {
                     return Err(bad("Enter whole hex byte pairs."));
                 }
                 Self::Bytes(
@@ -630,15 +638,18 @@ fn client_allowed(peer: std::net::IpAddr, allowed: &[String]) -> bool {
 }
 
 /// Whether any of `addresses` is one of Sniper's own guarded listeners.
+/// Whether a target is one of Sniper's guarded ports on this machine. Any
+/// address of the machine counts: a UI on every interface is announced as
+/// 127.0.0.1, and it trusts a connection that comes from this machine.
 fn reaches_guarded(addresses: &[std::net::SocketAddr], guarded: &[std::net::SocketAddr]) -> bool {
     addresses.iter().any(|address| {
-        guarded.iter().any(|listener| {
-            address.port() == listener.port()
-                && crate::proxy::ip_belongs_to_this_machine(
-                    address.ip().to_canonical(),
-                    listener.ip(),
-                )
-        })
+        guarded
+            .iter()
+            .any(|listener| listener.port() == address.port())
+            && crate::proxy::ip_belongs_to_this_machine(
+                address.ip().to_canonical(),
+                Ipv4Addr::UNSPECIFIED.into(),
+            )
     })
 }
 
@@ -1835,11 +1846,18 @@ impl TcpCapture {
         .await;
         match result {
             Ok(Ok(record)) => Ok(Some(record)),
-            _ => {
-                self.history.lock().unwrap().load_error = true;
-                anyhow::bail!("Saved TCP detail could not be read. History requires recovery.")
-            }
+            _ => self.unreadable(id),
         }
+    }
+    /// A saved detail that could not be read. One cleared while it was being
+    /// read is gone, not damaged: only a record still in history needs recovery.
+    fn unreadable(&self, id: Uuid) -> anyhow::Result<Option<TcpConnection>> {
+        let mut history = self.history.lock().unwrap();
+        if !history.records.contains_key(&id) {
+            return Ok(None);
+        }
+        history.load_error = true;
+        anyhow::bail!("Saved TCP detail could not be read. History requires recovery.")
     }
     pub async fn apply(self: &Arc<Self>, change: ListenerChange) -> anyhow::Result<()> {
         match change {
@@ -2320,7 +2338,7 @@ impl TcpCapture {
                             self.unrecorded.fetch_add(1, Ordering::Relaxed);
                             let proxy = self.upstream_proxy().await;
                             let guarded = self.guarded_for(&client);
-                            tasks.spawn(relay_unrecorded(client, settings, proxy, guarded, stop));
+                            tasks.spawn(relay_unrecorded(self.clone(), client, settings, proxy, guarded, stop));
                         }
                         Admission::Recorded(record, closed) => {
                             let capture = self.clone();
@@ -2582,9 +2600,16 @@ impl TcpCapture {
         let admitted = {
             let mut runtime = self.intercept.lock().unwrap();
             let mut history = self.history.lock().unwrap();
+            let passthrough_full = source == TcpSource::Passthrough
+                && history
+                    .records
+                    .values()
+                    .filter(|record| record.source == TcpSource::Passthrough)
+                    .count()
+                    >= MAX_PASSTHROUGH_RECORDS;
             if history.persistence_error || history.load_error {
                 None
-            } else if history.records.len() >= MAX_CONNECTIONS {
+            } else if history.records.len() >= MAX_CONNECTIONS || passthrough_full {
                 self.unrecorded.fetch_add(1, Ordering::Relaxed);
                 None
             } else {
@@ -2723,7 +2748,10 @@ impl TcpCapture {
                         open_upstream(&settings, unspecified, proxy.as_ref(), &[]).await?;
                     let stream: Box<dyn Io> = if request.tls {
                         let insecure = self.upstream_insecure().await;
-                        Box::new(connect_tls(upstream, &settings.target_host, insecure).await?)
+                        Box::new(
+                            connect_tls(upstream, &settings.target_host, insecure, Vec::new())
+                                .await?,
+                        )
                     } else {
                         Box::new(upstream)
                     };
@@ -2761,6 +2789,8 @@ impl TcpCapture {
                 .write_all(&message)
                 .await
                 .map_err(|_| TcpFailure::RelayFailed)?;
+            // Out before the replies are awaited, TLS included.
+            stream.flush().await.map_err(|_| TcpFailure::RelayFailed)?;
             self.capture(id, Direction::ClientToServer, &message);
             loop {
                 match tokio::time::timeout(wait, stream.read(&mut buffer)).await {
@@ -2823,7 +2853,8 @@ impl TcpCapture {
         match settings.tls {
             TlsMode::Off => Ok((Box::new(client), Box::new(upstream), false, false)),
             TlsMode::Upstream => {
-                let server = connect_tls(upstream, &settings.target_host, insecure).await?;
+                let server =
+                    connect_tls(upstream, &settings.target_host, insecure, Vec::new()).await?;
                 Ok((Box::new(client), Box::new(server), false, true))
             }
             TlsMode::Decrypt => {
@@ -2838,17 +2869,32 @@ impl TcpCapture {
                 .await
                 .map_err(|_| TcpFailure::TlsFailed)?;
                 // The name the client asked for, or the target's, names both ends.
-                let name = start
-                    .client_hello()
+                let hello = start.client_hello();
+                let name = hello
                     .server_name()
                     .map(str::to_owned)
                     .unwrap_or_else(|| settings.target_host.clone());
-                let server = connect_tls(upstream, &name, insecure).await?;
-                let config = certificates
+                // So do the application protocols: the target is offered the
+                // client's, and the client gets the one the target chose.
+                // gRPC, PostgreSQL and MQTT clients refuse anything else.
+                let offered = hello
+                    .alpn()
+                    .map(|protocols| protocols.map(<[u8]>::to_vec).collect())
+                    .unwrap_or_default();
+                let server = connect_tls(upstream, &name, insecure, offered).await?;
+                let mut config = (*certificates
                     .server_config_for_host(&name)
-                    .map_err(|_| TcpFailure::TlsFailed)?;
+                    .map_err(|_| TcpFailure::TlsFailed)?)
+                .clone();
+                config.alpn_protocols = server
+                    .get_ref()
+                    .1
+                    .alpn_protocol()
+                    .map(<[u8]>::to_vec)
+                    .into_iter()
+                    .collect();
                 let client = start
-                    .into_stream(config)
+                    .into_stream(Arc::new(config))
                     .await
                     .map_err(|_| TcpFailure::TlsFailed)?;
                 Ok((Box::new(client), Box::new(server), true, true))
@@ -3004,6 +3050,9 @@ impl TcpCapture {
                 }
                 offset += written;
             }
+            // TLS takes plain bytes while its socket is full and sends them
+            // only on a later write or a flush; the next read may never come.
+            writer.flush().await?;
             if let Some(ticket) = ticket {
                 self.end_range(ticket, "forwarded");
             }
@@ -3099,15 +3148,19 @@ async fn client_starts_tls(client: &TcpStream, upstream: &TcpStream) -> bool {
     }
 }
 
-/// TLS towards the target, named by SNI where the name is a host name.
+/// TLS towards the target, named by SNI where the name is a host name, offering
+/// the application protocols in `alpn`.
 async fn connect_tls(
     upstream: TcpStream,
     name: &str,
     insecure: bool,
+    alpn: Vec<Vec<u8>>,
 ) -> Result<tokio_rustls26::client::TlsStream<TcpStream>, TcpFailure> {
     let name = rustls23::pki_types::ServerName::try_from(name.trim_matches(['[', ']']).to_owned())
         .map_err(|_| TcpFailure::TlsFailed)?;
-    tokio_rustls26::TlsConnector::from(crate::ws_tls::client_config(insecure))
+    let mut config = (*crate::ws_tls::client_config(insecure)).clone();
+    config.alpn_protocols = alpn;
+    tokio_rustls26::TlsConnector::from(Arc::new(config))
         .connect(name, upstream)
         .await
         .map_err(|_| TcpFailure::TlsFailed)
@@ -3167,19 +3220,22 @@ async fn open_upstream(
         false,
     )
     .await?;
-    if upstream
-        .peer_addr()
-        .map_err(|_| TcpFailure::ConnectFailed)?
-        == listener
-    {
+    if same_address(
+        upstream
+            .peer_addr()
+            .map_err(|_| TcpFailure::ConnectFailed)?,
+        listener,
+    ) {
         return Err(TcpFailure::SelfTarget);
     }
     Ok((upstream, false))
 }
 
-/// A connection past the history cap: relayed as it is, not recorded or held.
+/// A connection past the history cap: relayed with the listener's TLS, but not
+/// recorded or held.
 async fn relay_unrecorded(
-    mut client: TcpStream,
+    capture: Arc<TcpCapture>,
+    client: TcpStream,
     settings: TcpSettings,
     proxy: Option<crate::upstream_proxy::UpstreamProxy>,
     guarded: Vec<std::net::SocketAddr>,
@@ -3187,9 +3243,11 @@ async fn relay_unrecorded(
 ) {
     let relay = async {
         let local = client.local_addr().ok()?;
-        let (mut upstream, _) = open_upstream(&settings, local, proxy.as_ref(), &guarded)
+        let (upstream, _) = open_upstream(&settings, local, proxy.as_ref(), &guarded)
             .await
             .ok()?;
+        let (mut client, mut upstream, _, _) =
+            capture.secure(&settings, client, upstream).await.ok()?;
         tokio::io::copy_bidirectional(&mut client, &mut upstream)
             .await
             .ok()
@@ -3198,6 +3256,11 @@ async fn relay_unrecorded(
         _ = wait_stop(&mut stop) => {}
         _ = relay => {}
     }
+}
+
+/// A dual-stack socket names an IPv4 peer in its v4-mapped form.
+fn same_address(a: std::net::SocketAddr, b: std::net::SocketAddr) -> bool {
+    a.ip().to_canonical() == b.ip().to_canonical() && a.port() == b.port()
 }
 
 fn is_loopback(ip: std::net::IpAddr) -> bool {
@@ -5654,6 +5717,9 @@ mod tests {
         for (kind, value) in [
             (FilterKind::Hex, "5"),
             (FilterKind::Hex, "zz"),
+            // Spaces alone leave no bytes to look for.
+            (FilterKind::Hex, " "),
+            (FilterKind::Hex, " \t\n"),
             (FilterKind::Regex, "("),
             (FilterKind::Text, ""),
         ] {
@@ -6161,6 +6227,30 @@ mod tests {
         assert!(reaches_guarded(&[at("[::ffff:127.0.0.1]:23001")], &guarded));
         assert!(!reaches_guarded(&[at("127.0.0.1:23002")], &guarded));
         assert!(!reaches_guarded(&[at("192.0.2.1:23001")], &guarded));
+        // A UI on every interface is announced as 127.0.0.1, and it trusts a
+        // connection from this machine: every address of the machine counts.
+        let addresses = crate::proxy::local_interface_ips();
+        assert!(addresses.iter().any(|ip| !ip.is_loopback()));
+        for ip in addresses {
+            assert!(
+                reaches_guarded(&[std::net::SocketAddr::new(ip, 23001)], &guarded),
+                "{ip}"
+            );
+        }
+    }
+    #[test]
+    fn a_dual_stack_listener_knows_its_own_address_in_either_form() {
+        let at = |text: &str| text.parse::<std::net::SocketAddr>().unwrap();
+        assert!(same_address(
+            at("[::ffff:192.0.2.7]:9000"),
+            at("192.0.2.7:9000")
+        ));
+        assert!(same_address(at("192.0.2.7:9000"), at("192.0.2.7:9000")));
+        assert!(!same_address(at("192.0.2.7:9000"), at("192.0.2.7:9001")));
+        assert!(!same_address(
+            at("[::ffff:192.0.2.7]:9000"),
+            at("192.0.2.8:9000")
+        ));
     }
     /// macOS gives lo0 the link-local fe80::1: a client bound to it reaches the
     /// listener from an address that is not loopback, as another device would.
@@ -6494,6 +6584,188 @@ mod tests {
         let status = capture.status().await;
         assert_eq!(status.history_count, MAX_CONNECTIONS);
         assert_eq!(status.unrecorded_count, 1);
+    }
+
+    /// Ended, saved records from `source`, as a session collects them.
+    fn fill_history(capture: &TcpCapture, count: usize, source: TcpSource) {
+        let mut history = capture.history.lock().unwrap();
+        for _ in 0..count {
+            let mut saved = record();
+            saved.source = source;
+            saved.status = "closed".into();
+            saved.ended_at = Some(Utc::now());
+            saved.durable = true;
+            history.records.insert(saved.id, saved);
+        }
+    }
+    async fn relay_and_end(capture: &Arc<TcpCapture>, source: TcpSource) {
+        let (client, upstream, app, target) = tunnel_ends();
+        drop((app, target));
+        capture
+            .relay_tunnel(
+                client,
+                upstream,
+                "127.0.0.1:50000".into(),
+                "pinned.example.com:443".into(),
+                source,
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn passthrough_tunnels_leave_room_in_history_for_the_rest() {
+        let capture = temporary();
+        fill_history(&capture, MAX_PASSTHROUGH_RECORDS, TcpSource::Passthrough);
+        relay_and_end(&capture, TcpSource::Passthrough).await;
+        let status = capture.status().await;
+        assert_eq!(status.history_count, MAX_PASSTHROUGH_RECORDS);
+        assert_eq!(status.unrecorded_count, 1);
+        relay_and_end(&capture, TcpSource::Connect).await;
+        assert_eq!(
+            capture.status().await.history_count,
+            MAX_PASSTHROUGH_RECORDS + 1
+        );
+    }
+    #[test]
+    fn a_detail_cleared_while_it_was_read_is_gone_not_damaged() {
+        let capture = temporary();
+        assert!(capture.unreadable(Uuid::new_v4()).unwrap().is_none());
+        assert!(!capture.history.lock().unwrap().load_error);
+        let saved = record();
+        let id = saved.id;
+        capture.history.lock().unwrap().records.insert(id, saved);
+        assert!(capture.unreadable(id).is_err());
+        assert!(capture.history.lock().unwrap().load_error);
+    }
+    #[tokio::test]
+    async fn a_full_history_still_applies_the_listeners_tls() {
+        let ca = test_ca();
+        let server = tls_server(&ca, b"").await;
+        let (capture, port) = tls_listener(&ca, server, TlsMode::Upstream).await;
+        fill_history(&capture, MAX_CONNECTIONS, TcpSource::Listener);
+        assert_eq!(
+            echo_through(port, b"plain in, TLS out").await,
+            b"plain in, TLS out"
+        );
+        assert_eq!(capture.status().await.unrecorded_count, 1);
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn a_relayed_read_reaches_a_writer_that_holds_bytes_until_flushed() {
+        let capture = temporary();
+        let (mut app, client_end) = tokio::io::duplex(1024);
+        let (target_end, mut target) = tokio::io::duplex(1024);
+        // Holds what it is given until flushed, as TLS does when its socket is full.
+        let writer = tokio::io::BufWriter::new(target_end);
+        let pumping = tokio::spawn(async move {
+            capture
+                .pump(
+                    Uuid::new_v4(),
+                    Direction::ClientToServer,
+                    client_end,
+                    writer,
+                )
+                .await
+        });
+        app.write_all(b"PING").await.unwrap();
+        let mut got = [0; 4];
+        tokio::time::timeout(Duration::from_secs(5), target.read_exact(&mut got))
+            .await
+            .expect("the read reaches the target while the client stays open")
+            .unwrap();
+        assert_eq!(&got, b"PING");
+        drop(app);
+        pumping.await.unwrap().unwrap();
+    }
+    #[tokio::test]
+    async fn a_replayed_message_is_flushed_before_its_replies_are_awaited() {
+        let capture = temporary();
+        let saved = record();
+        let id = saved.id;
+        capture.history.lock().unwrap().records.insert(id, saved);
+        let (ours, mut target) = tokio::io::duplex(1024);
+        let (read, write) = tokio::io::split(ours);
+        let stream: Box<dyn Io> = Box::new(tokio::io::join(read, tokio::io::BufWriter::new(write)));
+        let answering = tokio::spawn(async move {
+            let mut got = [0; 4];
+            target.read_exact(&mut got).await.unwrap();
+            target.write_all(b"PONG").await.unwrap();
+            target
+        });
+        capture
+            .exchange(
+                id,
+                stream,
+                vec![b"PING".to_vec()],
+                Duration::from_millis(500),
+            )
+            .await
+            .unwrap();
+        let replies = stream_of(
+            &capture.history.lock().unwrap().records[&id],
+            Direction::ServerToClient,
+        );
+        assert_eq!(replies, b"PONG");
+        drop(answering.await.unwrap());
+    }
+    /// A TLS server with a certificate from `ca` that speaks only `protocol`.
+    async fn alpn_server(ca: &crate::certificate::CertificateAuthority, protocol: &[u8]) -> u16 {
+        let mut config = (*ca.server_config_for_host("db.example.com").unwrap()).clone();
+        config.alpn_protocols = vec![protocol.to_vec()];
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(mut tls) = acceptor.accept(socket).await else {
+                        return;
+                    };
+                    let mut buffer = [0; 1024];
+                    while let Ok(read @ 1..) = tls.read(&mut buffer).await {
+                        if tls.write_all(&buffer[..read]).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+    #[tokio::test]
+    async fn a_decrypted_client_gets_the_protocol_its_target_chose() {
+        let ca = test_ca();
+        let server = alpn_server(&ca, b"postgresql").await;
+        let (capture, port) = tls_listener(&ca, server, TlsMode::Decrypt).await;
+        let mut roots = rustls23::RootCertStore::empty();
+        roots
+            .add(rustls23::pki_types::CertificateDer::from(
+                ca.root_der_bytes().to_vec(),
+            ))
+            .unwrap();
+        let mut config = rustls23::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        config.alpn_protocols = vec![b"postgresql".to_vec()];
+        let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        let name = rustls23::pki_types::ServerName::try_from("db.example.com").unwrap();
+        let mut tls = tokio_rustls26::TlsConnector::from(Arc::new(config))
+            .connect(name, stream)
+            .await
+            .expect("an ALPN-only client completes its handshake");
+        assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"postgresql"[..]));
+        tls.write_all(b"startup").await.unwrap();
+        let mut back = [0; 7];
+        tokio::time::timeout(Duration::from_secs(5), tls.read_exact(&mut back))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&back, b"startup");
+        capture.stop().await.unwrap();
     }
 }
 
