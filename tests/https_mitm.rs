@@ -131,8 +131,10 @@ async fn mitm_connect_tls_failure_after_200_records_connect_success_status() {
     let connect_response = read_headers(&mut stream).await;
     assert!(connect_response.starts_with("HTTP/1.1 200"));
 
+    // Opens like a TLS handshake record, so it goes to TLS and fails there;
+    // plain bytes would be relayed as a TCP connection instead.
     stream
-        .write_all(b"not a tls client hello\r\n")
+        .write_all(b"\x16\x03\x01\x00\x05not a client hello")
         .await
         .unwrap();
     stream.shutdown().await.unwrap();

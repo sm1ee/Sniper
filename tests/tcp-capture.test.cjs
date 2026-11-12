@@ -592,4 +592,17 @@ test("a UDP listener: the editor sends it without TLS, the list and the detail s
   f.requests.at(-1).resolve({id:"x", target:"127.0.0.1:53", status:"closed", durable:true, protocol:"udp", client_bytes:0, server_bytes:0, chunks:[]}); await selected;
   assert.match(f.get("tcpStreamMeta").textContent, /UDP/);
 });
+test("history and detail say a connection came through the HTTP proxy, a passthrough host or Replay", async () => {
+  const f = fixture();
+  await pollStatus(f, status, [{id:"c", source:"connect", target:"db.example.com:5432", status:"closed"},
+    {id:"p", source:"passthrough", target:"pinned.example.com:443", status:"closed"},
+    {id:"r", source:"replay", target:"example.com:1", status:"closed"}]);
+  assert.deepEqual(f.get("tcpHistoryRows").children.map(row => row.children[1].textContent), ["Proxy", "Passthrough", "Replay"]);
+  let selected = f.controller.select("p");
+  f.requests.at(-1).resolve({id:"p", source:"passthrough", target:"pinned.example.com:443", status:"closed", durable:true, client_bytes:0, server_bytes:0, chunks:[]}); await selected;
+  assert.match(f.get("tcpStreamMeta").textContent, /Passthrough host, not decrypted/);
+  selected = f.controller.select("c");
+  f.requests.at(-1).resolve({id:"c", source:"connect", target:"db.example.com:5432", status:"closed", durable:true, client_bytes:0, server_bytes:0, chunks:[]}); await selected;
+  assert.match(f.get("tcpStreamMeta").textContent, /CONNECT tunnel from the HTTP proxy/);
+});
 

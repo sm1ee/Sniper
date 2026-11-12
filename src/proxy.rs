@@ -68,6 +68,7 @@ use crate::{
     session::SessionContext,
     special_host,
     state::AppState,
+    tcp_capture::{Io, TcpSource},
     upstream_proxy::UpstreamProxyRouteSnapshot,
 };
 
@@ -1470,14 +1471,8 @@ async fn handle_connect(
         let authority = target
             .parse::<Authority>()
             .expect("validated CONNECT authority");
-        let upstream_stream = match session
-            .runtime
-            .upstream_proxy()
-            .await
-            .connect(authority.host(), authority.port_u16().unwrap_or(443))
-            .await
-        {
-            Ok(stream) => stream,
+        let upstream = match dial_tunnel_target(&session, &authority).await {
+            Ok(upstream) => upstream,
             Err(error) => {
                 warn!(
                     %peer_addr,
@@ -1518,7 +1513,7 @@ async fn handle_connect(
         spawn_tracked_proxy_task(session.id(), PROXY_WORK_TUNNEL, async move {
             if let Err(error) = serve_passthrough_tunnel(
                 upgrade,
-                upstream_stream,
+                upstream,
                 state.clone(),
                 session.clone(),
                 target.clone(),
@@ -1526,6 +1521,7 @@ async fn handle_connect(
                 started_at,
                 started,
                 request_http_version,
+                peer_addr,
             )
             .await
             {
@@ -1542,7 +1538,7 @@ async fn handle_connect(
         let failure_request_http_version = request_http_version;
 
         spawn_tracked_proxy_task(session.id(), PROXY_WORK_TUNNEL, async move {
-            if let Err(error) = serve_https_mitm(
+            if let Err(error) = serve_connect_tunnel(
                 upgrade,
                 state.clone(),
                 session.clone(),
@@ -1555,7 +1551,7 @@ async fn handle_connect(
             )
             .await
             {
-                warn!(%peer_addr, ?error, target = %failure_target, "HTTPS MITM handler failed");
+                warn!(%peer_addr, ?error, target = %failure_target, "CONNECT tunnel failed");
                 record_connect_post_ok_tunnel_failure(
                     &failure_state,
                     &failure_session,
@@ -1563,7 +1559,7 @@ async fn handle_connect(
                     failure_capture,
                     failure_started_at,
                     failure_started,
-                    format!("HTTPS MITM failed: {error}"),
+                    error.to_string(),
                     failure_request_http_version,
                 )
                 .await;
@@ -2637,7 +2633,30 @@ async fn record_connect_post_ok_tunnel_failure(
     note: String,
     request_http_version: Version,
 ) {
-    let note = format!("{note}; CONNECT 200 had already been sent to the client");
+    record_connect_tunnel(
+        state,
+        session,
+        target,
+        request_capture,
+        started_at,
+        started,
+        request_http_version,
+        format!("{note}; CONNECT 200 had already been sent to the client"),
+    )
+    .await;
+}
+
+/// Records a CONNECT tunnel the proxy answered with 200, and what became of it.
+async fn record_connect_tunnel(
+    state: &Arc<AppState>,
+    session: &Arc<SessionContext>,
+    target: String,
+    request_capture: MessageRecord,
+    started_at: chrono::DateTime<Utc>,
+    started: Instant,
+    request_http_version: Version,
+    note: String,
+) {
     let record = with_record_http_versions(
         TransactionRecord::tunnel(
             started_at,
@@ -2650,9 +2669,241 @@ async fn record_connect_post_ok_tunnel_failure(
         Some(request_http_version),
         Some(Version::HTTP_11),
     );
-    let insert_outcome =
-        insert_transaction_quiet(session, record, "connect post-ok tunnel failure").await;
+    let insert_outcome = insert_transaction_quiet(session, record, "connect tunnel").await;
     persist_transaction_insert_outcome(state, session, insert_outcome).await;
+}
+
+/// What a client speaks through a CONNECT tunnel, told by its first bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TunnelStart {
+    Tls,
+    Http,
+    /// Anything else, or a server that speaks first.
+    Other,
+}
+
+/// How long a quiet client may wait before the target is dialled to hear
+/// whether it speaks first, as SMTP and MySQL do. TLS clients speak at once.
+const TUNNEL_QUIET: Duration = Duration::from_millis(500);
+/// How much of a tunnel's first line is read to tell HTTP from anything else.
+const TUNNEL_HEAD_BYTES: usize = 8 * 1024;
+
+/// Tells what a tunnel's first bytes are, or `None` while too few have come.
+/// `complete` says no more are coming in time.
+fn tunnel_start(head: &[u8], complete: bool) -> Option<TunnelStart> {
+    match head {
+        // Nothing came: the TLS path reports the tunnel as it always has.
+        [] => complete.then_some(TunnelStart::Tls),
+        [0x16, 0x03, version, ..] if *version <= 0x04 => Some(TunnelStart::Tls),
+        [0x16] | [0x16, 0x03] if !complete => None,
+        [first, ..] if first.is_ascii_uppercase() => {
+            match head.iter().position(|byte| *byte == b'\n') {
+                Some(end) => {
+                    let line = head[..end].strip_suffix(b"\r").unwrap_or(&head[..end]);
+                    let request = line.ends_with(b" HTTP/1.1")
+                        || line.ends_with(b" HTTP/1.0")
+                        || line == b"PRI * HTTP/2.0";
+                    Some(if request {
+                        TunnelStart::Http
+                    } else {
+                        TunnelStart::Other
+                    })
+                }
+                // A request line is printable, so any other byte settles it.
+                None if !complete
+                    && head
+                        .iter()
+                        .all(|byte| byte.is_ascii_graphic() || matches!(byte, b' ' | b'\r')) =>
+                {
+                    None
+                }
+                None => Some(TunnelStart::Other),
+            }
+        }
+        _ => Some(TunnelStart::Other),
+    }
+}
+
+/// Dials a CONNECT tunnel's target the way the session reaches it, and says
+/// whether that went through the upstream proxy.
+async fn dial_tunnel_target(
+    session: &SessionContext,
+    authority: &Authority,
+) -> Result<(tokio::net::TcpStream, bool)> {
+    let proxy = session.runtime.upstream_proxy().await;
+    let host = authority.host().trim_matches(['[', ']']);
+    let via_proxy = proxy.enabled && !proxy.bypasses(host);
+    let stream = proxy
+        .connect(host, authority.port_u16().unwrap_or(443))
+        .await?;
+    Ok((stream, via_proxy))
+}
+
+/// Resolves once a server has sent something. A server that closes without
+/// a word is not speaking first, so then this never resolves.
+async fn speaks(server: &tokio::net::TcpStream) {
+    let mut byte = [0; 1];
+    if !matches!(server.peek(&mut byte).await, Ok(read) if read > 0) {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Takes the client's end of a CONNECT tunnel and tells what it speaks
+/// without consuming it. A target dialled to hear whether it speaks first
+/// comes back too.
+async fn sniff_tunnel(
+    upgraded: hyper::upgrade::Upgraded,
+    session: &SessionContext,
+    authority: &Authority,
+) -> (
+    Box<dyn Io>,
+    TunnelStart,
+    Option<(tokio::net::TcpStream, bool)>,
+) {
+    use tokio::io::AsyncReadExt as _;
+    // Only the proxy's own socket can be peeked; anything else is TLS, as before.
+    let parts = match upgraded.downcast::<TokioIo<tokio::net::TcpStream>>() {
+        Ok(parts) => parts,
+        Err(upgraded) => return (Box::new(TokioIo::new(upgraded)), TunnelStart::Tls, None),
+    };
+    let socket = parts.io.into_inner();
+    // Bytes the client sent along with the CONNECT come first.
+    let buffered = parts.read_buf;
+    let mut upstream = None;
+    if buffered.is_empty()
+        && tokio::time::timeout(TUNNEL_QUIET, socket.readable())
+            .await
+            .is_err()
+    {
+        upstream = dial_tunnel_target(session, authority).await.ok();
+        if let Some((server, _)) = &upstream {
+            let server_first = tokio::select! {
+                _ = socket.readable() => false,
+                _ = speaks(server) => true,
+            };
+            if server_first {
+                return (Box::new(socket), TunnelStart::Other, upstream);
+            }
+        }
+    }
+    let mut head = vec![0; TUNNEL_HEAD_BYTES];
+    let mut seen = buffered.to_vec();
+    let deadline = tokio::time::Instant::now() + TUNNEL_QUIET;
+    let start = loop {
+        let complete = seen.len() >= TUNNEL_HEAD_BYTES || tokio::time::Instant::now() >= deadline;
+        if let Some(start) = tunnel_start(&seen, complete) {
+            break start;
+        }
+        if !seen.is_empty() {
+            // A peek returns what is there at once; give the rest a moment.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        match tokio::time::timeout_at(deadline, socket.peek(&mut head)).await {
+            Ok(Ok(read)) if read > 0 => seen = [&buffered[..], &head[..read]].concat(),
+            // Closed, failed, or quiet until the deadline: decide on what came.
+            _ => break tunnel_start(&seen, true).unwrap_or(TunnelStart::Other),
+        }
+    };
+    let client: Box<dyn Io> = if buffered.is_empty() {
+        Box::new(socket)
+    } else {
+        let (read, write) = socket.into_split();
+        Box::new(tokio::io::join(
+            std::io::Cursor::new(buffered).chain(read),
+            write,
+        ))
+    };
+    (client, start, upstream)
+}
+
+/// Serves a CONNECT tunnel by what its client speaks: TLS is decrypted and
+/// its requests recorded, plain HTTP is recorded as it is, and anything else,
+/// or a server that speaks first, is relayed and recorded in TCP history. The
+/// error is the note recorded for the tunnel.
+async fn serve_connect_tunnel(
+    upgrade: hyper::upgrade::OnUpgrade,
+    state: Arc<AppState>,
+    session: Arc<SessionContext>,
+    target: String,
+    connect_capture: MessageRecord,
+    started_at: chrono::DateTime<Utc>,
+    started: Instant,
+    peer_addr: SocketAddr,
+    request_http_version: Version,
+) -> Result<()> {
+    let authority: Authority = target
+        .parse()
+        .with_context(|| format!("invalid CONNECT target authority: {target}"))?;
+    let upgraded = upgrade
+        .await
+        .map_err(|error| anyhow!("CONNECT upgrade failed: {error}"))?;
+    let (client, start, upstream) = sniff_tunnel(upgraded, &session, &authority).await;
+    match start {
+        TunnelStart::Tls => serve_https_mitm(
+            client,
+            state,
+            session,
+            authority,
+            connect_capture,
+            started_at,
+            started,
+            peer_addr,
+            request_http_version,
+        )
+        .await
+        .map_err(|error| anyhow!("HTTPS MITM failed: {error}")),
+        TunnelStart::Http => {
+            record_connect_tunnel(
+                &state,
+                &session,
+                target,
+                connect_capture,
+                started_at,
+                started,
+                request_http_version,
+                "Plain HTTP through the tunnel; its requests are recorded as they pass."
+                    .to_string(),
+            )
+            .await;
+            serve_tunnel_requests(client, "http", state, session, peer_addr, authority).await;
+            Ok(())
+        }
+        TunnelStart::Other => {
+            let (upstream, via_proxy) = match upstream {
+                Some(upstream) => upstream,
+                None => dial_tunnel_target(&session, &authority)
+                    .await
+                    .map_err(|error| {
+                        anyhow!("CONNECT tunnel could not reach the target: {error}")
+                    })?,
+            };
+            record_connect_tunnel(
+                &state,
+                &session,
+                target.clone(),
+                connect_capture,
+                started_at,
+                started,
+                request_http_version,
+                "Neither TLS nor HTTP: relayed and recorded in TCP history.".to_string(),
+            )
+            .await;
+            let peer = SocketAddr::new(peer_addr.ip().to_canonical(), peer_addr.port());
+            // The TCP record holds how the relay went.
+            let _ = session
+                .tcp_capture
+                .relay_tunnel(
+                    client,
+                    Box::new(upstream),
+                    peer.to_string(),
+                    target,
+                    TcpSource::Connect,
+                    via_proxy,
+                )
+                .await;
+            Ok(())
+        }
+    }
 }
 
 trait EmptyStringExt {
@@ -2821,7 +3072,7 @@ fn special_host_record_authority(connect_target: &str) -> String {
 
 async fn serve_passthrough_tunnel(
     upgrade: hyper::upgrade::OnUpgrade,
-    mut upstream_stream: tokio::net::TcpStream,
+    (upstream_stream, via_proxy): (tokio::net::TcpStream, bool),
     state: Arc<AppState>,
     session: Arc<SessionContext>,
     target: String,
@@ -2829,6 +3080,7 @@ async fn serve_passthrough_tunnel(
     started_at: chrono::DateTime<chrono::Utc>,
     started: Instant,
     request_http_version: Version,
+    peer_addr: SocketAddr,
 ) -> Result<()> {
     let upgraded = match upgrade.await {
         Ok(upgraded) => upgraded,
@@ -2848,12 +3100,12 @@ async fn serve_passthrough_tunnel(
             return Err(anyhow!(message));
         }
     };
-    let mut client_stream = TokioIo::new(upgraded);
+    let client_stream = TokioIo::new(upgraded);
 
     let record = with_record_http_versions(
         TransactionRecord::tunnel(
             started_at,
-            target,
+            target.clone(),
             Some(StatusCode::OK.as_u16()),
             0,
             request_capture,
@@ -2869,7 +3121,19 @@ async fn serve_passthrough_tunnel(
         .await;
     persist_transaction_insert_outcome(&state, &session, insert_outcome).await;
 
-    let result = tokio::io::copy_bidirectional(&mut client_stream, &mut upstream_stream).await;
+    // Its bytes are kept in TCP history, still undecrypted.
+    let peer = SocketAddr::new(peer_addr.ip().to_canonical(), peer_addr.port());
+    let result = session
+        .tcp_capture
+        .relay_tunnel(
+            Box::new(client_stream),
+            Box::new(upstream_stream),
+            peer.to_string(),
+            target,
+            TcpSource::Passthrough,
+            via_proxy,
+        )
+        .await;
 
     let notes = match &result {
         Ok((client_to_server, server_to_client)) => {
@@ -2901,60 +3165,62 @@ async fn serve_passthrough_tunnel(
 }
 
 async fn serve_https_mitm(
-    upgrade: hyper::upgrade::OnUpgrade,
+    client: Box<dyn Io>,
     state: Arc<AppState>,
     session: Arc<SessionContext>,
-    target: String,
+    authority: Authority,
     connect_capture: MessageRecord,
     started_at: chrono::DateTime<Utc>,
     started: Instant,
     peer_addr: SocketAddr,
     request_http_version: Version,
 ) -> Result<()> {
-    let authority: Authority = target
-        .parse()
-        .with_context(|| format!("invalid CONNECT target authority: {target}"))?;
-    let upgraded = upgrade
-        .await
-        .context("CONNECT upgrade failed for HTTPS MITM")?;
-    let upgraded = TokioIo::new(upgraded);
     let acceptor = state
         .certificates
         .tls_acceptor_for_host(authority.host())
         .with_context(|| format!("failed to build MITM certificate for {}", authority.host()))?;
     let tls_stream = acceptor
-        .accept(upgraded)
+        .accept(client)
         .await
         .with_context(|| format!("TLS handshake failed for {}", authority.host()))?;
-
-    let record = with_record_http_versions(
-        TransactionRecord::tunnel(
-            started_at,
-            target,
-            Some(StatusCode::OK.as_u16()),
-            started.elapsed().as_millis() as u64,
-            connect_capture,
-            vec![format!(
-                "HTTPS MITM terminated locally and is forwarding upstream traffic for {}.",
-                authority.host()
-            )],
+    record_connect_tunnel(
+        &state,
+        &session,
+        authority.as_str().to_string(),
+        connect_capture,
+        started_at,
+        started,
+        request_http_version,
+        format!(
+            "HTTPS MITM terminated locally and is forwarding upstream traffic for {}.",
+            authority.host()
         ),
-        Some(request_http_version),
-        Some(Version::HTTP_11),
-    );
-    let insert_outcome = insert_transaction_quiet(&session, record, "https mitm tunnel").await;
-    persist_transaction_insert_outcome(&state, &session, insert_outcome).await;
+    )
+    .await;
+    serve_tunnel_requests(tls_stream, "https", state, session, peer_addr, authority).await;
+    Ok(())
+}
 
-    let io = TokioIo::new(tls_stream);
+/// Serves the HTTP requests a CONNECT tunnel carries, decrypted or plain.
+async fn serve_tunnel_requests<I>(
+    io: I,
+    scheme: &'static str,
+    state: Arc<AppState>,
+    session: Arc<SessionContext>,
+    peer_addr: SocketAddr,
+    authority: Authority,
+) where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let connect_authority = authority.to_string();
-    let log_authority = connect_authority.clone();
     let service = service_fn(move |request| {
-        handle_https_mitm_request(
+        handle_tunnel_request(
             request,
             state.clone(),
             session.clone(),
             peer_addr,
             connect_authority.clone(),
+            scheme,
         )
     });
     let mut builder = AutoBuilder::new(TokioExecutor::new());
@@ -2963,13 +3229,11 @@ async fn serve_https_mitm(
         .preserve_header_case(true)
         .title_case_headers(true);
     if let Err(error) = builder
-        .serve_connection_with_upgrades(io, service)
+        .serve_connection_with_upgrades(TokioIo::new(io), service)
         .await
-        .map_err(|error| anyhow!("HTTPS MITM HTTP serving failed: {error}"))
     {
-        warn!(%peer_addr, target = %log_authority, ?error, "HTTPS MITM HTTP serving failed after CONNECT was recorded");
+        warn!(%peer_addr, target = %authority, %error, scheme, "HTTP serving failed after CONNECT was recorded");
     }
-    Ok(())
 }
 
 async fn handle_special_host_request(
@@ -3082,21 +3346,22 @@ async fn handle_special_host_request(
     ))
 }
 
-async fn handle_https_mitm_request(
+async fn handle_tunnel_request(
     request: Request<Incoming>,
     state: Arc<AppState>,
     session: Arc<SessionContext>,
     peer_addr: SocketAddr,
     connect_authority: String,
+    scheme: &'static str,
 ) -> Result<Response<Body>, Infallible> {
     Ok(handle_forwardable_request(
         request,
         state,
         session,
         peer_addr,
-        "https",
+        scheme,
         Some(connect_authority),
-        true,
+        scheme == "https",
     )
     .await)
 }
@@ -11270,5 +11535,38 @@ mod tests {
         let map = header_map_from_records(&records);
         assert_eq!(map.get_all(COOKIE).iter().count(), 1);
         assert_eq!(map.get(COOKIE).unwrap(), "a=1; b=2; c=3");
+    }
+
+    #[test]
+    fn a_tunnels_first_bytes_tell_tls_http_and_everything_else() {
+        use TunnelStart::{Http, Other, Tls};
+        for (head, complete, start) in [
+            (&b""[..], false, None),
+            (b"", true, Some(Tls)),
+            (b"\x16\x03\x01\x02\x00", false, Some(Tls)),
+            (b"\x16", false, None),
+            (b"\x16", true, Some(Other)),
+            (b"\x16\x01\x00", false, Some(Other)),
+            (
+                b"GET / HTTP/1.1\r\nHost: example.com\r\n",
+                false,
+                Some(Http),
+            ),
+            (b"OPTIONS * HTTP/1.0\n", false, Some(Http)),
+            (b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", false, Some(Http)),
+            (b"GET / HT", false, None),
+            (b"GET / HT", true, Some(Other)),
+            (b"NICK sniper\r\n", false, Some(Other)),
+            (b"SET k v\x00", false, Some(Other)),
+            (b"\x00\x01ping", false, Some(Other)),
+            (b"*1\r\n$4\r\nPING\r\n", false, Some(Other)),
+        ] {
+            assert_eq!(
+                tunnel_start(head, complete),
+                start,
+                "{:?}",
+                String::from_utf8_lossy(head)
+            );
+        }
     }
 }

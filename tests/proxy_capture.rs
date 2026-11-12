@@ -964,3 +964,243 @@ async fn passthrough_connect_returns_bad_gateway_when_upstream_dial_fails() {
 
     proxy_handle.abort();
 }
+
+async fn start_proxy(
+    name: &str,
+) -> (
+    Arc<AppState>,
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<()>,
+) {
+    let config = AppConfig {
+        proxy_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_addr: "127.0.0.1:0".parse().unwrap(),
+        max_entries: 100,
+        max_transaction_entries: 100,
+        body_preview_bytes: 4096,
+        data_dir: std::env::temp_dir().join(format!("sniper-test-{name}-{}", uuid::Uuid::new_v4())),
+    };
+    let state = Arc::new(AppState::new(config).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let proxy_state = state.clone();
+    let handle = tokio::spawn(async move {
+        serve_proxy(listener, proxy_state).await.unwrap();
+    });
+    (state, address, handle)
+}
+
+/// A loopback server that says `greeting` on accept, then echoes.
+async fn echo_server(greeting: &'static [u8]) -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                socket.write_all(greeting).await.unwrap();
+                let (mut reader, mut writer) = socket.split();
+                let _ = tokio::io::copy(&mut reader, &mut writer).await;
+            });
+        }
+    });
+    address
+}
+
+/// CONNECTs through the proxy and reads the response head a byte at a time,
+/// so no byte of the tunnel is taken with it.
+async fn open_tunnel(proxy: std::net::SocketAddr, target: std::net::SocketAddr) -> TcpStream {
+    let mut stream = TcpStream::connect(proxy).await.unwrap();
+    stream
+        .write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        head.push(stream.read_u8().await.unwrap());
+    }
+    assert!(
+        head.starts_with(b"HTTP/1.1 200"),
+        "{}",
+        String::from_utf8_lossy(&head)
+    );
+    stream
+}
+
+async fn read_exactly(stream: &mut TcpStream, length: usize) -> Vec<u8> {
+    let mut bytes = vec![0; length];
+    tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut bytes))
+        .await
+        .expect("the reply arrives")
+        .unwrap();
+    bytes
+}
+
+async fn ended_tcp_record(
+    state: &AppState,
+    source: sniper::tcp_capture::TcpSource,
+) -> sniper::tcp_capture::TcpConnection {
+    let session = state.session().await;
+    for _ in 0..400 {
+        for record in session.tcp_capture.summaries().await {
+            if record.source == source && record.ended_at.is_some() {
+                return session
+                    .tcp_capture
+                    .detail(record.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("no ended {source:?} record in TCP history");
+}
+
+fn tcp_stream(
+    record: &sniper::tcp_capture::TcpConnection,
+    direction: sniper::tcp_capture::Direction,
+) -> Vec<u8> {
+    use base64::Engine;
+    record
+        .chunks
+        .iter()
+        .filter(|chunk| chunk.direction == direction)
+        .flat_map(|chunk| {
+            base64::engine::general_purpose::STANDARD
+                .decode(&chunk.data_base64)
+                .unwrap()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_plaintext_protocol_through_connect_lands_in_tcp_history() {
+    use sniper::tcp_capture::{Direction, TcpSource};
+    let (state, proxy, handle) = start_proxy("connect-plain").await;
+    let target = echo_server(b"").await;
+    let mut tunnel = open_tunnel(proxy, target).await;
+    tunnel.write_all(b"\x00\x01ping").await.unwrap();
+    assert_eq!(read_exactly(&mut tunnel, 6).await, b"\x00\x01ping");
+    drop(tunnel);
+
+    let record = ended_tcp_record(&state, TcpSource::Connect).await;
+    assert_eq!(record.target, target.to_string());
+    assert_eq!(record.status, "closed");
+    assert_eq!(
+        tcp_stream(&record, Direction::ClientToServer),
+        b"\x00\x01ping"
+    );
+    assert_eq!(
+        tcp_stream(&record, Direction::ServerToClient),
+        b"\x00\x01ping"
+    );
+    handle.abort();
+}
+
+#[tokio::test]
+async fn a_server_that_speaks_first_through_connect_lands_in_tcp_history() {
+    use sniper::tcp_capture::{Direction, TcpSource};
+    let (state, proxy, handle) = start_proxy("connect-greeting").await;
+    let target = echo_server(b"220 mail.example.com ready\r\n").await;
+    let mut tunnel = open_tunnel(proxy, target).await;
+    assert_eq!(
+        read_exactly(&mut tunnel, 28).await,
+        b"220 mail.example.com ready\r\n"
+    );
+    tunnel.write_all(b"QUIT\r\n").await.unwrap();
+    assert_eq!(read_exactly(&mut tunnel, 6).await, b"QUIT\r\n");
+    drop(tunnel);
+
+    let record = ended_tcp_record(&state, TcpSource::Connect).await;
+    assert_eq!(tcp_stream(&record, Direction::ClientToServer), b"QUIT\r\n");
+    assert_eq!(
+        tcp_stream(&record, Direction::ServerToClient),
+        b"220 mail.example.com ready\r\nQUIT\r\n"
+    );
+    handle.abort();
+}
+
+#[tokio::test]
+async fn plain_http_through_connect_is_recorded_as_http() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = upstream.local_addr().unwrap();
+    let app = Router::new().route("/hello", get(|| async { "world" }));
+    let upstream_handle = tokio::spawn(async move {
+        axum::serve(upstream, app).await.unwrap();
+    });
+    let (state, proxy, handle) = start_proxy("connect-http").await;
+    let mut tunnel = open_tunnel(proxy, target).await;
+    tunnel
+        .write_all(
+            format!("GET /hello HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), tunnel.read_to_end(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 200") && response.contains("\r\nworld\r\n"),
+        "{response}"
+    );
+
+    let session = state.session().await;
+    let mut found = None;
+    for _ in 0..200 {
+        found = session
+            .store
+            .snapshot(Some(10))
+            .await
+            .into_iter()
+            .find(|record| record.method == "GET" && record.path == "/hello");
+        if found.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let record = found.expect("the request inside the tunnel is in HTTP history");
+    assert_eq!(record.scheme, "http");
+    assert_eq!(record.status, Some(200));
+    assert!(session.tcp_capture.summaries().await.is_empty());
+    handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn a_passthrough_tunnel_lands_in_tcp_history() {
+    use sniper::tcp_capture::{Direction, TcpSource};
+    let (state, proxy, handle) = start_proxy("connect-passthrough").await;
+    state
+        .session()
+        .await
+        .runtime
+        .update(RuntimeSettingsUpdate {
+            passthrough_hosts: Some(vec!["127.0.0.1".to_string()]),
+            ..RuntimeSettingsUpdate::default()
+        })
+        .await
+        .unwrap();
+    let target = echo_server(b"").await;
+    let mut tunnel = open_tunnel(proxy, target).await;
+    // Bytes that open like a TLS record still pass untouched.
+    tunnel.write_all(b"\x16\x03\x01opaque").await.unwrap();
+    assert_eq!(read_exactly(&mut tunnel, 9).await, b"\x16\x03\x01opaque");
+    drop(tunnel);
+
+    let record = ended_tcp_record(&state, TcpSource::Passthrough).await;
+    assert_eq!(record.target, target.to_string());
+    assert_eq!(
+        tcp_stream(&record, Direction::ClientToServer),
+        b"\x16\x03\x01opaque"
+    );
+    assert_eq!(
+        tcp_stream(&record, Direction::ServerToClient),
+        b"\x16\x03\x01opaque"
+    );
+    handle.abort();
+}

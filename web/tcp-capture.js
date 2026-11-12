@@ -13,6 +13,8 @@
     ["proxy_failed", "Upstream proxy failed"], ["tls_failed", "TLS handshake failed"],
     ["guarded_target", "Target is Sniper itself"]
   ]);
+  // Where a connection without a listener came from, for the Listener column.
+  const SOURCE_LABELS = new Map([["connect", "Proxy"], ["passthrough", "Passthrough"], ["replay", "Replay"]]);
   const DIRECTIONS = ["client_to_server", "server_to_client"];
   const MAX_DISPLAY_BYTES = 1024 * 1024;
   const GAP = "Missing bytes in this capture.";
@@ -386,7 +388,7 @@
         row.dataset.tcpId = record.id;
         row.classList.toggle("selected", record.id === selectedId);
         row.setAttribute("aria-selected", String(record.id === selectedId));
-        const values = [indexById.get(record.id), record.local_port ? record.local_port : "—", record.target, record.peer, statusText(record), formatSize(record.client_bytes), formatSize(record.server_bytes), duration(record), formatTime(record.started_at)];
+        const values = [indexById.get(record.id), record.local_port || SOURCE_LABELS.get(record.source) || "—", record.target, record.peer, statusText(record), formatSize(record.client_bytes), formatSize(record.server_bytes), duration(record), formatTime(record.started_at)];
         values.forEach((value, column) => {
           const cell = document.createElement("td");
           if (column === 4) cell.className = "tcp-status tcp-status-" + record.status;
@@ -418,6 +420,7 @@
         formatSize(record.client_bytes) + " sent", formatSize(record.server_bytes) + " received",
         record.capture_truncated ? "Partial capture" : "",
         !LIVE.has(record.status) && !record.durable ? "Not saved" : "",
+        record.source === "connect" ? "CONNECT tunnel from the HTTP proxy" : record.source === "passthrough" ? "Passthrough host, not decrypted" : "",
         record.via_proxy ? "Through the upstream proxy" : "",
         record.client_tls ? "TLS decrypted" : record.server_tls ? "TLS to the target" : "",
         record.protocol === "udp" ? "UDP, one chunk per datagram" : "",

@@ -751,6 +751,10 @@ pub enum TcpSource {
     Listener,
     /// Sent by TCP Replay.
     Replay,
+    /// A CONNECT tunnel through the HTTP proxy that carried neither TLS nor HTTP.
+    Connect,
+    /// A passthrough host's tunnel through the HTTP proxy, relayed undecrypted.
+    Passthrough,
     #[serde(other)]
     Unknown,
 }
@@ -1523,6 +1527,8 @@ impl TcpCapture {
         let original_offset = *received;
         *received += bytes.len() as u64;
         if !runtime.policy.enabled
+            // A passthrough host was chosen to be left alone: recorded, never held.
+            || record.source == TcpSource::Passthrough
             || !matches!(
                 (runtime.policy.direction, direction),
                 (PolicyDirection::Both, _)
@@ -2534,20 +2540,106 @@ impl TcpCapture {
                     r.client_tls = client_tls;
                     r.server_tls = server_tls;
                 }
-                let (client_read, client_write) = tokio::io::split(client);
-                let (server_read, server_write) = tokio::io::split(upstream);
-                tokio::try_join!(
-                    self.pump(id, Direction::ClientToServer, client_read, server_write),
-                    self.pump(id, Direction::ServerToClient, server_read, client_write)
-                )
-                .map_err(|_| TcpFailure::RelayFailed)?;
-                Ok::<(), TcpFailure>(())
+                self.relay_pair(id, client, upstream).await
             },
             &mut stop,
             &mut closed,
         )
         .await;
         self.finish(id, result.0, result.1).await;
+    }
+    /// Pumps both directions of an opened pair until both have ended.
+    async fn relay_pair(
+        &self,
+        id: Uuid,
+        client: Box<dyn Io>,
+        upstream: Box<dyn Io>,
+    ) -> Result<(), TcpFailure> {
+        let (client_read, client_write) = tokio::io::split(client);
+        let (server_read, server_write) = tokio::io::split(upstream);
+        tokio::try_join!(
+            self.pump(id, Direction::ClientToServer, client_read, server_write),
+            self.pump(id, Direction::ServerToClient, server_read, client_write)
+        )
+        .map_err(|_| TcpFailure::RelayFailed)?;
+        Ok(())
+    }
+    /// Relays a tunnel the HTTP proxy opened and records it like a listener's
+    /// connection. A tunnel the history cannot take is relayed unrecorded: it
+    /// carries the app's traffic, which must not break because history is
+    /// full. Dropping this future, as the proxy does to its tunnels on a
+    /// session switch, closes the relay, which then records how it ended.
+    /// Returns the bytes sent each way, as `copy_bidirectional` does.
+    pub(crate) async fn relay_tunnel(
+        self: &Arc<Self>,
+        mut client: Box<dyn Io>,
+        mut upstream: Box<dyn Io>,
+        peer: String,
+        target: String,
+        source: TcpSource,
+        via_proxy: bool,
+    ) -> std::io::Result<(u64, u64)> {
+        let admitted = {
+            let mut runtime = self.intercept.lock().unwrap();
+            let mut history = self.history.lock().unwrap();
+            if history.persistence_error || history.load_error {
+                None
+            } else if history.records.len() >= MAX_CONNECTIONS {
+                self.unrecorded.fetch_add(1, Ordering::Relaxed);
+                None
+            } else {
+                let mut record = self.new_record(Uuid::new_v4(), peer, &TcpSettings::default());
+                record.target = target;
+                record.source = source;
+                record.via_proxy = via_proxy;
+                record.status = "open".into();
+                let (close, closed) = watch::channel(false);
+                runtime.connections.insert(record.id, close);
+                history.records.insert(record.id, record.clone());
+                Some((record, closed))
+            }
+        };
+        let Some((record, closed)) = admitted else {
+            return tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+        };
+        let id = record.id;
+        let relay = tokio::spawn(self.clone().tunnel(record, client, upstream, closed));
+        let _close = CloseOnDrop(self.clone(), id);
+        relay.await.map_err(std::io::Error::other)?
+    }
+    async fn tunnel(
+        self: Arc<Self>,
+        record: TcpConnection,
+        mut client: Box<dyn Io>,
+        mut upstream: Box<dyn Io>,
+        mut closed: watch::Receiver<bool>,
+    ) -> std::io::Result<(u64, u64)> {
+        let id = record.id;
+        if !self.persist(&record).await {
+            self.finish(id, "failed", Some(TcpFailure::StorageFailed))
+                .await;
+            return tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+        }
+        // No listener stops a tunnel: it ends with its sides, or when closed.
+        let mut stop = closed.clone();
+        let (status, failure) = connection_outcome(
+            self.relay_pair(id, client, upstream),
+            &mut stop,
+            &mut closed,
+        )
+        .await;
+        self.finish(id, status, failure).await;
+        if failure.is_some() {
+            return Err(std::io::Error::other("TCP relay failed"));
+        }
+        Ok(self
+            .history
+            .lock()
+            .unwrap()
+            .records
+            .get(&id)
+            .map(|record| (record.client_bytes, record.server_bytes))
+            .unwrap_or_default())
     }
     /// Sends a request's messages to its target over a new connection, one at a
     /// time, and records the exchange like a listener's: after each message the
@@ -2968,8 +3060,16 @@ fn stream_of(record: &TcpConnection, direction: Direction) -> Vec<u8> {
 }
 
 /// A relayed stream, plain or in TLS.
-trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+
+/// Closes a recorded tunnel when the proxy task carrying it is cut.
+struct CloseOnDrop(Arc<TcpCapture>, Uuid);
+impl Drop for CloseOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.close(self.1);
+    }
+}
 
 /// Whether the client's first bytes are a TLS handshake record (16 03 0x). A
 /// server that speaks first, as SMTP or MySQL do, decides it: not TLS.
@@ -6241,6 +6341,159 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), "TLS is for TCP listeners.");
+    }
+
+    /// A tunnel as the HTTP proxy hands it over: the app's end and the
+    /// target's end of an in-memory pair.
+    fn tunnel_ends() -> (
+        Box<dyn Io>,
+        Box<dyn Io>,
+        tokio::io::DuplexStream,
+        tokio::io::DuplexStream,
+    ) {
+        let (client, app) = tokio::io::duplex(1024);
+        let (upstream, target) = tokio::io::duplex(1024);
+        (Box::new(client), Box::new(upstream), app, target)
+    }
+    async fn tunnel_record(capture: &TcpCapture, status: &str) -> TcpConnection {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(record) = capture
+                    .summaries()
+                    .await
+                    .into_iter()
+                    .find(|record| record.status == status)
+                {
+                    return record;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    #[tokio::test]
+    async fn a_tunnel_cut_by_the_proxy_is_recorded_as_stopped() {
+        let capture = temporary();
+        let (client, upstream, _app, _target) = tunnel_ends();
+        let relay = capture.relay_tunnel(
+            client,
+            upstream,
+            "127.0.0.1:50000".into(),
+            "db.example.com:5432".into(),
+            TcpSource::Connect,
+            false,
+        );
+        // A session switch drops the proxy task that carries the tunnel.
+        assert!(tokio::time::timeout(Duration::from_millis(100), relay)
+            .await
+            .is_err());
+        let record = tunnel_record(&capture, "stopped").await;
+        assert_eq!(record.source, TcpSource::Connect);
+        assert_eq!(record.target, "db.example.com:5432");
+        assert_eq!(record.local_port, 0);
+    }
+    #[tokio::test]
+    async fn passthrough_tunnels_are_recorded_but_never_held() {
+        let capture = temporary();
+        holding(&capture, None);
+        let (client, upstream, mut app, mut target) = tunnel_ends();
+        let relay = tokio::spawn({
+            let capture = capture.clone();
+            async move {
+                capture
+                    .relay_tunnel(
+                        client,
+                        upstream,
+                        "127.0.0.1:50000".into(),
+                        "pinned.example.com:443".into(),
+                        TcpSource::Passthrough,
+                        false,
+                    )
+                    .await
+            }
+        });
+        app.write_all(b"\x16\x03\x01hello").await.unwrap();
+        let mut passed = [0u8; 8];
+        tokio::time::timeout(Duration::from_secs(5), target.read_exact(&mut passed))
+            .await
+            .expect("a passthrough tunnel is never held")
+            .unwrap();
+        assert_eq!(&passed, b"\x16\x03\x01hello");
+        drop((app, target));
+        assert_eq!(relay.await.unwrap().unwrap(), (8, 0));
+        let record = tunnel_record(&capture, "closed").await;
+        assert_eq!(record.source, TcpSource::Passthrough);
+        assert_eq!(record.client_bytes, 8);
+    }
+    #[tokio::test]
+    async fn a_connect_tunnel_is_held_like_a_listener_connection() {
+        let capture = temporary();
+        holding(&capture, None);
+        let (client, upstream, mut app, mut target) = tunnel_ends();
+        tokio::spawn({
+            let capture = capture.clone();
+            async move {
+                capture
+                    .relay_tunnel(
+                        client,
+                        upstream,
+                        "127.0.0.1:50000".into(),
+                        "db.example.com:5432".into(),
+                        TcpSource::Connect,
+                        false,
+                    )
+                    .await
+            }
+        });
+        app.write_all(b"PING").await.unwrap();
+        wait_paused(&capture, 1).await;
+        assert_eq!(capture.release_all(DecisionAction::Forward).await, 1);
+        let mut passed = [0u8; 4];
+        tokio::time::timeout(Duration::from_secs(5), target.read_exact(&mut passed))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&passed, b"PING");
+    }
+    #[tokio::test]
+    async fn a_tunnel_past_a_full_history_is_relayed_unrecorded() {
+        let capture = temporary();
+        {
+            let mut history = capture.history.lock().unwrap();
+            for _ in 0..MAX_CONNECTIONS {
+                let mut saved = record();
+                saved.status = "closed".into();
+                saved.ended_at = Some(Utc::now());
+                saved.durable = true;
+                history.records.insert(saved.id, saved);
+            }
+        }
+        let (client, upstream, mut app, mut target) = tunnel_ends();
+        let relay = tokio::spawn({
+            let capture = capture.clone();
+            async move {
+                capture
+                    .relay_tunnel(
+                        client,
+                        upstream,
+                        "127.0.0.1:50000".into(),
+                        "db.example.com:5432".into(),
+                        TcpSource::Connect,
+                        false,
+                    )
+                    .await
+            }
+        });
+        app.write_all(b"still relayed").await.unwrap();
+        let mut passed = [0u8; 13];
+        target.read_exact(&mut passed).await.unwrap();
+        assert_eq!(&passed, b"still relayed");
+        drop((app, target));
+        relay.await.unwrap().unwrap();
+        let status = capture.status().await;
+        assert_eq!(status.history_count, MAX_CONNECTIONS);
+        assert_eq!(status.unrecorded_count, 1);
     }
 }
 
