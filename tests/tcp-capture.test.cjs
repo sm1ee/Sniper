@@ -223,6 +223,12 @@ test("TCP admission warnings wrap instead of hiding behind an ellipsis", () => {
   const css=require("node:fs").readFileSync(require("node:path").join(__dirname,"../web/styles.css"),"utf8");
   assert.match(css,/#tcpHistoryStatus\s*\{[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/);
 });
+test("the relay's own fields take the app's control look, not the browser's white default", () => {
+  const css=require("node:fs").readFileSync(require("node:path").join(__dirname,"../web/styles.css"),"utf8").replace(/\/\*[\s\S]*?\*\//g,"");
+  const rules=[...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].map(([, selector, body]) => ({selectors:selector.split(",").map(part => part.trim()), body}));
+  const themed=selector => rules.some(rule => rule.selectors.includes(selector) && /background:\s*var\(--/.test(rule.body));
+  for (const selector of ["#tcpSearch","#tcpInterceptMatch","#tcpSplit","#tcpSplitDelimiter","#tcpReplayHost","#tcpReplayPort","#tcpReplayWait",".tcp-replay-message textarea"]) assert.ok(themed(selector), selector);
+});
 test("listener normalizes IPv6 and rejects host:port and malformed brackets", () => {
   for (const host of ["::1", "[::1]", "[0:0:0:0:0:0:0:1]"]) assert.equal(tcp.validateSettings("9000",host,"9100").target_host,"::1");
   for (const host of ["localhost:1234","127.0.0.1:80","[::1]:80","[localhost]","[::1","::1]","[[::1]]","fe80::1%eth0"]) assert.throws(()=>tcp.validateSettings("9000",host,"9100"));
