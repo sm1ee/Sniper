@@ -87,6 +87,51 @@
     }
     return parts;
   }
+  // The end of the message that starts at `start`, as a length, or 0 while it
+  // is still incomplete: after a delimiter, or after a length-prefixed body.
+  function boundary(bytes, start, split) {
+    if (split.kind === "delimiter") {
+      const delimiter = split.delimiter;
+      for (let i = start; i + delimiter.length <= bytes.length; i++) {
+        let match = true;
+        for (let j = 0; j < delimiter.length && match; j++) match = bytes[i + j] === delimiter[j];
+        if (match) return i + delimiter.length - start;
+      }
+      return 0;
+    }
+    if (bytes.length - start < split.size) return 0;
+    let length = 0;
+    for (let i = 0; i < split.size; i++) length = length * 256 + bytes[start + (split.littleEndian ? split.size - 1 - i : i)];
+    return bytes.length - start >= split.size + length ? split.size + length : 0;
+  }
+  // Each direction's bytes cut into messages, a delimiter or a length header
+  // kept with its message. A message is placed where its last byte arrived;
+  // what is left at a direction's end is marked partial.
+  function splitMessages(record, direction, split) {
+    const parts = conversation(record, direction), messages = [];
+    for (const side of DIRECTIONS) {
+      const own = parts.filter(part => part.direction === side);
+      const bytes = new Uint8Array(own.reduce((sum, part) => sum + part.bytes.length, 0)), ends = [];
+      let at = 0;
+      for (const part of own) { bytes.set(part.bytes, at); at += part.bytes.length; ends.push({ end: at, order: parts.indexOf(part), time: part.at }); }
+      const base = own[0]?.offset ?? 0;
+      for (let start = 0; start < bytes.length;) {
+        let length = boundary(bytes, start, split);
+        const partial = length === 0;
+        if (partial) length = bytes.length - start;
+        const last = ends.find(entry => entry.end >= start + length);
+        messages.push({ direction: side, at: last.time, offset: base + start, bytes: bytes.subarray(start, start + length), partial, order: last.order + (partial ? 0.5 : 0) });
+        start += length;
+      }
+    }
+    return messages.sort((a, b) => a.order - b.order);
+  }
+  const SPLITS = {
+    lines: { kind: "delimiter", delimiter: [0x0a] }, crlf: { kind: "delimiter", delimiter: [0x0d, 0x0a] }, nul: { kind: "delimiter", delimiter: [0] },
+    u8: { kind: "length", size: 1, littleEndian: false }, u16be: { kind: "length", size: 2, littleEndian: false },
+    u16le: { kind: "length", size: 2, littleEndian: true }, u32be: { kind: "length", size: 4, littleEndian: false },
+    u32le: { kind: "length", size: 4, littleEndian: true }
+  };
   // One direction's bytes, joined: what an export or a copy would take.
   function streamBytes(record, direction) {
     const parts = conversation(record, direction);
@@ -353,7 +398,7 @@
       const block = document.createElement("div"), head = document.createElement("div"), bytes = document.createElement("pre");
       block.className = "tcp-chunk " + (outbound ? "tcp-chunk-out" : "tcp-chunk-in");
       head.className = "tcp-chunk-head";
-      head.textContent = (outbound ? "→ " : "← ") + formatSize(part.bytes.length) + (part.at ? " · " + clock(part.at) : "");
+      head.textContent = (outbound ? "→ " : "← ") + formatSize(part.bytes.length) + (part.at ? " · " + clock(part.at) : "") + (part.partial ? " · partial" : "");
       bytes.textContent = mode === "hex" ? formatHex(part.bytes, part.offset) : formatText(part.bytes);
       block.append(head, bytes);
       return block;
@@ -381,8 +426,8 @@
         text("tcpStreamMeta", "");
         return;
       }
-      const direction = el("tcpDirection").value;
-      const view = { session: sessionId(), id: selectedId, direction, mode };
+      const direction = el("tcpDirection").value, split = el("tcpSplit").value || "reads";
+      const view = { session: sessionId(), id: selectedId, direction, mode, split: split + (split === "delimiter" ? el("tcpSplitDelimiter").value : "") };
       const same = streamView && Object.keys(view).every(name => streamView[name] === view[name]);
       // Counters change on every poll of a live connection, and a capped capture
       // keeps relaying without new chunks: redraw only when the shown chunks did.
@@ -395,7 +440,11 @@
       const atEnd = same && surface.scrollTop + surface.clientHeight >= surface.scrollHeight - 4;
       const scrollTop = surface.scrollTop;
       let parts = [], error = "";
-      try { parts = conversation(detail, direction); } catch (failure) { error = failure.message; }
+      try {
+        parts = split === "reads" ? conversation(detail, direction)
+          : splitMessages(detail, direction, split === "delimiter"
+            ? { kind: "delimiter", delimiter: [...parseHex(el("tcpSplitDelimiter").value || "0a")] } : SPLITS[split]);
+      } catch (failure) { error = failure.message; }
       surface.replaceChildren();
       surface.textContent = !error && !parts.length ? "No bytes captured" : "";
       for (const part of parts) surface.append(chunkBlock(part));
@@ -632,6 +681,8 @@
       Array.from(el("tcpHistoryRows").children).find(row => row.dataset.tcpId === id)?.scrollIntoView?.({ block: "nearest" });
     });
     el("tcpDirection").addEventListener("change", renderDetail);
+    el("tcpSplit").addEventListener("change", () => { el("tcpSplitDelimiter").hidden = el("tcpSplit").value !== "delimiter"; renderDetail(); });
+    el("tcpSplitDelimiter").addEventListener("change", renderDetail);
     for (const view of ["hex", "text"]) el(view === "hex" ? "tcpHexView" : "tcpTextView").addEventListener("click", () => {
       mode = view;
       for (const [id, value] of [["tcpHexView", "hex"], ["tcpTextView", "text"]]) {
@@ -860,7 +911,8 @@
       for (const [id, active] of [["tcpStreamTab", tab === "stream"], ["tcpPendingTab", tab === "pending"], ["tcpReplayTab", tab === "replay"]]) {
         el(id).classList.toggle("active", active); el(id).setAttribute("aria-pressed", String(active));
       }
-      for (const id of ["tcpDirection", "tcpHexView", "tcpTextView"]) el(id).hidden = tab !== "stream";
+      for (const id of ["tcpDirection", "tcpSplit", "tcpHexView", "tcpTextView"]) el(id).hidden = tab !== "stream";
+      if (tab !== "stream") el("tcpSplitDelimiter").hidden = true;
       const picker = el("tcpPendingPicker");
       const nextPickerKey = JSON.stringify([items.map(entry => [entry.pending_id, entry.sequence, entry.direction, entry.original_length, entry.state]), Boolean(selected)]);
       // Do not rebuild an unchanged native select while the operator is using it.
@@ -1157,7 +1209,7 @@
     render();
     return { load, render };
   }
-  const api = { statusLabel, requestError, validateSettings, conversation, streamBytes, formatHex, formatText, parseHex, encodeEditable, decodeEditable, createInterceptController, createReplayController, createController };
+  const api = { statusLabel, requestError, validateSettings, conversation, streamBytes, formatHex, formatText, parseHex, encodeEditable, decodeEditable, splitMessages, createInterceptController, createReplayController, createController };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.SniperTcpCapture = api;
 })(typeof window === "undefined" ? globalThis : window);

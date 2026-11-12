@@ -537,4 +537,39 @@ test("a listener for other devices: the editor sends its list, the row shows eve
   f.requests[3].resolve({...status, enabled: true, listeners: [open]}); f.requests[4].resolve([]); await tick(); await tick();
   assert.deepEqual(listenerRows(f)[0], ["*:9000", "127.0.0.1:5432", "Listening · 2 refused"]);
 });
+const piece = (sequence, direction, offset, bytes) => ({sequence, direction, offset, at:"2026-01-01T00:00:00.000Z", data_base64:Buffer.from(bytes).toString("base64")});
+const texts = parts => parts.map(part => [part.direction === "client_to_server" ? ">" : "<", Buffer.from(part.bytes).toString("latin1"), Boolean(part.partial)]);
+test("a stream splits into messages at a delimiter, across reads and in the order they completed", () => {
+  const record = {chunks:[piece(0,"client_to_server",0,"PI"), piece(1,"client_to_server",2,"NG\nPO"), piece(2,"server_to_client",0,"OK\n"), piece(3,"client_to_server",7,"NG\nPA")]};
+  assert.deepEqual(texts(tcp.splitMessages(record, "both", {kind:"delimiter", delimiter:[0x0a]})),
+    [[">","PING\n",false], ["<","OK\n",false], [">","PONG\n",false], [">","PA",true]]);
+  assert.deepEqual(texts(tcp.splitMessages(record, "server_to_client", {kind:"delimiter", delimiter:[0x0a]})), [["<","OK\n",false]]);
+  const crlf = {chunks:[piece(0,"client_to_server",0,"A\r"), piece(1,"client_to_server",2,"\nB\r\n")]};
+  assert.deepEqual(texts(tcp.splitMessages(crlf, "both", {kind:"delimiter", delimiter:[0x0d, 0x0a]})), [[">","A\r\n",false], [">","B\r\n",false]]);
+});
+test("a stream splits into length-prefixed messages, big or little endian, with a partial tail", () => {
+  const bytes = [0,3,0x61,0x62,0x63, 0,2,0x64];
+  const record = {chunks:[piece(0,"client_to_server",0,bytes.slice(0,4)), piece(1,"client_to_server",4,bytes.slice(4))]};
+  const split = tcp.splitMessages(record, "both", {kind:"length", size:2, littleEndian:false});
+  assert.deepEqual(split.map(part => [...part.bytes]), [[0,3,0x61,0x62,0x63], [0,2,0x64]]);
+  assert.deepEqual(split.map(part => Boolean(part.partial)), [false, true]);
+  assert.deepEqual(split.map(part => part.offset), [0, 5]);
+  const little = {chunks:[piece(0,"server_to_client",0,[2,0,0x41,0x42, 1])]};
+  assert.deepEqual(tcp.splitMessages(little, "both", {kind:"length", size:2, littleEndian:true}).map(part => [...part.bytes]), [[2,0,0x41,0x42], [1]]);
+  const wide = {chunks:[piece(0,"client_to_server",0,[0,0,0,1,0x7a])]};
+  assert.deepEqual(tcp.splitMessages(wide, "both", {kind:"length", size:4, littleEndian:false}).map(part => [...part.bytes]), [[0,0,0,1,0x7a]]);
+});
+test("Split by in the detail view redraws the stream as messages", async () => {
+  const f = fixture(); f.get("tcpDirection").value = "both";
+  const selected = f.controller.select("x");
+  f.requests[0].resolve({id:"x", target:"example.com:1", status:"closed", durable:true, client_bytes:10, server_bytes:0,
+    chunks:[piece(0,"client_to_server",0,"PI"), piece(1,"client_to_server",2,"NG\nPONG\n")]});
+  await selected;
+  assert.equal(f.get("tcpStreamBytes").children.length, 2, "two reads");
+  f.get("tcpSplit").value = "lines"; f.get("tcpSplit").listeners.change();
+  assert.equal(f.get("tcpStreamBytes").children.length, 2, "two lines");
+  assert.match(f.get("tcpStreamBytes").children[0].children[0].textContent, /^→ 5 B/);
+  f.get("tcpSplit").value = "u16be"; f.get("tcpSplit").listeners.change();
+  assert.match(shown(f.get("tcpStreamBytes")), /partial/);
+});
 

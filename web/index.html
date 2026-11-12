@@ -419,6 +419,8 @@
                   <span class="tcp-stream-title" id="tcpStreamTitle"></span>
                   <div class="view-tabs">
                     <select id="tcpDirection" aria-label="Direction"><option value="both">Both directions</option><option value="client_to_server">Client → Server</option><option value="server_to_client">Server → Client</option></select>
+                    <select id="tcpSplit" aria-label="Split by"><option value="reads">Reads</option><option value="lines">Lines (\n)</option><option value="crlf">Lines (\r\n)</option><option value="nul">NUL-terminated</option><option value="delimiter">Delimiter…</option><option value="u8">1-byte length</option><option value="u16be">2-byte length (big endian)</option><option value="u16le">2-byte length (little endian)</option><option value="u32be">4-byte length (big endian)</option><option value="u32le">4-byte length (little endian)</option></select>
+                    <input id="tcpSplitDelimiter" type="text" value="0a" placeholder="0a" aria-label="Delimiter as hex" spellcheck="false" autocomplete="off" hidden />
                     <button class="view-tab active" id="tcpHexView" type="button" aria-pressed="true">Hex</button>
                     <button class="view-tab" id="tcpTextView" type="button" aria-pressed="false">Text</button>
                     <button class="secondary-action tcp-close" id="tcpCloseConnection" type="button" title="Close both directions" disabled>Close connection</button>
