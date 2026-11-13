@@ -907,6 +907,23 @@ var hasher = {
         return { value: encodeURIComponent(input), success: true };
       }
     },
+    e5u: {
+      id : tabs.encode+"urlencode-all",
+      tab : tabs.encode,
+      title : "URL encode (all characters)",
+      calculate : function (input) {
+        return hasher.elements.e5u.calculateResult(input).value;
+      },
+      calculateResult : function (input) {
+        // Every UTF-8 byte, letters too, as Burp's Decoder encodes a URL:
+        // encodeURIComponent() leaves letters and digits as they are.
+        var bytes = new TextEncoder().encode(input), out = "";
+        for (var i = 0; i < bytes.length; i++) {
+          out += "%" + (bytes[i] < 16 ? "0" : "") + bytes[i].toString(16).toUpperCase();
+        }
+        return { value: out, success: true };
+      }
+    },
     e6: {
       id : tabs.encode+"decodeURI",
       tab : tabs.encode,
