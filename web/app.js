@@ -33213,6 +33213,8 @@ function parseCurlCommand(text) {
   let url = "";
   const headers = [];
   const bodyParts = [];
+  const formFields = [];
+  let notice = "";
   let bodyProvided = false;
   let needsDefaultFormContentType = false;
   let needsDefaultJsonHeaders = false;
@@ -33392,10 +33394,15 @@ function parseCurlCommand(text) {
     else if (tok === "-F" || tok === "--form" || tok === "--form-string") {
       const value = requireOptionValue(tok);
       if (value.error) return value;
-      return { error: "cURL multipart form imports are not supported yet." };
+      const field = parseCurlFormField(value.value, tok === "--form-string");
+      if (field.error) return field;
+      formFields.push(field);
     }
     else if ((tok.startsWith("-F") && tok.length > 2) || tok.startsWith("--form=") || tok.startsWith("--form-string=")) {
-      return { error: "cURL multipart form imports are not supported yet." };
+      const field = parseCurlFormField(tok.startsWith("-F") ? tok.slice(2) : tok.slice(tok.indexOf("=") + 1),
+        tok.startsWith("--form-string="));
+      if (field.error) return field;
+      formFields.push(field);
     }
     else if (tok === "-u" || tok === "--user") {
       const value = requireOptionValue(tok);
@@ -33477,6 +33484,29 @@ function parseCurlCommand(text) {
     body = "";
     bodyProvided = false;
   }
+  if (formFields.length) {
+    // curl itself refuses a form together with -d.
+    if (bodyParts.length) return { error: "cURL -F cannot be combined with -d or --json." };
+    const boundary = `${"-".repeat(24)}${Math.random().toString(16).slice(2, 18).padEnd(16, "0")}`;
+    const escape = text => text.replace(/"/g, "%22").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+    body = formFields.map(field => [
+      `--${boundary}`,
+      `Content-Disposition: form-data${field.name ? `; name="${escape(field.name)}"` : ""}${
+        field.filename === null ? "" : `; filename="${escape(field.filename)}"`}`,
+      ...(field.type ? [`Content-Type: ${field.type}`] : []),
+      ...field.headers,
+      "",
+      field.content,
+    ].join("\r\n")).join("\r\n") + `\r\n--${boundary}--\r\n`;
+    bodyProvided = true;
+    if (!methodExplicit) method = "POST";
+    // Like curl, a Content-Type given with -H gets the boundary appended.
+    const contentType = headers.find(header => headerNameEquals(header, "content-type"));
+    if (contentType) contentType.value += `; boundary=${boundary}`;
+    else headers.push({ name: "Content-Type", value: `multipart/form-data; boundary=${boundary}` });
+    const files = formFields.filter(field => field.file).map(field => field.file);
+    if (files.length) notice = `File contents are not imported; these parts are empty: ${files.join(", ")}`;
+  }
   let scheme = "https";
   let host = "";
   let port = "";
@@ -33505,7 +33535,77 @@ function parseCurlCommand(text) {
   const headerText = headers.map((h) => `${h.name}: ${h.value}`).join("\n");
   const requestHttpVersion = httpVersion || "HTTP/1.1";
   const requestText = bodyProvided ? `${method} ${path} ${requestHttpVersion}\n${headerText}\n\n${body}` : `${method} ${path} ${requestHttpVersion}\n${headerText}`;
-  return { scheme, host, port, method, path, headers, body, httpVersion, requestText };
+  return { scheme, host, port, method, path, headers, body, httpVersion, requestText, notice };
+}
+
+// One -F field, read as curl's tool_formparse.c reads it: name=content, where
+// content starting with @ uploads a file and < fills a field from a file, then
+// ;type=, ;filename= and ;headers= parameters. A "quoted" word takes \" and \\
+// escapes; an unquoted one ends at ; and loses its trailing spaces. Sniper does
+// not read local files, so contents from a file stay empty, with its path kept
+// in `file`.
+function parseCurlFormField(value, literal = false) {
+  const eq = value.indexOf("=");
+  if (eq < 0) return { error: "cURL -F requires a name=content value." };
+  const text = value.slice(eq + 1);
+  const field = { name: value.slice(0, eq), content: text, file: "", filename: null, type: "", headers: [] };
+  if (literal) return field;
+  const source = /^[@<]/.test(text) ? text[0] : "";
+  const stops = source === "@" ? ";," : ";";
+  const skipSpace = at => { while (/\s/.test(text[at] || "")) at += 1; return at; };
+  const word = start => {
+    let at = skipSpace(start);
+    if (text[at] === '"') {
+      let out = "";
+      for (let i = at + 1; i < text.length; i++) {
+        if (text[i] === "\\" && /["\\]/.test(text[i + 1] || "")) out += text[++i];
+        else if (text[i] !== '"') out += text[i];
+        else {
+          let end = i + 1;
+          while (end < text.length && !stops.includes(text[end])) end += 1;
+          return [out, end];
+        }
+      }
+    }
+    let end = at;
+    while (end < text.length && !stops.includes(text[end])) end += 1;
+    return [text.slice(at, end).trimEnd(), end];
+  };
+  let [data, at] = word(source ? 1 : 0);
+  field.content = source ? "" : data;
+  field.file = source ? data : "";
+  if (source === "@") field.filename = data.split(/[\\/]/).pop();
+  // As in curl, a content type runs on over parameters it does not know.
+  let typeStart = -1;
+  while (text[at] === ";") {
+    const p = skipSpace(at + 1);
+    const key = /^(type|filename|headers|encoder)=/i.exec(text.slice(p))?.[1].toLowerCase();
+    if (key === "type" && typeStart < 0) {
+      typeStart = at = skipSpace(p + 5);
+      while (at < text.length && !'()<>@,;:\\"[]?=\r\n '.includes(text[at])) at += 1;
+      field.type = text.slice(typeStart, at);
+    } else if (key && key !== "type") {
+      typeStart = -1;
+      if (key === "encoder") return { error: "cURL -F encoder= imports are not supported." };
+      if (key === "headers" && /[@<]/.test(text[p + 8] || "")) return { error: "cURL -F headers= files are not supported." };
+      const [found, end] = word(p + key.length + 1);
+      if (key === "filename") field.filename = found;
+      else field.headers.push(found);
+      at = end;
+    } else if (typeStart >= 0) {
+      for (at = p; at < text.length && !stops.includes(text[at]);) at += 1;
+      field.type = text.slice(typeStart, at).trimEnd();
+    } else {
+      at = word(p)[1];
+    }
+  }
+  if (text[at] === ",") return { error: "cURL -F with several files in one field is not supported." };
+  if (source === "<") field.filename = null;
+  const types = { gif: "image/gif", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", svg: "image/svg+xml",
+    txt: "text/plain", htm: "text/html", html: "text/html", pdf: "application/pdf", xml: "application/xml" };
+  const byExtension = name => types[/\.([^./\\]+)$/.exec(name || "")?.[1].toLowerCase()];
+  field.type ||= byExtension(field.filename) || byExtension(field.file) || (source === "@" ? "application/octet-stream" : "");
+  return field;
 }
 
 function curlDataBinaryBodyIsPlainText(value) {
@@ -33800,6 +33900,7 @@ function applyCurlImport() {
   closeCurlImportModal();
   scheduleWorkspaceStateSave();
   renderToolPanels();
+  if (result.notice) showToast(result.notice, "warning", 6000);
 }
 
 function initReplayContextMenu() {

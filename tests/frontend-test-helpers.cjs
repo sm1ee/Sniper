@@ -26,6 +26,7 @@ function loadFunctions(names, globals = {}) {
     names = [...new Set([...names, "replayTabBodyIsBinary", "replayDraftFromEditor", "replayDraftShown",
       "rawRequestWithBinaryBody", "rawRequestWithBase64Body", "binaryBodyText", "binaryBodyBase64"])];
   }
+  if (names.includes("parseCurlCommand")) names = [...new Set([...names, "parseCurlFormField"])];
   // Intercept shows a held binary body as bytes through the raw build and parse.
   const rawBodyCallers = ["buildEditableRawRequest", "parseEditableRawRequest", "buildEditableRawResponse", "parseEditableRawResponse"];
   if (names.some(name => rawBodyCallers.includes(name))) {

@@ -179,7 +179,7 @@ test("shell syntax is imported as text without evaluating substitutions", () => 
 });
 
 test("unsupported cURL body sources and captured binary or truncated bodies stay blocked", () => {
-  for (const option of ["--data @fixture.txt", "--data-binary @fixture.txt", "--data-urlencode @fixture.txt", "--form field=value"]) {
+  for (const option of ["--data @fixture.txt", "--data-binary @fixture.txt", "--data-urlencode @fixture.txt"]) {
     assert.ok(c.parseCurlCommand(`curl https://example.com ${option}`).error);
   }
   assert.ok(c.parseCurlCommand("curl https://example.com --data-binary $'\\x01'").error);

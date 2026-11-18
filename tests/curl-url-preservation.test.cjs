@@ -106,7 +106,7 @@ test('fragments are excluded, while encoded query and fragment delimiters stay l
 });
 
 test('declared unsupported import options remain rejected', () => {
-  for (const option of ['--http3', '--http3-only', '--form field=value', '--data @fixture.txt']) {
+  for (const option of ['--http3', '--http3-only', '--data @fixture.txt']) {
     assert.ok(c.parseCurlCommand(`curl https://example.com/ordinary ${option}`).error);
   }
 });

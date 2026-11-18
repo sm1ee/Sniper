@@ -164,7 +164,7 @@ test('ordinary quoting, empty values, URL/body separation and malformed feedback
   f.c.openCurlImportModal();
   for (const text of ['', 'echo hello', "curl https://example.com/synthetic -H 'missing colon'",
     'curl https://example.com/synthetic --data-raw', 'curl https://example.com/synthetic --http3',
-    'curl https://example.com/synthetic --data @fixture.txt', 'curl https://example.com/synthetic --form field=value']) {
+    'curl https://example.com/synthetic --data @fixture.txt']) {
     f.importText(text);
     assert.equal(f.state.replayTabs.length, 0);
     assert.equal(f.modal.classList.contains('hidden'), false);
@@ -202,4 +202,59 @@ test('empty-field support does not accept malformed or file-backed header argume
   for (const value of [';', 'missing header;', 'X-Empty;extra;', '@fixture.txt', 'missing colon']) {
     assert.ok(f.c.parseCurlCommand(`curl https://example.com/synthetic -H '${value}'`).error);
   }
+});
+
+// curl -F, as curl's tool_formparse.c reads it. Sniper does not read local
+// files, so a part whose contents come from one is left empty and named.
+const plain = value => JSON.parse(JSON.stringify(value));
+
+test('-F imports the multipart body curl sends, with file parts left empty', () => {
+  const f = fixture(); f.c.openCurlImportModal();
+  f.importText(`curl https://example.com/upload -F name=John -F 'photo=@fixtures/me.png' --form-string 'note=@kept;type=x' -F 'we"ird=v;filename=a"b.txt'`);
+  assert.equal(f.state.replayTabs.length, 1, f.toasts.at(-1)?.[0]);
+  const request = f.state.replayTabs[0].baseRequest;
+  const boundary = /^multipart\/form-data; boundary=(-{24}[0-9a-f]{16})$/.exec(headers(request, 'content-type')[0])?.[1];
+  assert.ok(boundary, headers(request, 'content-type')[0]);
+  const body = [
+    `--${boundary}`, 'Content-Disposition: form-data; name="name"', '', 'John',
+    `--${boundary}`, 'Content-Disposition: form-data; name="photo"; filename="me.png"', 'Content-Type: image/png', '', '',
+    `--${boundary}`, 'Content-Disposition: form-data; name="note"', '', '@kept;type=x',
+    `--${boundary}`, 'Content-Disposition: form-data; name="we%22ird"; filename="a%22b.txt"', 'Content-Type: text/plain', '', 'v',
+    `--${boundary}--`, '',
+  ].join('\r\n');
+  assert.equal(request.method, 'POST');
+  assert.equal(request.body, body);
+  assert.ok(f.state.replayTabs[0].requestText.endsWith(`\n\n${body}`));
+  assert.deepEqual(plain(f.toasts.at(-1)), ['File contents are not imported; these parts are empty: fixtures/me.png', 'warning', 6000]);
+});
+
+test('-F parameters, quoting and file fields follow curl', () => {
+  const { c } = fixture();
+  const field = (value, literal) => { const result = plain(c.parseCurlFormField(value, literal)); assert.ok(!result.error, result.error); return result; };
+  const part = (name, rest) => ({ name, content: '', file: '', filename: null, type: '', headers: [], ...rest });
+  assert.deepEqual(field('a=@dir/x.JPG'), part('a', { file: 'dir/x.JPG', filename: 'x.JPG', type: 'image/jpeg' }));
+  assert.deepEqual(field('a=@x'), part('a', { file: 'x', filename: 'x', type: 'application/octet-stream' }));
+  assert.deepEqual(field('a=@x.bin;filename="b;c.png"'), part('a', { file: 'x.bin', filename: 'b;c.png', type: 'image/png' }));
+  assert.deepEqual(field('a=@x;type=text/plain; charset=utf-8 ;filename=y'),
+    part('a', { file: 'x', filename: 'y', type: 'text/plain; charset=utf-8' }));
+  assert.deepEqual(field('a=<notes.txt;filename=ignored'), part('a', { file: 'notes.txt', type: 'text/plain' }));
+  assert.deepEqual(field('a= "say \\"hi\\"; ok" ;type=text/x'), part('a', { content: 'say "hi"; ok', type: 'text/x' }));
+  assert.deepEqual(field('a=  spaced  ;headers="X-One: 1";headers=X-Two: 2;unknown=1'),
+    part('a', { content: 'spaced', headers: ['X-One: 1', 'X-Two: 2'] }));
+  assert.deepEqual(field('a=v;filename=r.txt'), part('a', { content: 'v', filename: 'r.txt', type: 'text/plain' }));
+  assert.deepEqual(field('=v'), part('', { content: 'v' }));
+  assert.deepEqual(field('a=@x;type=y', true), part('a', { content: '@x;type=y' }));
+  for (const value of ['novalue', 'a=@x,y', 'a=v;encoder=base64', 'a=v;headers=@h.txt']) {
+    assert.ok(c.parseCurlFormField(value).error, value);
+  }
+});
+
+test('-F sets POST unless a method is given, keeps a given Content-Type and refuses -d', () => {
+  const { c } = fixture();
+  assert.equal(parsed(c, 'curl https://example.com/upload -X PUT -F a=b').method, 'PUT');
+  assert.equal(parsed(c, 'curl https://example.com/upload -G -F a=b').method, 'POST', '-G only moves -d data');
+  const mixed = parsed(c, "curl https://example.com/upload -H 'Content-Type: multipart/mixed' -F a=b");
+  assert.match(headers(mixed, 'content-type').join('|'), /^multipart\/mixed; boundary=-{24}[0-9a-f]{16}$/);
+  assert.equal(parsed(c, 'curl https://example.com/upload -F a=b').notice, '');
+  assert.ok(c.parseCurlCommand('curl https://example.com/upload -d x=1 -F a=b').error);
 });
