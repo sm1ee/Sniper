@@ -36,6 +36,7 @@ export {
   defaultKeymap,
   history,
   historyKeymap,
+  invertedEffects,
   undo,
   redo,
 } from "@codemirror/commands";

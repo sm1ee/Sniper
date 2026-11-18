@@ -165,7 +165,8 @@ test('a complete smaller edit repairs an older oversized base without changing o
 
 test('repairing an out-of-band oversized base may undo to an earlier valid draft, never the oversized one',()=>{
   const f=editorFixture();f.render();
-  const original=f.cv().getContent();
+  // Undo gives back the earlier draft exactly, CRLF included.
+  const original=f.cv().getText();
   const oldBody='"'.repeat(1100*1024);
   f.a.baseRequest=request(oldBody);f.a.requestText=raw(oldBody);f.render();
   f.edit(0,f.cv().getContent().length,raw('small'));
@@ -173,7 +174,7 @@ test('repairing an out-of-band oversized base may undo to an earlier valid draft
   f.undo();
   assert.equal(f.a.requestText,original);
   assert.equal(f.context.replayRequestSizeError(f.a.requestText,f.a.baseRequest),'');
-  assert.equal(f.cv().getContent(),original);
+  assert.equal(f.cv().getText(),original);
 });
 
 test('navigation can retain a complete smaller DOM edit that repairs an older oversized base',()=>{

@@ -16341,13 +16341,22 @@ function replayDraftFromEditor(shown, tab = getActiveReplayTab()) {
   return replayTabBodyIsBinary(tab) ? rawRequestWithBase64Body(shown) : shown;
 }
 
-/** An edited draft as the editor shows it, without Pretty's reformatting. */
-function replayDraftShown(draft, tab = getActiveReplayTab()) {
-  return replayTabBodyIsBinary(tab) ? rawRequestWithBinaryBody(draft) : draft;
+/**
+ * An edited draft as the editor shows it, without Pretty's reformatting. Given
+ * the text the editor shows now, a binary body stays as typed: a character above
+ * U+00FF becomes its UTF-8 bytes in the draft only, so neither the caret nor an
+ * input method's composition moves.
+ */
+function replayDraftShown(draft, tab = getActiveReplayTab(), shown = null) {
+  if (!replayTabBodyIsBinary(tab)) return draft;
+  const head = /\r?\n\r?\n/.exec(draft), body = shown === null ? null : /\r?\n\r?\n/.exec(shown);
+  return head && body ? draft.slice(0, head.index + head[0].length) + shown.slice(body.index + body[0].length)
+    : rawRequestWithBinaryBody(draft);
 }
 
 function replayEditorShowsDraft(shown, draft) {
-  return replayRequestTextsEquivalent(shown, draft) || shown === replayRequestEditorText(draft);
+  return replayRequestTextsEquivalent(shown, draft) || shown === replayRequestEditorText(draft)
+    || replayDraftFromEditor(shown) === draft;
 }
 
 function syncReplayRequestTextFromEditor(shownText, validatedCandidate = null) {
@@ -16374,7 +16383,7 @@ function syncReplayRequestTextFromEditor(shownText, validatedCandidate = null) {
   }
   if (renderedHttpReplayDraftOwner?.tab === activeTab) renderedHttpReplayDraftOwner.preservedVersionDraft = null;
   activeTab.protobufEditRevision = (activeTab.protobufEditRevision || 0) + 1;
-  if (nextText !== newText) setReplayRequestEditorText(replayDraftShown(nextText, activeTab), { preserveSelection: true });
+  if (nextText !== newText) setReplayRequestEditorText(replayDraftShown(nextText, activeTab, shownText), { preserveSelection: true });
   activeTab.requestText = nextText;
   activeTab.httpVersionMode = replayHttpVersionState(parsed, nextText, activeTab.httpVersionMode);
   activeTab.requestBytes = null;
@@ -34965,7 +34974,9 @@ function createBaseExtensions(options = {}) {
       },
     }]));
   } else {
-    exts.push(CM.history());
+    // Text the app sets right after an edit, such as a new Content-Length, is
+    // undone with that edit in one step.
+    exts.push(CM.history({ joinToEvent: (transaction, adjacent) => adjacent || lineEndings.recorded(transaction) }));
     exts.push(CM.keymap.of([...CM.defaultKeymap, ...CM.historyKeymap]));
   }
   if (options.placeholder) {
@@ -34991,10 +35002,13 @@ const setSearchQuery = CM.StateEffect.define();
 // CodeMirror keeps "\n" between lines and forgets whether a break was CRLF or a
 // lone CR. A raw request needs them back byte for byte: multipart parts end in
 // CRLF, and file bytes hold lone CR and LF. Each break that came in is kept as
-// a mark over its newline, mapped through edits and written back; a break the
-// user types takes the ending of the break before it.
+// a mark over its newline, mapped through edits and written back. A break the
+// user types takes the ending of the next break, as the line it splits had;
+// after the last break, the ending of the one before.
 function createLineEndingTracker() {
-  const record = CM.StateEffect.define();
+  // The history maps these marks when it joins two edits into one Undo step.
+  // A change kept out of the history would map them by the wrong positions.
+  const record = CM.StateEffect.define({ map: (marks, mapping) => marks.map(mapping) });
   const field = CM.StateField.define({
     create: () => CM.Decoration.none,
     update(marks, transaction) {
@@ -35019,27 +35033,29 @@ function createLineEndingTracker() {
   return {
     field,
     marks,
+    // Undo and Redo bring back the marks of the text they return to: the history
+    // keeps the deleted breaks, not the marks that went with them.
+    undoable: CM.invertedEffects.of(transaction => transaction.docChanged
+      ? [record.of(transaction.startState.field(field, false) ?? CM.Decoration.none)] : []),
     /** The effect that records `text`'s line endings, sent with its insertion. */
     record: text => record.of(marks(text)),
+    recorded: transaction => transaction.effects.some(effect => effect.is(record)),
     /** The document with each line break written as it came in. */
     text(state) {
       const marks = state.field(field, false);
       if (!marks || marks.size === 0) return state.doc.toString();
       const kept = new Map();
+      let next = "\n";
       marks.between(0, state.doc.length, (from, to, mark) => {
-        if (to === from + 1) kept.set(from, mark.spec.ending);
+        if (to === from + 1) kept.set(from, next = mark.spec.ending);
       });
       const parts = [];
-      let ending = "\n";
-      for (let number = 1; number <= state.doc.lines; number++) {
+      for (let number = state.doc.lines; number >= 1; number--) {
         const line = state.doc.line(number);
+        if (number < state.doc.lines) parts.push(next = kept.get(line.to) ?? next);
         parts.push(line.text);
-        if (number < state.doc.lines) {
-          ending = kept.get(line.to) ?? ending;
-          parts.push(ending);
-        }
       }
-      return parts.join("");
+      return parts.reverse().join("");
     },
   };
 }
@@ -35149,7 +35165,7 @@ class SniperCodeView {
         // Initial content is a baseline, not an undoable edit from an empty pane.
         doc: options.content || "",
         extensions: [...createBaseExtensions(options), searchDecoField, changedDecoField, packetEvidenceField,
-          lineEndings.field.init(() => lineEndings.marks(options.content || ""))],
+          lineEndings.field.init(() => lineEndings.marks(options.content || "")), lineEndings.undoable],
       }),
       parent: container,
     });
@@ -35192,17 +35208,19 @@ class SniperCodeView {
     if (lineEndings.text(view.state) === nextText) {
       return;
     }
-    // CodeMirror counts a CRLF as one character, so positions are in the
-    // document it makes of the text, not in the text.
-    const length = nextText.replace(/\r\n/g, "\n").length;
-    const selection = view.state.selection.main;
-    const anchor = Math.min(selection.anchor, length);
-    const head = Math.min(selection.head, length);
+    // Replace only what differs, so the caret moves with the text around it when
+    // Content-Length gains a digit. The history joins it to the edit it follows.
+    const before = view.state.doc.toString();
+    const after = nextText.replace(/\r\n?/g, "\n");
+    let from = 0;
+    while (from < before.length && from < after.length && before[from] === after[from]) from += 1;
+    let tail = 0;
+    while (tail < before.length - from && tail < after.length - from
+      && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail += 1;
     cmProgrammaticViews.add(view);
     try {
       view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: nextText },
-        selection: { anchor, head },
+        changes: { from, to: before.length - tail, insert: after.slice(from, after.length - tail) },
         effects: lineEndings.record(nextText),
       });
     } finally {
