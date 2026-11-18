@@ -424,6 +424,12 @@ printf 'GET /api/orders?status=closed HTTP/1.1\r\nhost: 127.0.0.1:18911\r\naccep
 `replay open` returns the tab with its `id` and the target it took from the
 capture, and the UI shows the same tab. Each send adds a new row to the history.
 
+A body that is not text, such as a file in a multipart upload, shows one
+character per byte in Replay and Intercept, as Burp's Raw view shows it. Change
+`filename="a.png"` in place, and every byte you leave alone is sent as it was.
+**Import cURL**, in the empty Replay tab and the tab menu, reads `-F` forms. It
+does not read local files, so a part given as `@file` or `<file` stays empty.
+
 `--host`, `--port` and `--scheme` on `replay open` and `replay update` change
 where the request goes without touching its `Host:` header. If the captured host
 is an IP address, as everywhere in this guide, they are refused with
