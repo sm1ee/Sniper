@@ -9,7 +9,7 @@
 - Storage stays as it is: `tab.requestText`, workspace files, the CLI and the API still carry a binary body as Base64. Only the editor shows it as bytes, and converts back on every edit. Old saved tabs and CLI-made tabs need no migration.
 - A character up to U+00FF is that byte. A character above it can only have been typed, and is sent as UTF-8.
 - CodeMirror forgets whether a line break was CRLF, CR or LF. An editor that edits a raw request remembers each original break as a mark over its newline, maps the marks through edits, and writes them back. A break the user types takes the ending of the next break, or of the one before it after the last break. Undo and Redo put back the marks of the text they return to (CodeMirror's `invertedEffects`, added to the bundle's exports).
-- Fuzzer positions inside a binary body are out of scope: the server fills markers in a string, so it needs a byte-string mode, which touches the server, the CLI and the workspace. Asked separately.
+- Fuzzer positions inside a binary body came after this plan: [2026-11-18-fuzzer-binary-positions.md](2026-11-18-fuzzer-binary-positions.md).
 
 ## Tasks
 
