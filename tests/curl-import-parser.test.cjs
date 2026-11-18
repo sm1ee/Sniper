@@ -237,14 +237,22 @@ test('-F parameters, quoting and file fields follow curl', () => {
   assert.deepEqual(field('a=@x.bin;filename="b;c.png"'), part('a', { file: 'x.bin', filename: 'b;c.png', type: 'image/png' }));
   assert.deepEqual(field('a=@x;type=text/plain; charset=utf-8 ;filename=y'),
     part('a', { file: 'x', filename: 'y', type: 'text/plain; charset=utf-8' }));
-  assert.deepEqual(field('a=<notes.txt;filename=ignored'), part('a', { file: 'notes.txt', type: 'text/plain' }));
+  // curl drops a guessed text/plain from a part without a file name.
+  assert.deepEqual(field('a=<notes.txt;filename=ignored'), part('a', { file: 'notes.txt' }));
+  assert.deepEqual(field('a=<page.html'), part('a', { file: 'page.html', type: 'text/html' }));
+  assert.deepEqual(field('a=@-'), part('a', { file: '-', filename: '-' }), 'standard input has no type');
+  // A Content-Type given in headers= is the part's type, unless type= names one.
+  assert.deepEqual(field('a=v;headers="Content-Type: text/x";headers="X-One: 1"'),
+    part('a', { content: 'v', type: 'text/x', headers: ['X-One: 1'] }));
+  assert.deepEqual(field('a=v;type=text/y;headers="content-type: text/x"'), part('a', { content: 'v', type: 'text/y' }));
+  assert.deepEqual(field('a=)'), part('a', { content: ')' }));
   assert.deepEqual(field('a= "say \\"hi\\"; ok" ;type=text/x'), part('a', { content: 'say "hi"; ok', type: 'text/x' }));
   assert.deepEqual(field('a=  spaced  ;headers="X-One: 1";headers=X-Two: 2;unknown=1'),
     part('a', { content: 'spaced', headers: ['X-One: 1', 'X-Two: 2'] }));
   assert.deepEqual(field('a=v;filename=r.txt'), part('a', { content: 'v', filename: 'r.txt', type: 'text/plain' }));
   assert.deepEqual(field('=v'), part('', { content: 'v' }));
   assert.deepEqual(field('a=@x;type=y', true), part('a', { content: '@x;type=y' }));
-  for (const value of ['novalue', 'a=@x,y', 'a=v;encoder=base64', 'a=v;headers=@h.txt']) {
+  for (const value of ['novalue', 'a=@x,y', 'a=v;encoder=base64', 'a=v;headers=@h.txt', 'a=(', '=)']) {
     assert.ok(c.parseCurlFormField(value).error, value);
   }
 });
@@ -257,4 +265,5 @@ test('-F sets POST unless a method is given, keeps a given Content-Type and refu
   assert.match(headers(mixed, 'content-type').join('|'), /^multipart\/mixed; boundary=-{24}[0-9a-f]{16}$/);
   assert.equal(parsed(c, 'curl https://example.com/upload -F a=b').notice, '');
   assert.ok(c.parseCurlCommand('curl https://example.com/upload -d x=1 -F a=b').error);
+  assert.ok(c.parseCurlCommand('curl https://example.com/upload -I -F a=b').error, 'curl refuses HEAD with a form');
 });

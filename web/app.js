@@ -33208,6 +33208,7 @@ function parseCurlCommand(text) {
   let method = "GET";
   let methodExplicit = false;
   let getMode = false;
+  let headMode = false;
   let pathAsIs = false;
   let httpVersion = "";
   let url = "";
@@ -33335,6 +33336,7 @@ function parseCurlCommand(text) {
     else if (tok === "-I" || tok === "--head") {
       if (!methodExplicit) method = "HEAD";
       methodExplicit = true;
+      headMode = true;
     }
     else if (tok === "-G" || tok === "--get") {
       getMode = true;
@@ -33485,8 +33487,8 @@ function parseCurlCommand(text) {
     bodyProvided = false;
   }
   if (formFields.length) {
-    // curl itself refuses a form together with -d.
-    if (bodyParts.length) return { error: "cURL -F cannot be combined with -d or --json." };
+    // curl itself refuses a form together with -d or -I.
+    if (bodyParts.length || headMode) return { error: "cURL -F cannot be combined with -d, --json or -I." };
     const boundary = `${"-".repeat(24)}${Math.random().toString(16).slice(2, 18).padEnd(16, "0")}`;
     const escape = text => text.replace(/"/g, "%22").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
     body = formFields.map(field => [
@@ -33550,6 +33552,7 @@ function parseCurlFormField(value, literal = false) {
   const text = value.slice(eq + 1);
   const field = { name: value.slice(0, eq), content: text, file: "", filename: null, type: "", headers: [] };
   if (literal) return field;
+  if (text.startsWith("(") || (!field.name && text === ")")) return { error: "cURL -F nested multipart parts are not supported." };
   const source = /^[@<]/.test(text) ? text[0] : "";
   const stops = source === "@" ? ";," : ";";
   const skipSpace = at => { while (/\s/.test(text[at] || "")) at += 1; return at; };
@@ -33604,7 +33607,14 @@ function parseCurlFormField(value, literal = false) {
   const types = { gif: "image/gif", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", svg: "image/svg+xml",
     txt: "text/plain", htm: "text/html", html: "text/html", pdf: "application/pdf", xml: "application/xml" };
   const byExtension = name => types[/\.([^./\\]+)$/.exec(name || "")?.[1].toLowerCase()];
-  field.type ||= byExtension(field.filename) || byExtension(field.file) || (source === "@" ? "application/octet-stream" : "");
+  // curl takes a Content-Type in headers= as the type and sends it once. A file
+  // has a guessed type, standard input none, and a part without a file name
+  // drops a guessed text/plain.
+  const given = field.headers.find(header => /^content-type\s*:/i.test(header));
+  field.headers = field.headers.filter(header => !/^content-type\s*:/i.test(header));
+  const guessed = byExtension(field.filename) || byExtension(field.file)
+    || (source === "@" && field.file !== "-" ? "application/octet-stream" : "");
+  field.type ||= given?.replace(/^[^:]*:\s*/, "") || (guessed === "text/plain" && field.filename === null ? "" : guessed);
   return field;
 }
 
