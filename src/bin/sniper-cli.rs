@@ -3205,6 +3205,11 @@ struct FuzzerSetTemplateArgs {
     host: Option<String>,
     #[arg(long)]
     port: Option<String>,
+    /// Mark bytes START to END of the request body as a position; repeat for
+    /// more. A binary body is marked without writing `§` into its bytes.
+    #[arg(long = "body-position", value_name = "START:END", action = ArgAction::Append,
+        value_parser = parse_body_position)]
+    body_positions: Vec<(usize, usize)>,
 }
 
 #[derive(Args, Debug, Default)]
@@ -8311,6 +8316,8 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "scheme",
             "host",
             "port",
+            "body_positions",
+            "body_position",
         ],
         "replay.update" => &[
             "tab_id",
@@ -8696,6 +8703,8 @@ fn fuzzer_input_preview(command: &FuzzerCommand) -> Value {
             "scheme": args.scheme,
             "host": args.host,
             "port": args.port,
+            "body_positions": args.body_positions.iter()
+                .map(|(start, end)| format!("{start}:{end}")).collect::<Vec<_>>(),
         }),
         FuzzerCommand::SetPayloads(args) => json!({
             "session_id": args.session_id,
@@ -10597,6 +10606,15 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                     scheme: call_optional(operation, input, "scheme")?,
                     host: call_optional(operation, input, "host")?,
                     port: call_optional(operation, input, "port")?,
+                    body_positions: call_string_list(
+                        operation,
+                        input,
+                        "body_positions",
+                        "body_position",
+                    )?
+                    .iter()
+                    .map(|value| parse_body_position(value).map_err(|error| anyhow!(error)))
+                    .collect::<Result<_>>()?,
                 }),
             }
         }
@@ -15221,6 +15239,11 @@ async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
                 .as_ref()
                 .and(base_request.as_ref())
                 .map(fuzzer_target_request_authority_for_request);
+            let request_text = if args.body_positions.is_empty() {
+                request_text
+            } else {
+                mark_body_positions(&request_text, base_request.as_ref(), &args.body_positions)?
+            };
             workspace.fuzzer.base_request = base_request;
             workspace.fuzzer.source_transaction_id = source_transaction_id;
             workspace.fuzzer.target = target;
@@ -15242,7 +15265,7 @@ async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
         }
         FuzzerCommand::Run(args) => {
             let mut workspace = load_workspace_state(&api, args.session_id).await?;
-            let parsed_template = parse_editable_raw_request_with_version(
+            let parsed_template = parse_fuzzer_template(
                 &workspace.fuzzer.request_text,
                 workspace.fuzzer.base_request.as_ref(),
             )?;
@@ -19130,6 +19153,124 @@ fn parse_editable_raw_request_with_version(
     parse_editable_raw_request_parts(head, RawRequestBody::Text(body), fallback)
 }
 
+/// The Fuzzer's request with its positions, read as the Fuzzer editor reads it.
+/// Content-Length is set to the length the parser checks, since the server
+/// works it out again after each payload; a binary body keeps its positions
+/// between Base64 pieces and is checked with every position at its original.
+fn parse_fuzzer_template(
+    text: &str,
+    base: Option<&EditableRequest>,
+) -> Result<ParsedEditableRequest> {
+    let (head, body) = split_raw_http_message(text);
+    let binary = base.is_some_and(|request| request.body_encoding == BodyEncoding::Base64);
+    let positions = binary && (body.contains('\u{a7}') || body.contains("$payload$"));
+    let (checked, length) = if positions {
+        let originals = sniper::fuzzer::base64_body_originals(&body)?;
+        (STANDARD.encode(&originals), Some(originals.len()))
+    } else if binary {
+        // The parser says what is wrong with a body that is not Base64.
+        let length = STANDARD.decode(&body).ok().map(|bytes| bytes.len());
+        (body.clone(), length)
+    } else {
+        (body.clone(), Some(body.len()))
+    };
+    let head = match length {
+        Some(length) => with_content_length(&head, length)?,
+        None => head,
+    };
+    let mut parsed = parse_editable_raw_request_parts(head, RawRequestBody::Text(checked), base)?;
+    if positions {
+        parsed.request.body = body;
+    }
+    Ok(parsed)
+}
+
+/// `head` with every Content-Length set to `length`, which must agree first.
+fn with_content_length(head: &str, length: usize) -> Result<String> {
+    let mut declared = Vec::new();
+    let lines: Vec<String> = head
+        .lines()
+        .map(|line| match line.split_once(':') {
+            Some((name, value)) if name.trim().eq_ignore_ascii_case("content-length") => {
+                declared.push(value.trim().parse::<u64>().ok());
+                format!("{name}: {length}")
+            }
+            _ => line.to_string(),
+        })
+        .collect();
+    if declared
+        .iter()
+        .any(|value| value.is_none() || *value != declared[0])
+    {
+        bail!("Invalid or conflicting Content-Length headers in the request template.");
+    }
+    Ok(lines.join("\n"))
+}
+
+/// Marks byte ranges of the request body as positions, so a binary body is
+/// marked without `§` written into its bytes: a binary body keeps them between
+/// Base64 pieces, as the Fuzzer editor stores it, and a text body as `§original§`.
+fn mark_body_positions(
+    text: &str,
+    base: Option<&EditableRequest>,
+    ranges: &[(usize, usize)],
+) -> Result<String> {
+    let start = raw_blank_line(text.as_bytes())
+        .map(|(index, length)| index + length)
+        .ok_or_else(|| anyhow!("--body-position needs a request with a body"))?;
+    let body = &text[start..];
+    let binary = base.is_some_and(|request| request.body_encoding == BodyEncoding::Base64);
+    let bytes = if binary {
+        STANDARD
+            .decode(body)
+            .context("the request body is not valid Base64")?
+    } else if body.contains('\u{a7}') || body.contains("$payload$") {
+        bail!("the body already has § or $payload$; write its positions in the request instead");
+    } else {
+        body.as_bytes().to_vec()
+    };
+    let mut ranges = ranges.to_vec();
+    ranges.sort_unstable();
+    let mut marked = text[..start].to_string();
+    let mut cursor = 0;
+    for (from, to) in ranges {
+        if from < cursor || to > bytes.len() {
+            bail!(
+                "body position {from}:{to} overlaps another or ends past the {}-byte body",
+                bytes.len()
+            );
+        }
+        marked.push_str(&body_piece(&bytes[cursor..from], binary)?);
+        marked.push('\u{a7}');
+        marked.push_str(&body_piece(&bytes[from..to], binary)?);
+        marked.push('\u{a7}');
+        cursor = to;
+    }
+    marked.push_str(&body_piece(&bytes[cursor..], binary)?);
+    Ok(marked)
+}
+
+fn body_piece(piece: &[u8], binary: bool) -> Result<String> {
+    if binary {
+        return Ok(STANDARD.encode(piece));
+    }
+    std::str::from_utf8(piece)
+        .map(str::to_string)
+        .map_err(|_| anyhow!("a body position splits a character of the text body"))
+}
+
+fn parse_body_position(value: &str) -> std::result::Result<(usize, usize), String> {
+    match value
+        .split_once(':')
+        .and_then(|(start, end)| Some((start.parse().ok()?, end.parse().ok()?)))
+    {
+        Some((start, end)) if start <= end => Ok((start, end)),
+        _ => Err(format!(
+            "`{value}` is not START:END, two byte offsets into the body with START no larger than END"
+        )),
+    }
+}
+
 fn parse_editable_raw_request_bytes_with_version(
     bytes: &[u8],
     fallback: Option<&EditableRequest>,
@@ -19446,31 +19587,33 @@ fn declared_content_length(headers: &[HeaderRecord]) -> Result<Option<usize>> {
     Ok(content_length)
 }
 
+/// Where the head ends, as the editor finds it: the first blank line, whose
+/// breaks may be CRLF or LF. A multipart body keeps CRLF under an LF head, so
+/// its own blank lines must not be taken for the head's.
+fn raw_blank_line(bytes: &[u8]) -> Option<(usize, usize)> {
+    (0..bytes.len()).find_map(|index| {
+        [&b"\r\n\r\n"[..], b"\r\n\n", b"\n\r\n", b"\n\n"]
+            .into_iter()
+            .find(|blank| bytes[index..].starts_with(blank))
+            .map(|blank| (index, blank.len()))
+    })
+}
+
 fn split_raw_http_message(text: &str) -> (String, String) {
-    if let Some(index) = text.find("\r\n\r\n") {
-        return (
+    match raw_blank_line(text.as_bytes()) {
+        Some((index, length)) => (
             text[..index].replace("\r\n", "\n"),
-            text[index + 4..].to_string(),
-        );
+            text[index + length..].to_string(),
+        ),
+        None => (text.replace("\r\n", "\n"), String::new()),
     }
-    if let Some(index) = text.find("\n\n") {
-        return (
-            text[..index].replace("\r\n", "\n"),
-            text[index + 2..].to_string(),
-        );
-    }
-    (text.replace("\r\n", "\n"), String::new())
 }
 
 fn split_raw_http_message_bytes(bytes: &[u8]) -> Result<(String, Vec<u8>)> {
-    let (head, body) =
-        if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
-            (&bytes[..index], bytes[index + 4..].to_vec())
-        } else if let Some(index) = bytes.windows(2).position(|window| window == b"\n\n") {
-            (&bytes[..index], bytes[index + 2..].to_vec())
-        } else {
-            (bytes, Vec::new())
-        };
+    let (head, body) = match raw_blank_line(bytes) {
+        Some((index, length)) => (&bytes[..index], bytes[index + length..].to_vec()),
+        None => (bytes, Vec::new()),
+    };
     let head = std::str::from_utf8(head)
         .context("request headers are not valid UTF-8")?
         .replace("\r\n", "\n");
@@ -21063,7 +21206,9 @@ mod tests {
         data_dir_strings_match, process_path_strings_match, validate_sniper_settings_probe,
         SniperApiProbeExpectation,
     };
+    use super::{mark_body_positions, parse_fuzzer_template, split_raw_http_message};
     use super::{validate_service_map_packet_response, ServiceMapPacketArgs};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use chrono::Utc;
     use clap::Parser;
     use serde_json::{json, Value};
@@ -23240,6 +23385,174 @@ mod tests {
             panic!("expected session reveal");
         };
         assert_eq!(args.id, reveal_id);
+    }
+
+    fn fuzzer_base(body: &str, body_encoding: BodyEncoding) -> EditableRequest {
+        EditableRequest {
+            scheme: "https".to_string(),
+            host: "example.com".to_string(),
+            method: "POST".to_string(),
+            path: "/upload".to_string(),
+            headers: vec![HeaderRecord {
+                name: "Host".to_string(),
+                value: "example.com".to_string(),
+            }],
+            body: body.to_string(),
+            body_encoding,
+            preview_truncated: false,
+        }
+    }
+
+    fn content_length(request: &EditableRequest) -> &str {
+        &request
+            .headers
+            .iter()
+            .find(|header| header.name.eq_ignore_ascii_case("content-length"))
+            .unwrap()
+            .value
+    }
+
+    #[test]
+    fn the_fuzzer_template_keeps_its_positions_and_sets_content_length_as_the_editor_does() {
+        let binary = fuzzer_base(&STANDARD.encode(b"\x89\xa7AB"), BodyEncoding::Base64);
+        let body = format!(
+            "{}\u{a7}{}\u{a7}",
+            STANDARD.encode(b"\x89\xa7"),
+            STANDARD.encode(b"AB")
+        );
+        let text = format!(
+            "POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: 99\r\n\r\n{body}"
+        );
+        let parsed = parse_fuzzer_template(&text, Some(&binary)).unwrap();
+        assert_eq!(parsed.request.body, body);
+        assert_eq!(parsed.request.body_encoding, BodyEncoding::Base64);
+        assert_eq!(content_length(&parsed.request), "4");
+
+        // The editor leaves Content-Length as it was when it marks a text body.
+        let form = fuzzer_base("a=1", BodyEncoding::Utf8);
+        let parsed = parse_fuzzer_template(
+            "POST /upload HTTP/1.1\nHost: example.com\nContent-Length: 3\n\na=\u{a7}1\u{a7}",
+            Some(&form),
+        )
+        .unwrap();
+        assert_eq!(parsed.request.body, "a=\u{a7}1\u{a7}");
+
+        // An LF head with a CRLF multipart body ends at its first blank line.
+        let multipart =
+            "--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n\u{a7}v\u{a7}\r\n--b--\r\n";
+        let parsed = parse_fuzzer_template(
+            &format!("POST /upload HTTP/1.1\nHost: example.com\n\n{multipart}"),
+            Some(&form),
+        )
+        .unwrap();
+        assert_eq!(parsed.request.body, multipart);
+
+        for (text, base) in [
+            (format!("POST /upload HTTP/1.1\nHost: example.com\n\nQUJ\u{a7}QQ==\u{a7}"), &binary),
+            (
+                "POST /upload HTTP/1.1\nHost: example.com\nContent-Length: 3\nContent-Length: 4\n\na=\u{a7}1\u{a7}"
+                    .to_string(),
+                &form,
+            ),
+        ] {
+            assert!(parse_fuzzer_template(&text, Some(base)).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn body_positions_mark_byte_ranges_of_a_binary_or_text_body() {
+        let binary = fuzzer_base(&STANDARD.encode(b"\x89\xa7ABC"), BodyEncoding::Base64);
+        let text = build_editable_raw_request(&binary);
+        let marked = mark_body_positions(&text, Some(&binary), &[(5, 5), (1, 3)]).unwrap();
+        let (_, body) = split_raw_http_message(&marked);
+        assert_eq!(
+            body,
+            format!(
+                "{}\u{a7}{}\u{a7}{}\u{a7}\u{a7}",
+                STANDARD.encode(b"\x89"),
+                STANDARD.encode(b"\xa7A"),
+                STANDARD.encode(b"BC")
+            )
+        );
+        let parsed = parse_fuzzer_template(&marked, Some(&binary)).unwrap();
+        assert_eq!(parsed.request.body, body);
+
+        let form = fuzzer_base("a=1&b=\u{e9}", BodyEncoding::Utf8);
+        let text = build_editable_raw_request(&form);
+        let marked = mark_body_positions(&text, Some(&form), &[(2, 3)]).unwrap();
+        assert!(marked.ends_with("a=\u{a7}1\u{a7}&b=\u{e9}"), "{marked}");
+
+        for ranges in [&[(5, 9)][..], &[(0, 2), (1, 3)], &[(7, 8)]] {
+            assert!(
+                mark_body_positions(&text, Some(&form), ranges).is_err(),
+                "{ranges:?}"
+            );
+        }
+        let marked_already = text.replace("a=1", "a=\u{a7}1\u{a7}");
+        assert!(mark_body_positions(&marked_already, Some(&form), &[(0, 1)]).is_err());
+        assert!(
+            mark_body_positions(&text, Some(&binary), &[(0, 1)]).is_err(),
+            "a text body read as Base64"
+        );
+    }
+
+    #[test]
+    fn fuzzer_set_template_takes_body_positions_from_flags_and_calls() {
+        let id = "00000000-0000-0000-0000-000000000000";
+        let Cli {
+            command:
+                Command::Fuzzer {
+                    command: FuzzerCommand::SetTemplate(args),
+                },
+            ..
+        } = Cli::try_parse_from([
+            "sniper-cli",
+            "fuzzer",
+            "set-template",
+            "--transaction-id",
+            id,
+            "--body-position",
+            "1:3",
+            "--body-position",
+            "5:5",
+        ])
+        .unwrap()
+        else {
+            panic!("expected fuzzer set-template");
+        };
+        assert_eq!(args.body_positions, vec![(1, 3), (5, 5)]);
+        for value in ["3:1", "1", "a:b", "-1:2"] {
+            assert!(
+                Cli::try_parse_from([
+                    "sniper-cli",
+                    "fuzzer",
+                    "set-template",
+                    "--transaction-id",
+                    id,
+                    "--body-position",
+                    value,
+                ])
+                .is_err(),
+                "{value}"
+            );
+        }
+
+        let Command::Fuzzer {
+            command: FuzzerCommand::SetTemplate(args),
+        } = command_from_operation_input(
+            "fuzzer.set_template",
+            &json!({"transaction_id": id, "body_positions": ["1:3"]}),
+        )
+        .unwrap()
+        else {
+            panic!("expected fuzzer set-template");
+        };
+        assert_eq!(args.body_positions, vec![(1, 3)]);
+        assert!(command_from_operation_input(
+            "fuzzer.set_template",
+            &json!({"transaction_id": id, "body_position": "3:1"}),
+        )
+        .is_err());
     }
 
     #[test]
