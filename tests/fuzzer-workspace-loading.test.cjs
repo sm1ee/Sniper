@@ -53,7 +53,7 @@ function fixture() {
   });
   for (const name of ['renderFuzzer', 'renderFuzzerPayloadsEditor', 'updateFuzzerRequestText',
     'updateFuzzerPayloadsText', 'markFuzzerDraftChanged', 'loadWorkspaceState',
-    'applyWorkspaceState', 'reloadSessionWorkspace', 'resetSessionScopedUiState']) {
+    'applyWorkspaceState', 'reloadSessionWorkspace', 'resetSessionScopedUiState', 'fuzzerBodyIsBinary', 'fuzzerShownText', 'fuzzerStoredText', 'fuzzerDraftShowsBytes']) {
     vm.runInContext(source(name), f.context);
   }
   vm.runInContext(appSource.match(/^class WorkspaceSessionMismatchError[^]*?^\}/m)[0], f.context);

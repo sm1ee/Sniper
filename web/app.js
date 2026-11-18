@@ -17404,8 +17404,11 @@ function renderFuzzer() {
     const generation = workspaceStateGeneration;
     const owner = JSON.stringify([sessionId, generation, state.fuzzerBinaryPresentationRevision || 0]);
     // A session/workspace replacement retires history even for identical text.
-    if (!cv || cv._owner !== owner || cv._editable !== (workspaceLoaded && !binaryMarkersBlocked) || cv.getContent() !== state.fuzzerRequestText) {
-      updateCodePaneCM("fuzzerReq", els.fuzzerRequestCM, state.fuzzerRequestText, {
+    // A binary body shows in bytes, and stays as typed while it holds the draft.
+    const shown = fuzzerShownText(state.fuzzerRequestText);
+    if (!cv || cv._owner !== owner || cv._editable !== (workspaceLoaded && !binaryMarkersBlocked)
+      || (cv.getText() !== shown && fuzzerStoredText(cv.getText()) !== state.fuzzerRequestText)) {
+      updateCodePaneCM("fuzzerReq", els.fuzzerRequestCM, shown, {
         mode: "http", readOnly: !workspaceLoaded || binaryMarkersBlocked, owner,
         payloadHighlight: true,
         placeholder: "Paste an HTTP request, then mark the values to fuzz",
@@ -17419,7 +17422,7 @@ function renderFuzzer() {
         addCMUpdateListener(newCv.view, (newText) => {
           if (!workspaceLoaded || binaryMarkersBlocked || getCMView("fuzzerReq") !== newCv || sessionId !== currentSessionId()
             || generation !== workspaceStateGeneration) return;
-          updateFuzzerRequestText(newText, { userEdit: true });
+          updateFuzzerRequestText(fuzzerStoredText(newText), { userEdit: true });
           scheduleWorkspaceStateSave();
         });
         wireFuzzerMarkerSelection(newCv);
@@ -17856,6 +17859,9 @@ async function readFuzzerSavedRun(action) {
         throw new Error("A saved payload contains a line break and cannot be restored into the one-payload-per-line editor.");
       }
       const requestText = buildEditableRawRequest(record.template);
+      // A binary body must be Base64 around its positions: say so before asking.
+      const baseRequest = fuzzerBaseRequestFor(cloneEditableRequest(record.template));
+      if (record.template.http_version) baseRequest.http_version = record.template.http_version;
       const payloads = recovered?.payloads || record.results.map((result) => String(result.payload ?? ""));
       const originalCount = recovered?.originalCount
         ?? (Number.isSafeInteger(savedRecord.payload_count) && savedRecord.payload_count > 0 ? savedRecord.payload_count : null);
@@ -17872,11 +17878,9 @@ async function readFuzzerSavedRun(action) {
         "Replace the current request and payload draft with this retained run?\n\nThe request is reconstructed from its saved template; original raw formatting, source transaction and target override are unavailable. Any current source and target override will be cleared. A saved template HTTP version is kept when present; otherwise the draft uses HTTP/1.1. The original separate HTTP-version override cannot be recovered. Review the destination and HTTP version before starting. Reuse does not send requests." + partialNotice,
         () => {
           if (!ownsSelection()) return;
-          const template = cloneEditableRequest(record.template);
-          if (record.template.http_version) template.http_version = record.template.http_version;
           invalidateFuzzerRun();
           state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
-          state.fuzzerBaseRequest = template;
+          state.fuzzerBaseRequest = baseRequest;
           state.fuzzerRequestText = requestText;
           state.fuzzerPayloadsText = payloadsText;
           if (record.attack_type) state.fuzzerAttackType = record.attack_type;
@@ -18695,10 +18699,73 @@ async function saveTargetScope(options = {}) {
   return true;
 }
 
+function fuzzerBodyIsBinary() {
+  return state.fuzzerBaseRequest?.body_encoding === "base64";
+}
+
+/** The Fuzzer draft as its editor shows it: a binary body in bytes, as Replay
+ * shows one, its positions marked between them (see fuzzer-workflow.js). */
+function fuzzerShownText(text) {
+  const raw = String(text ?? "");
+  const boundary = fuzzerBodyIsBinary() ? /\r?\n\r?\n/.exec(raw) : null;
+  if (!boundary) return raw;
+  const start = boundary.index + boundary[0].length;
+  const shown = SniperFuzzerWorkflow.showBinaryBody(raw.slice(start));
+  return shown === null ? raw : raw.slice(0, start) + shown;
+}
+
+/** Whether the editor shows the draft's body in bytes: a binary body that is
+ * Base64 around its positions. Any other body shows as it is stored. */
+function fuzzerDraftShowsBytes() {
+  const draft = String(state.fuzzerRequestText ?? "");
+  const boundary = fuzzerBodyIsBinary() ? /\r?\n\r?\n/.exec(draft) : null;
+  return !!boundary && SniperFuzzerWorkflow.showBinaryBody(draft.slice(boundary.index + boundary[0].length)) !== null;
+}
+
+/** The inverse of `fuzzerShownText`: what the editor shows, as the draft. A
+ * body the editor shows as it is stored is edited as it is stored, so its
+ * Base64 text never turns into bytes. */
+function fuzzerStoredText(text) {
+  const raw = String(text ?? "");
+  const boundary = fuzzerBodyIsBinary() ? /\r?\n\r?\n/.exec(raw) : null;
+  if (!boundary || !fuzzerDraftShowsBytes()) return raw;
+  const start = boundary.index + boundary[0].length;
+  return raw.slice(0, start) + SniperFuzzerWorkflow.storeBinaryBody(raw.slice(start));
+}
+
+/** A template as the base request the workspace keeps, which must stay a
+ * request: a binary body with every position at its original. */
+function fuzzerBaseRequestFor(template) {
+  if (template?.body_encoding !== "base64" || !/\$payload\$|§[^§]*§/.test(template.body || "")) return template;
+  return { ...template, body: btoa(SniperFuzzerWorkflow.binaryBodyOriginals(template.body)) };
+}
+
+/** The draft as the position actions mark it, and the way back to the draft:
+ * a binary body in the bytes the editor shows, as typed when the editor holds
+ * this draft. The plain editor shows the draft as it is stored. */
+function fuzzerMarkerDraft(raw) {
+  const editor = getCMView("fuzzerReq");
+  const shown = editor?.getText ? editor.getText() : null;
+  const typed = fuzzerBodyIsBinary() && shown !== null ? shown : raw;
+  const text = typed === raw || fuzzerStoredText(typed) === raw ? typed : fuzzerShownText(raw);
+  return {
+    text,
+    stored: marked => (text === raw ? marked : fuzzerStoredText(marked)),
+    // The editor's own breaks place a position exactly, even where a lone CR and
+    // a lone LF side by side read as one CRLF in the text.
+    offset: position => (shown === text ? editor.textOffset(position) : fuzzerRawOffsetForEditorOffset(text, position)),
+  };
+}
+
 function fuzzerRequestTextForAction() {
   const editor = getCMView("fuzzerReq");
-  const visible = editor ? editor.getContent() : els.fuzzerRequestEditor?.value;
   const saved = String(state.fuzzerRequestText || "");
+  if (fuzzerBodyIsBinary() && editor?.getText) {
+    const shown = editor.getText();
+    // A body that will not show as bytes is shown as it is stored.
+    return shown === fuzzerShownText(saved) ? saved : fuzzerStoredText(shown);
+  }
+  const visible = editor ? editor.getContent() : els.fuzzerRequestEditor?.value;
   // CodeMirror normalizes line breaks. Preserve the untouched source bytes when
   // its displayed document still matches that source (notably multipart CRLF).
   if (visible == null || String(visible) === saved.replace(/\r\n?/g, "\n")) return saved;
@@ -18718,12 +18785,22 @@ function parseFuzzerRequestTemplate(text, fallback = state.fuzzerBaseRequest || 
   const boundary = /\r?\n\r?\n/.exec(raw);
   const { body } = splitRawHttpMessage(raw);
   const bodyEncoding = fallback?.body_encoding === "base64" ? "base64" : "utf8";
+  // A binary body keeps its positions between Base64 pieces. The shared parser
+  // checks it with every position at its original.
+  const binaryPositions = bodyEncoding === "base64" && /\$payload\$|§[^§]*§/.test(body);
+  let checkedBody = body;
   let bodyLength;
-  try {
-    bodyLength = editableRequestBodyLength(body, bodyEncoding);
-  } catch (error) {
-    if (bodyEncoding !== "base64") throw error;
-    throw new Error("Request body must be valid base64. Restore valid base64 in Request; use header or query positions instead of body markers.");
+  if (binaryPositions) {
+    const originals = SniperFuzzerWorkflow.binaryBodyOriginals(body);
+    checkedBody = btoa(originals);
+    bodyLength = originals.length;
+  } else {
+    try {
+      bodyLength = editableRequestBodyLength(body, bodyEncoding);
+    } catch (error) {
+      if (bodyEncoding !== "base64") throw error;
+      throw new Error("Request body must be valid Base64.");
+    }
   }
   const headEnd = boundary ? boundary.index : raw.length;
   // The engine always recalculates Content-Length after expansion. Normalize
@@ -18736,7 +18813,10 @@ function parseFuzzerRequestTemplate(text, fallback = state.fuzzerBaseRequest || 
     throw new Error("Invalid or conflicting Content-Length headers in the request template.");
   }
   const head = originalHead.replace(/^([ \t]*content-length[ \t]*:[ \t]*)[^\r\n]*/gmi, (_line, prefix) => `${prefix}${bodyLength}`);
-  return parseEditableRawRequest(head + raw.slice(headEnd), fallback);
+  const bodyStart = boundary ? boundary.index + boundary[0].length : raw.length;
+  const request = parseEditableRawRequest(head + raw.slice(headEnd, bodyStart) + checkedBody, fallback);
+  if (binaryPositions) request.body = body;
+  return request;
 }
 
 function fuzzerSetupNode(id) {
@@ -18887,12 +18967,6 @@ function renderFuzzerSetup() {
   renderFuzzerPayloadImportStatus();
   if (typeof SniperFuzzerWorkflow === "undefined" || !fuzzerSetupNode("fuzzerPreflightSummary")) return;
   const raw = fuzzerRequestTextForAction();
-  // Source encoding still applies when the edited body cannot be parsed.
-  const bodyEncodingHelp = workspaceLoaded && state.fuzzerBaseRequest?.body_encoding === "base64"
-    ? "Base64 body · header and query positions only" : "";
-  const requestHelp = fuzzerSetupNode("fuzzerRequestHelp");
-  if (requestHelp) requestHelp.textContent = bodyEncodingHelp
-    ? bodyEncodingHelp : "";
   const select = fuzzerSetupNode("fuzzerCandidateSelect");
   let candidates = [];
   let template = null;
@@ -18975,7 +19049,7 @@ function renderFuzzerSetup() {
     summary.textContent = raw.trim() ? `${fuzzerPayloadCount(state.fuzzerPayloadsText || "")} payloads` : "";
     notice.textContent = raw.trim() ? error : "";
     notice.classList?.toggle("fuzzer-notice-error", !!raw.trim() && !!error);
-    if (previewNotes) previewNotes.textContent = bodyEncodingHelp;
+    if (previewNotes) previewNotes.textContent = "";
     if (samples) samples.textContent = "Add a valid request and payloads to preview.";
     return;
   }
@@ -18996,7 +19070,8 @@ function renderFuzzerSetup() {
   if (previewNotes) previewNotes.textContent = (model.warnings || []).join(" ");
   if (samples) {
     samples.innerHTML = (model.samples || []).map((sample) => {
-      const text = buildEditableRawRequest(sample.request);
+      // A binary body shows in bytes, as in the editor.
+      const text = buildEditableRawRequest(sample.request, false, { bytes: true });
       const preview = text.slice(0, 16384);
       return `<details class="fuzzer-request-sample"><summary>Template-expanded sample ${sample.index + 1} · ${escapeHtml(sample.effectiveTarget || destination || "")}${text.length > preview.length ? " (display truncated)" : ""}</summary><pre>${escapeHtml(preview)}</pre></details>`;
     }).join("") || (model.samplesOmitted ? "Samples omitted because the expanded requests exceed the local preview budget." : "Samples appear after adding at least one payload and one marker.");
@@ -19047,32 +19122,37 @@ function markFuzzerPosition(start, end, expectedRaw = fuzzerRequestTextForAction
   const raw = fuzzerRequestTextForAction();
   if (raw !== expectedRaw) throw new Error("The request changed. Choose the value again.");
   const template = parseFuzzerRequestTemplate(raw);
-  const boundary = /\r?\n\r?\n/.exec(raw);
-  const bodyStart = boundary ? boundary.index + boundary[0].length : raw.length;
-  if (boundary && (end > bodyStart || start === bodyStart) && (template.body_encoding === "base64" || template.preview_truncated)) {
-    throw new Error("Body positions require a complete UTF-8 request body. Header and query positions remain available.");
+  // Offsets are in the text the editor shows, which shows a binary body in bytes.
+  const draft = fuzzerMarkerDraft(raw);
+  const boundary = /\r?\n\r?\n/.exec(draft.text);
+  const bodyStart = boundary ? boundary.index + boundary[0].length : draft.text.length;
+  if (boundary && (end > bodyStart || start === bodyStart) && template.preview_truncated) {
+    throw new Error("Body positions require the complete request body. Header and query positions remain available.");
   }
-  const next = SniperFuzzerWorkflow.markRequestSelection(raw, start, end);
+  const marked = SniperFuzzerWorkflow.markRequestSelection(draft.text, start, end);
+  const next = draft.stored(marked);
   parseFuzzerRequestTemplate(next);
   state._fuzzerMarkerUndo = { before: raw, after: next, sessionId: currentSessionId(), runToken: state.fuzzerRunToken };
   updateFuzzerRequestText(next, { userEdit: true });
+  getCMView("fuzzerReq")?.setContent?.(marked);
   scheduleWorkspaceStateSave();
   renderFuzzer();
   const editor = getCMView("fuzzerReq");
   if (editor?.view) {
-    const anchor = next.slice(0, start).replace(/\r\n?/g, "\n").length;
-    const marked = next.slice(start, end + 2).replace(/\r\n?/g, "\n").length;
-    editor.view.dispatch({ selection: { anchor: start === end ? anchor + 1 : anchor, head: start === end ? anchor + 1 : anchor + marked }, scrollIntoView: true });
+    const anchor = marked.slice(0, start).replace(/\r\n?/g, "\n").length;
+    const length = marked.slice(start, end + 2).replace(/\r\n?/g, "\n").length;
+    editor.view.dispatch({ selection: { anchor: start === end ? anchor + 1 : anchor, head: start === end ? anchor + 1 : anchor + length }, scrollIntoView: true });
     editor.view.focus();
   }
 }
 
 function markFuzzerEditorSelection() {
   const raw = fuzzerRequestTextForAction();
+  const draft = fuzzerMarkerDraft(raw);
   const editor = getCMView("fuzzerReq");
   const selection = editor?.view?.state?.selection?.main;
   if (selection) {
-    markFuzzerPosition(fuzzerRawOffsetForEditorOffset(raw, selection.from), fuzzerRawOffsetForEditorOffset(raw, selection.to), raw);
+    markFuzzerPosition(draft.offset(selection.from), draft.offset(selection.to), raw);
   } else {
     const input = els.fuzzerRequestEditor;
     if (!input) throw new Error("Place the caret or select a value in the request editor first.");
@@ -19080,15 +19160,17 @@ function markFuzzerEditorSelection() {
   }
 }
 
+/** The selected position removed, in the text the editor shows, and as the draft. */
 function fuzzerMarkerRemoval() {
-  const raw = fuzzerRequestTextForAction();
+  const draft = fuzzerMarkerDraft(fuzzerRequestTextForAction());
   const editor = getCMView("fuzzerReq");
   const selection = editor?.view?.state?.selection?.main;
   const input = els.fuzzerRequestEditor;
   if (!selection && !input) throw new Error("Select a marked position in the request editor first.");
-  const start = fuzzerRawOffsetForEditorOffset(raw, selection ? selection.from : input.selectionStart);
-  const end = fuzzerRawOffsetForEditorOffset(raw, selection ? selection.to : input.selectionEnd);
-  return SniperFuzzerWorkflow.removeRequestSelection(raw, start, end);
+  const start = selection ? draft.offset(selection.from) : fuzzerRawOffsetForEditorOffset(draft.text, input.selectionStart);
+  const end = selection ? draft.offset(selection.to) : fuzzerRawOffsetForEditorOffset(draft.text, input.selectionEnd);
+  const removed = SniperFuzzerWorkflow.removeRequestSelection(draft.text, start, end);
+  return { ...removed, draft: draft.stored(removed.text) };
 }
 
 function wireFuzzerMarkerSelection(editor) {
@@ -19115,8 +19197,9 @@ function removeFuzzerEditorPosition() {
   if (state.fuzzerRunning || state.fuzzerRunningAttackId) throw new Error("Wait for the current run to finish before changing positions.");
   const raw = fuzzerRequestTextForAction();
   const result = fuzzerMarkerRemoval();
-  state._fuzzerMarkerUndo = { before: raw, after: result.text, sessionId: currentSessionId(), runToken: state.fuzzerRunToken };
-  updateFuzzerRequestText(result.text, { userEdit: true });
+  state._fuzzerMarkerUndo = { before: raw, after: result.draft, sessionId: currentSessionId(), runToken: state.fuzzerRunToken };
+  updateFuzzerRequestText(result.draft, { userEdit: true });
+  getCMView("fuzzerReq")?.setContent?.(result.text);
   scheduleWorkspaceStateSave();
   renderFuzzer();
   const anchor = result.text.slice(0, result.from).replace(/\r\n?/g, "\n").length;
@@ -19136,10 +19219,13 @@ function clearFuzzerMarkers() {
   if (!workspaceLoaded) return false;
   if (state.fuzzerRunning || state.fuzzerRunningAttackId) throw new Error("Wait for the current run to finish before changing positions.");
   const raw = fuzzerRequestTextForAction();
-  const next = SniperFuzzerWorkflow.clearRequestPositions(raw);
+  const draft = fuzzerMarkerDraft(raw);
+  const cleared = SniperFuzzerWorkflow.clearRequestPositions(draft.text);
+  const next = draft.stored(cleared);
   if (next === raw) return;
   state._fuzzerMarkerUndo = { before: raw, after: next, sessionId: currentSessionId(), runToken: state.fuzzerRunToken };
   updateFuzzerRequestText(next, { userEdit: true });
+  getCMView("fuzzerReq")?.setContent?.(cleared);
   scheduleWorkspaceStateSave();
   renderFuzzer();
   getCMView("fuzzerReq")?.view?.focus();
@@ -19946,7 +20032,7 @@ async function runFuzzerAttack() {
       scheduleRefresh();
       return;
     }
-    state.fuzzerBaseRequest = template;
+    state.fuzzerBaseRequest = fuzzerBaseRequestFor(template);
     state.fuzzerTarget = target;
     state.fuzzerTargetRequestText = target ? fuzzerTargetAuthorityFromRequestText(fuzzerReqText) : null;
     state.fuzzerRequestText = fuzzerReqText;
@@ -34277,6 +34363,7 @@ const sniperCMTheme = CM.EditorView.theme({
   ".tok-diff-header":  { color: "var(--point, #7d91ab)", fontWeight: "600" },
   /* ── Payload placeholder ── */
   ".tok-payload":      { color: "#f8d06b", background: "rgba(248, 208, 107, 0.18)", borderRadius: "3px", padding: "0 2px", fontWeight: "600" },
+  ".tok-byte-a7":      { color: "var(--token-plain-color, #cdd2da)", opacity: "0.55" },
   /* ── Search highlight ── */
   ".tok-search-hit":   { background: "rgba(132, 151, 173, 0.42)", borderRadius: "4px", padding: "0 1px", boxShadow: "inset 0 0 0 1px rgba(170, 190, 214, 0.72)" },
   ".tok-search-active": { background: "rgba(201, 169, 110, 0.62)", borderRadius: "4px", padding: "0 1px", boxShadow: "inset 0 0 0 1px rgba(232, 201, 141, 0.9)" },
@@ -34505,6 +34592,24 @@ const diffDecoPlugin = CM.ViewPlugin.fromClass(
 );
 
 // ─── Payload marker decoration plugin ($payload$) ────────
+// A byte of a binary body that could be read as a mark is drawn as the `§`
+// or `$` it is, apart from the marks.
+class FuzzerByteWidget extends CM.WidgetType {
+  constructor(byte) { super(); this.byte = byte; }
+  eq(other) { return other.byte === this.byte; }
+  toDOM() {
+    const byte = document.createElement("span");
+    byte.className = "tok-byte-a7";
+    byte.textContent = this.byte;
+    byte.title = `Byte ${this.byte.charCodeAt(0).toString(16).toUpperCase()} (${this.byte}), not a position`;
+    return byte;
+  }
+}
+const fuzzerByteDecorations = new Map([
+  [SniperFuzzerWorkflow.BYTE_A7, CM.Decoration.replace({ widget: new FuzzerByteWidget("\xa7") })],
+  [SniperFuzzerWorkflow.BYTE_24, CM.Decoration.replace({ widget: new FuzzerByteWidget("$") })],
+]);
+
 function buildPayloadDecorations(view) {
   const doc = view.state.doc;
   const text = doc.toString();
@@ -34515,7 +34620,12 @@ function buildPayloadDecorations(view) {
   while ((m = re.exec(text)) !== null) {
     builder.push(CM.Decoration.mark({ class: "tok-payload" }).range(m.index, m.index + m[0].length));
   }
-  return builder.length ? CM.Decoration.set(builder) : CM.Decoration.none;
+  for (const [stand, decoration] of fuzzerByteDecorations) {
+    for (let at = text.indexOf(stand); at !== -1; at = text.indexOf(stand, at + 1)) {
+      builder.push(decoration.range(at, at + 1));
+    }
+  }
+  return builder.length ? CM.Decoration.set(builder, true) : CM.Decoration.none;
 }
 
 const payloadDecoPlugin = CM.ViewPlugin.fromClass(
@@ -35030,6 +35140,21 @@ function createLineEndingTracker() {
     }
     return CM.Decoration.set(found);
   };
+  /** Each line break's ending, in document order. */
+  const endings = state => {
+    const marks = state.field(field, false);
+    const found = new Array(state.doc.lines - 1).fill("\n");
+    if (!marks || marks.size === 0) return found;
+    const kept = new Map();
+    let next = "\n";
+    marks.between(0, state.doc.length, (from, to, mark) => {
+      if (to === from + 1) kept.set(from, next = mark.spec.ending);
+    });
+    for (let number = state.doc.lines - 1; number >= 1; number--) {
+      found[number - 1] = next = kept.get(state.doc.line(number).to) ?? next;
+    }
+    return found;
+  };
   return {
     field,
     marks,
@@ -35044,18 +35169,18 @@ function createLineEndingTracker() {
     text(state) {
       const marks = state.field(field, false);
       if (!marks || marks.size === 0) return state.doc.toString();
-      const kept = new Map();
-      let next = "\n";
-      marks.between(0, state.doc.length, (from, to, mark) => {
-        if (to === from + 1) kept.set(from, next = mark.spec.ending);
-      });
+      const ending = endings(state);
       const parts = [];
-      for (let number = state.doc.lines; number >= 1; number--) {
-        const line = state.doc.line(number);
-        if (number < state.doc.lines) parts.push(next = kept.get(line.to) ?? next);
-        parts.push(line.text);
+      for (let number = 1; number <= state.doc.lines; number++) {
+        parts.push(state.doc.line(number).text);
+        if (number < state.doc.lines) parts.push(ending[number - 1]);
       }
-      return parts.reverse().join("");
+      return parts.join("");
+    },
+    /** Where document position `position` falls in `text(state)`. */
+    offset(state, position) {
+      const before = state.doc.lineAt(position).number - 1;
+      return endings(state).slice(0, before).reduce((at, ending) => at + ending.length - 1, position);
     },
   };
 }
@@ -35268,6 +35393,11 @@ class SniperCodeView {
   /** The text with each line break as it came in: CRLF, CR or LF. */
   getText() {
     return lineEndings.text(this.view.state);
+  }
+
+  /** Where a document position falls in `getText()`. */
+  textOffset(position) {
+    return lineEndings.offset(this.view.state, position);
   }
 
   destroy() {

@@ -38,12 +38,57 @@ const MAX_FUZZER_STOP_MATCH_BYTES: usize = 1024;
 static MARKER_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$payload\$|§([^§]*)§").expect("valid marker regex"));
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+
 use crate::{
     event_log::EventLevel,
-    model::{EditableRequest, MessageRecord, RequestTargetOverride},
+    model::{BodyEncoding, EditableRequest, MessageRecord, RequestTargetOverride},
     proxy,
     state::AppState,
 };
+
+/// Part of a body that is not text: its bytes, or a position's original.
+enum BodyPart {
+    Bytes(Vec<u8>),
+    Position(Vec<u8>),
+}
+
+/// A body that is not text keeps its positions between Base64 pieces, each
+/// piece and each original Base64 by itself. `§` and `$` are not Base64, so no
+/// byte of the body pairs up into a position, as byte A7 (`§`) does in Burp.
+fn base64_body_parts(body: &str) -> Result<Vec<BodyPart>> {
+    let decode = |piece: &str| {
+        STANDARD
+            .decode(piece)
+            .map_err(|_| anyhow!("The request body is not valid Base64 around its positions."))
+    };
+    let mut parts = Vec::new();
+    let mut cursor = 0;
+    for captures in MARKER_REGEX.captures_iter(body) {
+        let found = captures.get(0).expect("the whole match");
+        parts.push(BodyPart::Bytes(decode(&body[cursor..found.start()])?));
+        let original = captures.get(1).map_or("", |original| original.as_str());
+        parts.push(BodyPart::Position(decode(original)?));
+        cursor = found.end();
+    }
+    parts.push(BodyPart::Bytes(decode(&body[cursor..])?));
+    Ok(parts)
+}
+
+/// A Base64 body's bytes with every position at its original, which is what
+/// the CLI checks a template's framing against.
+pub fn base64_body_originals(body: &str) -> Result<Vec<u8>> {
+    Ok(base64_body_parts(body)?
+        .into_iter()
+        .flat_map(|part| match part {
+            BodyPart::Bytes(bytes) | BodyPart::Position(bytes) => bytes,
+        })
+        .collect())
+}
+
+fn has_base64_body_positions(request: &EditableRequest) -> bool {
+    request.body_encoding == BodyEncoding::Base64 && MARKER_REGEX.is_match(&request.body)
+}
 
 /// How payloads fill the positions, as Burp Intruder and Caido Automate name it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -513,6 +558,10 @@ pub(crate) fn plan_attack(
         ));
     }
     validate_marker_count(positions)?;
+    // No payload makes such a body decode, so nothing is sent.
+    if has_base64_body_positions(template) {
+        base64_body_parts(&template.body)?;
+    }
     let payloads = normalize_payloads(payloads);
     if payloads.is_empty() {
         return Err(anyhow!("Fuzzer needs at least one payload"));
@@ -946,7 +995,15 @@ impl RequestExpansionBudget {
             field(&header.name, 1);
             field(&header.value, 1);
         }
-        field(&template.body, 1);
+        // Base64 sends 4 bytes for every 3 a payload puts in the body.
+        field(
+            &template.body,
+            if template.body_encoding == BodyEncoding::Base64 {
+                2
+            } else {
+                1
+            },
+        );
         if literal_host {
             budget.unmarked = budget.unmarked.saturating_add(template.host.len());
         }
@@ -1043,7 +1100,27 @@ pub(crate) fn build_request(
         header.name = fill(&header.name, false);
         header.value = fill(&header.value, false);
     }
-    request.body = fill(&request.body, false);
+    request.body = if has_base64_body_positions(template) {
+        // The payload goes into the bytes, and the whole body back to Base64.
+        let mut bytes = Vec::new();
+        for part in base64_body_parts(&template.body)? {
+            match part {
+                BodyPart::Bytes(piece) => bytes.extend(piece),
+                BodyPart::Position(original) => {
+                    let here = next;
+                    next += 1;
+                    if position.is_none_or(|position| position == here) {
+                        bytes.extend_from_slice(payload.as_bytes());
+                    } else {
+                        bytes.extend(original);
+                    }
+                }
+            }
+        }
+        STANDARD.encode(bytes)
+    } else {
+        fill(&request.body, false)
+    };
     if let Some(host) = request
         .headers
         .iter()
@@ -1246,6 +1323,91 @@ mod tests {
             build_request(&template, "é", None, true).unwrap().path,
             "/p?q=%C3%A9&n=1"
         );
+    }
+
+    fn binary_template(body: String) -> EditableRequest {
+        let mut template = query_template("/upload");
+        template.method = "POST".to_string();
+        template.body = body;
+        template.body_encoding = BodyEncoding::Base64;
+        template.headers.push(HeaderRecord {
+            name: "Content-Length".to_string(),
+            value: "1".to_string(),
+        });
+        template
+    }
+
+    #[test]
+    fn a_binary_body_takes_the_payload_in_its_bytes_and_keeps_every_other_byte() {
+        // Byte A7 is `§`: around and inside a position it stays a byte.
+        let before: &[u8] = &[0x89, 0xA7, 0x00, 0x0D, 0x0A];
+        let original: &[u8] = &[0xA7, 0xFF];
+        let after: &[u8] = &[0xA7, 0x01];
+        let template = binary_template(format!(
+            "{}§{}§{}$payload$",
+            STANDARD.encode(before),
+            STANDARD.encode(original),
+            STANDARD.encode(after),
+        ));
+        assert_eq!(count_request_markers(&template), 2);
+
+        let first = build_request(&template, "é", Some(0), false).unwrap();
+        assert_eq!(
+            first.body_bytes(),
+            [before, "é".as_bytes(), after].concat(),
+            "a payload goes in as its UTF-8 bytes"
+        );
+        let second = build_request(&template, "x", Some(1), false).unwrap();
+        assert_eq!(
+            second.body_bytes(),
+            [before, original, after, b"x"].concat()
+        );
+        let every = build_request(&template, "x", None, false).unwrap();
+        assert_eq!(every.body_bytes(), [before, b"x", after, b"x"].concat());
+        assert_eq!(
+            every.headers.last().unwrap().value,
+            (before.len() + 1 + after.len() + 1).to_string()
+        );
+    }
+
+    #[test]
+    fn a_binary_body_that_is_not_base64_around_its_positions_is_refused_before_sending() {
+        let options = FuzzerAttackOptions {
+            attack_type: FuzzerAttackType::Sniper,
+            url_encode: true,
+            concurrency: 1,
+            delay: None,
+            stop_match: None,
+        };
+        for body in ["QUJD§not base64§", "QUJ§QQ==§", "QUJD§QQ==§x"] {
+            let error = plan_attack(
+                &binary_template(body.to_string()),
+                vec!["x".into()],
+                &options,
+            )
+            .err()
+            .unwrap_or_else(|| panic!("{body} was accepted"))
+            .to_string();
+            assert!(error.contains("Base64"), "{body}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_binary_body_position_counts_the_payload_as_base64() {
+        let template = binary_template("§§".to_string());
+        let budget = RequestExpansionBudget::new(&template, false);
+        let payload = "x".repeat(300);
+        let sent = build_request(&template, &payload, Some(0), false).unwrap();
+        assert!(budget.size(payload.len(), Some(0)) >= rendered_request_size(&sent));
+    }
+
+    #[test]
+    fn the_cli_reads_a_binary_body_with_every_position_at_its_original() {
+        assert_eq!(
+            base64_body_originals("QUJD§RA==§$payload$RQ==").unwrap(),
+            b"ABCDE"
+        );
+        assert!(base64_body_originals("QUJD§RA=§").is_err());
     }
 
     #[test]

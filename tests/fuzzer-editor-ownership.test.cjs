@@ -19,7 +19,7 @@ function fixture() {
     wireFuzzerMarkerSelection() {}, scheduleFuzzerSetupRender() {},
     scheduleWorkspaceStateSave() { f.saves++; },
   });
-  for (const name of ['renderFuzzer', 'updateFuzzerRequestText', 'markFuzzerDraftChanged']) {
+  for (const name of ['renderFuzzer', 'updateFuzzerRequestText', 'markFuzzerDraftChanged', 'fuzzerBodyIsBinary', 'fuzzerShownText', 'fuzzerStoredText', 'fuzzerDraftShowsBytes']) {
     vm.runInContext(source(name), f.context);
   }
   f.cv = () => f.context.getCMView('fuzzerReq');

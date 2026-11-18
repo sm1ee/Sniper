@@ -27,6 +27,13 @@ function loadFunctions(names, globals = {}) {
       "rawRequestWithBinaryBody", "rawRequestWithBase64Body", "binaryBodyText", "binaryBodyBase64"])];
   }
   if (names.includes("parseCurlCommand")) names = [...new Set([...names, "parseCurlFormField"])];
+  // The Fuzzer editor shows a binary body as bytes and keeps the draft in Base64.
+  const fuzzerBodyCallers = ["renderFuzzer", "fuzzerRequestTextForAction", "markFuzzerPosition", "markFuzzerEditorSelection",
+    "fuzzerMarkerRemoval", "removeFuzzerEditorPosition", "clearFuzzerMarkers", "runFuzzerAttack", "readFuzzerSavedRun"];
+  if (names.some(name => fuzzerBodyCallers.includes(name))) {
+    names = [...new Set([...names, "fuzzerBodyIsBinary", "fuzzerShownText", "fuzzerStoredText", "fuzzerDraftShowsBytes",
+      "fuzzerMarkerDraft", "fuzzerBaseRequestFor"])];
+  }
   // Intercept shows a held binary body as bytes through the raw build and parse.
   const rawBodyCallers = ["buildEditableRawRequest", "parseEditableRawRequest", "buildEditableRawResponse", "parseEditableRawResponse"];
   if (names.some(name => rawBodyCallers.includes(name))) {

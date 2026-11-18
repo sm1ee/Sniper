@@ -231,12 +231,57 @@ test("base64 Content-Length uses decoded length only for canonical Rust STANDARD
     const expanded = workflow.expandTemplate(request({ body, body_encoding: "base64", headers: [{ name: "content-length", value: "99" }] }), "x");
     assert.deepEqual(expanded.headers, [{ name: "Content-Length", value: length }]);
   }
-  for (const body of ["YQ", "YR==", "YWJ=", "YQ==\n", "====", "A===", "-w==", "$payload$"]) {
+  for (const body of ["YQ", "YR==", "YWJ=", "YQ==\n", "====", "A===", "-w=="]) {
     const expanded = workflow.expandTemplate(request({ body, body_encoding: "base64", headers: [{ name: "content-length", value: "99" }] }), "!");
     assert.deepEqual(expanded.headers, [{ name: "content-length", value: "99" }], body);
   }
+  // A payload in a Base64 body is its own bytes, not more Base64.
   const expanded = workflow.expandTemplate(request({ body: "$payload$", body_encoding: "base64", headers: [{ name: "Content-Length", value: "99" }] }), "YQ==");
-  assert.equal(expanded.headers[0].value, "1");
+  assert.equal(expanded.headers[0].value, "4");
+});
+
+const bytes = (...codes) => String.fromCharCode(...codes);
+
+test("a binary body keeps its positions between Base64 pieces and shows byte A7 apart from them", () => {
+  const stored = `${btoa(bytes(0x89, 0xa7, 0x0d, 0x0a))}§${btoa(bytes(0xa7, 0xff))}§${btoa("x")}$payload$`;
+  const shown = workflow.showBinaryBody(stored);
+  assert.equal(shown, `${bytes(0x89)}${workflow.BYTE_A7}\r\n§${workflow.BYTE_A7}${bytes(0xff)}§x$payload$`);
+  assert.equal(workflow.storeBinaryBody(shown), stored);
+  // No positions: plain Base64, as a binary draft has always been.
+  assert.equal(workflow.storeBinaryBody(bytes(0x00, 0x0d)), btoa(bytes(0x00, 0x0d)));
+  // A typed pair of § is a position, a lone § is byte A7, and a character
+  // above U+00FF can only have been typed: it goes as UTF-8.
+  assert.equal(workflow.storeBinaryBody("a§b§c§한"), `${btoa("a")}§${btoa("b")}§${btoa("c\xa7\xed\x95\x9c")}`);
+  assert.equal(workflow.showBinaryBody("QUJ§QQ==§"), null);
+});
+
+test("a payload goes into a binary body as its UTF-8 bytes, as src/fuzzer.rs does", () => {
+  const template = request({
+    method: "POST", path: "/upload", body_encoding: "base64",
+    body: `${btoa(bytes(0x89, 0xa7))}§${btoa(bytes(0xa7, 0xff))}§$payload$`,
+    headers: [{ name: "Host", value: "example.com" }, { name: "Content-Length", value: "1" }],
+  });
+  const first = workflow.expandTemplate(template, "é", { position: 0 });
+  assert.equal(atob(first.body), bytes(0x89, 0xa7, 0xc3, 0xa9));
+  assert.equal(first.headers.at(-1).value, "4");
+  assert.equal(atob(workflow.expandTemplate(template, "x", { position: 1 }).body), bytes(0x89, 0xa7, 0xa7, 0xff) + "x");
+  assert.equal(atob(workflow.expandTemplate(template, "x").body), bytes(0x89, 0xa7) + "xx");
+});
+
+test("preflight takes binary body positions and refuses a body that is not Base64 around them", () => {
+  const checked = workflow.preflight(request({ path: "/", body: `${btoa("ab")}§${btoa("c")}§`, body_encoding: "base64" }), ["x"]);
+  assert.equal(checked.valid, true);
+  assert.equal(checked.markerCount, 1);
+  assert.doesNotMatch(checked.warnings.join(" "), /header or query positions/);
+  assert.equal(atob(checked.samples[0].request.body), "abx");
+  const refused = workflow.preflight(request({ path: "/", body: "QUJ§QQ==§", body_encoding: "base64" }), ["x"]);
+  assert.equal(refused.valid, false);
+  assert.match(refused.errors.join(" "), /not valid Base64 around its positions/);
+  // Base64 sends 4 bytes for every 3, which the size estimate counts.
+  const large = workflow.preflight(request({ path: "/", body: "§§", body_encoding: "base64" }), ["x".repeat(300)]);
+  const sent = large.samples[0].request;
+  const fields = [sent.scheme, sent.host, sent.method, sent.path, sent.body, ...sent.headers.flatMap(h => [h.name, h.value])].join("").length;
+  assert.ok(large.maxExpandedRequestBytes >= fields, `${large.maxExpandedRequestBytes} < ${fields}`);
 });
 
 test("preflight reports one planned request per payload, repeated markers, exact counts and normalized samples", () => {
@@ -337,12 +382,11 @@ test("preflight samples are bounded and never silently truncate generated reques
   assert.equal(oversizedSample.samplesOmitted, 1);
 });
 
-test("truncated request bodies fail setup while a base64 source warns and keeps literal expansion semantics", () => {
+test("truncated request bodies fail setup while a base64 body without positions is sent as it is", () => {
   assert.equal(workflow.preflight(request({ preview_truncated: true }), ["x"]).valid, false);
   const checked = workflow.preflight(request({ body: "YQ==", body_encoding: "base64" }), ["x"]);
   assert.equal(checked.valid, true);
-  assert.match(checked.warnings.join(" "), /encoded text/);
-  assert.match(checked.warnings.join(" "), /header or query positions instead of body markers/);
+  assert.doesNotMatch(checked.warnings.join(" "), /encoded text/);
   assert.equal(checked.samples[0].request.body, "YQ==");
 });
 

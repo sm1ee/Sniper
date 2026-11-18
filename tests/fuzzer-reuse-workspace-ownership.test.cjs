@@ -35,7 +35,7 @@ function fixture({ shown = true } = {}) {
   });
   for (const name of ['fuzzerResultsWorkflowState', 'fuzzerSavedReadOwner', 'readFuzzerSavedRun',
     'reusableSniperPayloads', 'normalizeFuzzerAttackRecord', 'jsonArray', 'invalidateFuzzerRun',
-    'setFuzzerAttackRecord', 'clearFuzzerAttackRecord', 'followRestoredFuzzerAttack']) {
+    'setFuzzerAttackRecord', 'clearFuzzerAttackRecord', 'followRestoredFuzzerAttack', 'fuzzerBaseRequestFor']) {
     const source = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, 'm'));
     assert.ok(source, name); vm.runInContext(source[0], c);
   }
@@ -193,4 +193,19 @@ test('a stale workflow matching the supplied session is not the active session o
   f.state.activeSession.id = 'session-b'; f.workflow.readBusy = true; f.workflow.readGeneration = 8;
   f.c.applyFuzzerWorkspace(fields, 'session-a', { keepShownRun: true });
   assert.equal(f.workflow.readGeneration, 8); assert.equal(f.workflow.readBusy, true);
+});
+
+test('a saved run whose binary body is not Base64 around its positions is refused before Reuse asks', async () => {
+  const f = fixture(), job = f.begin(), before = f.state.fuzzerRequestText;
+  Object.assign(f.c, { SniperFuzzerWorkflow: require('../web/fuzzer-workflow.js'),
+    btoa: value => Buffer.from(value, 'binary').toString('base64') });
+  job.request.resolve({ ok: true, status: 200, json: async () => ({
+    id: job.id, attack_type: 'battering_ram', payload_count: 1, marker_count: 1,
+    results: [{ index: 0, payload: 'saved payload' }],
+    template: { scheme: 'https', host: 'example.com', method: 'POST', path: '/saved', headers: [], body: 'AA$payload$', body_encoding: 'base64' },
+  }) });
+  await job.pending;
+  assert.equal(f.confirmations.length, 0);
+  assert.match(f.workflow.notice, /not valid Base64 around its positions/);
+  assert.equal(f.state.fuzzerRequestText, before);
 });

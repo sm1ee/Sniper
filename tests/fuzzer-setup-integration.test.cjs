@@ -15,7 +15,7 @@ function fixture() {
   const target = { scheme: 'https', host: '127.0.0.1', port: '8443' };
   const pending = deferred(), requests = [];
   let editor = null, renders = 0, saves = 0;
-  const c = loadFunctions(names, { workspaceLoaded: true, state, els, TextEncoder, TextDecoder, URL, atob, SniperFuzzerWorkflow: workflow,
+  const c = loadFunctions(names, { workspaceLoaded: true, state, els, TextEncoder, TextDecoder, URL, atob, btoa, SniperFuzzerWorkflow: workflow,
     document: { getElementById: () => null }, getCMView: () => editor,
     currentSessionId: () => state.activeSession?.id || null,
     renderFuzzer() { renders++; els.fuzzerPayloadsEditor.value = state.fuzzerPayloadsText; },
@@ -82,12 +82,18 @@ test('stale candidate and undo cannot overwrite newer editor content', () => {
   f.state.fuzzerRequestText += '\n';
   assert.throws(() => f.c.undoFuzzerMarker(), /changed/);
 });
-for (const kind of ['base64', 'truncated']) test(`${kind} source body is not offered for marking`, () => {
+test('truncated source body is not offered for marking', () => {
   const f = fixture();
-  if (kind === 'base64') { f.state.fuzzerBaseRequest.body_encoding = 'base64'; f.state.fuzzerBaseRequest.body = 'YQ=='; f.state.fuzzerRequestText = raw.replace('a=1', 'YQ=='); }
-  else f.state.fuzzerBaseRequest.preview_truncated = true;
+  f.state.fuzzerBaseRequest.preview_truncated = true;
   const text = f.state.fuzzerRequestText;
-  assert.throws(() => f.c.markFuzzerPosition(text.length - 1, text.length, text), /complete UTF-8/);
+  assert.throws(() => f.c.markFuzzerPosition(text.length - 1, text.length, text), /complete request body/);
+  assert.equal(f.state.fuzzerRequestText, text);
+});
+test('without the CodeMirror editor a binary body stays Base64, and a mark inside it is refused', () => {
+  const f = fixture();
+  f.state.fuzzerBaseRequest.body_encoding = 'base64'; f.state.fuzzerBaseRequest.body = 'YQ==';
+  const text = f.state.fuzzerRequestText = raw.replace('a=1', 'YQ==');
+  assert.throws(() => f.c.markFuzzerPosition(text.length - 1, text.length, text), /not valid Base64 around its positions/);
   assert.equal(f.state.fuzzerRequestText, text);
 });
 test('append and replace preserve empty, whitespace, literal-dollar and trailing-empty payloads', () => {
@@ -165,6 +171,17 @@ test('unchanged run posts exactly one captured request with original protocol, s
   assert.equal(f.state.fuzzerRunning, false);
 });
 
+test('a finished binary run keeps a base request whose body is still Base64', async () => {
+  const f = fixture(), btoa = value => Buffer.from(value, 'binary').toString('base64');
+  const marked = raw.replace('a=1', `${btoa('a=')}§${btoa('1')}§`);
+  Object.assign(f.state.fuzzerBaseRequest, { body: btoa('a=1'), body_encoding: 'base64' });
+  f.state.fuzzerRequestText = marked;
+  const job = f.c.runFuzzerAttack(); f.pending.resolve(7); await job;
+  assert.equal(f.requests[0].body.template.body, marked.slice(marked.indexOf('\r\n\r\n') + 4));
+  assert.equal(f.state.fuzzerBaseRequest.body, btoa('a=1'));
+  assert.equal(f.state.fuzzerRequestText, marked);
+});
+
 test('a started attack is followed to its end with the chosen options, then shown as before', async () => {
   const f = fixture(); f.state.fuzzerRequestText = raw.replace('one', '§one§');
   const reads = [];
@@ -226,29 +243,24 @@ function setupNodes(f) {
   return nodes;
 }
 
-for (const body of ['$payload$', '§YQ==§', 'not base64!']) test(`base64 body guidance explains invalid ${JSON.stringify(body)} without modifying the draft`, () => {
+for (const [body, message] of [['$payload$', null], ['§YQ==§', null], ['not base64!', 'Request body must be valid Base64.'],
+  ['QUJ§YQ==§', 'The request body is not valid Base64 around its positions.']]) test(`a base64 draft body ${JSON.stringify(body)} ${message ? 'is refused without modifying the draft' : 'holds a position'}`, () => {
   const f = fixture(), nodes = setupNodes(f);
   f.state.fuzzerBaseRequest.body_encoding = 'base64';
   f.state.fuzzerBaseRequest.body = 'YQ==';
   f.state.fuzzerRequestText = raw.replace('one', '§one§').replace('a=1', body);
   const before = f.state.fuzzerRequestText;
-  const message = 'Request body must be valid base64. Restore valid base64 in Request; use header or query positions instead of body markers.';
-  assert.throws(() => f.c.parseFuzzerRequestTemplate(before), { message });
+  if (message) assert.throws(() => f.c.parseFuzzerRequestTemplate(before), { message });
+  else assert.equal(f.c.parseFuzzerRequestTemplate(before).body, body);
   f.c.renderFuzzerSetup();
-  assert.equal(nodes.startFuzzerButton.disabled, true);
-  assert.equal(nodes.fuzzerPreflightNotice.textContent, message);
-  assert.equal(nodes.fuzzerRequestHelp.textContent, 'Base64 body · header and query positions only');
-  assert.match(nodes.fuzzerPreviewNotes.textContent, /Base64 body/);
+  assert.equal(nodes.startFuzzerButton.disabled, !!message);
+  assert.equal(nodes.fuzzerPreflightNotice.textContent, message || '');
+  assert.doesNotMatch(nodes.fuzzerPreviewNotes.textContent, /Base64 body|header or query positions/);
   assert.equal(f.state.fuzzerRequestText, before);
   assert.equal(f.state.fuzzerPayloadsText, 'x');
   assert.equal(f.state.fuzzerBaseRequest.body, 'YQ==');
   assert.equal(f.saves, 0);
   assert.equal(f.requests.length, 0);
-  f.state.fuzzerRequestText = raw.replace('one', '§one§').replace('a=1', 'YQ==');
-  f.c.renderFuzzerSetup();
-  assert.equal(nodes.startFuzzerButton.disabled, false);
-  assert.equal(nodes.fuzzerPreflightNotice.textContent, '');
-  assert.equal(nodes.fuzzerRequestHelp.textContent, 'Base64 body · header and query positions only');
 });
 
 test('base64 guidance does not tighten decoding or replace unrelated parser errors', () => {
@@ -284,13 +296,8 @@ for (const position of ['query', 'header']) test(`base64 request ${position} pos
   f.c.renderFuzzerSetup();
   assert.equal(nodes.startFuzzerButton.disabled, false);
   assert.equal(nodes.fuzzerPreflightNotice.textContent, '');
-  assert.equal(nodes.fuzzerRequestHelp.textContent, 'Base64 body · header and query positions only');
-  assert.match(nodes.fuzzerPreviewNotes.textContent, /header or query positions instead of body markers/);
+  assert.doesNotMatch(nodes.fuzzerPreviewNotes.textContent, /header or query positions/);
   assert.equal(f.state.fuzzerRequestText, marked);
-  f.state.fuzzerBaseRequest.body_encoding = 'utf8';
-  f.c.renderFuzzerSetup();
-  assert.equal(nodes.fuzzerRequestHelp.textContent, '');
-  assert.doesNotMatch(nodes.fuzzerPreviewNotes.textContent, /base64/);
 });
 
 for (const [prefix, line] of [['', 1], ['small\n', 2], ['\r\n', 2], [' \r\n\r\n', 3]]) test(`oversized Payloads line ${line} with prefix ${JSON.stringify(prefix)} disables Start without rewriting input`, () => {
@@ -422,7 +429,7 @@ test('Clear is disabled during a run and Add rejects a caret at an opaque body s
   assert.throws(() => f.c.clearFuzzerMarkers(), /Wait/);
   f.state.fuzzerRunning = false; f.state.fuzzerBaseRequest.preview_truncated = true;
   const at = f.state.fuzzerRequestText.indexOf('a=1');
-  assert.throws(() => f.c.markFuzzerPosition(at, at), /complete UTF-8/);
+  assert.throws(() => f.c.markFuzzerPosition(at, at), /complete request body/);
 });
 
 

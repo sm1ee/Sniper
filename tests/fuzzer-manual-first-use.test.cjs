@@ -42,7 +42,8 @@ function fixture() {
     'fuzzerAuthorityFromSavedValue','activeFuzzerTargetForRequest','fuzzerTargetAuthorityFromRequestText',
     'fuzzerTargetAuthorityFromEditableRequest','initFuzzerSetupControls','fuzzerSetupError',
     'markFuzzerEditorSelection','markFuzzerPosition','fuzzerRawOffsetForEditorOffset',
-    'removeFuzzerEditorPosition','undoFuzzerMarker','clearFuzzerMarkers']) {
+    'removeFuzzerEditorPosition','undoFuzzerMarker','clearFuzzerMarkers',
+    'fuzzerBodyIsBinary','fuzzerShownText','fuzzerStoredText','fuzzerDraftShowsBytes','fuzzerMarkerDraft']) {
     vm.runInContext(source(name),c);
   }
   c.initFuzzerSetupControls();

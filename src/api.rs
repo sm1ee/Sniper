@@ -22863,7 +22863,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fuzzer_run_accepts_base64_template_that_is_valid_after_expansion() {
+    async fn fuzzer_run_puts_the_payload_bytes_into_a_base64_body() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-fuzzer-expanded-base64-template-{}",
             uuid::Uuid::new_v4()
@@ -22880,18 +22880,18 @@ mod tests {
         let session = state.session().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let (sent, received) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut buffer = [0u8; 1024];
-            let _ = stream.read(&mut buffer).await.unwrap();
+            let read = stream.read(&mut buffer).await.unwrap();
+            let _ = sent.send(buffer[..read].to_vec());
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
                 .await
                 .unwrap();
         });
-
-        let response = super::run_fuzzer_attack(
-            State(state.clone()),
+        let attack = |body: &str| {
             Json(crate::fuzzer::FuzzerAttackPayload {
                 attack_type: Default::default(),
                 url_encode: false,
@@ -22905,7 +22905,7 @@ mod tests {
                     method: "POST".to_string(),
                     path: "/".to_string(),
                     headers: Vec::new(),
-                    body: "AA$payload$".to_string(),
+                    body: body.to_string(),
                     body_encoding: BodyEncoding::Base64,
                     preview_truncated: false,
                 },
@@ -22915,10 +22915,15 @@ mod tests {
                 target: None,
                 delay: None,
                 stop_match: None,
-            }),
-        )
-        .await;
+            })
+        };
 
+        // Each piece around a position is Base64 by itself, and `AA` is not.
+        let refused = super::run_fuzzer_attack(State(state.clone()), attack("AA$payload$")).await;
+        assert_eq!(refused.status(), super::StatusCode::BAD_REQUEST);
+
+        let response =
+            super::run_fuzzer_attack(State(state.clone()), attack("AAEC$payload$")).await;
         assert_eq!(response.status(), super::StatusCode::OK);
         let started: crate::fuzzer::FuzzerAttackRecord = response_json(response).await;
         assert!(started.running);
@@ -22929,6 +22934,8 @@ mod tests {
         ));
         assert_eq!(attack.results.len(), 1);
         assert_eq!(attack.results[0].status, Some(200));
+        // The payload goes in as its own bytes after the decoded piece.
+        assert!(received.await.unwrap().ends_with(b"\r\n\r\n\x00\x01\x02EC"));
 
         let _ = std::fs::remove_dir_all(data_dir);
     }
