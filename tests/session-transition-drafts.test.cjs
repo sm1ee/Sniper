@@ -240,7 +240,7 @@ for (const operation of ['create', 'activate']) {
     test(`${operation}: supported ${editor} fallback draft is captured and flushed`, async () => {
       const f = setup();
       if (editor === 'CodeMirror') {
-        const view = { text: f.old.requestText, getContent() { return this.text; } };
+        const view = { text: f.old.requestText, getContent() { return this.text; }, getText() { return this.text; } };
         f.els.replayRequestCM = {}; f.context.getCMView = () => view;
         f.context.updateCodePaneCM = (_, __, text) => { view.text = text; };
         f.context.renderReplay(); view.text = 'GET /fallback HTT';
@@ -1105,13 +1105,15 @@ function useOwnedDomEditor(f, kind) {
   if (kind === 'CodeMirror') {
     let listener;
     const view = { dispatch: update => { listener = Array.isArray(update.effects) ? update.effects[0] : update.effects; } };
-    const editor = { view, text: f.old.requestText, getContent() { return this.text; }, setContent(text) { this.text = text; } };
+    const editor = { view, text: f.old.requestText, getContent() { return this.text; }, getText() { return this.text; }, setContent(text) { this.text = text; } };
     f.els.replayRequestCM = {}; f.context.getCMView = () => editor;
     f.context.updateCodePaneCM = (_, __, text) => { editor.text = text; };
     f.context.CM = { EditorView: { updateListener: { of: callback => callback } },
       EditorState: { transactionFilter: { of: () => null } },
       StateEffect: { appendConfig: { of: callback => callback } } };
     f.context.cmProgrammaticViews = new WeakSet();
+    // The fake state has no recorded line endings to restore.
+    f.context.lineEndings = { text: state => state.doc.toString() };
     vm.runInContext(source('addCMUpdateListener'), f.context);
     f.context.addCMUpdateListener(view, f.context.syncReplayRequestTextFromEditor);
     f.context.renderReplay();

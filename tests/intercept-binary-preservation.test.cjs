@@ -33,10 +33,11 @@ test('legacy UTF8 binary response migrates before CodeMirror and survives MIME e
 });
 test('unmodified binary response forwards edited=false after CodeMirror normalization',async()=>{
  const r={status:200,headers:[{name:'Content-Type',value:'application/protobuf'}],body:'CgNBDQo=',body_encoding:'base64'};
- const raw=EditorState.create({doc:c.buildEditableRawResponse(r)}).doc.toString();let sent;
+ // CM shows the body as bytes and getText gives them back exactly, CR included.
+ const shown=c.buildEditableRawResponse(r,{bytes:true}),raw=EditorState.create({doc:shown}).doc.toString();let sent;
  const f=loadFunctions(['forwardSelectedResponseIntercept'],{
  state:{selectedResponseInterceptId:'one',selectedResponseInterceptRecord:{id:'one',response:r,method:'POST'},responseIntercepts:[{id:'one'}]},els:{},
- currentSessionId:()=> 'session',getCMView:()=>({getContent:()=>raw}),parseEditableRawResponse:c.parseEditableRawResponse,buildEditableRawResponse:c.buildEditableRawResponse,
+ currentSessionId:()=> 'session',getCMView:()=>({getContent:()=>raw,getText:()=>shown}),parseEditableRawResponse:c.parseEditableRawResponse,buildEditableRawResponse:c.buildEditableRawResponse,
  getVisibleResponseInterceptSummaries:()=>[],renderResponseIntercepts(){},updateInterceptQueueBadges(){},sessionWritePath:p=>p,
  async fetch(url,opts){sent=JSON.parse(opts.body);return {ok:true};},async requireOkResponse(){},async loadResponseIntercepts(){},scheduleRefresh(){},showToast(){},
  });await f.forwardSelectedResponseIntercept();assert.equal(sent.edited,false);assert.equal(sent.response.body,'CgNBDQo=');
@@ -58,7 +59,7 @@ test('legacy request intercept safe rendering, MIME edits, body edits and histor
 test('unmodified legacy binary request forwards edited=false with exact bytes',async()=>{
  const r={scheme:'http',host:'example.test',path:'/a',method:'POST',headers:[{name:'Content-Type',value:'application/protobuf'}],body:'\n\x03A\r\n',body_encoding:'utf8'};
  const q=loadFunctions(['buildEditableRawRequest','parseEditableRawRequest','mergeHeaders','normalizedHeaders','headerNameEquals','headerValue','splitRawHttpMessage','parseReplayHttpVersionToken','normalizeReplayHttpVersion','editableRequestBodyLength','decodedBase64Length','validateRawHttpBodyFraming'],{TextEncoder,atob,btoa,URL,document:{getElementById:()=>({checked:true})}});
- const raw=EditorState.create({doc:q.buildEditableRawRequest(r,true)}).doc.toString();let sent;
- const f=loadFunctions(['forwardSelectedIntercept'],{state:{selectedInterceptId:'one',selectedInterceptRecord:{id:'one',request:r},intercepts:[{id:'one'}]},els:{},currentSessionId:()=> 'session',getCMView:()=>({getContent:()=>raw}),parseEditableRawRequest:q.parseEditableRawRequest,buildEditableRawRequest:q.buildEditableRawRequest,getVisibleRequestInterceptSummaries:()=>[],renderIntercepts(){},updateInterceptQueueBadges(){},sessionWritePath:p=>p,async fetch(url,opts){sent=JSON.parse(opts.body);return {ok:true};},async requireOkResponse(){},async loadIntercepts(){},scheduleRefresh(){},showToast(){}});
+ const shown=q.buildEditableRawRequest(r,true,{bytes:true}),raw=EditorState.create({doc:shown}).doc.toString();let sent;
+ const f=loadFunctions(['forwardSelectedIntercept'],{state:{selectedInterceptId:'one',selectedInterceptRecord:{id:'one',request:r},intercepts:[{id:'one'}]},els:{},currentSessionId:()=> 'session',getCMView:()=>({getContent:()=>raw,getText:()=>shown}),parseEditableRawRequest:q.parseEditableRawRequest,buildEditableRawRequest:q.buildEditableRawRequest,getVisibleRequestInterceptSummaries:()=>[],renderIntercepts(){},updateInterceptQueueBadges(){},sessionWritePath:p=>p,async fetch(url,opts){sent=JSON.parse(opts.body);return {ok:true};},async requireOkResponse(){},async loadIntercepts(){},scheduleRefresh(){},showToast(){}});
  await f.forwardSelectedIntercept();assert.equal(sent.edited,false);assert.equal(sent.request.body,'CgNBDQo=');assert.equal(sent.request.body_encoding,'base64');
 });

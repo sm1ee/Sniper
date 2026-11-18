@@ -99,7 +99,7 @@ function fixture(mode, cm) {
       writes.push({ key, text });
       if (!views.has(key)) views.set(key, {
         text: "", view: { hasFocus: false, state: { doc: { lines: 1 } } },
-        getContent() { return this.text; }, applySearch() { return { matchCount: 0 }; },
+        getContent() { return this.text; }, getText() { return this.text; }, applySearch() { return { matchCount: 0 }; },
       });
       views.get(key).text = text;
       return { lineCount: 1, matchCount: 0 };

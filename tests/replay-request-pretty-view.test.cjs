@@ -28,7 +28,7 @@ function setup() {
   f.tab.responseRecord = { id: 'response-1' };
   f.seed([f.tab]);
   f.shown = f.context.replayRequestEditorText(RAW);
-  f.editor = { content: f.shown, getContent() { return this.content; }, setContent(value) { this.content = value; } };
+  f.editor = { content: f.shown, getContent() { return this.content; }, getText() { return this.content; }, setContent(value) { this.content = value; } };
   f.context.getCMView = () => f.editor;
   return f;
 }

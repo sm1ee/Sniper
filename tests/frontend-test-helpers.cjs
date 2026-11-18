@@ -19,6 +19,18 @@ function loadFunctions(names, globals = {}) {
   if (names.some(name => replaySizeCallers.includes(name))) {
     names = [...new Set([...names, "replayRequestSizeError", "canStoreReplayRequest", "replayRequestEditCandidate", "acceptReplayRequestEdit"])];
   }
+  // The Replay editor shows a binary body as bytes and keeps the draft in Base64.
+  const binaryBodyCallers = ["replayRequestEditorText", "replayEditorShowsDraft", "syncReplayRequestTextFromEditor",
+    "changeReplayMethod", "acceptReplayRequestEdit", "renderReplay", "renderReplayViewContent"];
+  if (names.some(name => binaryBodyCallers.includes(name))) {
+    names = [...new Set([...names, "replayTabBodyIsBinary", "replayDraftFromEditor", "replayDraftShown",
+      "rawRequestWithBinaryBody", "rawRequestWithBase64Body", "binaryBodyText", "binaryBodyBase64"])];
+  }
+  // Intercept shows a held binary body as bytes through the raw build and parse.
+  const rawBodyCallers = ["buildEditableRawRequest", "parseEditableRawRequest", "buildEditableRawResponse", "parseEditableRawResponse"];
+  if (names.some(name => rawBodyCallers.includes(name))) {
+    names = [...new Set([...names, "binaryBodyText", "binaryBodyBase64"])];
+  }
   for (const name of names) {
     assert.match(name, /^[A-Za-z_$][\w$]*$/);
     const match = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, "m"));

@@ -141,6 +141,7 @@ test("real wrapper redraw clears a preview even for identical bytes and replacem
   const start = appSource.indexOf("class SniperCodeView {");
   const end = appSource.indexOf("// CodeMirror-based code pane instances", start);
   f.context.cmProgrammaticViews = new WeakSet();
+  vm.runInContext(appSource.match(/^function createLineEndingTracker\(\)[^]*?^\}/m)[0] + "\nvar lineEndings = createLineEndingTracker();", f.context);
   vm.runInContext(appSource.slice(start, end) + "\nglobalThis.CodeView = SniperCodeView;", f.context);
   const wrapper = Object.create(f.context.CodeView.prototype); wrapper.view = f.view;
   for (const method of ["setContent", "setContentPreservingSelection"]) {

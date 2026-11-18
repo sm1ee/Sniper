@@ -336,6 +336,48 @@ function decodedBase64Length(value) {
   }
 }
 
+/** A body that is not text, one character per byte, as Burp's Raw view shows it.
+ * Null when `base64` is not Base64. */
+function binaryBodyText(base64) {
+  try {
+    return atob(String(base64 ?? "").replace(/\s+/g, ""));
+  } catch (_error) {
+    return null;
+  }
+}
+
+/** Text from `binaryBodyText`, edited, back to Base64. A character up to U+00FF
+ * is that byte; one above it can only have been typed, and goes as UTF-8. */
+function binaryBodyBase64(text) {
+  const source = String(text ?? "");
+  if (!/[^\x00-\xff]/.test(source)) return btoa(source);
+  let bytes = "";
+  for (const character of source) {
+    if (character.codePointAt(0) <= 0xff) bytes += character;
+    else for (const byte of new TextEncoder().encode(character)) bytes += String.fromCharCode(byte);
+  }
+  return btoa(bytes);
+}
+
+/** A raw request whose body is Base64, with the body shown as bytes. */
+function rawRequestWithBinaryBody(text) {
+  const raw = String(text ?? "");
+  const boundary = /\r?\n\r?\n/.exec(raw);
+  if (!boundary) return raw;
+  const start = boundary.index + boundary[0].length;
+  const bytes = binaryBodyText(raw.slice(start));
+  return bytes === null ? raw : raw.slice(0, start) + bytes;
+}
+
+/** The inverse of `rawRequestWithBinaryBody`: the shown bytes back to Base64. */
+function rawRequestWithBase64Body(text) {
+  const raw = String(text ?? "");
+  const boundary = /\r?\n\r?\n/.exec(raw);
+  if (!boundary) return raw;
+  const start = boundary.index + boundary[0].length;
+  return raw.slice(0, start) + binaryBodyBase64(raw.slice(start));
+}
+
 function editableRequestBodyLength(body, bodyEncoding) {
   if (bodyEncoding === "base64") {
     return decodedBase64Length(body);
@@ -2529,8 +2571,9 @@ function bindEvents() {
         const updated = parseEditableRawRequest(next, current.baseRequest);
         next = updated._normalizedRawText || next;
         if (!acceptReplayRequestEdit(next, current)) throw new Error("The edited request exceeds Replay's save limit. Use a smaller request.");
-        setReplayRequestEditorText(next, { preserveSelection: false });
-        syncReplayRequestTextFromEditor(next);
+        const shown = replayDraftShown(next, current);
+        setReplayRequestEditorText(shown, { preserveSelection: false });
+        syncReplayRequestTextFromEditor(shown);
       },
       request: () => {
         if (!tab || tab.type === "websocket") return null;
@@ -3956,7 +3999,7 @@ function replayTabHasUncommittedEditorState(tab) {
   if (tab.id !== state.activeReplayTabId) return false;
   if (state.replayMessageViews.request === "hex") return true;
   const editor = getCMView("replayReq");
-  const text = editor ? editor.getContent()
+  const text = editor ? editor.getText()
     : (els.replayRequestHighlight?.innerText ?? els.replayRequestEditor?.value ?? null);
   if (typeof text === "string" && !replayEditorShowsDraft(text, tab.requestText)) return true;
   const target = getRepeaterTargetConfig(tab);
@@ -5141,7 +5184,7 @@ function syncActiveHttpReplayDraftFromDom() {
   if (state.replayMessageViews.request !== "hex") {
     const cv = getCMView("replayReq");
     const requestText = cv
-      ? cv.getContent()
+      ? cv.getText()
       : (els.replayRequestEditor?.value ?? els.replayRequestHighlight?.innerText ?? null);
     if (typeof requestText === "string" && !replayEditorShowsDraft(requestText, tab.requestText)) {
       // The hidden legacy mirror can differ from the visible editor. Only skip
@@ -14441,10 +14484,13 @@ function handleInterceptDraftReadFailure(queue, status, { capture = false, owner
   if (!record || record.id !== id || seed !== id || !visible.some(item => item.id === id)) return;
   const view = getCMView(response ? "interceptRes" : "interceptReq");
   const editor = response ? els.interceptResponseEditor : els.interceptRequestEditor;
-  const text = view ? view.getContent() : editor?.value;
-  const original = response ? buildEditableRawResponse(record.response) : buildEditableRawRequest(record.request, true);
-  // Both CM and native textareas normalize line endings. Compare in that
-  // editor domain without rewriting the text retained for recovery.
+  const text = view ? view.getText() : editor?.value;
+  // Only CM keeps a binary body's CR bytes, so only CM shows the body as bytes.
+  const bytes = Boolean(view);
+  const original = response ? buildEditableRawResponse(record.response, { bytes })
+    : buildEditableRawRequest(record.request, true, { bytes });
+  // A native textarea normalizes line endings. Compare without them, and keep
+  // the text retained for recovery as it is.
   const comparableOriginal = original.replace(/\r\n?/g, "\n");
   // Read at failure settlement so typing during the fetch is included. Empty
   // and invalid drafts are still edits; parsing belongs to explicit Forward.
@@ -14734,7 +14780,8 @@ function renderIntercepts() {
   if (els.interceptRequestCM) {
     if (state.interceptEditorSeedId !== state.selectedInterceptRecord.id) {
       setInterceptPaneContent("interceptReq", els.interceptRequestCM,
-        takeInterceptDraftRecovery("request", state.selectedInterceptRecord) ?? buildEditableRawRequest(state.selectedInterceptRecord.request, true), {
+        takeInterceptDraftRecovery("request", state.selectedInterceptRecord)
+          ?? buildEditableRawRequest(state.selectedInterceptRecord.request, true, { bytes: true }), {
         mode: "http", readOnly: false,
       });
       state.interceptEditorSeedId = state.selectedInterceptRecord.id;
@@ -16274,26 +16321,44 @@ function replayRequestTextsEquivalent(left, right) {
 // captured: a signed or byte-compared body must not change because someone looked
 // at it. Once the operator edits the text, what they see becomes the draft.
 // ponytail: edit-then-undo keeps the formatted text, not the captured bytes.
-function replayRequestEditorText(draft) {
+function replayRequestEditorText(draft, tab = getActiveReplayTab()) {
   const text = draft || "";
+  // A body that is not text shows its bytes, as Burp's Raw view does, in every
+  // view; the draft keeps it as Base64.
+  if (replayTabBodyIsBinary(tab)) return rawRequestWithBinaryBody(text);
   if (state.replayMessageViews.request !== "pretty") return text;
   const normalized = text.replace(/\r\n/g, "\n");
   const pretty = prettyFormat(normalized, {}, { jsonLines: false });
   return pretty === normalized ? text : pretty;
 }
 
+function replayTabBodyIsBinary(tab) {
+  return tab?.baseRequest?.body_encoding === "base64";
+}
+
+/** What the Replay editor shows, as the draft it stands for. */
+function replayDraftFromEditor(shown, tab = getActiveReplayTab()) {
+  return replayTabBodyIsBinary(tab) ? rawRequestWithBase64Body(shown) : shown;
+}
+
+/** An edited draft as the editor shows it, without Pretty's reformatting. */
+function replayDraftShown(draft, tab = getActiveReplayTab()) {
+  return replayTabBodyIsBinary(tab) ? rawRequestWithBinaryBody(draft) : draft;
+}
+
 function replayEditorShowsDraft(shown, draft) {
   return replayRequestTextsEquivalent(shown, draft) || shown === replayRequestEditorText(draft);
 }
 
-function syncReplayRequestTextFromEditor(newText, validatedCandidate = null) {
+function syncReplayRequestTextFromEditor(shownText, validatedCandidate = null) {
   const activeTab = getActiveReplayTab();
   if (!activeTab || activeTab.type === "websocket") {
     return;
   }
   const previousText = activeTab.requestText;
   const rendered = replayRequestEditorText(previousText);
-  if (rendered !== previousText && newText === rendered) return;
+  if (rendered !== previousText && shownText === rendered) return;
+  const newText = replayDraftFromEditor(shownText, activeTab);
   let candidate = validatedCandidate;
   if (!candidate && !acceptReplayRequestEdit(newText, activeTab, value => { candidate = value; })) {
     // CodeMirror rejects before dispatch; the legacy editor has already applied
@@ -16309,7 +16374,7 @@ function syncReplayRequestTextFromEditor(newText, validatedCandidate = null) {
   }
   if (renderedHttpReplayDraftOwner?.tab === activeTab) renderedHttpReplayDraftOwner.preservedVersionDraft = null;
   activeTab.protobufEditRevision = (activeTab.protobufEditRevision || 0) + 1;
-  if (nextText !== newText) setReplayRequestEditorText(nextText, { preserveSelection: true });
+  if (nextText !== newText) setReplayRequestEditorText(replayDraftShown(nextText, activeTab), { preserveSelection: true });
   activeTab.requestText = nextText;
   activeTab.httpVersionMode = replayHttpVersionState(parsed, nextText, activeTab.httpVersionMode);
   activeTab.requestBytes = null;
@@ -21349,19 +21414,22 @@ async function forwardSelectedIntercept() {
 
   const sessionId = currentSessionId();
   const id = state.selectedInterceptRecord.id;
-  const interceptReqText = getCMView("interceptReq")
-    ? getCMView("interceptReq").getContent()
-    : (els.interceptRequestEditor ? els.interceptRequestEditor.value : "");
+  const view = getCMView("interceptReq");
+  const interceptReqText = view ? view.getText() : (els.interceptRequestEditor ? els.interceptRequestEditor.value : "");
+  // CM shows a binary body as bytes; a native textarea keeps it as Base64.
+  const bytes = Boolean(view);
   const request = parseEditableRawRequest(
     interceptReqText,
     state.selectedInterceptRecord.request,
     true,
+    { bytes },
   );
   // The editor is the only place that knows whether anything was actually typed.
   // Comparing the parsed request against the held one on the server reports edits
   // that never happened, because the round trip through text normalises headers
   // and can rewrite Content-Length on its own.
-  const edited = interceptReqText.replace(/\r\n?/g, "\n") !== buildEditableRawRequest(state.selectedInterceptRecord.request, true).replace(/\r\n?/g, "\n");
+  const edited = interceptReqText.replace(/\r\n?/g, "\n")
+    !== buildEditableRawRequest(state.selectedInterceptRecord.request, true, { bytes }).replace(/\r\n?/g, "\n");
   if (state.selectedInterceptRecord.is_websocket && request.body) {
     showToast("WebSocket upgrade requests must not include a request body.", "error");
     return;
@@ -21529,7 +21597,7 @@ async function loadResponseInterceptDetail(id, { explicit = false } = {}) {
   }
 }
 
-function buildEditableRawResponse(resp) {
+function buildEditableRawResponse(resp, { bytes = false } = {}) {
   const source = resp || {};
   let text = `HTTP/1.1 ${source.status ?? 200}\r\n`;
   for (const h of normalizedHeaders(source.headers)) {
@@ -21538,18 +21606,18 @@ function buildEditableRawResponse(resp) {
   text += "\r\n";
   const binaryMime = normalizedHeaders(source.headers).some(h =>
     headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
+  let body = source.body || "";
   if (source.body_encoding !== "base64" && binaryMime) {
     // Encode UTF-8 bytes, not Latin-1 code units, before the editor normalizes lines.
     let binary = "";
-    for (const byte of new TextEncoder().encode(source.body || "")) binary += String.fromCharCode(byte);
-    text += btoa(binary);
-  } else {
-    text += source.body || "";
+    for (const byte of new TextEncoder().encode(body)) binary += String.fromCharCode(byte);
+    body = btoa(binary);
   }
-  return text;
+  if (bytes && (source.body_encoding === "base64" || binaryMime)) body = binaryBodyText(body) ?? body;
+  return text + body;
 }
 
-function parseEditableRawResponse(text, original, requestMethod = "") {
+function parseEditableRawResponse(text, original, requestMethod = "", { bytes = false } = {}) {
   const { head, body } = splitRawHttpMessage(text);
   const lines = head.split("\n").filter((line) => line.length > 0);
   const statusLine = lines[0] || "";
@@ -21574,11 +21642,11 @@ function parseEditableRawResponse(text, original, requestMethod = "") {
     }
   }
 
-  const bodyText = body;
   const originalBinaryMime = normalizedHeaders(original?.headers).some(h =>
     headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
   const isText = (!original || original.body_encoding === "utf8") && !originalBinaryMime;
   const bodyEncoding = isText ? "utf8" : "base64";
+  const bodyText = bytes && bodyEncoding === "base64" ? binaryBodyBase64(body) : body;
   const bodyLength = editableResponseBodyLength(bodyText, bodyEncoding);
   if (responseMustNotIncludeBody(status, requestMethod) && bodyLength > 0) {
     throw new Error(`Response status ${status} must not include a body`);
@@ -21671,7 +21739,7 @@ function renderResponseIntercepts() {
     if (els.interceptResponseCM) {
       if (state.responseInterceptEditorSeedId !== rec.id) {
         setInterceptPaneContent("interceptRes", els.interceptResponseCM,
-          takeInterceptDraftRecovery("response", rec) ?? buildEditableRawResponse(rec.response), {
+          takeInterceptDraftRecovery("response", rec) ?? buildEditableRawResponse(rec.response, { bytes: true }), {
           mode: "http", readOnly: false,
         });
         state.responseInterceptEditorSeedId = rec.id;
@@ -21695,16 +21763,18 @@ async function forwardSelectedResponseIntercept() {
 
   const sessionId = currentSessionId();
   const id = state.selectedResponseInterceptRecord.id;
-  const interceptResText = getCMView("interceptRes")
-    ? getCMView("interceptRes").getContent()
-    : (els.interceptResponseEditor ? els.interceptResponseEditor.value : "");
+  const view = getCMView("interceptRes");
+  const interceptResText = view ? view.getText() : (els.interceptResponseEditor ? els.interceptResponseEditor.value : "");
+  // CM shows a binary body as bytes; a native textarea keeps it as Base64.
+  const bytes = Boolean(view);
   const editedResponse = parseEditableRawResponse(
     interceptResText,
     state.selectedResponseInterceptRecord.response,
     state.selectedResponseInterceptRecord.method,
+    { bytes },
   );
-  const edited =
-    interceptResText.replace(/\r\n?/g, "\n") !== buildEditableRawResponse(state.selectedResponseInterceptRecord.response).replace(/\r\n?/g, "\n");
+  const edited = interceptResText.replace(/\r\n?/g, "\n")
+    !== buildEditableRawResponse(state.selectedResponseInterceptRecord.response, { bytes }).replace(/\r\n?/g, "\n");
 
   // Optimistic UI
   state.responseIntercepts = state.responseIntercepts.filter((i) => i.id !== id);
@@ -23410,11 +23480,11 @@ function preserveActiveHttpReplayDraftBeforeNavigation(tab, action) {
   const hexMode = state.replayMessageViews.request === "hex";
   const legacyText = els.replayRequestCM ? null
     : (els.replayRequestHighlight?.innerText ?? els.replayRequestEditor?.value ?? null);
-  const visibleText = hexMode ? null : (editor ? editor.getContent()
+  const visibleText = hexMode ? null : (editor ? editor.getText()
     : legacyText);
   let textChanged = typeof visibleText === "string"
     && !replayEditorShowsDraft(visibleText, tab.requestText);
-  let requestText = textChanged ? visibleText : (tab.requestText || "");
+  let requestText = textChanged ? replayDraftFromEditor(visibleText, tab) : (tab.requestText || "");
   const target = getRepeaterTargetConfig(tab);
   const host = els.replayHostInput?.value ?? target.host;
   const port = els.replayPortInput?.value ?? target.port;
@@ -27120,7 +27190,9 @@ function editableRequestFromRecord(record) {
   };
 }
 
-function buildEditableRawRequest(request, binarySafe = false) {
+// `bytes` shows a Base64 body one character per byte, as Burp's Raw view does;
+// parse with the same option to turn the shown bytes back into Base64.
+function buildEditableRawRequest(request, binarySafe = false, { bytes = false } = {}) {
   const source = request || {};
   const headers = normalizedHeaders(source.headers);
   if (!headers.some((header) => headerNameEquals(header, "host")) && source.host) {
@@ -27130,18 +27202,22 @@ function buildEditableRawRequest(request, binarySafe = false) {
   const head = `${source.method || "GET"} ${source.path || "/"} ${httpVer}`;
   const headerBlock = mergeHeaders(headers).map((header) => `${header.name}: ${header.value}`).join("\n");
   let body = source.body || "";
+  let base64 = source.body_encoding === "base64";
   if (binarySafe && source.body_encoding !== "base64" && headers.some(h =>
     headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()))) {
     let binary = "";
     for (const byte of new TextEncoder().encode(body)) binary += String.fromCharCode(byte);
     body = btoa(binary);
+    base64 = true;
   }
+  if (bytes && base64) body = binaryBodyText(body) ?? body;
   const rawHead = headerBlock ? `${head}\n${headerBlock}` : head;
   return body.length > 0 ? `${rawHead}\n\n${body}` : rawHead;
 }
 
-function parseEditableRawRequest(text, fallback, binarySafe = false) {
-  const { head, body } = splitRawHttpMessage(text);
+function parseEditableRawRequest(text, fallback, binarySafe = false, { bytes = false } = {}) {
+  const { head, body: shownBody } = splitRawHttpMessage(text);
+  let body = shownBody;
   const lines = head.split("\n").filter((line) => line.length > 0);
   const fallbackPath = fallback?.path && String(fallback.path).trim()
     ? String(fallback.path)
@@ -27220,6 +27296,7 @@ function parseEditableRawRequest(text, fallback, binarySafe = false) {
   const legacyBinary = binarySafe && normalizedHeaders(fallback?.headers).some(h =>
     headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
   const bodyEncoding = fallback?.body_encoding === "base64" || legacyBinary ? "base64" : "utf8";
+  if (bytes && bodyEncoding === "base64") body = binaryBodyBase64(body);
   const bodyLength = editableRequestBodyLength(body, bodyEncoding);
   const acceptedBodyLengths = [bodyLength];
   let contentLengthChanged = false;
@@ -32666,9 +32743,9 @@ function changeReplayMethod(newMethod, tabId = state.activeReplayTabId) {
   const isActiveTab = state.activeReplayTabId === tab.id;
   const cv = isActiveTab ? getCMView("replayReq") : null;
   const shown = cv
-    ? cv.getContent()
+    ? cv.getText()
     : (isActiveTab && els.replayRequestEditor ? els.replayRequestEditor.value : tab.requestText) || "";
-  const text = replayEditorShowsDraft(shown, tab.requestText) ? tab.requestText || "" : shown;
+  const text = replayEditorShowsDraft(shown, tab.requestText) ? tab.requestText || "" : replayDraftFromEditor(shown, tab);
   const nextText = requestTextWithMethod(text, newMethod);
   if (!acceptReplayRequestEdit(nextText, tab)) return;
   tab.requestText = nextText;
@@ -34366,7 +34443,7 @@ function addCMUpdateListener(view, callback) {
           candidate = pending.candidate;
         }
       }
-      callback(update.state.doc.toString(), candidate);
+      callback(lineEndings.text(update.state), candidate);
     }
   });
   const extensions = [listener];
@@ -34376,7 +34453,9 @@ function addCMUpdateListener(view, callback) {
       const currentView = getCMView("replayReq")?.view;
       if (!transaction.docChanged || cmProgrammaticViews.has(currentView)) return transaction;
       const before = identity();
-      const accepted = acceptReplayRequestEdit(transaction.newDoc.toString(), getActiveReplayTab(), candidate => {
+      // The line endings live in the new state, so read it rather than newDoc.
+      const draft = replayDraftFromEditor(lineEndings.text(transaction.state));
+      const accepted = acceptReplayRequestEdit(draft, getActiveReplayTab(), candidate => {
         validated = { startState: transaction.startState, doc: transaction.newDoc, identity: before, candidate };
       });
       return accepted ? transaction : [];
@@ -34795,8 +34874,65 @@ function createBaseExtensions(options = {}) {
   return exts;
 }
 
+
 // Search decoration effect & field
 const setSearchQuery = CM.StateEffect.define();
+// CodeMirror keeps "\n" between lines and forgets whether a break was CRLF or a
+// lone CR. A raw request needs them back byte for byte: multipart parts end in
+// CRLF, and file bytes hold lone CR and LF. Each break that came in is kept as
+// a mark over its newline, mapped through edits and written back; a break the
+// user types takes the ending of the break before it.
+function createLineEndingTracker() {
+  const record = CM.StateEffect.define();
+  const field = CM.StateField.define({
+    create: () => CM.Decoration.none,
+    update(marks, transaction) {
+      marks = marks.map(transaction.changes);
+      for (const effect of transaction.effects) if (effect.is(record)) marks = effect.value;
+      return marks;
+    },
+  });
+  const kinds = new Map(["\r\n", "\r", "\n"].map(ending => [ending, CM.Decoration.mark({ ending })]));
+  /** `text`'s line endings, placed in the document CodeMirror makes of it. */
+  const marks = text => {
+    const found = [], breaks = /\r\n|\r|\n/g;
+    let at = 0, last = 0, match;
+    while ((match = breaks.exec(text))) {
+      at += match.index - last;
+      found.push(kinds.get(match[0]).range(at, at + 1));
+      at += 1;
+      last = match.index + match[0].length;
+    }
+    return CM.Decoration.set(found);
+  };
+  return {
+    field,
+    marks,
+    /** The effect that records `text`'s line endings, sent with its insertion. */
+    record: text => record.of(marks(text)),
+    /** The document with each line break written as it came in. */
+    text(state) {
+      const marks = state.field(field, false);
+      if (!marks || marks.size === 0) return state.doc.toString();
+      const kept = new Map();
+      marks.between(0, state.doc.length, (from, to, mark) => {
+        if (to === from + 1) kept.set(from, mark.spec.ending);
+      });
+      const parts = [];
+      let ending = "\n";
+      for (let number = 1; number <= state.doc.lines; number++) {
+        const line = state.doc.line(number);
+        parts.push(line.text);
+        if (number < state.doc.lines) {
+          ending = kept.get(line.to) ?? ending;
+          parts.push(ending);
+        }
+      }
+      return parts.join("");
+    },
+  };
+}
+const lineEndings = createLineEndingTracker();
 const setSearchActiveIndex = CM.StateEffect.define();
 const searchDecoField = CM.StateField.define({
   create() {
@@ -34901,7 +35037,8 @@ class SniperCodeView {
       state: editorState || CM.EditorState.create({
         // Initial content is a baseline, not an undoable edit from an empty pane.
         doc: options.content || "",
-        extensions: [...createBaseExtensions(options), searchDecoField, changedDecoField, packetEvidenceField],
+        extensions: [...createBaseExtensions(options), searchDecoField, changedDecoField, packetEvidenceField,
+          lineEndings.field.init(() => lineEndings.marks(options.content || ""))],
       }),
       parent: container,
     });
@@ -34923,13 +35060,14 @@ class SniperCodeView {
     // Even an identical replacement can belong to a newer selected record.
     view.sniperDecodedPreview?.hide();
     const nextText = text || "";
-    if (view.state.doc.toString() === nextText.replace(/\r\n?/g, "\n")) {
+    if (lineEndings.text(view.state) === nextText) {
       return;
     }
     cmProgrammaticViews.add(view);
     try {
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: nextText },
+        effects: lineEndings.record(nextText),
       });
     } finally {
       cmProgrammaticViews.delete(view);
@@ -34940,17 +35078,21 @@ class SniperCodeView {
     const { view } = this;
     view.sniperDecodedPreview?.hide();
     const nextText = text || "";
-    if (view.state.doc.toString() === nextText.replace(/\r\n?/g, "\n")) {
+    if (lineEndings.text(view.state) === nextText) {
       return;
     }
+    // CodeMirror counts a CRLF as one character, so positions are in the
+    // document it makes of the text, not in the text.
+    const length = nextText.replace(/\r\n/g, "\n").length;
     const selection = view.state.selection.main;
-    const anchor = Math.min(selection.anchor, nextText.length);
-    const head = Math.min(selection.head, nextText.length);
+    const anchor = Math.min(selection.anchor, length);
+    const head = Math.min(selection.head, length);
     cmProgrammaticViews.add(view);
     try {
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: nextText },
         selection: { anchor, head },
+        effects: lineEndings.record(nextText),
       });
     } finally {
       cmProgrammaticViews.delete(view);
@@ -34989,8 +35131,14 @@ class SniperCodeView {
     return this._searchNavIndex;
   }
 
+  /** CodeMirror's document: every line break is "\n", so offsets are positions. */
   getContent() {
     return this.view.state.doc.toString();
+  }
+
+  /** The text with each line break as it came in: CRLF, CR or LF. */
+  getText() {
+    return lineEndings.text(this.view.state);
   }
 
   destroy() {
@@ -35042,7 +35190,7 @@ function updateCodePaneCM(key, container, text, options = {}) {
     // another presentation must not resurrect an obsolete draft or listener.
     const restoreState = editable && suspendedEditableState?.mode === mode
       && suspendedEditableState.onChange === options.onChange
-      && suspendedEditableState.state.doc.toString() === (text || "").replace(/\r\n?/g, "\n");
+      && lineEndings.text(suspendedEditableState.state) === (text || "");
     cmOpts.readOnly = !editable;
     if (mode === "http") cmOpts.httpHighlight = true;
     else if (mode === "hex") cmOpts.hexHighlight = true;

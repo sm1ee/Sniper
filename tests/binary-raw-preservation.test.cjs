@@ -43,8 +43,9 @@ test('legacy migration permits safe body editing and exact undo after MIME chang
  const f=editorFixture(),body='\n\x03A\r\n';f.a.baseRequest.body_encoding='utf8';
  f.a.requestText=`POST /a HTTP/1.1\nHost: a.test\nContent-Type: application/protobuf\nContent-Length: 5\n\n${body}`;f.render();
  assert.equal(f.a.baseRequest.body_encoding,'base64');
+ // The editor shows the body's bytes, CRLF included; the draft keeps Base64.
  const original=Buffer.from(body).toString('base64'),replacement=Buffer.from('\n\x03B\r\n').toString('base64');
- let text=f.cv().getContent(),i=text.indexOf(original);f.edit(i,i+original.length,replacement);
+ let text=f.cv().getContent(),i=text.indexOf('\x03A')+1;f.edit(i,i+1,'B');
  assert.equal(Buffer.from(f.context.splitRawHttpMessage(f.a.requestText).body,'base64').toString('hex'),'0a03420d0a');
  assert.equal(f.undo(),true);assert.equal(f.context.splitRawHttpMessage(f.a.requestText).body,original);
  assert.equal(f.redo(),true);assert.equal(f.context.splitRawHttpMessage(f.a.requestText).body,replacement);
