@@ -2098,7 +2098,7 @@ struct ProxyChainArgs {
 #[derive(Subcommand, Debug)]
 enum SessionCommand {
     List,
-    /// Create and activate a new Sniper session.
+    /// Create and activate a new Sniper session; `--no-activate` only creates it.
     Create(CreateSessionArgs),
     Switch(SessionSwitchArgs),
     Delete(SessionDeleteArgs),
@@ -2111,6 +2111,21 @@ struct CreateSessionArgs {
     /// Optional name for the new session.
     #[arg(long)]
     name: Option<String>,
+    /// Create the session and leave the proxy recording where it is.
+    #[arg(long)]
+    no_activate: bool,
+}
+
+impl CreateSessionArgs {
+    /// What the API is sent: `activate` only when it is turned off, so the
+    /// plain form stays what older tools expect.
+    fn body(&self) -> Value {
+        let mut body = json!({ "name": self.name });
+        if self.no_activate {
+            body["activate"] = json!(false);
+        }
+        body
+    }
 }
 
 #[derive(Args, Debug)]
@@ -4277,11 +4292,6 @@ struct RuntimeUpdatePayload {
 }
 
 #[derive(Serialize)]
-struct CreateSessionPayload {
-    name: Option<String>,
-}
-
-#[derive(Serialize)]
 struct ReplaySendPayload {
     session_id: Option<Uuid>,
     expected_active_session_id: Option<Uuid>,
@@ -4755,11 +4765,14 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "session.create",
             "session create",
-            "Create and activate a new Sniper session.",
+            "Create and activate a new Sniper session; `activate: false` creates it and leaves the proxy recording where it is.",
             Write,
             false,
             &[],
-            vec![json!({"name":"test session"})],
+            vec![
+                json!({"name":"test session"}),
+                json!({"name":"agent session","activate":false}),
+            ],
         ),
         op(
             "session.switch",
@@ -7997,6 +8010,11 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
             "type":["string","null"],
             "description":"The server trims the name and limits it to 256 UTF-8 bytes after trimming. Omitted, null, empty or whitespace-only names use the server's timestamp-based default."
         }));
+        properties.insert("activate".into(), json!({
+            "type":"boolean",
+            "default":true,
+            "description":"False creates the session and leaves the proxy recording into the session it records into now. Give the new session a port with session.port.open."
+        }));
     }
     if matches!(
         operation,
@@ -8115,7 +8133,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "skills.install" | "skills.status" => {
             &["codex", "claude", "all", "codex_dir", "claude_dir"]
         }
-        "session.create" => &["name"],
+        "session.create" => &["name", "activate"],
         "session.rename" => &["id", "name"],
         "findings.list" | "event_log.list" => &["session_id", "limit"],
         "findings.get" => &["id", "session_id"],
@@ -8446,7 +8464,7 @@ fn command_input_preview(command: &Command) -> Value {
         Command::Call(args) => json!({ "operation": args.operation, "input": args.input }),
         Command::Session { command } => match command {
             SessionCommand::List => json!({}),
-            SessionCommand::Create(args) => json!({ "name": args.name }),
+            SessionCommand::Create(args) => args.body(),
             SessionCommand::Switch(args) => json!({ "id": args.id }),
             SessionCommand::Delete(args) => json!({ "id": args.id }),
             SessionCommand::Rename(args) => json!({ "id": args.id, "name": args.name }),
@@ -8883,9 +8901,7 @@ fn command_api_preview(command: &Command) -> Result<Value> {
         Command::Skills { .. } => json!({ "local": true }),
         Command::Session { command } => match command {
             SessionCommand::List => api_preview("GET", "/api/sessions", None),
-            SessionCommand::Create(args) => {
-                api_preview("POST", "/api/sessions", Some(json!({ "name": args.name })))
-            }
+            SessionCommand::Create(args) => api_preview("POST", "/api/sessions", Some(args.body())),
             SessionCommand::Switch(args) => api_preview(
                 "POST",
                 format!("/api/sessions/{}/activate", args.id),
@@ -9515,7 +9531,10 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
     if matches!(
         command,
         Command::Session {
-            command: SessionCommand::Create(_)
+            command: SessionCommand::Create(CreateSessionArgs {
+                no_activate: false,
+                ..
+            })
         }
     ) {
         notes.push("On success, the new session becomes the active session; this preview does not create or activate a session.");
@@ -9691,6 +9710,7 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
         "session.create" => Command::Session {
             command: SessionCommand::Create(CreateSessionArgs {
                 name: call_optional(operation, input, "name")?,
+                no_activate: call_optional::<bool>(operation, input, "activate")? == Some(false),
             }),
         },
         "session.switch" => Command::Session {
@@ -12417,9 +12437,7 @@ async fn handle_session(mut api: ApiClient, command: SessionCommand) -> Result<(
             print_json(&sessions)
         }
         SessionCommand::Create(args) => {
-            let session: SessionSummary = api
-                .post_json("/api/sessions", &CreateSessionPayload { name: args.name })
-                .await?;
+            let session: SessionSummary = api.post_json("/api/sessions", &args.body()).await?;
             print_json(&session)
         }
         SessionCommand::Switch(args) => {
@@ -23736,6 +23754,58 @@ mod tests {
             let spec = operation_spec(operation).unwrap();
             assert_eq!(spec.input_schema["additionalProperties"], false);
         }
+    }
+
+    // An agent that creates a session of its own must be able to leave the
+    // main listener where it is, and the plain form must stay what it was.
+    #[test]
+    fn session_create_can_leave_the_main_listener_alone() {
+        let plain = Cli::try_parse_from(["sniper-cli", "session", "create", "--name", "a"])
+            .unwrap()
+            .command;
+        assert_eq!(command_input_preview(&plain), json!({ "name": "a" }));
+        assert_eq!(
+            super::command_api_preview(&plain).unwrap()["body"],
+            json!({ "name": "a" })
+        );
+
+        let direct = Cli::try_parse_from([
+            "sniper-cli",
+            "session",
+            "create",
+            "--name",
+            "a",
+            "--no-activate",
+        ])
+        .unwrap()
+        .command;
+        let call =
+            command_from_operation_input("session.create", &json!({"name":"a","activate":false}))
+                .unwrap();
+        assert_eq!(command_input_preview(&direct), command_input_preview(&call));
+        assert_eq!(
+            command_input_preview(&direct),
+            json!({ "name": "a", "activate": false })
+        );
+        let preview = super::command_api_preview(&direct).unwrap();
+        assert_eq!(preview["path"], "/api/sessions");
+        assert_eq!(preview["body"], json!({ "name": "a", "activate": false }));
+        let plan = dry_run_command(&direct).unwrap();
+        assert!(!plan.to_string().contains("becomes the active session"));
+        assert!(dry_run_command(&plain)
+            .unwrap()
+            .to_string()
+            .contains("becomes the active session"));
+
+        let activating =
+            command_from_operation_input("session.create", &json!({"name":"a","activate":true}))
+                .unwrap();
+        assert_eq!(command_input_preview(&activating), json!({ "name": "a" }));
+        assert_eq!(
+            operation_spec("session.create").unwrap().input_schema["properties"]["activate"]
+                ["type"],
+            "boolean"
+        );
     }
 
     // Turning the daily update off is how an agent stops Sniper asking GitHub

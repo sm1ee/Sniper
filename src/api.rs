@@ -3077,6 +3077,8 @@ fn ws_replay_send_error_response(error: anyhow::Error) -> Response {
 #[derive(Debug, Deserialize)]
 struct CreateSessionPayload {
     name: Option<String>,
+    /// False creates the session and leaves the main listener where it is.
+    activate: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3196,7 +3198,12 @@ async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateSessionPayload>,
 ) -> Response {
-    match state.create_session(payload.name).await {
+    let created = if payload.activate.unwrap_or(true) {
+        state.create_session(payload.name).await
+    } else {
+        state.create_inactive_session(payload.name).await
+    };
+    match created {
         Ok(summary) => Json(summary).into_response(),
         Err(error) => session_operation_error_response(error),
     }
@@ -10456,6 +10463,38 @@ mod tests {
         body: serde_json::Value,
     ) -> (reqwest::StatusCode, String) {
         api_route_response(state, method, path, Some(body)).await
+    }
+
+    #[tokio::test]
+    async fn creating_a_session_activates_it_unless_told_not_to() {
+        let (state, data_dir) = test_state("create-session-activate-flag");
+        let first = state.session().await.id();
+
+        let (status, body) = api_route_json(
+            state.clone(),
+            reqwest::Method::POST,
+            "/api/sessions",
+            serde_json::json!({ "name": "agent", "activate": false }),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(created["active"], false);
+        assert_eq!(state.session().await.id(), first);
+
+        let (status, body) = api_route_json(
+            state.clone(),
+            reqwest::Method::POST,
+            "/api/sessions",
+            serde_json::json!({ "name": "tester" }),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        let created: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(created["active"], true);
+        assert_eq!(state.session().await.id().to_string(), created["id"]);
+
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     fn assert_active_session_conflict_body(body: &str, active_session_id: Uuid) {

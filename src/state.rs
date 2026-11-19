@@ -842,6 +842,20 @@ impl AppState {
         self.activate_session_inner(metadata.id, false, true).await
     }
 
+    /// Creates a session and leaves the main listener where it is. An agent
+    /// that makes a session of its own must not move everyone else's capture.
+    pub async fn create_inactive_session(&self, name: Option<String>) -> Result<SessionSummary> {
+        let sessions = self.sessions.clone();
+        let metadata = tokio::task::spawn_blocking(move || sessions.create_session(name))
+            .await
+            .context("session create writer panicked")??;
+        self.sessions
+            .summaries()
+            .into_iter()
+            .find(|session| session.id == metadata.id)
+            .ok_or_else(|| anyhow::anyhow!("session {} was not found", metadata.id))
+    }
+
     pub async fn rename_session(&self, id: uuid::Uuid, name: String) -> Result<SessionSummary> {
         let state = self.clone();
         // Once disk persistence starts, a disconnected requester must not cancel
@@ -3612,6 +3626,37 @@ mod tests {
                 None => std::env::remove_var(key),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn creating_a_session_without_activating_moves_nothing() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-create-inactive-{}", uuid::Uuid::new_v4()));
+        let state = AppState::new(AppConfig {
+            proxy_addr: "127.0.0.1:0".parse().unwrap(),
+            ui_addr: "127.0.0.1:0".parse().unwrap(),
+            max_entries: 100,
+            max_transaction_entries: 100,
+            body_preview_bytes: 4096,
+            data_dir: data_dir.clone(),
+        })
+        .unwrap();
+        let before = state.session().await;
+
+        let created = state
+            .create_inactive_session(Some("agent".to_string()))
+            .await
+            .unwrap();
+
+        assert!(!created.active);
+        assert_eq!(created.name, "agent");
+        assert_eq!(state.sessions.active_session_id(), before.id());
+        assert!(Arc::ptr_eq(&state.session().await, &before));
+        let listed = state.list_sessions().await;
+        assert!(listed.iter().any(|s| s.id == created.id && !s.active));
+        assert!(listed.iter().any(|s| s.id == before.id() && s.active));
+
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[test]
