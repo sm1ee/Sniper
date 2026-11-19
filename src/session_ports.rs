@@ -1096,6 +1096,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    // The API drops a request's future when its client disconnects. A close
+    // left half done would be closed in the registry and still serving the
+    // connections it had.
+    #[tokio::test]
+    async fn a_close_whose_caller_goes_away_still_finishes() {
+        let _work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let dir = scratch("close-cancelled");
+        let state = state_in(&dir);
+        let agent = inactive_session(&state, "agent").await;
+        let port = port_addr(&state.open_session_port(agent).await.unwrap());
+        let session = state.session_port_context(agent).unwrap();
+        session
+            .runtime
+            .update(crate::runtime::RuntimeSettingsUpdate {
+                intercept_enabled: Some(true),
+                intercept_scope_only: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let upstream = upstream().await;
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(port).await.unwrap();
+            let request =
+                format!("GET http://{upstream}/held HTTP/1.1\r\nHost: {upstream}\r\n\r\n");
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut answer = Vec::new();
+            let _ = stream.read_to_end(&mut answer).await;
+        });
+        for _ in 0..250 {
+            if session.intercepts.held().await == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(session.intercepts.held().await, 1);
+
+        // The close waits for the held request; its caller leaves meanwhile.
+        let closing = tokio::spawn({
+            let state = state.clone();
+            async move { state.close_session_port(agent).await }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        closing.abort();
+        let _ = closing.await;
+
+        // A delete waits for the close to finish, and then goes through.
+        state.delete_session(agent).await.unwrap();
+        assert_eq!(session.intercepts.held().await, 0);
+        tokio::time::timeout(Duration::from_secs(5), client)
+            .await
+            .expect("the held request's connection was cut")
+            .unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn a_tunnel_on_a_session_port_survives_a_rebind_of_the_main_listener() {
         let _work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;

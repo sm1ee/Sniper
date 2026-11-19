@@ -999,7 +999,7 @@ impl AppState {
                 }
                 let Some((listener, port)) = bound else {
                     return Err(refused(
-                        "no free port was found for this session; try again",
+                        "the next 64 port numbers are all in use; free one and try again",
                     ));
                 };
                 // Saved before anything is accepted, so no request arrives on
@@ -1151,6 +1151,20 @@ impl AppState {
         if !self.sessions.contains_session(id) {
             anyhow::bail!("session {id} was not found");
         }
+        let state = self.clone();
+        // A close that has begun is finished even when its caller goes away.
+        // The API drops a request's future when the client disconnects, and a
+        // port left half closed would be closed in the registry and still
+        // serve the connections it had.
+        tokio::spawn(async move { state.finish_closing_session_port(id).await })
+            .await
+            .context("session port close task failed")?
+    }
+
+    async fn finish_closing_session_port(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<crate::session_ports::SessionPortStatus> {
         let activation_guard = self.session_activation_lock.lock().await;
         // A delete or a switch that follows waits here until the port is
         // fully closed.
