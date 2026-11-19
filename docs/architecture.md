@@ -59,6 +59,14 @@ works.
 - `src/session.rs`: session metadata and the active workspace; persists each
   session's settings, records, WebSockets, rules and fuzzer records under
   `data_dir/sessions/<session-id>`.
+- `src/session_ports.rs`: a loopback proxy port that records into one session,
+  whichever session is active, so several sessions capture at once. Each open
+  port holds its session's one writable context, and its requests use that
+  directly. A number is given once, from 18081 up, and kept in
+  `session-ports.json` until the session is deleted. The module also keeps the
+  one list of Sniper's own listeners that every guard against a connection
+  leading back into Sniper reads. The design is in
+  [the session ports design](superpowers/specs/2026-11-19-session-proxy-ports-design.md).
 - `src/model.rs`: the transaction schema shared by the proxy, the API and other
   tooling.
 - `src/scanner.rs`: the passive vulnerability scanner.

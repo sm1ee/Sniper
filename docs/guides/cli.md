@@ -37,6 +37,33 @@ sniper-cli --output compact tcp list --contains PING
 The TCP and UDP relay is under `sniper-cli tcp`; see the
 [TCP and UDP relay guide](tcp-relay.md).
 
+## A proxy port for each session
+
+The proxy listener records into one session, the active one. To capture into
+several sessions at once, such as one for each agent or account, give each
+session a port of its own.
+
+```bash
+sniper-cli session create --name 'agent-a' --no-activate --yes
+sniper-cli session port open --id <session-uuid> --yes
+curl -x http://127.0.0.1:18081 https://example.com/
+sniper-cli --output compact capture http list --session-id <session-uuid> --limit 10
+sniper-cli session port list
+sniper-cli session port close --id <session-uuid> --yes
+```
+
+- `--no-activate` creates the session and leaves the proxy listener recording
+  where it is.
+- `session port open` prints `proxy_addr`. Everything sent through that address
+  is recorded into the session, whichever session is active.
+- A session keeps its port number until it is deleted, and no other session
+  gets it. Numbers start at 18081. A port is on `127.0.0.1` only.
+- No port is open after Sniper restarts. Open it again and it has the same
+  number. At most 16 are open at once.
+- The active session has the proxy listener and gets no port. A session with an
+  open port is not switched to or deleted: close its port first.
+- Name the session on every command with `--session-id <session-uuid>`.
+
 ## Reads, writes and the manifest
 
 Operations marked `side_effect: "write"` in `sniper-cli manifest` need

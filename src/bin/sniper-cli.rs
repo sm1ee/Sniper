@@ -2104,6 +2104,27 @@ enum SessionCommand {
     Delete(SessionDeleteArgs),
     Rename(SessionRenameArgs),
     Reveal(SessionRevealArgs),
+    /// A proxy port that records into one session, whichever is active.
+    Port {
+        #[command(subcommand)]
+        command: SessionPortCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionPortCommand {
+    /// Open the session's own proxy port and print its address.
+    Open(SessionPortArgs),
+    /// Close the session's port. The session keeps the number.
+    Close(SessionPortArgs),
+    /// List each session's port and whether it is open.
+    List,
+}
+
+#[derive(Args, Debug)]
+struct SessionPortArgs {
+    #[arg(long)]
+    id: Uuid,
 }
 
 #[derive(Args, Debug)]
@@ -4503,6 +4524,11 @@ impl SessionCommand {
             SessionCommand::Delete(_) => "session.delete",
             SessionCommand::Rename(_) => "session.rename",
             SessionCommand::Reveal(_) => "session.reveal",
+            SessionCommand::Port { command } => match command {
+                SessionPortCommand::Open(_) => "session.port.open",
+                SessionPortCommand::Close(_) => "session.port.close",
+                SessionPortCommand::List => "session.port.list",
+            },
         }
     }
 }
@@ -4805,6 +4831,33 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             false,
             &["id"],
             vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
+        ),
+        op(
+            "session.port.open",
+            "session port open --id <uuid>",
+            "Open the session's own proxy port on 127.0.0.1 and return its address. Traffic through it is recorded into that session whichever session is active, so several sessions capture at once. The session keeps its port number until it is deleted; asking again returns the open port. Refused for the active session, which the main proxy listener records into.",
+            Write,
+            false,
+            &["id"],
+            vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
+        ),
+        op(
+            "session.port.close",
+            "session port close --id <uuid>",
+            "Close the session's own proxy port and end what it carried. The session keeps the port number. A session is closed this way before it is switched to or deleted.",
+            Write,
+            false,
+            &["id"],
+            vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
+        ),
+        op(
+            "session.port.list",
+            "session port list",
+            "List each session's own proxy port and whether it is open. No port is open after Sniper restarts.",
+            Read,
+            false,
+            &[],
+            vec![json!({})],
         ),
         op(
             "findings.list", "findings list",
@@ -8018,7 +8071,11 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
     }
     if matches!(
         operation,
-        "session.switch" | "session.delete" | "session.reveal"
+        "session.switch"
+            | "session.delete"
+            | "session.reveal"
+            | "session.port.open"
+            | "session.port.close"
     ) {
         properties.insert(
             "id".into(),
@@ -8127,7 +8184,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         return Some(fields);
     }
     Some(match operation {
-        "manifest" | "session.list" => &[],
+        "manifest" | "session.list" | "session.port.list" => &[],
         "schema" => &["kind", "operation"],
         "examples" => &["operation"],
         "skills.install" | "skills.status" => {
@@ -8176,7 +8233,8 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "mime",
             "selection_token",
         ],
-        "session.switch" | "session.delete" | "session.reveal" => &["id"],
+        "session.switch" | "session.delete" | "session.reveal" | "session.port.open"
+        | "session.port.close" => &["id"],
         "capture.http.list" => &[
             "session_id",
             "query",
@@ -8469,6 +8527,12 @@ fn command_input_preview(command: &Command) -> Value {
             SessionCommand::Delete(args) => json!({ "id": args.id }),
             SessionCommand::Rename(args) => json!({ "id": args.id, "name": args.name }),
             SessionCommand::Reveal(args) => json!({ "id": args.id }),
+            SessionCommand::Port { command } => match command {
+                SessionPortCommand::Open(args) | SessionPortCommand::Close(args) => {
+                    json!({ "id": args.id })
+                }
+                SessionPortCommand::List => json!({}),
+            },
         },
         Command::Capture { command } => match command {
             CaptureCommand::Http { command } => history_input_preview(command),
@@ -8920,6 +8984,19 @@ fn command_api_preview(command: &Command) -> Result<Value> {
                 format!("/api/sessions/{}/reveal", args.id),
                 Some(json!({})),
             ),
+            SessionCommand::Port { command } => match command {
+                SessionPortCommand::Open(args) => api_preview(
+                    "POST",
+                    format!("/api/sessions/{}/proxy-port", args.id),
+                    Some(json!({})),
+                ),
+                SessionPortCommand::Close(args) => api_preview(
+                    "DELETE",
+                    format!("/api/sessions/{}/proxy-port", args.id),
+                    None,
+                ),
+                SessionPortCommand::List => api_preview("GET", "/api/sessions/activity", None),
+            },
         },
         Command::Recon { command } => recon_api_preview(command),
         Command::Scanner { command } => scanner_api_preview(command),
@@ -9780,6 +9857,25 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
             command: SessionCommand::Reveal(SessionRevealArgs {
                 id: call_required(operation, input, "id")?,
             }),
+        },
+        "session.port.open" => Command::Session {
+            command: SessionCommand::Port {
+                command: SessionPortCommand::Open(SessionPortArgs {
+                    id: call_required(operation, input, "id")?,
+                }),
+            },
+        },
+        "session.port.close" => Command::Session {
+            command: SessionCommand::Port {
+                command: SessionPortCommand::Close(SessionPortArgs {
+                    id: call_required(operation, input, "id")?,
+                }),
+            },
+        },
+        "session.port.list" => Command::Session {
+            command: SessionCommand::Port {
+                command: SessionPortCommand::List,
+            },
         },
         "capture.http.list" => {
             let offset = call_optional(operation, input, "offset")?;
@@ -12472,7 +12568,38 @@ async fn handle_session(mut api: ApiClient, command: SessionCommand) -> Result<(
                 .await?;
             print_json(&result)
         }
+        SessionCommand::Port { command } => match command {
+            SessionPortCommand::Open(args) => {
+                let port: serde_json::Value = api
+                    .post_json(&format!("/api/sessions/{}/proxy-port", args.id), &json!({}))
+                    .await?;
+                print_json(&port)
+            }
+            SessionPortCommand::Close(args) => {
+                let port: serde_json::Value = api
+                    .delete_json(&format!("/api/sessions/{}/proxy-port", args.id))
+                    .await?;
+                print_json(&port)
+            }
+            SessionPortCommand::List => {
+                let sessions: Vec<SessionPortEntry> =
+                    api.get_json("/api/sessions/activity").await?;
+                print_json(&sessions)
+            }
+        },
     }
+}
+
+/// A session's own proxy port, as `session port list` prints it.
+#[derive(Deserialize, Serialize)]
+struct SessionPortEntry {
+    id: Uuid,
+    name: String,
+    /// The number the session keeps until it is deleted.
+    #[serde(default)]
+    proxy_port: Option<u16>,
+    #[serde(default)]
+    proxy_port_open: bool,
 }
 
 fn validate_session_metadata_response_id(
@@ -23806,6 +23933,59 @@ mod tests {
                 ["type"],
             "boolean"
         );
+    }
+
+    // An agent gives its session a port of its own, and finds the commands
+    // in the manifest like any other.
+    #[test]
+    fn session_ports_are_opened_closed_and_listed_from_the_cli() {
+        let id = "11111111-1111-1111-1111-111111111111";
+        for (operation, args, input, method, path, writes) in [
+            (
+                "session.port.open",
+                vec!["session", "port", "open", "--id", id],
+                json!({ "id": id }),
+                "POST",
+                format!("/api/sessions/{id}/proxy-port"),
+                true,
+            ),
+            (
+                "session.port.close",
+                vec!["session", "port", "close", "--id", id],
+                json!({ "id": id }),
+                "DELETE",
+                format!("/api/sessions/{id}/proxy-port"),
+                true,
+            ),
+            (
+                "session.port.list",
+                vec!["session", "port", "list"],
+                json!({}),
+                "GET",
+                "/api/sessions/activity".to_string(),
+                false,
+            ),
+        ] {
+            let mut argv = vec!["sniper-cli"];
+            argv.extend(args);
+            let direct = Cli::try_parse_from(argv).unwrap().command;
+            let call = command_from_operation_input(operation, &input).unwrap();
+            assert_eq!(direct.operation_name(), operation);
+            assert_eq!(call.operation_name(), operation);
+            assert_eq!(command_input_preview(&direct), input);
+            assert_eq!(command_input_preview(&call), input);
+            assert_eq!(direct.requires_confirmation(), writes);
+            let plan = dry_run_command(&direct).unwrap();
+            assert_eq!(plan["side_effect"], if writes { "write" } else { "read" });
+            assert_eq!(plan["api"]["method"], method);
+            assert_eq!(plan["api"]["path"], path);
+            let spec = operation_spec(operation).unwrap();
+            assert_eq!(spec.input_schema["additionalProperties"], false);
+            assert!(spec.description.contains("port"), "{operation}");
+        }
+        assert!(Cli::try_parse_from(["sniper-cli", "session", "port", "open"]).is_err());
+        assert!(command_from_operation_input("session.port.close", &json!({})).is_err());
+        assert!(command_from_operation_input("session.port.list", &json!({ "id": id })).is_err());
     }
 
     // Turning the daily update off is how an agent stops Sniper asking GitHub

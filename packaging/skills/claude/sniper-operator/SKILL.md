@@ -181,6 +181,7 @@ sniper-cli --output compact call saved.v1.operation.get --input '{"operation_id"
 Use these when v1 does not cover the task or the installed Sniper lacks it. They print raw JSON and have no v1 receipts.
 
 - `session create --name "Review"` creates a session and makes it active. `session rename --id <session-uuid> --name "Archive"` changes only the display name.
+- To work beside the user or another agent, do not take the active session. Create your own with `session create --name "<task>" --no-activate`, then `session port open --id <session-uuid>` and send your traffic through the `proxy_addr` it prints. That traffic is recorded into your session whichever session is active. Pass `--session-id <session-uuid>` on every other command. `session port list` shows each session's port. A session keeps its port number until it is deleted; no port is open after a restart, so open it again. Close it with `session port close --id <session-uuid>` when you finish: a session with an open port is not switched to or deleted.
 - `session switch --id <session-uuid>` respects busy-session checks. `session delete --id <session-uuid>` deletes the session's saved data and refuses the active session; switch away first. Do not bypass live-capture, proxy-work or pending-persistence safeguards.
 - Session writes are sent once, without following redirects. A lost or invalid response, or one naming a different UUID, leaves the outcome uncertain: check `session list` before another write.
 - Delete records by ID with `capture http delete --session-id <session-uuid> --id <record-uuid>`. Repeat `--id` or comma-separate UUIDs; in `call` JSON, use the `ids` array. One missing ID, including one from another session, rejects the whole request.
@@ -193,6 +194,10 @@ Use these when v1 does not cover the task or the installed Sniper lacks it. They
 sniper-cli --output compact session list
 sniper-cli session create --name "Review" --dry-run
 sniper-cli session create --name "Review" --yes
+sniper-cli session create --name "Agent task" --no-activate --yes
+sniper-cli session port open --id <session-uuid> --yes
+sniper-cli --output compact session port list
+sniper-cli session port close --id <session-uuid> --yes
 sniper-cli session rename --id <session-uuid> --name "Archive" --dry-run
 sniper-cli session rename --id <session-uuid> --name "Archive" --yes
 sniper-cli session delete --id <inactive-session-uuid> --dry-run

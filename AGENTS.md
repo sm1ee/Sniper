@@ -87,6 +87,7 @@ given change, including the parts that are easy to miss.
 | Proxy path, MITM, replay | `src/proxy.rs` |
 | HTTP API and the UI server | `src/api.rs` (largest module, ~17k lines) |
 | Session lifecycle and on-disk format | `src/session.rs`, `src/state.rs` |
+| A proxy port for one session | `src/session_ports.rs` (numbers, the registry, `OwnListeners`), `open_session_port` and `close_session_port` in `src/state.rs`, `serve_session_port` and `end_session_port_work` in `src/proxy.rs`, the `proxy-port` routes in `src/api.rs`, `session port` in `src/bin/sniper-cli.rs` |
 | Transaction storage, filtering, sorting | `src/store.rs` |
 | Opening a pre-wired browser | `src/browser.rs` (launch, SPKI trust, profile, which browser `auto` picks), `launch_browser` and `set_browser_preference` in `src/api.rs`, the saved default in `src/ui_settings.rs`, `capture browser` in `src/bin/sniper-cli.rs`, the launcher in `web/` (one component mounted by `[data-browser-launcher]`) |
 | Scope matching | `src/scope.rs` — **the only matcher**; do not add a second one |
@@ -105,6 +106,11 @@ Changes that must land in more than one place:
   them.
 - **Scope semantics** are shared by the history filter, intercept, and the site
   map. Change `src/scope.rs` and all three follow.
+- **A session has one writable context.** A session port holds it, and every
+  API write to that session resolves to the same `Arc`
+  (`AppState::session_port_context`). Do not load a context for a session
+  another way: a second one on the same directory shows another request's body
+  with no error.
 - **A new workspace section** must also be adopted in `adoptExternalWorkspace`
   (`web/app.js`). The app saves the whole workspace at the revision it last
   adopted, so a section it does not adopt puts back what another writer, such
@@ -189,7 +195,9 @@ seriously.
   requests and tunnels to every port Sniper listens on: the UI, the proxy
   itself, and the ports the browsers Sniper opened are driven through, at any
   address of this machine and under any name (`remote_client_targets` in
-  `src/proxy.rs`). A new port that Sniper listens on belongs in that list.
+  `src/proxy.rs`). A new port that Sniper listens on belongs in that list:
+  `OwnListeners` (`src/session_ports.rs`) holds the UI, the proxy listener and
+  every open session port, and each guard reads it.
 - **Never log captured traffic content** — bodies, headers, cookies, or tokens —
   into event logs, error messages, or temp files.
 - **Never put a real hostname in a test fixture, UI placeholder, or example.**
