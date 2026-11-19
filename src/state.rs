@@ -1676,6 +1676,19 @@ impl AppState {
                 session.id()
             )));
         }
+        // A session port records into the cached context. Replacing that one
+        // for a caller that holds another would leave two writable contexts
+        // on one session, so such a caller is refused instead.
+        if self
+            .session_ports
+            .context(session.id())
+            .is_some_and(|held| !Arc::ptr_eq(&held, session))
+        {
+            return Err(crate::workspace::WorkspaceReplaceError::Persist(format!(
+                "session {} is recording through its own port; reload it and save again",
+                session.id()
+            )));
+        }
         self.read_only_session_contexts
             .lock()
             .await

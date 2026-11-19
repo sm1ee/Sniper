@@ -553,6 +553,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    // A workspace save through a context other than the cached one replaces
+    // the cached one. For a session with a port that would leave the port
+    // recording into a context nobody else gets: a second writable context.
+    #[tokio::test]
+    async fn a_workspace_save_through_another_context_does_not_replace_the_ports() {
+        let dir = scratch("stale-workspace");
+        let state = state_in(&dir);
+        let agent = inactive_session(&state, "agent").await;
+        state.open_session_port(agent).await.unwrap();
+        let held = state.session_port_context(agent).unwrap();
+        let other = state.sessions.load_context_read_only(agent).unwrap();
+        let snapshot = other.workspace.snapshot().await;
+
+        let saved = state
+            .replace_workspace_state_and_persist(&other, snapshot)
+            .await;
+
+        assert!(saved.is_err());
+        assert!(Arc::ptr_eq(
+            &held,
+            &state.session_context_for_id(agent).await.unwrap()
+        ));
+        state.close_session_port(agent).await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn opening_a_port_twice_returns_the_open_port() {
         let dir = scratch("twice");

@@ -3655,7 +3655,7 @@ async fn update_workspace_state(
     if target_session_id != active_session.id()
         && proxy::live_websocket_session_context(target_session_id).is_none()
         && proxy::pending_session_context(target_session_id).is_none()
-        && !proxy::session_has_active_proxy_work(target_session_id)
+        && !busy_away_from_the_proxy(&state, target_session_id)
         && !state.sessions.contains_session(target_session_id)
     {
         let mut current = active_session.workspace.snapshot().await;
@@ -3674,7 +3674,10 @@ async fn update_workspace_state(
     let active_session = state.session().await;
     let session = if target_session_id == active_session.id() {
         active_session
-    } else if proxy::session_has_active_proxy_work(target_session_id) {
+    } else if let Some(session) = state.session_port_context(target_session_id) {
+        // The context its port records into, so the save never loads another.
+        session
+    } else if busy_away_from_the_proxy(&state, target_session_id) {
         let mut current = active_session.workspace.snapshot().await;
         current.session_id = Some(active_session.id());
         return (StatusCode::CONFLICT, Json(current)).into_response();
@@ -3755,7 +3758,7 @@ async fn update_workspace_state_keepalive(
     if target_session_id != active_session.id()
         && proxy::live_websocket_session_context(target_session_id).is_none()
         && proxy::pending_session_context(target_session_id).is_none()
-        && !proxy::session_has_active_proxy_work(target_session_id)
+        && !busy_away_from_the_proxy(&state, target_session_id)
         && !state.sessions.contains_session(target_session_id)
     {
         return StatusCode::CONFLICT.into_response();
@@ -3772,7 +3775,10 @@ async fn update_workspace_state_keepalive(
     let active_session = state.session().await;
     let session = if target_session_id == active_session.id() {
         active_session
-    } else if proxy::session_has_active_proxy_work(target_session_id) {
+    } else if let Some(session) = state.session_port_context(target_session_id) {
+        // The context its port records into, so the save never loads another.
+        session
+    } else if busy_away_from_the_proxy(&state, target_session_id) {
         return StatusCode::CONFLICT.into_response();
     } else if let Some(session) = proxy::live_websocket_session_context(target_session_id) {
         session
@@ -4254,6 +4260,16 @@ fn session_load_failure_response(session_id: Uuid, error: anyhow::Error) -> Resp
         .into_response()
 }
 
+/// Whether a write that names a session which is not the active one is
+/// refused because the proxy still works in it. The rule catches a client
+/// that writes to a session the proxy has left. A session with its own port
+/// always has proxy work and is written while it flows; what keeps that safe
+/// is its one writable context, which the port holds.
+fn busy_away_from_the_proxy(state: &AppState, session_id: Uuid) -> bool {
+    proxy::session_has_active_proxy_work(session_id)
+        && state.session_port_context(session_id).is_none()
+}
+
 pub(crate) async fn resolve_session_for_optional_id(
     state: &Arc<AppState>,
     target_session_id: Option<Uuid>,
@@ -4265,7 +4281,11 @@ pub(crate) async fn resolve_session_for_optional_id(
     if target_session_id == active_session.id() {
         return Ok(active_session);
     }
-    if proxy::session_has_active_proxy_work(target_session_id) {
+    // The context its port records into, so a write never loads another.
+    if let Some(session) = state.session_port_context(target_session_id) {
+        return Ok(session);
+    }
+    if busy_away_from_the_proxy(state, target_session_id) {
         return Err(session_proxy_work_conflict_response(target_session_id));
     }
     if let Some(session) = proxy::live_websocket_session_context(target_session_id) {
@@ -4324,7 +4344,7 @@ pub(crate) async fn guard_session_write_operation(
     }
     if !require_still_active
         && state.sessions.active_session_id() != session.id()
-        && proxy::session_has_active_proxy_work(session.id())
+        && busy_away_from_the_proxy(state, session.id())
     {
         return Err(session_proxy_work_conflict_response(session.id()));
     }
@@ -4350,7 +4370,7 @@ async fn begin_session_proxy_operation(
         return Err(response);
     }
     if state.sessions.active_session_id() != session.id()
-        && proxy::session_has_active_proxy_work(session.id())
+        && busy_away_from_the_proxy(state, session.id())
     {
         return Err(session_proxy_work_conflict_response(session.id()));
     }
@@ -4422,7 +4442,7 @@ async fn guard_ws_replay_connection_owner_operation(
         return Err(response);
     }
     if state.sessions.active_session_id() != session_id
-        && proxy::session_has_active_proxy_work(session_id)
+        && busy_away_from_the_proxy(state, session_id)
     {
         return Err(session_proxy_work_conflict_response(session_id));
     }
@@ -10638,6 +10658,99 @@ mod tests {
         .await;
         assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
 
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A session fed by its own port always has proxy work. The rule that
+    // refuses a write to a busy session that is not active would refuse every
+    // write to it, and not even a held request could be forwarded.
+    #[tokio::test]
+    async fn a_session_with_an_open_port_is_written_while_the_proxy_works_in_it() {
+        let (state, data_dir) = test_state("port-session-writes");
+        let default = state.session().await.id();
+        let agent = state
+            .create_inactive_session(Some("agent".into()))
+            .await
+            .unwrap()
+            .id;
+        let no_port = state
+            .create_inactive_session(Some("no port".into()))
+            .await
+            .unwrap()
+            .id;
+        state.open_session_port(agent).await.unwrap();
+        let held = state.session_port_context(agent).unwrap();
+        let _agent_work = crate::proxy::remember_active_proxy_session_owner(
+            agent,
+            crate::proxy::PROXY_WORK_HTTP_REQUEST,
+        );
+        let _other_work = crate::proxy::remember_active_proxy_session_owner(
+            no_port,
+            crate::proxy::PROXY_WORK_HTTP_REQUEST,
+        );
+
+        // Every write resolves to the one context the port holds.
+        let resolved = super::resolve_session_for_optional_id(&state, Some(agent))
+            .await
+            .ok()
+            .expect("a session with an open port resolves while it is busy");
+        assert!(Arc::ptr_eq(&resolved, &held));
+        drop(
+            super::guard_session_write_operation(&state, &held, false)
+                .await
+                .ok()
+                .expect("a write to a session with an open port is not refused"),
+        );
+        drop(
+            super::begin_session_proxy_operation(&state, &held, None, None)
+                .await
+                .ok()
+                .expect("a Replay in a session with an open port is not refused"),
+        );
+
+        // A session without a port keeps the rule.
+        let refused = super::resolve_session_for_optional_id(&state, Some(no_port))
+            .await
+            .err()
+            .expect("a busy session without a port is still refused");
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+
+        let (status, body) = api_route_json(
+            state.clone(),
+            reqwest::Method::POST,
+            "/api/runtime",
+            serde_json::json!({ "session_id": agent, "intercept_enabled": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(held.runtime.snapshot().await.intercept_enabled);
+
+        // The workspace, over both routes, and the answer is this session's.
+        for endpoint in ["/api/workspace-state", "/api/workspace-state/keepalive"] {
+            let mut snapshot = held.workspace.snapshot().await;
+            snapshot.session_id = Some(agent);
+            let (status, body) = api_route_json(
+                state.clone(),
+                reqwest::Method::POST,
+                endpoint,
+                serde_json::to_value(&snapshot).unwrap(),
+            )
+            .await;
+            assert!(status.is_success(), "{endpoint}: {status} {body}");
+            assert!(!body.contains(&default.to_string()), "{endpoint}: {body}");
+        }
+
+        // None of it replaced the context the port records into.
+        assert!(Arc::ptr_eq(
+            &held,
+            &state.session_port_context(agent).unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &held,
+            &state.session_context_for_id(agent).await.unwrap()
+        ));
+
+        state.close_session_port(agent).await.unwrap();
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
