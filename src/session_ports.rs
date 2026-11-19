@@ -55,6 +55,16 @@ impl Numbers {
         self.sessions.get(&session).copied()
     }
 
+    pub(crate) fn holder_of(&self, port: u16) -> Option<Uuid> {
+        self.sessions
+            .iter()
+            .find_map(|(session, held)| (*held == port).then_some(*session))
+    }
+
+    fn held(&self) -> Vec<u16> {
+        self.sessions.values().copied().collect()
+    }
+
     /// The numbers never given yet, lowest first, none below `first`.
     pub(crate) fn candidates(&self, first: u16) -> impl Iterator<Item = u16> {
         let next = self.last.max(first.saturating_sub(1)).saturating_add(1);
@@ -69,6 +79,60 @@ impl Numbers {
     /// The session's number, which no session gets again.
     pub(crate) fn forget(&mut self, session: Uuid) -> Option<u16> {
         self.sessions.remove(&session)
+    }
+}
+
+/// The addresses Sniper itself listens on, kept in one place for every guard
+/// against a connection that leads back into Sniper: the UI, the main proxy
+/// listener and each open session port, and the numbers sessions keep for
+/// ports that are closed now. A port that opens later is known to all of them
+/// at once, also to the checks a session makes without the state at hand.
+#[derive(Clone, Default)]
+pub struct OwnListeners(Arc<std::sync::RwLock<OwnAddrs>>);
+
+#[derive(Default)]
+struct OwnAddrs {
+    ui: Option<SocketAddr>,
+    main: Option<SocketAddr>,
+    session_ports: Vec<SocketAddr>,
+    held: Vec<u16>,
+}
+
+impl OwnListeners {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, OwnAddrs> {
+        self.0.read().unwrap_or_else(|error| error.into_inner())
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, OwnAddrs> {
+        self.0.write().unwrap_or_else(|error| error.into_inner())
+    }
+
+    pub(crate) fn set_ui(&self, addr: SocketAddr) {
+        self.write().ui = Some(addr);
+    }
+
+    pub(crate) fn set_main(&self, addr: SocketAddr) {
+        self.write().main = Some(addr);
+    }
+
+    /// Sniper's proxy listeners: the main one and every open session port.
+    pub fn proxies(&self) -> Vec<SocketAddr> {
+        let own = self.read();
+        own.main
+            .into_iter()
+            .chain(own.session_ports.iter().copied())
+            .collect()
+    }
+
+    /// Every listener of Sniper's: the UI and the proxies.
+    pub fn all(&self) -> Vec<SocketAddr> {
+        let ui = self.read().ui;
+        ui.into_iter().chain(self.proxies()).collect()
+    }
+
+    /// Whether a session keeps this number for its port, open or not.
+    pub fn keeps(&self, port: u16) -> bool {
+        self.read().held.contains(&port)
     }
 }
 
@@ -133,16 +197,22 @@ pub(crate) struct SessionPorts {
     /// runtime, so the registry's own lock cannot be held across it.
     numbers_write: tokio::sync::Mutex<()>,
     inner: Mutex<Inner>,
+    /// What the guards read. Every change to the open ports and the kept
+    /// numbers is copied into it here, so none can be forgotten.
+    own: OwnListeners,
     #[cfg(test)]
     test_first_port: std::sync::OnceLock<u16>,
 }
 
 impl SessionPorts {
-    pub(crate) fn load(data_dir: &Path) -> Self {
+    pub(crate) fn load(data_dir: &Path, own: OwnListeners) -> Self {
         let path = data_dir.join(NUMBERS_FILE);
         let numbers = Numbers::load(&path).map_err(|error| format!("{error:#}"));
-        if let Err(error) = &numbers {
-            tracing::warn!(%error, "session ports stay closed until the numbers file is readable");
+        match &numbers {
+            Ok(numbers) => own.write().held = numbers.held(),
+            Err(error) => {
+                tracing::warn!(%error, "session ports stay closed until the numbers file is readable")
+            }
         }
         Self {
             path,
@@ -151,6 +221,7 @@ impl SessionPorts {
                 numbers,
                 open: HashMap::new(),
             }),
+            own,
             #[cfg(test)]
             test_first_port: std::sync::OnceLock::new(),
         }
@@ -229,7 +300,8 @@ impl SessionPorts {
         addr: SocketAddr,
         accept: JoinHandle<()>,
     ) {
-        let replaced = self.inner().open.insert(
+        let mut inner = self.inner();
+        let replaced = inner.open.insert(
             session.id(),
             OpenPort {
                 addr,
@@ -241,12 +313,18 @@ impl SessionPorts {
         if let Some(replaced) = replaced {
             replaced.accept.abort();
         }
+        self.own.write().session_ports = open_addrs(&inner);
     }
 
     /// Stops the port from accepting and forgets it. The listener is closed
     /// when this returns, so the number can be bound again.
     pub(crate) async fn unregister(&self, session: Uuid) -> Option<SocketAddr> {
-        let port = self.inner().open.remove(&session)?;
+        let port = {
+            let mut inner = self.inner();
+            let port = inner.open.remove(&session)?;
+            self.own.write().session_ports = open_addrs(&inner);
+            port
+        };
         port.accept.abort();
         let _ = port.accept.await;
         Some(port.addr)
@@ -266,8 +344,19 @@ impl SessionPorts {
             .await
             .context("session port number writer panicked")?
             .with_context(|| format!("failed to save {}", self.path.display()))?;
+        self.own.write().held = numbers.held();
         self.inner().numbers = Ok(numbers);
         Ok(())
+    }
+
+    /// Takes `port` from the session that keeps it, when the main listener
+    /// was started there, and says which session that was.
+    pub(crate) async fn release(&self, port: u16) -> Result<Option<Uuid>> {
+        let Some(session) = self.numbers()?.holder_of(port) else {
+            return Ok(None);
+        };
+        self.forget(session).await?;
+        Ok(Some(session))
     }
 
     pub(crate) async fn give(&self, session: Uuid, port: u16) -> Result<()> {
@@ -283,6 +372,14 @@ impl SessionPorts {
         self.change_numbers(|numbers| numbers.forget(session).is_some())
             .await
     }
+}
+
+/// The open ports' addresses, lowest number first so the list reads the same
+/// each time.
+fn open_addrs(inner: &Inner) -> Vec<SocketAddr> {
+    let mut addrs: Vec<_> = inner.open.values().map(|port| port.addr).collect();
+    addrs.sort();
+    addrs
 }
 
 /// Whether something accepts a connection on `addr` now.
@@ -797,6 +894,232 @@ mod tests {
         assert!(echoes(&mut tunnel, b"\x00\x02after").await);
         drop(tunnel);
         state.close_session_port(agent).await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // Every guard against a connection that leads back into Sniper reads one
+    // list, so a port that opens later is known to all of them at once.
+    #[tokio::test]
+    async fn every_guard_learns_of_a_session_port_when_it_opens() {
+        let dir = scratch("own-listeners");
+        let state = state_in(&dir);
+        let default = state.session().await;
+        let agent = inactive_session(&state, "agent").await;
+        let main: SocketAddr = "127.0.0.1:18080".parse().unwrap();
+        let ui: SocketAddr = "127.0.0.1:18099".parse().unwrap();
+        state.set_active_proxy_addr(main).await;
+        state.set_active_ui_addr(ui).await;
+        assert_eq!(state.own_listeners().proxies(), [main]);
+
+        let port = port_addr(&state.open_session_port(agent).await.unwrap());
+
+        assert_eq!(state.own_listeners().proxies(), [main, port]);
+        assert_eq!(state.own_listeners().all(), [ui, main, port]);
+        assert!(state.own_listeners().keeps(port.port()));
+        assert!(
+            crate::proxy::targets_own_listener(&state, &default, "http", &port.to_string()).await
+        );
+        // A session loaded before the port opened sees it too, in the checks
+        // it makes without the state at hand.
+        assert_eq!(default.runtime.own_listeners().proxies(), [main, port]);
+        let chain = crate::upstream_proxy::UpstreamProxy {
+            enabled: true,
+            url: format!("http://{port}"),
+            ..default.runtime.upstream_proxy().await
+        };
+        let used = chain.apply(reqwest::Client::builder()).err().unwrap();
+        assert!(used.to_string().contains("own listener"), "{used:#}");
+        let dialled = chain.connect("example.com", 80).await.err().unwrap();
+        assert!(dialled.to_string().contains("own listener"), "{dialled:#}");
+
+        state.close_session_port(agent).await.unwrap();
+
+        assert_eq!(state.own_listeners().proxies(), [main]);
+        // The number stays the session's while the port is closed.
+        assert!(state.own_listeners().keeps(port.port()));
+        assert!(
+            !crate::proxy::targets_own_listener(&state, &default, "http", &port.to_string()).await
+        );
+        assert!(chain.apply(reqwest::Client::builder()).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // A request whose target is one of Sniper's proxy listeners would be
+    // forwarded back into Sniper, again and again.
+    #[tokio::test]
+    async fn a_request_for_one_of_snipers_proxy_listeners_is_refused_as_a_loop() {
+        let _work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let dir = scratch("loop");
+        let state = state_in(&dir);
+        let agent = inactive_session(&state, "agent").await;
+        let main = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let main_addr = main.local_addr().unwrap();
+        state.set_active_proxy_addr(main_addr).await;
+        let main_task = tokio::spawn(crate::proxy::serve_proxy(main, state.clone()));
+        let port = port_addr(&state.open_session_port(agent).await.unwrap());
+
+        for (through, target) in [(main_addr, port), (port, main_addr), (port, port)] {
+            let status = get_through(through, target, "/").await;
+            assert!(status.contains("508"), "{through} to {target}: {status}");
+        }
+
+        state.close_session_port(agent).await.unwrap();
+        main_task.abort();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn an_upstream_proxy_that_is_a_session_port_is_not_saved() {
+        let dir = scratch("upstream-save");
+        let state = state_in(&dir);
+        let agent = inactive_session(&state, "agent").await;
+        let port = port_addr(&state.open_session_port(agent).await.unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = listener.local_addr().unwrap();
+        let router = crate::api::router(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("http://{api}/api/runtime"))
+            .json(&serde_json::json!({
+                "upstream_proxy": { "enabled": true, "url": format!("http://{port}") }
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert!(response.text().await.unwrap().contains("own listener"));
+        assert!(!state.session().await.runtime.upstream_proxy().await.enabled);
+        server.abort();
+        state.close_session_port(agent).await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A session that keeps a number while its port is closed.
+    async fn session_keeping_a_number(state: &AppState) -> (Uuid, u16) {
+        let session = inactive_session(state, "keeps a number").await;
+        let port = state
+            .open_session_port(session)
+            .await
+            .unwrap()
+            .proxy_port
+            .unwrap();
+        state.close_session_port(session).await.unwrap();
+        (session, port)
+    }
+
+    // A client left pointing at a session's number must reach that session or
+    // nothing, so nothing else of Sniper's is started on it.
+    #[tokio::test]
+    async fn the_main_listener_is_not_moved_onto_a_number_a_session_keeps() {
+        let _work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let dir = scratch("main-held");
+        let state = state_in(&dir);
+        let (session, port) = session_keeping_a_number(&state).await;
+        let before = state.get_active_proxy_addr().await;
+        let saved = state.startup.snapshot().await.proxy_port;
+
+        let error = crate::proxy::rebind_proxy(state.clone(), loopback(port))
+            .await
+            .unwrap_err();
+        assert!(error.contains("session"), "{error}");
+        assert_eq!(state.get_active_proxy_addr().await, before);
+
+        // The setting is refused before it is saved.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = listener.local_addr().unwrap();
+        let router = crate::api::router(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("http://{api}/api/startup-settings"))
+            .json(&serde_json::json!({ "proxy_port": port }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+        assert!(response.text().await.unwrap().contains("session"));
+        assert_eq!(state.startup.snapshot().await.proxy_port, saved);
+        assert_eq!(state.session_port_status(session).proxy_port, Some(port));
+        server.abort();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_tcp_relay_listener_does_not_start_on_a_number_a_session_keeps() {
+        let dir = scratch("tcp-held");
+        let state = state_in(&dir);
+        let (_session, port) = session_keeping_a_number(&state).await;
+        let target = echo_upstream().await;
+        let listener = |protocol| crate::tcp_capture::TcpListenerInput {
+            enabled: true,
+            settings: crate::tcp_capture::TcpSettings {
+                local_port: port,
+                target_host: "127.0.0.1".into(),
+                target_port: target.port(),
+                protocol,
+                ..Default::default()
+            },
+        };
+        let capture = state.session().await.tcp_capture.clone();
+
+        let error = capture
+            .add_listener(listener(crate::tcp_capture::Protocol::Tcp))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("session"), "{error}");
+        assert!(capture.listener_configs().is_empty());
+
+        // A UDP listener takes nothing from a TCP port.
+        capture
+            .add_listener(listener(crate::tcp_capture::Protocol::Udp))
+            .await
+            .unwrap();
+        capture.stop().await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // The main listener is where the operator put it, the environment
+    // included, so there the session gives way.
+    #[tokio::test]
+    async fn a_main_listener_started_on_a_sessions_number_takes_it_from_the_session() {
+        let dir = scratch("claim");
+        let state = state_in(&dir);
+        let (session, port) = session_keeping_a_number(&state).await;
+        let (other, other_port) = session_keeping_a_number(&state).await;
+        state.set_active_proxy_addr(loopback(port)).await;
+
+        state.claim_main_listener_port().await;
+
+        assert_eq!(state.session_port_status(session).proxy_port, None);
+        assert_eq!(
+            state.session_port_status(other).proxy_port,
+            Some(other_port)
+        );
+        assert!(!state.own_listeners().keeps(port));
+        let events = state.session().await.event_log.snapshot(None).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.title == "Session port number released"
+                    && event.message.contains(&port.to_string())),
+            "{events:?}"
+        );
+        // It is not given again, to this session or another.
+        let next = state.open_session_port(session).await.unwrap().proxy_port;
+        assert!(next > Some(port.max(other_port)));
+        state.close_session_port(session).await.unwrap();
+
+        // With no session on the main listener's number nothing is said.
+        let before = state.session().await.event_log.len().await;
+        state.claim_main_listener_port().await;
+        assert_eq!(state.session().await.event_log.len().await, before);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -282,6 +282,7 @@ fn run_desktop() -> Result<()> {
     let state = Arc::new(AppState::new(config.clone())?);
 
     let initial_proxy_generation = if proxy_listener.is_some() {
+        runtime.block_on(state.claim_main_listener_port());
         let proxy_generation = state.mark_proxy_listener_online();
         runtime.block_on(state.log_info(
             "runtime",

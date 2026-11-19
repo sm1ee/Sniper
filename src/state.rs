@@ -136,6 +136,9 @@ pub struct AppState {
     /// The proxy ports that each record into one session. Opened and closed
     /// under `session_activation_lock`.
     session_ports: Arc<crate::session_ports::SessionPorts>,
+    /// Every address Sniper listens on, for the guards against a connection
+    /// that leads back into it.
+    own_listeners: crate::session_ports::OwnListeners,
     /// WebSocket replay connections.
     pub ws_replay: Arc<WsReplayStore>,
     /// Stable owner token for runtime-state writes from this app process.
@@ -226,7 +229,13 @@ impl AppState {
         )?;
 
         let saved_operations = Arc::new(SavedOperationLedger::new(&config.data_dir));
-        let session_ports = Arc::new(crate::session_ports::SessionPorts::load(&config.data_dir));
+        let own_listeners = crate::session_ports::OwnListeners::default();
+        own_listeners.set_main(config.proxy_addr);
+        own_listeners.set_ui(config.ui_addr);
+        let session_ports = Arc::new(crate::session_ports::SessionPorts::load(
+            &config.data_dir,
+            own_listeners.clone(),
+        ));
         let active_proxy_addr = config.proxy_addr;
         let active_ui_addr = config.ui_addr;
         let runtime_instance_id = uuid::Uuid::new_v4();
@@ -257,6 +266,7 @@ impl AppState {
             session_contexts: Arc::new(AsyncMutex::new(HashMap::new())),
             read_only_session_contexts: Arc::new(AsyncMutex::new(HashMap::new())),
             session_ports,
+            own_listeners,
             ws_replay: Arc::new(WsReplayStore::new()),
             runtime_instance_id,
             workspace_retention_uncertain: Arc::new(Default::default()),
@@ -403,16 +413,13 @@ impl AppState {
         session.tcp_capture.clear().await
     }
 
-    /// What a session's TCP listeners need from Sniper: its CA to decrypt TLS,
-    /// and its own listeners, which a client on another device must not reach.
+    /// What a session's TCP listeners need from Sniper: its CA to decrypt TLS.
+    /// Sniper's own listeners, which a client on another device must not
+    /// reach, come to it through the session's runtime settings.
     async fn arm_tcp_capture(&self, session: &SessionContext) {
         session
             .tcp_capture
             .use_certificates(self.certificates.clone());
-        session.tcp_capture.use_own_addresses(vec![
-            self.get_active_ui_addr().await,
-            self.get_active_proxy_addr().await,
-        ]);
     }
 
     /// Starts the active session's saved listeners once Sniper is up.
@@ -535,6 +542,11 @@ impl AppState {
     }
 
     fn bind_upstream_peer_durability(&self, session: &Arc<SessionContext>) {
+        // Every context this state loads passes through here, so each checks
+        // its upstream proxy and its TCP relay against Sniper's own listeners.
+        session
+            .runtime
+            .use_own_listeners(self.own_listeners.clone());
         let gate = self
             .upstream_peer_durability_gates
             .lock()
@@ -1778,6 +1790,36 @@ impl AppState {
 
     pub async fn set_active_proxy_addr(&self, addr: SocketAddr) {
         *self.active_proxy_addr.write().await = addr;
+        self.own_listeners.set_main(addr);
+    }
+
+    /// Every address Sniper listens on now: the UI, the main proxy listener
+    /// and each open session port.
+    pub fn own_listeners(&self) -> &crate::session_ports::OwnListeners {
+        &self.own_listeners
+    }
+
+    /// The main listener is where the operator put it, the environment
+    /// included. A session that kept that number for a port of its own loses
+    /// it and gets another when its port is opened next.
+    pub async fn claim_main_listener_port(&self) {
+        let port = self.get_active_proxy_addr().await.port();
+        match self.session_ports.release(port).await {
+            Ok(Some(session)) => {
+                self.log_warn(
+                    "runtime",
+                    "Session port number released",
+                    format!(
+                        "The proxy listener started on {port}, the number session {session} kept for its own port. That session gets another number when its port is opened."
+                    ),
+                )
+                .await;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(?error, port, "failed to release a session's port number")
+            }
+        }
     }
 
     pub async fn get_active_ui_addr(&self) -> SocketAddr {
@@ -1797,6 +1839,7 @@ impl AppState {
 
     pub async fn set_active_ui_addr(&self, addr: SocketAddr) {
         *self.active_ui_addr.write().await = addr;
+        self.own_listeners.set_ui(addr);
     }
 
     pub async fn set_proxy_task(&self, handle: JoinHandle<()>) {

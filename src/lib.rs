@@ -109,6 +109,7 @@ pub async fn run_with_config(config: AppConfig) -> Result<()> {
                 .local_addr()
                 .context("failed to read bound proxy address")?;
             state.set_active_proxy_addr(proxy_addr).await;
+            state.claim_main_listener_port().await;
             let proxy_generation = state.mark_proxy_listener_online();
             state
                 .log_info(

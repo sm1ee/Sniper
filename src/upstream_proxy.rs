@@ -46,6 +46,11 @@ pub struct UpstreamProxy {
     /// `RuntimeSettings::upstream_proxy` attaches it.
     #[serde(skip)]
     pub bypass_hosts: Vec<String>,
+    /// Sniper's own listeners, attached with the bypass list. A chain whose
+    /// address is one of them is refused when it is used: the setting is
+    /// checked when it is saved, and a session port can open there afterwards.
+    #[serde(skip)]
+    pub own_listeners: crate::session_ports::OwnListeners,
 }
 
 impl std::fmt::Debug for UpstreamProxy {
@@ -101,6 +106,22 @@ impl UpstreamProxy {
         url::Url::parse(&self.url).map_err(|_| anyhow::anyhow!("Invalid upstream proxy address"))
     }
 
+    /// A request sent through one of Sniper's own proxy listeners comes back
+    /// in and goes out through the chain again, until the process is out of
+    /// sockets.
+    fn refuse_own_listener(&self) -> Result<()> {
+        let loops = self.url.parse::<http::Uri>().is_ok_and(|uri| {
+            self.own_listeners
+                .proxies()
+                .iter()
+                .any(|addr| crate::proxy::request_targets_own_listener(&uri, *addr))
+        });
+        if loops {
+            bail!("Upstream proxy cannot be Sniper's own listener");
+        }
+        Ok(())
+    }
+
     pub(crate) fn route_snapshot(&self) -> UpstreamProxyRouteSnapshot {
         let route = if !self.enabled {
             ObservedSocketPeerRoute::Direct
@@ -123,6 +144,7 @@ impl UpstreamProxy {
             return Ok(builder);
         }
         self.validate()?;
+        self.refuse_own_listener()?;
         // Both SOCKS spellings resolve destination names at the proxy, including replay.
         let mut url = self.parsed_url()?;
         if url.scheme() == "socks5" {
@@ -161,6 +183,7 @@ impl UpstreamProxy {
                 .context("Upstream connection failed");
         }
         self.validate()?;
+        self.refuse_own_listener()?;
         let url = self.parsed_url()?;
         let mut stream = TcpStream::connect((
             url.host_str().unwrap().trim_matches(['[', ']']),

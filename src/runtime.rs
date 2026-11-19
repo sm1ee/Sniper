@@ -267,6 +267,10 @@ pub struct RuntimeSettingsUpdate {
 
 pub struct RuntimeSettings {
     inner: RwLock<RuntimeSettingsSnapshot>,
+    /// Sniper's own listeners, for the checks a session makes without the
+    /// state at hand: its upstream proxy when used, and its TCP relay. Absent
+    /// for a context nothing serves.
+    own_listeners: std::sync::OnceLock<crate::session_ports::OwnListeners>,
 }
 
 impl RuntimeSettings {
@@ -277,7 +281,16 @@ impl RuntimeSettings {
     pub fn from_snapshot(snapshot: RuntimeSettingsSnapshot) -> Self {
         Self {
             inner: RwLock::new(snapshot.sanitized_for_load()),
+            own_listeners: std::sync::OnceLock::new(),
         }
+    }
+
+    pub fn use_own_listeners(&self, listeners: crate::session_ports::OwnListeners) {
+        let _ = self.own_listeners.set(listeners);
+    }
+
+    pub fn own_listeners(&self) -> crate::session_ports::OwnListeners {
+        self.own_listeners.get().cloned().unwrap_or_default()
     }
 
     pub async fn snapshot(&self) -> RuntimeSettingsSnapshot {
@@ -461,6 +474,7 @@ impl RuntimeSettings {
         let current = self.inner.read().await;
         crate::upstream_proxy::UpstreamProxy {
             bypass_hosts: current.upstream_bypass_hosts.clone(),
+            own_listeners: self.own_listeners(),
             ..current.upstream_proxy.clone()
         }
     }

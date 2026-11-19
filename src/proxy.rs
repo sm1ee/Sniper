@@ -293,6 +293,14 @@ pub async fn rebind_proxy_locked(
         }
         return Ok(());
     }
+    // A client left pointing at a session's number must reach that session
+    // or nothing, never the main listener and whichever session it records.
+    if state.own_listeners().keeps(new_addr.port()) {
+        return Err(format!(
+            "Port {} is kept for a session's own proxy port. Choose another port.",
+            new_addr.port()
+        ));
+    }
 
     close_live_websocket_relays(
         state.as_ref(),
@@ -902,10 +910,7 @@ pub(crate) async fn targets_own_listener(
     else {
         return true;
     };
-    for listener in [
-        state.get_active_proxy_addr().await,
-        state.get_active_ui_addr().await,
-    ] {
+    for listener in state.own_listeners().all() {
         if request_targets_own_listener(&uri, listener)
             || name_resolves_to_own_listener(session, &uri, listener).await
         {
@@ -913,6 +918,24 @@ pub(crate) async fn targets_own_listener(
         }
     }
     false
+}
+
+/// The proxy listener of Sniper's that `uri` leads back to, by address or by
+/// a name that resolves to this machine: the main listener or a session port.
+/// Forwarding there would send the request round again and again.
+async fn own_proxy_listener_for(
+    state: &AppState,
+    session: &SessionContext,
+    uri: &Uri,
+) -> Option<SocketAddr> {
+    for listener in state.own_listeners().proxies() {
+        if request_targets_own_listener(uri, listener)
+            || name_resolves_to_own_listener(session, uri, listener).await
+        {
+            return Some(listener);
+        }
+    }
+    None
 }
 
 const RENDER_RESOURCE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -933,7 +956,7 @@ pub(crate) struct RenderResource {
 pub(crate) async fn fetch_render_resource(
     session: &SessionContext,
     url: &str,
-    own_listeners: [SocketAddr; 2],
+    own_listeners: Vec<SocketAddr>,
 ) -> Result<RenderResource> {
     let proxy = session.runtime.upstream_proxy().await;
     // A redirect must not lead back into Sniper's own listeners either.
@@ -1727,10 +1750,7 @@ async fn handle_forwardable_request(
         )
         .await;
     }
-    let proxy_addr = state.get_active_proxy_addr().await;
-    if request_targets_own_listener(&absolute_uri, proxy_addr)
-        || name_resolves_to_own_listener(&session, &absolute_uri, proxy_addr).await
-    {
+    if let Some(proxy_addr) = own_proxy_listener_for(&state, &session, &absolute_uri).await {
         return record_http_rejection(
             &state,
             &session,
@@ -2055,10 +2075,12 @@ async fn remote_client_reaches_guarded(state: &AppState, client: IpAddr, uri: &U
     if client.to_canonical().is_loopback() {
         return false;
     }
-    let mut ports = vec![
-        state.get_active_ui_addr().await.port(),
-        state.get_active_proxy_addr().await.port(),
-    ];
+    let mut ports: Vec<u16> = state
+        .own_listeners()
+        .all()
+        .iter()
+        .map(SocketAddr::port)
+        .collect();
     ports.extend(crate::browser::driver_ports());
     remote_client_targets(client, uri, &ports)
 }
@@ -10397,6 +10419,49 @@ mod tests {
         // Once the browser exits the port is anyone's again.
         crate::browser::forget_driver_ports(&profile);
         assert!(!remote_client_reaches_guarded(&state, remote, &devtools).await);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A session port is one more second hop: a client that makes Sniper
+    // connect to it arrives there as a local client.
+    #[tokio::test]
+    async fn another_machine_is_refused_a_session_port() {
+        let (state, data_dir) = test_proxy_state("sniper-proxy-session-port-guard");
+        let agent = state
+            .create_inactive_session(Some("agent".into()))
+            .await
+            .unwrap()
+            .id;
+        let status = state.open_session_port(agent).await.unwrap();
+        let port = status.proxy_port.unwrap();
+        let remote: IpAddr = "192.0.2.10".parse().unwrap();
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let targets = [
+            format!("http://127.0.0.1:{port}/"),
+            format!("http://[::1]:{port}/"),
+            format!("http://example.com:{port}/"),
+        ];
+        for target in &targets {
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                remote_client_reaches_guarded(&state, remote, &uri).await,
+                "{target}"
+            );
+            assert!(
+                !remote_client_reaches_guarded(&state, local, &uri).await,
+                "{target}"
+            );
+        }
+
+        // Once it is closed the port is anyone's again.
+        state.close_session_port(agent).await.unwrap();
+        for target in &targets {
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                !remote_client_reaches_guarded(&state, remote, &uri).await,
+                "{target}"
+            );
+        }
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

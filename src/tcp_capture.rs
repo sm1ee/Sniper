@@ -1345,8 +1345,6 @@ pub struct TcpCapture {
     runtime: std::sync::OnceLock<Arc<crate::runtime::RuntimeSettings>>,
     /// Sniper's CA, for listeners that decrypt TLS.
     certificates: std::sync::OnceLock<Arc<crate::certificate::CertificateAuthority>>,
-    /// Sniper's UI and proxy listeners, which a remote client must not reach.
-    own_addresses: std::sync::Mutex<Vec<std::net::SocketAddr>>,
     /// How long a UDP flow may go without a datagram before it ends.
     udp_idle: std::sync::Mutex<Duration>,
     intercept: std::sync::Mutex<InterceptRuntime>,
@@ -1689,7 +1687,6 @@ impl TcpCapture {
             unrecorded: AtomicU64::new(0),
             runtime: std::sync::OnceLock::new(),
             certificates: std::sync::OnceLock::new(),
-            own_addresses: std::sync::Mutex::new(Vec::new()),
             udp_idle: std::sync::Mutex::new(Duration::from_secs(60)),
             intercept: std::sync::Mutex::new(InterceptRuntime::default()),
         }
@@ -1936,9 +1933,7 @@ impl TcpCapture {
     fn set_udp_idle(&self, idle: Duration) {
         *self.udp_idle.lock().unwrap() = idle;
     }
-    pub fn use_own_addresses(&self, addresses: Vec<std::net::SocketAddr>) {
-        *self.own_addresses.lock().unwrap() = addresses;
-    }
+
     /// What `client` may not be relayed to: nothing for this machine.
     fn guarded_for(&self, client: &TcpStream) -> Vec<std::net::SocketAddr> {
         match client.peer_addr() {
@@ -1946,9 +1941,14 @@ impl TcpCapture {
             _ => self.guarded(),
         }
     }
-    /// What a client on another device may not be relayed to.
+    /// What a client on another device may not be relayed to: Sniper's UI and
+    /// proxy listeners as they are now, a session port opened since included,
+    /// and the driver ports of the browsers it opened.
     fn guarded(&self) -> Vec<std::net::SocketAddr> {
-        let mut guarded = self.own_addresses.lock().unwrap().clone();
+        let mut guarded = match self.runtime.get() {
+            Some(runtime) => runtime.own_listeners().all(),
+            None => Vec::new(),
+        };
         guarded.extend(
             crate::browser::driver_ports()
                 .into_iter()
@@ -2137,6 +2137,17 @@ impl TcpCapture {
     ) -> anyhow::Result<()> {
         settings.validate()?;
         settings.target_host = settings.normalized_host()?;
+        // A client left pointing at a session's proxy port must reach that
+        // session or nothing. UDP takes nothing from a TCP port.
+        anyhow::ensure!(
+            settings.protocol == Protocol::Udp
+                || !self
+                    .runtime
+                    .get()
+                    .is_some_and(|runtime| runtime.own_listeners().keeps(settings.local_port)),
+            "Local port {} is kept for a session's own proxy port. Choose another Local port.",
+            settings.local_port
+        );
         let mut running = self.running.lock().await;
         // A listener can exit on accept failure without an explicit stop. Reap
         // only completed owners, under the same lock used for start/stop, so
@@ -6270,7 +6281,11 @@ mod tests {
         let capture = temporary();
         let guarded = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let guarded_port = guarded.local_addr().unwrap().port();
-        capture.use_own_addresses(vec![guarded.local_addr().unwrap()]);
+        let own = crate::session_ports::OwnListeners::default();
+        own.set_main(guarded.local_addr().unwrap());
+        let runtime = Arc::new(crate::runtime::RuntimeSettings::new());
+        runtime.use_own_listeners(own);
+        capture.use_runtime(runtime);
         let (open, closed, onto_sniper) = (free_port(), free_port(), free_port());
         for settings in [
             remote(open, target, &["fe80::1"]),

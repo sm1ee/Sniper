@@ -4474,10 +4474,12 @@ async fn update_runtime_settings(
                 .as_str()
                 .parse::<http::Uri>()
             {
-                if crate::proxy::request_targets_own_listener(
-                    &uri,
-                    state.get_active_proxy_addr().await,
-                ) {
+                if state
+                    .own_listeners()
+                    .proxies()
+                    .iter()
+                    .any(|addr| crate::proxy::request_targets_own_listener(&uri, *addr))
+                {
                     return (
                         StatusCode::BAD_REQUEST,
                         "Upstream proxy cannot be Sniper's own listener",
@@ -4633,10 +4635,7 @@ async fn get_render_resource(
         }
         _ => return (StatusCode::BAD_REQUEST, "Not an http(s) URL").into_response(),
     };
-    let own_listeners = [
-        state.get_active_proxy_addr().await,
-        state.get_active_ui_addr().await,
-    ];
+    let own_listeners = state.own_listeners().all();
     let targets_sniper = url.as_str().parse::<http::Uri>().is_ok_and(|uri| {
         own_listeners
             .iter()
@@ -4703,6 +4702,17 @@ async fn update_startup_settings(
         expected_active_session_conflict_response(&state, expected_active_session_id, None)
     {
         return response;
+    }
+    // Refused before it is saved: the next start would otherwise put the
+    // main listener on a number a session's clients still point at.
+    if let Some(port) = update.proxy_port {
+        if state.own_listeners().keeps(port) {
+            return (
+                StatusCode::CONFLICT,
+                format!("Port {port} is kept for a session's own proxy port. Choose another port."),
+            )
+                .into_response();
+        }
     }
     match state.startup.update(update).await {
         Ok(snapshot) => {
