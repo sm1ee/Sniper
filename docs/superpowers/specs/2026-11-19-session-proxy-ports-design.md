@@ -436,16 +436,26 @@ compared with what was sent.
   session.
 - "New session" creates the session, moves the main listener to it and views
   it, as today.
+- The session list runs the full height of the window, and the top strip, the
+  tool and the status bar sit beside it. Left is which session; everything to
+  its right, the tabs included, is that session. Today the list starts under
+  the top strip, which reads as if the tabs were above the sessions.
+- The proxy indicator in the top strip says how traffic reaches the viewed
+  session: "Proxy :8080", "Proxy :18081" or "Not receiving". It is on every
+  tab, and "Not receiving" opens the two actions that fix it. Today it says
+  only whether the one listener is up.
 - The row of a fed session shows its port at the trailing edge, the main
   listener's for the default session. That label is how the list says where
-  the main listener records.
+  the main listener records. The Session tab shows the same beside the name,
+  and its "Open" views the session.
 - The row's existing menu gains: "Record :8080 here" (the main listener's
   port), "Open a port" or "Close port :18081", and "Copy proxy address". An
   action the server would refuse (decision 4) is not offered.
-- A viewed session that is not fed says so where Capture already speaks, with
-  no new banner: the capture pill reads "Not receiving", and the empty-history
-  message names the session the proxy records into and offers the two actions
-  beside the browser button.
+- Capture adds to that where it already speaks, with no new banner: the capture
+  pill reads "Not receiving", and the empty-history message names the session
+  the proxy records into and offers the two actions beside the browser button.
+  Replay, Fuzzer, Sequence, Scan and Tools send their own requests and need
+  nothing more.
 - What the non-goals leave with the default session (the TCP relay, OAST,
   Service Map bodies, socket peers) says in one line where it runs, in place of
   today's "open that session first".
