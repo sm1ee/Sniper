@@ -409,6 +409,46 @@ mod tests {
         panic!("the session never recorded {count} request(s)");
     }
 
+    /// A loopback server that sends back whatever it receives.
+    async fn echo_upstream() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let (mut read, mut write) = stream.split();
+                    let _ = tokio::io::copy(&mut read, &mut write).await;
+                });
+            }
+        });
+        addr
+    }
+
+    /// A CONNECT tunnel to `target` through `proxy`, ready for bytes.
+    async fn open_tunnel(proxy: SocketAddr, target: SocketAddr) -> TcpStream {
+        let mut stream = TcpStream::connect(proxy).await.unwrap();
+        stream
+            .write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            head.push(stream.read_u8().await.unwrap());
+        }
+        assert!(String::from_utf8_lossy(&head).contains(" 200"), "{head:?}");
+        stream
+    }
+
+    /// Whether bytes that are neither TLS nor HTTP come back through the tunnel.
+    async fn echoes(tunnel: &mut TcpStream, bytes: &[u8]) -> bool {
+        if tunnel.write_all(bytes).await.is_err() {
+            return false;
+        }
+        let mut back = vec![0; bytes.len()];
+        let read = tokio::time::timeout(Duration::from_secs(5), tunnel.read_exact(&mut back));
+        matches!(read.await, Ok(Ok(_))) && back == bytes
+    }
+
     async fn inactive_session(state: &AppState, name: &str) -> Uuid {
         state
             .create_inactive_session(Some(name.to_string()))
@@ -667,6 +707,70 @@ mod tests {
         assert!(!state.session_port_status(agent).open);
         assert_eq!(std::fs::read(dir.join(NUMBERS_FILE)).unwrap(), b"not json");
         state.activate_session(agent).await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // One feed for each session: a switch then never has a session port's
+    // work to wait for or to cut.
+    #[tokio::test]
+    async fn a_session_with_an_open_port_does_not_become_the_default() {
+        let dir = scratch("no-activate");
+        let state = state_in(&dir);
+        let default = state.session().await.id();
+        let agent = inactive_session(&state, "agent").await;
+        let opened = state.open_session_port(agent).await.unwrap();
+
+        let error = state.activate_session(agent).await.unwrap_err();
+
+        assert!(error.is::<Refused>(), "{error:#}");
+        assert_eq!(state.session().await.id(), default);
+        assert_eq!(state.sessions.active_session_id(), default);
+        assert_eq!(state.session_port_status(agent), opened);
+
+        state.close_session_port(agent).await.unwrap();
+        assert!(state.activate_session(agent).await.unwrap().active);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_session_with_an_open_port_is_not_deleted() {
+        let dir = scratch("no-delete");
+        let state = state_in(&dir);
+        let agent = inactive_session(&state, "agent").await;
+        let opened = state.open_session_port(agent).await.unwrap();
+
+        let error = state.delete_session(agent).await.unwrap_err();
+
+        assert!(error.is::<Refused>(), "{error:#}");
+        assert!(
+            error.to_string().contains("close its port first"),
+            "{error:#}"
+        );
+        assert!(state.sessions.contains_session(agent));
+        assert_eq!(state.session_port_status(agent), opened);
+
+        state.close_session_port(agent).await.unwrap();
+        state.delete_session(agent).await.unwrap();
+        assert_eq!(state.session_port_status(agent).proxy_port, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_on_a_session_port_survives_a_switch_of_the_main_listener() {
+        let _work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let dir = scratch("tunnel-switch");
+        let state = state_in(&dir);
+        let agent = inactive_session(&state, "agent").await;
+        let other = inactive_session(&state, "other").await;
+        let port = port_addr(&state.open_session_port(agent).await.unwrap());
+        let mut tunnel = open_tunnel(port, echo_upstream().await).await;
+        assert!(echoes(&mut tunnel, b"\x00\x01before").await);
+
+        state.activate_session(other).await.unwrap();
+
+        assert!(echoes(&mut tunnel, b"\x00\x02after").await);
+        drop(tunnel);
+        state.close_session_port(agent).await.unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 

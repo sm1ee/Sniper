@@ -10595,6 +10595,28 @@ mod tests {
         .await;
         assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
 
+        // One feed for each session: it neither becomes the default nor is
+        // deleted while its port is open.
+        let (status, body) = api_route_response(
+            state.clone(),
+            reqwest::Method::POST,
+            &format!("/api/sessions/{agent}/activate"),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("close that port"), "{body}");
+        let (status, body) = api_route_response(
+            state.clone(),
+            reqwest::Method::DELETE,
+            &format!("/api/sessions/{agent}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("close its port first"), "{body}");
+        assert_eq!(state.session().await.id(), default);
+
         let (status, body) = api_route_response(
             state.clone(),
             reqwest::Method::DELETE,

@@ -1022,6 +1022,9 @@ impl AppState {
             anyhow::bail!("session {id} was not found");
         }
         let _activation_guard = self.session_activation_lock.lock().await;
+        // A delete that follows waits here until the port is fully closed.
+        let operation_lock = self.session_operation_lock(id).await;
+        let _operation_guard = operation_lock.lock().await;
         if let Some(addr) = self.session_ports.unregister(id).await {
             let cut = crate::proxy::abort_session_port_connections(id);
             tracing::info!(session_id = %id, %addr, cut, "session port closed");
@@ -1121,6 +1124,13 @@ impl AppState {
             let _activation_guard = self.session_activation_lock.clone().lock_owned().await;
             if !self.sessions.contains_session(id) {
                 anyhow::bail!("session {id} was not found");
+            }
+            // One feed for each session. A port opens under this lock, so
+            // what follows never has a session port's work to wait for or cut.
+            if let Some(port) = self.session_ports.addr(id) {
+                return Err(crate::session_ports::refused(format!(
+                    "this session records from its own port {port}; close that port before the proxy records into it"
+                )));
             }
             let operation_lock = self.session_operation_lock(id).await;
             let operation_guard = operation_lock.lock_owned().await;
@@ -1385,6 +1395,14 @@ impl AppState {
             drop(operation_guard);
             self.remove_session_operation_lock(id).await;
             anyhow::bail!("session {id} was not found");
+        }
+        // Before anything is stopped: closing the port here would leave it
+        // closed when a later check refuses the delete. A port opens under
+        // this session's operation lock, so none opens from here on.
+        if let Some(port) = self.session_ports.addr(id) {
+            return Err(crate::session_ports::refused(format!(
+                "this session's port {port} is open; close its port first"
+            )));
         }
         if crate::proxy::session_has_live_websocket_relays(id) {
             anyhow::bail!("cannot delete a session while live captures are active");
