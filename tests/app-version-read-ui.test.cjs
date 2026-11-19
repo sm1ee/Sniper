@@ -147,7 +147,7 @@ test("actual startup completes with one pending read and keeps the update action
   assert.equal(f.els.openUpdateButton.listeners.get("click")[0], f.context.performSelfUpdate);
   assert.ok(f.calls.includes("connectEvents"));
   assert.ok(f.calls.includes("initCliPathOnboarding"));
-  assert.deepEqual(f.intervals.map(interval => interval.delay).sort((a, b) => a - b), [1200, 60 * 60 * 1000]);
+  assert.deepEqual(f.intervals.map(interval => interval.delay).sort((a, b) => a - b), [1200, 3000, 60 * 60 * 1000]);
   f.json(0, AVAILABLE); await nextTurn();
   assert.equal(f.els.appVersionLabel.textContent, "v0.3.2");
   assert.equal(f.els.appVersionLabel.title, "Current version 0.3.2");

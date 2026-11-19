@@ -30,10 +30,11 @@ function setup() {
     showConfirmDialog: (_, cb) => { f.confirm = cb; },
     getSortedSessions: () => f.state.sessions, formatCappedCount: value => String(value ?? 0),
     retainedTransactionsCap() {}, retainedEntriesCap() {}, formatTimestamp: () => '-', escapeHtml: String,
+    renderSessionSidebar() {},
     console: { error() {}, warn: (...args) => f.warnings.push(args) },
   });
   for (const name of ['createSession', 'activateSessionById', 'deleteSessionById', 'loadSessions',
-    'reconcileSessionsAfterActionError', 'renderDashboard', 'sessionFindingCount', 'formatSize', 'toggleReplayTabPin', 'expectedActiveSessionIdForWrite']) {
+    'reconcileSessionsAfterActionError', 'renderDashboard', 'sessionIdentity', 'sessionFindingCount', 'formatSize', 'toggleReplayTabPin', 'expectedActiveSessionIdForWrite']) {
     const source = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, 'm'));
     // Keep the fixture behavioral: baseline handlers do not yet use this helper.
     if (!source && name === 'reconcileSessionsAfterActionError') continue;

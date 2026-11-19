@@ -118,6 +118,20 @@ impl ReconStore {
         self.snapshot.lock().unwrap().clone()
     }
 
+    /// A job the store reports as running, with no worker behind it.
+    #[cfg(test)]
+    pub(crate) fn push_running_job_for_test(&self) {
+        self.snapshot.lock().unwrap().jobs.push(ReconJob {
+            id: Uuid::new_v4(),
+            target_url: "https://example.com/".into(),
+            status: "running".into(),
+            started_at: Utc::now(),
+            finished_at: None,
+            sources: Vec::new(),
+            error: None,
+        });
+    }
+
     /// Project only the metadata needed by Target's site map, leaving full raw
     /// URL spellings and evidence in the session inventory.
     pub fn site_map_endpoints(&self) -> Vec<crate::target::ReconSiteMapEndpoint> {

@@ -478,6 +478,7 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/api/app-version", get(get_app_version))
         .route("/api/self-update", post(self_update))
         .route("/api/sessions", get(list_sessions).post(create_session))
+        .route("/api/sessions/activity", get(get_session_activity))
         .route("/api/sessions/:id/activate", post(activate_session))
         .route(
             "/api/sessions/:id",
@@ -3183,6 +3184,12 @@ async fn self_update(
 
 async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionListing>> {
     Json(state.list_session_listings().await)
+}
+
+async fn get_session_activity(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<crate::session::SessionActivity>> {
+    Json(state.session_activity().await)
 }
 
 async fn create_session(
@@ -28085,6 +28092,22 @@ mod tcp_intercept_api_tests {
             )
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn session_activity_lists_every_session_beside_the_session_id_routes() {
+        let (state, path) = state();
+        let id = state.session().await.id();
+        let response = request(router(state), "GET", "/api/sessions/activity", "").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let listed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(listed[0]["id"], id.to_string());
+        assert_eq!(listed[0]["running"], serde_json::json!([]));
+        assert_eq!(listed[0]["held"], 0);
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[tokio::test]

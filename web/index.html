@@ -11,6 +11,12 @@
     <div class="toast-container" id="toastContainer" role="status" aria-atomic="false" aria-relevant="additions text"></div>
     <div class="app-shell">
       <header class="top-strip">
+        <button class="utility-button icon-button session-sidebar-toggle" id="sessionSidebarToggle" type="button" aria-controls="sessionSidebar" aria-expanded="false" aria-label="Show sessions" title="Show sessions">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" focusable="false">
+            <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+            <path d="M9.5 4.5v15" />
+          </svg>
+        </button>
         <nav class="main-tabs" aria-label="Main tools">
           <button class="main-tab" data-tool="dashboard">Session</button>
           <button class="main-tab" data-tool="target">Scope</button>
@@ -63,6 +69,17 @@
           </div>
         </section>
       </header>
+
+      <nav class="session-sidebar hidden" id="sessionSidebar" aria-label="Sessions">
+        <header class="session-sidebar-header">
+          <span class="session-sidebar-title">Sessions</span>
+          <button class="utility-button icon-button" id="sessionSidebarNewButton" type="button" aria-label="New session" title="New session">+</button>
+        </header>
+        <div class="session-sidebar-create hidden" id="sessionSidebarCreate">
+          <input id="sessionSidebarCreateName" type="text" placeholder="Session name" aria-label="New session name" spellcheck="false" autocomplete="off" />
+        </div>
+        <ul class="session-sidebar-list" id="sessionSidebarList"></ul>
+      </nav>
 
       <main class="workspace">
         <section class="dashboard-shell hidden" id="dashboardShell">

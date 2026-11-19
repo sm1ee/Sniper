@@ -692,6 +692,8 @@ code {
 
 .app-shell {
   display: grid;
+  /* The session sidebar's column is empty, and takes no width, while it is put away. */
+  grid-template-columns: auto minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 100svh;
   height: 100svh;
@@ -700,8 +702,10 @@ code {
 }
 
 .top-strip {
+  grid-column: 1 / -1;
+  grid-row: 1;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px;
   min-height: 26px;
@@ -1061,8 +1065,164 @@ summary {
 }
 
 .workspace {
+  grid-column: 2;
+  grid-row: 2;
   min-height: 0;
   overflow: hidden;
+}
+
+/* Every session one click away, beside whatever tool is open. */
+.session-sidebar {
+  grid-column: 1;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  width: 208px;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+  background: var(--shell);
+}
+
+.session-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 8px 4px 12px;
+}
+
+.session-sidebar-title {
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+  font-weight: 600;
+}
+
+.session-sidebar-create {
+  padding: 0 8px 4px;
+}
+
+.session-sidebar-create input,
+.session-sidebar .session-name-input {
+  display: block;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--point-border);
+  border-radius: 6px;
+  background: var(--panel-code);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--font-sm);
+}
+
+.session-sidebar-create input:focus,
+.session-sidebar .session-name-input:focus {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--point-soft);
+}
+
+.session-sidebar-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0 4px 8px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.session-sidebar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-sidebar-row:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.session-sidebar-row.active {
+  color: var(--text);
+  background: var(--point-soft);
+  cursor: default;
+}
+
+.session-sidebar-row:focus-visible {
+  outline: 1px solid var(--point-border);
+  outline-offset: -1px;
+}
+
+.session-sidebar-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.session-sidebar-name,
+.session-sidebar-identity {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-sidebar-name {
+  font-size: var(--font-sm);
+}
+
+.session-sidebar-identity {
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+}
+
+.session-sidebar-held {
+  flex: none;
+  margin-left: 0;
+}
+
+/* A job running: the ring the buttons turn while they wait. */
+.session-sidebar-running {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--point-border);
+  border-top-color: var(--point);
+  border-radius: 50%;
+  animation: button-spinner 0.8s linear infinite;
+}
+
+/* A job that ended while another session was open. */
+.session-sidebar-finished {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--point);
+}
+
+/* Switching keeps the name readable; the ring sits where the status goes. */
+.session-sidebar-row.is-working.is-working-shown {
+  color: inherit;
+}
+
+.session-sidebar-row.is-working-shown::after {
+  inset: 0 8px 0 auto;
+}
+
+/* Still a ring, not the filled dot of a finished job. */
+@media (prefers-reduced-motion: reduce) {
+  .session-sidebar-running {
+    animation: none;
+  }
 }
 
 .proxy-shell,
@@ -6529,6 +6689,8 @@ button.utility-button.replay-tab-add {
 }
 
 .status-bar {
+  grid-column: 1 / -1;
+  grid-row: 3;
   display: flex;
   align-items: center;
   justify-content: space-between;

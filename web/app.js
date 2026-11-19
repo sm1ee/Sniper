@@ -494,6 +494,11 @@ const state = {
   activeSession: null,
   selectedSessionId: null,
   sessionRename: null,
+  sessionSidebarHidden: false,
+  // What each session is doing, from /api/sessions/activity.
+  sessionActivity: new Map(),
+  // Sessions whose jobs ended while another session was open: id → job kinds.
+  sessionsFinished: new Map(),
   dashboardStorageSessionId: null,
   sessionSortKey: "created_at",
   sessionSortDir: "desc",
@@ -706,6 +711,12 @@ const els = {
   dashboardSessionsMore: document.getElementById("dashboardSessionsMore"),
   dashboardReloadSessionsButton: document.getElementById("dashboardReloadSessionsButton"),
   dashboardSessionsBody: document.getElementById("dashboardSessionsBody"),
+  sessionSidebar: document.getElementById("sessionSidebar"),
+  sessionSidebarToggle: document.getElementById("sessionSidebarToggle"),
+  sessionSidebarList: document.getElementById("sessionSidebarList"),
+  sessionSidebarNewButton: document.getElementById("sessionSidebarNewButton"),
+  sessionSidebarCreate: document.getElementById("sessionSidebarCreate"),
+  sessionSidebarCreateName: document.getElementById("sessionSidebarCreateName"),
   proxyStatusIndicator: document.getElementById("proxyStatusIndicator"),
   proxyStatusLabel: document.getElementById("proxyStatusLabel"),
   remoteUiIndicator: document.getElementById("remoteUiIndicator"),
@@ -1262,6 +1273,11 @@ async function init() {
       console.error("init load failed:", result.reason);
     }
   }
+  // What each session in the sidebar is doing. Asking costs the server a few
+  // locks, unlike /api/sessions, which sizes every session on disk.
+  window.setInterval(() => {
+    loadSessionActivity().catch((error) => console.error(error));
+  }, 3000);
   connectEvents();
   auxTimer = window.setInterval(() => {
     pollAuxiliaryData().catch((error) => console.error(error));
@@ -1992,6 +2008,40 @@ function bindEvents() {
       .then(() => { if (!els.dashboardCreateSessionName.value) closeSessionCreateForm(); })
       .catch(handleWorkspaceActionError));
   els.dashboardNewSessionButton.addEventListener("click", openSessionCreateForm);
+  els.sessionSidebarToggle.addEventListener("click", toggleSessionSidebar);
+  els.sessionSidebarNewButton.addEventListener("click", openSidebarSessionCreate);
+  els.sessionSidebarCreateName.addEventListener("keydown", (event) => {
+    // Enter during IME composition picks a candidate; it does not create.
+    if (event.isComposing) return;
+    if (event.key === "Enter") createSidebarSession().catch(handleWorkspaceActionError);
+    else if (event.key === "Escape") closeSidebarSessionCreate();
+  });
+  els.sessionSidebarCreateName.addEventListener("blur", () => {
+    if (!sidebarSessionCreating && !els.sessionSidebarCreateName.value.trim()) closeSidebarSessionCreate();
+  });
+  // On the list, which outlives the rows each render replaces.
+  els.sessionSidebarList.addEventListener("click", (event) => {
+    const row = event.target.closest?.(".session-sidebar-row");
+    const id = row?.dataset.id;
+    if (!id || id === currentSessionId()) return;
+    withButtonProgress(row, () => activateSessionById(id)).catch(handleWorkspaceActionError);
+  });
+  els.sessionSidebarList.addEventListener("contextmenu", (event) => {
+    const id = event.target.closest?.(".session-sidebar-row")?.dataset.id;
+    if (!id) return;
+    event.preventDefault();
+    event.stopPropagation();
+    showSessionContextMenu(event, id, "sidebar");
+  });
+  els.sessionSidebarList.addEventListener("keydown", (event) => {
+    if ((event.key !== "ArrowUp" && event.key !== "ArrowDown")
+      || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    const rows = Array.from(els.sessionSidebarList.querySelectorAll(".session-sidebar-row"));
+    const index = rows.indexOf(document.activeElement);
+    if (index === -1) return;
+    event.preventDefault();
+    rows[Math.max(0, Math.min(rows.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)))].focus();
+  });
   els.dashboardCreateSessionName.addEventListener("keydown", (event) => {
     if (event.key === "Enter") els.dashboardCreateSessionButton.click();
     else if (event.key === "Escape") closeSessionCreateForm();
@@ -6035,7 +6085,7 @@ async function handleExternalSessionChanged(previousSessionId = currentSessionId
   }
 }
 
-async function createSession() {
+async function createSession(nameInput = els.dashboardCreateSessionName) {
   if (!preserveActiveHttpReplayDraftBeforeSessionChange("creating a session")) return;
   const entrySessionId = currentSessionId();
   const entryWorkspaceGeneration = workspaceStateGeneration;
@@ -6069,7 +6119,7 @@ async function createSession() {
   }
   if (!preserveActiveHttpReplayDraftBeforeSessionChange("creating a session")
     || !canLeaveSessionAfterDraftPreflight()) return;
-  const submittedName = els.dashboardCreateSessionName.value;
+  const submittedName = nameInput.value;
   const name = submittedName.trim();
   const actionSessionId = currentSessionId();
   const actionWorkspaceGeneration = workspaceStateGeneration;
@@ -6099,7 +6149,7 @@ async function createSession() {
     await reconcileSessionsAfterCompletedAction();
     return;
   }
-  if (els.dashboardCreateSessionName.value === submittedName) els.dashboardCreateSessionName.value = "";
+  if (nameInput.value === submittedName) nameInput.value = "";
   await reloadSessionWorkspace({ cleanupBeforeReset: false });
 }
 
@@ -10145,6 +10195,15 @@ function closeSessionCreateForm() {
   els.dashboardNewSessionButton.classList.remove("hidden");
 }
 
+// What a session is about: its scope, or else the hosts it captured most.
+function sessionIdentity(overview) {
+  const scope = overview?.scope || [];
+  const items = scope.length ? scope : (overview?.top_hosts || []).map((entry) => entry.host);
+  const total = scope.length ? overview.scope_count || scope.length : items.length;
+  const shown = Math.min(2, items.length);
+  return items.slice(0, 2).join(", ") + (total > shown ? ` +${total - shown}` : "");
+}
+
 function renderDashboard() {
   // Replacing rows should not strand a keyboard user on the document body.
   // Capture only list controls, so a refresh never steals focus from elsewhere.
@@ -10181,12 +10240,6 @@ function renderDashboard() {
   const severityLine = (findings) => SEVERITIES.filter((name) => findings?.[name])
     .map((name) => `${Number(findings[name]).toLocaleString()} ${name}`).join(" · ");
   const more = (shown, total) => (total > shown ? ` +${total - shown}` : "");
-  const sessionIdentity = (overview) => {
-    const scope = overview?.scope || [];
-    if (scope.length) return scope.slice(0, 2).join(", ") + more(Math.min(2, scope.length), overview.scope_count || scope.length);
-    const hosts = (overview?.top_hosts || []).map((entry) => entry.host);
-    return hosts.slice(0, 2).join(", ") + more(Math.min(2, hosts.length), hosts.length);
-  };
   const tile = (label, value, note) => `<div class="dashboard-tile"><div class="dashboard-tile-value">${value}</div>`
     + `<div class="dashboard-tile-label">${label}</div>${note ? `<div class="dashboard-tile-note">${note}</div>` : ""}</div>`;
   const totals = { bytes: 0, requests: 0, websockets: 0, tcp: 0, tcpUnknown: false, findings: {}, latest: null };
@@ -10275,13 +10328,14 @@ function renderDashboard() {
     });
   }
 
+  const renamingHere = state.sessionRename && state.sessionRename.place !== "sidebar";
   // The field being replaced is no longer the editor: its blur must not save.
-  sessionRenameInput = null;
+  if (renamingHere) sessionRenameInput = null;
   els.dashboardSessionsBody.innerHTML = sortedSessions.length
     ? sortedSessions
         .map((session) => `
           <tr class="${["history-row", session.id === state.selectedSessionId && "selected", session.active && "session-active"].filter(Boolean).join(" ")}" data-id="${session.id}">
-            <td>${state.sessionRename?.id === session.id
+            <td>${renamingHere && state.sessionRename.id === session.id
               ? `<input class="session-name-input" type="text" value="${escapeHtml(state.sessionRename.draft)}" aria-label="Rename session ${escapeHtml(session.name)}" spellcheck="false" autocomplete="off" />`
               : `<button class="session-name session-select-button" type="button" title="${escapeHtml(session.name)}" aria-pressed="${session.id === state.selectedSessionId}" aria-label="Select session ${escapeHtml(session.name)}">${escapeHtml(session.name)}</button>`}${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
             <td><div class="session-size"><span class="session-size-bar"><span style="width:${Math.max(2, Math.round((Number(session.storage_bytes) || 0) / largest * 100))}%"></span></span>${formatSize(session.storage_bytes)}</div></td>
@@ -10317,7 +10371,7 @@ function renderDashboard() {
       renderDashboard();
     });
   });
-  if (state.sessionRename) wireSessionRenameInput(renameSelection);
+  if (renamingHere) wireSessionRenameInput(renameSelection);
 
   // Activate button = switch session
   Array.from(els.dashboardSessionsBody.querySelectorAll(".session-open-button")).forEach((btn) => {
@@ -10360,6 +10414,164 @@ function renderDashboard() {
       .find((row) => row.dataset.id === focusedSessionId);
     replacementRow?.querySelector(`.${focusedClass}`)?.focus({ preventScroll: true });
   }
+  // The sidebar lists the same sessions.
+  renderSessionSidebar();
+}
+
+// ── Session sidebar ──
+// Every session one click away, as Claude and Codex list their conversations.
+// A click opens the session as Session ▸ Open does, so the proxy records into
+// the session on screen.
+// The rows last drawn: a read that changes nothing leaves focus, hover and a
+// click in progress alone.
+let sessionSidebarMarkup = "";
+// The rename whose field the rows last drawn hold.
+let sidebarRenameEdit = null;
+let sessionListRefresh = null;
+let sessionActivityReading = false;
+let sidebarSessionCreating = false;
+
+function renderSessionSidebar() {
+  const list = els.sessionSidebarList;
+  if (!list) return;
+  const hidden = state.sessionSidebarHidden === true;
+  els.sessionSidebar.classList.toggle("hidden", hidden);
+  const label = hidden ? "Show sessions" : "Hide sessions";
+  els.sessionSidebarToggle.setAttribute("aria-expanded", String(!hidden));
+  els.sessionSidebarToggle.setAttribute("aria-label", label);
+  els.sessionSidebarToggle.title = label;
+  const activeId = currentSessionId();
+  // Opening a session is seeing what finished in it, with the list shown or not.
+  state.sessionsFinished.delete(activeId);
+  if (hidden) return;
+  const editing = state.sessionRename?.place === "sidebar" ? state.sessionRename : null;
+  // A name being typed keeps its field: a new one would lose IME composition
+  // and undo. The rows catch up when the rename ends.
+  if (editing && editing === sidebarRenameEdit && sessionRenameInput?.isConnected) return;
+  const markup = [...state.sessions]
+    .sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0))
+    .map((session) => sessionSidebarRow(session, session.id === activeId, editing))
+    .join("");
+  if (markup === sessionSidebarMarkup) return;
+  const focused = document.activeElement;
+  const focusedId = focused?.classList?.contains("session-sidebar-row") ? focused.dataset.id : null;
+  const selection = focused?.classList?.contains("session-sidebar-rename")
+    ? [focused.selectionStart, focused.selectionEnd] : null;
+  // The field being replaced is no longer the editor: its blur must not save.
+  if (editing) sessionRenameInput = null;
+  list.innerHTML = markup;
+  sessionSidebarMarkup = markup;
+  sidebarRenameEdit = editing;
+  if (focusedId) {
+    Array.from(list.querySelectorAll(".session-sidebar-row"))
+      .find((row) => row.dataset.id === focusedId)?.focus({ preventScroll: true });
+  }
+  // After the row: a rename just started takes the focus from it.
+  if (editing) wireSessionRenameInput(selection, list);
+}
+
+function sessionSidebarRow(session, active, editing) {
+  const name = escapeHtml(session.name);
+  if (editing?.id === session.id) {
+    return `<li><input class="session-name-input session-sidebar-rename" type="text" value="${escapeHtml(editing.draft)}"`
+      + ` aria-label="Rename session ${name}" spellcheck="false" autocomplete="off" /></li>`;
+  }
+  const JOBS = { fuzzer: "Fuzzer", scan: "Scan", recon: "Recon" };
+  const jobs = (kinds) => kinds.map((kind) => JOBS[kind] || kind).join(", ");
+  const activity = state.sessionActivity.get(session.id);
+  const held = activity?.held || 0;
+  const heldLabel = held ? `${held.toLocaleString()} held in Intercept` : "";
+  const running = activity?.running?.length ? `Running: ${jobs(activity.running)}` : "";
+  const finished = !running && state.sessionsFinished.has(session.id)
+    ? `${jobs(state.sessionsFinished.get(session.id))} finished` : "";
+  const identity = sessionIdentity(session.overview);
+  const label = [session.name, heldLabel, running, finished].filter(Boolean).join(", ");
+  return `<li><button class="session-sidebar-row${active ? " active" : ""}" type="button" data-id="${escapeHtml(session.id)}"`
+    + `${active ? ' aria-current="true"' : ""} tabindex="${active ? 0 : -1}" aria-label="${escapeHtml(label)}">`
+    + `<span class="session-sidebar-text"><span class="session-sidebar-name">${name}</span>`
+    + `${identity ? `<span class="session-sidebar-identity">${escapeHtml(identity)}</span>` : ""}</span>`
+    + `${held ? `<span class="findings-badge session-sidebar-held" title="${heldLabel}">${held.toLocaleString()}</span>` : ""}`
+    + `${running ? `<span class="session-sidebar-running" title="${escapeHtml(running)}"></span>` : ""}`
+    + `${finished ? `<span class="session-sidebar-finished" title="${escapeHtml(finished)}"></span>` : ""}`
+    + "</button></li>";
+}
+
+async function loadSessionActivity() {
+  // A read held up, as by a switch saving a large session, is not asked again.
+  if (sessionActivityReading) return;
+  sessionActivityReading = true;
+  try {
+    const response = await fetch("/api/sessions/activity");
+    // The next read asks again; the rows keep what they last showed.
+    if (!response.ok) return;
+    applySessionActivity(await response.json());
+  } finally {
+    sessionActivityReading = false;
+  }
+}
+
+// A job that ends in a session not on screen marks the session until it is
+// opened, as an unread conversation is marked.
+function applySessionActivity(entries) {
+  if (!Array.isArray(entries)) return;
+  const activeId = currentSessionId();
+  const next = new Map();
+  for (const entry of entries) {
+    if (typeof entry?.id !== "string" || typeof entry.name !== "string") continue;
+    next.set(entry.id, {
+      name: entry.name,
+      running: Array.isArray(entry.running) ? entry.running.filter((kind) => typeof kind === "string") : [],
+      held: Number.isSafeInteger(entry.held) && entry.held > 0 ? entry.held : 0,
+    });
+  }
+  for (const [id, before] of state.sessionActivity) {
+    const after = next.get(id);
+    if (id === activeId || !after) continue;
+    const ended = before.running.filter((kind) => !after.running.includes(kind));
+    if (ended.length) state.sessionsFinished.set(id, [...new Set([...(state.sessionsFinished.get(id) || []), ...ended])]);
+  }
+  for (const id of state.sessionsFinished.keys()) {
+    if (!next.has(id)) state.sessionsFinished.delete(id);
+  }
+  state.sessionActivity = next;
+  // sniper-cli and agents create, rename and delete sessions too.
+  const listed = new Map(state.sessions.map((session) => [session.id, session.name]));
+  if (!sessionListRefresh
+    && (listed.size !== next.size || [...next].some(([id, entry]) => listed.get(id) !== entry.name))) {
+    sessionListRefresh = loadSessions({ preserveWorkspaceOwner: true })
+      .catch((error) => console.error(error))
+      .finally(() => { sessionListRefresh = null; });
+  }
+  renderSessionSidebar();
+}
+
+function toggleSessionSidebar() {
+  state.sessionSidebarHidden = !state.sessionSidebarHidden;
+  renderSessionSidebar();
+  scheduleUiSettingsSave();
+}
+
+function openSidebarSessionCreate() {
+  els.sessionSidebarCreate.classList.remove("hidden");
+  els.sessionSidebarCreateName.focus();
+}
+
+function closeSidebarSessionCreate() {
+  // A create already sent reads the name after the drafts it saves first.
+  if (!sidebarSessionCreating) els.sessionSidebarCreateName.value = "";
+  els.sessionSidebarCreate.classList.add("hidden");
+}
+
+async function createSidebarSession() {
+  if (sidebarSessionCreating) return;
+  sidebarSessionCreating = true;
+  try {
+    await createSession(els.sessionSidebarCreateName);
+    // A created session clears the name; one stopped before sending keeps it.
+    if (!els.sessionSidebarCreateName.value) closeSidebarSessionCreate();
+  } finally {
+    sidebarSessionCreating = false;
+  }
 }
 
 // ── Session rename ──
@@ -10367,10 +10579,10 @@ function renderDashboard() {
 // Enter or leaving the field saves, Escape cancels, as Replay tab names do.
 let sessionRenameInput = null;
 
-function startSessionRename(id) {
+function startSessionRename(id, place = "dashboard") {
   const session = state.sessions.find((entry) => entry.id === id);
   if (!session) return;
-  state.sessionRename = { id, draft: session.name, pending: false, focus: true };
+  state.sessionRename = { id, draft: session.name, pending: false, focus: true, place };
   renderDashboard();
 }
 
@@ -10379,7 +10591,7 @@ function cancelSessionRename({ refocus = false } = {}) {
   if (!edit) return;
   state.sessionRename = null;
   renderDashboard();
-  if (refocus) focusSessionNameButton(edit.id);
+  if (refocus) focusSessionNameButton(edit.id, edit.place);
 }
 
 async function commitSessionRename({ refocus = false } = {}) {
@@ -10412,13 +10624,13 @@ async function commitSessionRename({ refocus = false } = {}) {
   session.name = name;
   if (state.sessionRename === edit) state.sessionRename = null;
   renderDashboard();
-  if (refocus) focusSessionNameButton(edit.id);
+  if (refocus) focusSessionNameButton(edit.id, edit.place);
   // The name also shows outside this list, for the session in use.
   loadSessions().catch((error) => console.error(error));
 }
 
-function wireSessionRenameInput(selection) {
-  const input = els.dashboardSessionsBody.querySelector?.(".session-name-input");
+function wireSessionRenameInput(selection, container = els.dashboardSessionsBody) {
+  const input = container.querySelector?.(".session-name-input");
   const edit = state.sessionRename;
   if (!input || !edit) return;
   sessionRenameInput = input;
@@ -10449,7 +10661,12 @@ function wireSessionRenameInput(selection) {
   }
 }
 
-function focusSessionNameButton(id) {
+function focusSessionNameButton(id, place = "dashboard") {
+  if (place === "sidebar") {
+    Array.from(els.sessionSidebarList.querySelectorAll(".session-sidebar-row"))
+      .find((row) => row.dataset.id === id)?.focus({ preventScroll: true });
+    return;
+  }
   Array.from(els.dashboardSessionsBody.querySelectorAll("tr[data-id]"))
     .find((row) => row.dataset.id === id)
     ?.querySelector(".session-select-button")?.focus({ preventScroll: true });
@@ -10458,7 +10675,7 @@ function focusSessionNameButton(id) {
 // ── Session context menu ──
 let sessionContextMenuEl = null;
 
-function showSessionContextMenu(event, sessionId) {
+function showSessionContextMenu(event, sessionId, place = "dashboard") {
   closeSessionContextMenu();
   const session = state.sessions.find((s) => s.id === sessionId);
   if (!session) return;
@@ -10486,7 +10703,7 @@ function showSessionContextMenu(event, sessionId) {
     if (!btn) return;
     const action = btn.dataset.action;
     if (action === "rename") {
-      startSessionRename(sessionId);
+      startSessionRename(sessionId, place);
     } else if (action === "folder") {
       revealSessionFolder(sessionId).catch((error) => {
         console.error(error);
@@ -25967,6 +26184,7 @@ function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
   state.websocketInScopeOnly = Boolean(snapshot?.websocket_in_scope_only);
   state.websocketLiveOnly = Boolean(snapshot?.websocket_live_only);
   state.replayTabsWrap = snapshot?.replay_tabs_wrap === true;
+  state.sessionSidebarHidden = snapshot?.session_sidebar_hidden === true;
   els.replayTabStrip?.classList?.toggle("wrap", state.replayTabsWrap);
   if (els.replayTabsWrapInput) els.replayTabsWrapInput.checked = state.replayTabsWrap;
   state.websocketStackHeight = sanitizeWebsocketStackHeight(snapshot?.websocket_stack_height);
@@ -26057,6 +26275,7 @@ function snapshotUiSettings() {
     websocket_in_scope_only: Boolean(state.websocketInScopeOnly),
     websocket_live_only: Boolean(state.websocketLiveOnly),
     replay_tabs_wrap: state.replayTabsWrap === true,
+    session_sidebar_hidden: state.sessionSidebarHidden === true,
     websocket_stack_height: state.websocketStackHeight > 0 ? state.websocketStackHeight : null,
     ws_replay_left_width: state.wsReplayLeftWidth > 0 ? state.wsReplayLeftWidth : null,
     ws_replay_frame_detail_height: state.wsReplayFrameDetailHeight > 0 ? state.wsReplayFrameDetailHeight : null,

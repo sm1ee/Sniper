@@ -780,6 +780,27 @@ impl AppState {
         listings
     }
 
+    /// Every session with what it is doing now. Only a loaded session can be
+    /// doing anything, and asking one takes a few locks, so the session list
+    /// can ask every few seconds, unlike `list_session_listings`.
+    pub async fn session_activity(&self) -> Vec<crate::session::SessionActivity> {
+        let loaded = self.loaded_listed_sessions().await;
+        let mut activity = Vec::new();
+        for summary in self.sessions.summaries() {
+            let (running, held) = match loaded.get(&summary.id) {
+                Some(session) => session.activity().await,
+                None => (Vec::new(), 0),
+            };
+            activity.push(crate::session::SessionActivity {
+                id: summary.id,
+                name: summary.name,
+                running,
+                held,
+            });
+        }
+        activity
+    }
+
     /// The loaded context of each session the registry still lists. A
     /// read-only context stands in for a writable one of the same session.
     async fn loaded_listed_sessions(&self) -> HashMap<uuid::Uuid, Arc<SessionContext>> {
@@ -3902,6 +3923,64 @@ mod tests {
         let summary = serde_json::to_value(&state.list_sessions().await[0]).unwrap();
         assert!(summary.get("overview").is_none() && summary.get("storage_bytes").is_none());
         drop(context);
+        drop(state);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_activity_reports_each_session_running_jobs_and_held_intercepts() {
+        let (data_dir, state) = rename_session_test_state();
+        let first = state.session().await;
+        first.recon.push_running_job_for_test();
+        // Opening another session leaves the first loaded, its job running.
+        let second = state.create_session(Some("Second".into())).await.unwrap();
+        let unopened = state
+            .sessions
+            .create_session(Some("Unopened".into()))
+            .unwrap();
+        let active = state.session().await;
+        let held = tokio::spawn({
+            let active = active.clone();
+            async move {
+                active
+                    .intercepts
+                    .enqueue(crate::intercept::InterceptRecord {
+                        id: uuid::Uuid::new_v4(),
+                        started_at: chrono::Utc::now(),
+                        peer_addr: "127.0.0.1:1".into(),
+                        request: EditableRequest {
+                            scheme: "https".into(),
+                            host: "example.com".into(),
+                            method: "GET".into(),
+                            path: "/".into(),
+                            headers: Vec::new(),
+                            body: String::new(),
+                            body_encoding: BodyEncoding::Utf8,
+                            preview_truncated: false,
+                        },
+                        is_websocket: false,
+                    })
+                    .await
+            }
+        });
+        while active.intercepts.held().await == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let activity = state.session_activity().await;
+        assert_eq!(activity.len(), 3);
+        let entry = |id| activity.iter().find(|entry| entry.id == id).unwrap();
+        assert_eq!(entry(first.id()).running, ["recon"]);
+        assert_eq!(entry(first.id()).held, 0);
+        assert_eq!(entry(second.id).name, "Second");
+        assert!(entry(second.id).running.is_empty());
+        assert_eq!(entry(second.id).held, 1);
+        assert!(entry(unopened.id).running.is_empty());
+        assert_eq!(entry(unopened.id).held, 0);
+
+        active.intercepts.drop_all().await;
+        held.await.unwrap();
+        drop((first, active));
         drop(state);
         std::fs::remove_dir_all(data_dir).unwrap();
     }

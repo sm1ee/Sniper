@@ -398,6 +398,8 @@ pub struct AppUiSettingsSnapshot {
     /// Replay's tabs wrap onto as many rows as they need, as Burp's "Wrapped"
     /// tab view does, rather than scrolling along one.
     pub replay_tabs_wrap: bool,
+    /// The session list beside the workspace is put away.
+    pub session_sidebar_hidden: bool,
     pub websocket_stack_height: Option<u16>,
     pub ws_replay_left_width: Option<u16>,
     pub ws_replay_frame_detail_height: Option<u16>,
@@ -438,6 +440,7 @@ impl Default for AppUiSettingsSnapshot {
             websocket_in_scope_only: false,
             websocket_live_only: false,
             replay_tabs_wrap: false,
+            session_sidebar_hidden: false,
             websocket_stack_height: None,
             ws_replay_left_width: None,
             ws_replay_frame_detail_height: None,
@@ -512,6 +515,7 @@ impl AppUiSettingsSnapshot {
         sanitized.websocket_in_scope_only = self.websocket_in_scope_only;
         sanitized.websocket_live_only = self.websocket_live_only;
         sanitized.replay_tabs_wrap = self.replay_tabs_wrap;
+        sanitized.session_sidebar_hidden = self.session_sidebar_hidden;
         sanitized.websocket_stack_height = self
             .websocket_stack_height
             .filter(|height| *height > 0)
@@ -1644,6 +1648,7 @@ mod tests {
         snapshot.websocket_in_scope_only = true;
         snapshot.websocket_live_only = true;
         snapshot.replay_tabs_wrap = true;
+        snapshot.session_sidebar_hidden = true;
         snapshot.websocket_stack_height = Some(345);
         snapshot.ws_replay_left_width = Some(555);
         snapshot.ws_replay_frame_detail_height = Some(222);
@@ -1692,6 +1697,7 @@ mod tests {
         assert!(persisted.websocket_in_scope_only);
         assert!(persisted.websocket_live_only);
         assert!(persisted.replay_tabs_wrap);
+        assert!(persisted.session_sidebar_hidden);
         assert_eq!(persisted.websocket_stack_height, Some(345));
         assert_eq!(persisted.ws_replay_left_width, Some(555));
         assert_eq!(persisted.ws_replay_frame_detail_height, Some(222));

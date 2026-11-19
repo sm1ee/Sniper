@@ -248,6 +248,11 @@ impl InterceptQueue {
             .collect()
     }
 
+    /// How many requests `list` shows.
+    pub async fn held(&self) -> usize {
+        self.queue.lock().await.len()
+    }
+
     pub async fn get(&self, id: Uuid) -> Option<InterceptRecord> {
         self.queue
             .lock()
@@ -432,6 +437,11 @@ impl ResponseInterceptQueue {
             .iter()
             .map(|entry| entry.record.summary())
             .collect()
+    }
+
+    /// How many responses `list` shows.
+    pub async fn held(&self) -> usize {
+        self.queue.lock().await.len()
     }
 
     pub async fn get(&self, id: Uuid) -> Option<ResponseInterceptRecord> {

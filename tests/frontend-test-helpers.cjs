@@ -34,6 +34,8 @@ function loadFunctions(names, globals = {}) {
     names = [...new Set([...names, "fuzzerBodyIsBinary", "fuzzerShownText", "fuzzerStoredText", "fuzzerDraftShowsBytes",
       "fuzzerMarkerDraft", "fuzzerBaseRequestFor"])];
   }
+  // The Session table names a session as the sidebar does.
+  if (names.includes("renderDashboard")) names = [...new Set([...names, "sessionIdentity"])];
   // Intercept shows a held binary body as bytes through the raw build and parse.
   const rawBodyCallers = ["buildEditableRawRequest", "parseEditableRawRequest", "buildEditableRawResponse", "parseEditableRawResponse"];
   if (names.some(name => rawBodyCallers.includes(name))) {
@@ -45,6 +47,8 @@ function loadFunctions(names, globals = {}) {
     assert.ok(match, `Missing frontend function: ${name}`);
     vm.runInContext(match[0], context, { filename: `web/app.js:${name}` });
   }
+  // Every Session table redraw redraws the sidebar, which these fixtures lack.
+  if (names.includes("renderDashboard") && !("renderSessionSidebar" in context)) context.renderSessionSidebar = () => {};
   return context;
 }
 

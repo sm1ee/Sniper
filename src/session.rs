@@ -126,6 +126,17 @@ pub struct SessionListing {
     pub tcp_connection_count: Option<usize>,
 }
 
+/// What a session is doing now, for the session list beside the workspace.
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionActivity {
+    pub id: Uuid,
+    pub name: String,
+    /// Jobs running in the session: `fuzzer`, `scan`, `recon`.
+    pub running: Vec<&'static str>,
+    /// Requests, responses and TCP reads Intercept holds for a decision.
+    pub held: usize,
+}
+
 /// Findings counted by severity.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1481,6 +1492,22 @@ impl SessionContext {
             compactable_websocket_journal: false,
             unresolved_websocket_journal: false,
         }
+    }
+
+    /// The jobs running in this session, and how much Intercept holds in it.
+    pub async fn activity(&self) -> (Vec<&'static str>, usize) {
+        let running = [
+            ("fuzzer", self.fuzzer.is_running()),
+            ("scan", self.template_scans.is_running()),
+            ("recon", self.recon.is_running()),
+        ]
+        .into_iter()
+        .filter_map(|(kind, running)| running.then_some(kind))
+        .collect();
+        let held = self.intercepts.held().await
+            + self.response_intercepts.held().await
+            + self.tcp_capture.policy().paused_count;
+        (running, held)
     }
 
     /// This session's overview from its live state. Only the parts it names are
