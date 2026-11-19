@@ -124,7 +124,7 @@ Defaults: the proxy on `127.0.0.1:8080`, the headless server's UI on `127.0.0.1:
 | **Replay** | Edit and resend any captured request, override host and port, render the response. **Fields** reads Protobuf (without a schema), MessagePack, CBOR and gRPC bodies and edits Protobuf, MessagePack and CBOR request fields. A body that is not text, such as a file upload, is edited one character per byte, as in Burp's Raw view, and bytes left alone are sent unchanged. **Import cURL** reads `-F` forms |
 | **Fuzzer** | Payload lists sent at marked positions (Sniper or Battering ram), also inside a binary body such as a file upload, in the background with progress, Stop, a delay between requests and a stop on matching responses |
 | **Tools** | Decode, encode, hash, JWT inspector, data transformations |
-| **Sessions** | Separate workspaces, each with its own records, scope and state |
+| **Sessions** | Separate workspaces, each with its own records, scope and state, listed beside every tool: one click opens a session, and its row shows held requests and running or finished jobs |
 | **Scope** | Host and wildcard filters beside the captured hosts and paths |
 | **Map** | A passive Service Map of captured origins, how they relate, and the APIs they serve |
 | **Themes** | 12 themes: 7 dark, 5 light |
