@@ -89,6 +89,12 @@ curl -s -x http://127.0.0.1:18902 -X POST http://127.0.0.1:18911/api/orders \
 The `unset` matters: if `no_proxy` covers loopback, curl ignores `-x` and Sniper
 captures nothing.
 
+When the proxy listens beyond loopback, a client on another machine is refused
+every port Sniper itself listens on: the UI, the proxy, and a wired browser's
+DevTools port, at any address of this machine. A hostname on one of those ports
+is refused as well, so `http://example.com:8080` fails from that client while
+Sniper's proxy is on 8080. Move the proxy to another port to reach such a site.
+
 ### Or open a browser that is already wired
 
 Sniper can also open a browser with the proxy and certificate set up: click

@@ -1426,7 +1426,7 @@ async fn handle_connect(
         .path_and_query("/")
         .build();
     if let Ok(uri) = &tunnel {
-        if remote_client_reaches_guarded(&state, &session, peer_addr.ip(), uri).await {
+        if remote_client_reaches_guarded(&state, peer_addr.ip(), uri).await {
             return record_connect_rejection(
                 &state,
                 &session,
@@ -1679,7 +1679,7 @@ async fn handle_forwardable_request(
             .await
         }
     };
-    if remote_client_reaches_guarded(&state, &session, peer_addr.ip(), &absolute_uri).await {
+    if remote_client_reaches_guarded(&state, peer_addr.ip(), &absolute_uri).await {
         return record_http_rejection(
             &state,
             &session,
@@ -1977,49 +1977,58 @@ fn target_port(uri: &Uri) -> Option<u16> {
 }
 
 const REMOTE_GUARDED_MESSAGE: &str =
-    "Sniper's UI and the browsers it opened are not reachable through the proxy from another machine.";
+    "Sniper listens on this port, so another machine cannot reach it through the proxy, by address or by name.";
 
-/// What a client on another machine is refused through the proxy. The UI trusts
-/// a connection from this machine, and the proxy's own outbound one is such a
-/// connection, so a phone using a proxy bound beyond loopback would otherwise
-/// reach the UI's API past `remote_ui_auth_guard`. The loopback ports a browser
-/// Sniper opened is driven through (`browser::driver_ports`) hand over its
-/// logged-in sessions. A client on this machine reaches these directly anyway,
-/// and the browser Sniper opens sends loopback traffic through the proxy, the UI
-/// included; other local ports, a dev server for one, stay open to a phone.
-fn remote_client_targets(client: IpAddr, uri: &Uri, guarded: &[SocketAddr]) -> bool {
-    !client.to_canonical().is_loopback()
-        && guarded
-            .iter()
-            .any(|listener| request_targets_own_listener(uri, *listener))
-}
-
-/// `remote_client_targets` for the listeners guarded now, with names that
-/// resolve to them.
-async fn remote_client_reaches_guarded(
-    state: &AppState,
-    session: &SessionContext,
-    client: IpAddr,
-    uri: &Uri,
-) -> bool {
+/// What a client on another machine is refused through the proxy: a port Sniper
+/// listens on, at any address of this machine. The UI trusts a connection from
+/// this machine, and the proxy's own outbound one is such a connection, so a
+/// phone using a proxy bound beyond loopback would otherwise reach the UI's API
+/// past `remote_ui_auth_guard`. A tunnel to the proxy's own port arrives there as
+/// a local client and goes on to the UI the same way. The loopback ports a
+/// browser Sniper opened is driven through (`browser::driver_ports`) hand over
+/// its logged-in sessions.
+///
+/// Any address of this machine counts: a UI on every interface is announced as
+/// 127.0.0.1 and answers, and trusts this machine, on the others. A name on one
+/// of these ports is refused without a lookup, because the connection looks the
+/// name up again and an answer checked here says nothing about where it lands.
+///
+/// A client on this machine reaches these directly anyway, and the browser Sniper
+/// opens sends loopback traffic through the proxy, the UI included; other local
+/// ports, a dev server for one, stay open to a phone.
+fn remote_client_targets(client: IpAddr, uri: &Uri, ports: &[u16]) -> bool {
     if client.to_canonical().is_loopback() {
         return false;
     }
-    let mut guarded = vec![state.get_active_ui_addr().await];
-    guarded.extend(
-        crate::browser::driver_ports()
-            .into_iter()
-            .map(|port| SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))),
-    );
-    if remote_client_targets(client, uri, &guarded) {
-        return true;
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    if !target_port(uri).is_some_and(|port| ports.contains(&port)) {
+        return false;
     }
-    for listener in guarded {
-        if name_resolves_to_own_listener(session, uri, listener).await {
-            return true;
-        }
+    // Sniper answers its own page itself and never dials it.
+    if special_host::is_special_host(authority.host()) {
+        return false;
     }
-    false
+    let anywhere = IpAddr::from(std::net::Ipv4Addr::UNSPECIFIED);
+    match url::Host::parse(authority.host()) {
+        Ok(url::Host::Ipv4(ip)) => ip_belongs_to_this_machine(ip.into(), anywhere),
+        Ok(url::Host::Ipv6(ip)) => ip_belongs_to_this_machine(ip.to_canonical(), anywhere),
+        Ok(url::Host::Domain(_)) | Err(_) => true,
+    }
+}
+
+/// `remote_client_targets` for the ports Sniper listens on now.
+async fn remote_client_reaches_guarded(state: &AppState, client: IpAddr, uri: &Uri) -> bool {
+    if client.to_canonical().is_loopback() {
+        return false;
+    }
+    let mut ports = vec![
+        state.get_active_ui_addr().await.port(),
+        state.get_active_proxy_addr().await.port(),
+    ];
+    ports.extend(crate::browser::driver_ports());
+    remote_client_targets(client, uri, &ports)
 }
 
 /// True when `uri` resolves back to the proxy's own listener, which would make
@@ -10314,30 +10323,83 @@ mod tests {
     #[tokio::test]
     async fn another_machine_is_refused_the_ports_of_a_browser_sniper_opened() {
         let (state, data_dir) = test_proxy_state("sniper-proxy-driver-ports");
-        let session = state.session().await;
         let profile = data_dir.join("browser-profiles").join("example");
         let remote: IpAddr = "192.0.2.10".parse().unwrap();
         let local: IpAddr = "127.0.0.1".parse().unwrap();
         let devtools: Uri = "http://127.0.0.1:45123/json/version".parse().unwrap();
-        assert!(!remote_client_reaches_guarded(&state, &session, remote, &devtools).await);
+        assert!(!remote_client_reaches_guarded(&state, remote, &devtools).await);
 
         crate::browser::remember_driver_ports(&profile, vec![45123]);
-        assert!(remote_client_reaches_guarded(&state, &session, remote, &devtools).await);
-        assert!(!remote_client_reaches_guarded(&state, &session, local, &devtools).await);
+        assert!(remote_client_reaches_guarded(&state, remote, &devtools).await);
+        assert!(!remote_client_reaches_guarded(&state, local, &devtools).await);
 
         // Once the browser exits the port is anyone's again.
         crate::browser::forget_driver_ports(&profile);
-        assert!(!remote_client_reaches_guarded(&state, &session, remote, &devtools).await);
+        assert!(!remote_client_reaches_guarded(&state, remote, &devtools).await);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn another_machine_is_refused_every_port_sniper_listens_on() {
+        let (state, data_dir) = test_proxy_state("sniper-proxy-own-ports");
+        state
+            .set_active_proxy_addr("127.0.0.1:18080".parse().unwrap())
+            .await;
+        state
+            .set_active_ui_addr("127.0.0.1:18081".parse().unwrap())
+            .await;
+        let remote: IpAddr = "192.0.2.10".parse().unwrap();
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let mut refused = vec![
+            // The proxy itself: a tunnel to it arrives there as a local client.
+            "http://127.0.0.1:18080/".to_string(),
+            "http://[::1]:18080/".to_string(),
+            // The connection looks a name up again, so no lookup here can clear it.
+            "http://example.com:18080/".to_string(),
+            "http://example.com:18081/".to_string(),
+        ];
+        // A UI on every interface is announced as 127.0.0.1 and answers on the others.
+        for ip in local_interface_ips() {
+            if !ip.is_loopback() {
+                refused.push(match ip {
+                    IpAddr::V4(ip) => format!("http://{ip}:18081/"),
+                    IpAddr::V6(ip) => format!("http://[{ip}]:18081/"),
+                });
+            }
+        }
+        for target in &refused {
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                remote_client_reaches_guarded(&state, remote, &uri).await,
+                "{target}"
+            );
+            assert!(
+                !remote_client_reaches_guarded(&state, local, &uri).await,
+                "{target}"
+            );
+        }
+        for open in [
+            // Other ports of this machine stay reachable from a phone.
+            "http://127.0.0.1:3000/",
+            "http://example.com:3000/",
+            // The same port on another machine is not Sniper's.
+            "http://192.0.2.44:18080/",
+            // The page Sniper serves itself is never dialled.
+            "http://sniper:18080/",
+        ] {
+            let uri: Uri = open.parse().unwrap();
+            assert!(
+                !remote_client_reaches_guarded(&state, remote, &uri).await,
+                "{open}"
+            );
+        }
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[test]
     fn a_client_on_another_machine_cannot_reach_the_ui_through_the_proxy() {
         // The UI, and a DevTools port of a browser Sniper opened.
-        let guarded: [SocketAddr; 2] = [
-            "127.0.0.1:8081".parse().unwrap(),
-            "127.0.0.1:9222".parse().unwrap(),
-        ];
+        let guarded = [8081, 9222];
         let remote: IpAddr = "192.0.2.10".parse().unwrap();
         let mapped: IpAddr = "::ffff:192.0.2.10".parse().unwrap();
         let local: IpAddr = "127.0.0.1".parse().unwrap();
@@ -10345,8 +10407,12 @@ mod tests {
             "http://127.0.0.1:8081/api/runtime",
             "http://localhost:8081/",
             "http://127.1:8081/",
+            "http://0.0.0.0:8081/",
+            "http://[::ffff:127.0.0.1]:8081/",
             "http://127.0.0.1:9222/json/version",
             "http://localhost:9222/",
+            // A host that does not parse is not let through on the doubt.
+            "http://exa_mple..com:8081/",
         ] {
             let uri: Uri = target.parse().unwrap();
             assert!(remote_client_targets(remote, &uri, &guarded), "{target}");

@@ -1906,10 +1906,130 @@ pub(crate) fn forget_driver_ports(profile: &Path) {
         .remove(profile);
 }
 
+/// The port of the service a browser calls for itself, as its command line names
+/// it: `build_args` puts it in the bypass list.
+fn bypassed_own_port(args: &str) -> Option<u16> {
+    switch_value(args, "--proxy-bypass-list")?
+        .split(';')
+        .find_map(|rule| rule.strip_prefix("127.0.0.1:")?.parse().ok())
+}
+
+/// Guards again the ports of browsers an earlier Sniper opened that still run. The
+/// list lives in memory and is filled at launch, so without this a restart leaves
+/// a running browser's DevTools port open to a client on another machine.
+// ponytail: an entry found here stays until Sniper stops, even after that browser
+// quits; nothing watches a process this Sniper did not start.
+pub fn recover_driver_ports(data_dir: &Path) {
+    let Ok(profiles) = fs::read_dir(data_dir.join("browser-profiles")) else {
+        return;
+    };
+    for profile in profiles.flatten().map(|entry| entry.path()) {
+        let Some(owner) = read_owner(&profile) else {
+            continue;
+        };
+        let pid = if process_runs_as(owner.pid, &owner.exe) {
+            owner.pid
+        } else if let Some(holder) = lock_holder(&profile, &owner.exe) {
+            // It relaunched itself, and the record names the process that left.
+            holder
+        } else {
+            continue;
+        };
+        let mut ports = Vec::new();
+        // Only a browser started with the port: a later one can sit on the file an
+        // older run left in the profile.
+        if owner.devtools_port {
+            ports.extend(
+                [Driver::Cdp, Driver::BrowserosMcp]
+                    .into_iter()
+                    .filter_map(|driver| {
+                        let text = fs::read_to_string(profile.join(driver.port_file())).ok()?;
+                        driver.parse_port(&text)
+                    }),
+            );
+        }
+        ports.extend(process_args(pid).as_deref().and_then(bypassed_own_port));
+        if !ports.is_empty() {
+            remember_driver_ports(&profile, ports);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Child;
+
+    #[test]
+    fn a_browser_an_earlier_sniper_opened_has_its_ports_guarded_again() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-recover-ports-{}", Uuid::new_v4()));
+        let root = data_dir.join("browser-profiles");
+        let (running, gone, unasked) = (root.join("example"), root.join("gone"), root.join("old"));
+        for profile in [&running, &gone, &unasked] {
+            fs::create_dir_all(profile).unwrap();
+        }
+        // This test process stands in for a browser that is still running.
+        let me = Owner {
+            pid: std::process::id(),
+            exe: std::env::current_exe().unwrap(),
+            proxy: "127.0.0.1:8080".to_string(),
+            devtools_port: true,
+            started: None,
+        };
+        write_owner(&running, &me).unwrap();
+        fs::write(
+            running.join("DevToolsActivePort"),
+            "45131\n/devtools/browser/example",
+        )
+        .unwrap();
+        // A record whose process has gone guards nothing.
+        write_owner(
+            &gone,
+            &Owner {
+                pid: 0,
+                ..me.clone()
+            },
+        )
+        .unwrap();
+        fs::write(gone.join("DevToolsActivePort"), "45132\n").unwrap();
+        // A browser opened without the port can sit on a file an older run left.
+        write_owner(
+            &unasked,
+            &Owner {
+                devtools_port: false,
+                ..me.clone()
+            },
+        )
+        .unwrap();
+        fs::write(unasked.join("DevToolsActivePort"), "45133\n").unwrap();
+
+        recover_driver_ports(&data_dir);
+
+        let ports = driver_ports();
+        assert!(ports.contains(&45131));
+        assert!(!ports.contains(&45132));
+        assert!(!ports.contains(&45133));
+        forget_driver_ports(&running);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn a_browser_s_own_port_is_read_from_its_bypass_list() {
+        assert_eq!(
+            bypassed_own_port(
+                "/Applications/Example.app/Contents/MacOS/Example --user-data-dir=/data/p \
+                 --proxy-server=127.0.0.1:8080 \
+                 --proxy-bypass-list=<-loopback>;127.0.0.1:21420;localhost:21420 --no-first-run"
+            ),
+            Some(21420)
+        );
+        assert_eq!(
+            bypassed_own_port("/bin/example --proxy-bypass-list=<-loopback> --no-first-run"),
+            None
+        );
+        assert_eq!(bypassed_own_port("/bin/example"), None);
+    }
 
     #[test]
     fn spki_hash_is_the_sha256_of_the_public_key_info() {

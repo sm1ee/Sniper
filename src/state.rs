@@ -185,6 +185,9 @@ async fn session_summary_with_live_counts(
 
 impl AppState {
     pub fn new(config: AppConfig) -> Result<Self> {
+        // Before any listener answers: a browser an earlier run opened may still
+        // have its DevTools port, which the proxy refuses to another machine.
+        crate::browser::recover_driver_ports(&config.data_dir);
         let certificates = Arc::new(CertificateAuthority::load_or_create(&config.data_dir)?);
         let startup = Arc::new(StartupSettingsStore::load_or_create(
             &config.data_dir,
