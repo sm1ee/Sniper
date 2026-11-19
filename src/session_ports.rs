@@ -187,6 +187,9 @@ struct Inner {
     /// then stay closed, because nobody knows which numbers are taken.
     numbers: std::result::Result<Numbers, String>,
     open: HashMap<Uuid, OpenPort>,
+    /// The ports a shutdown stopped, with the context each held, so a
+    /// shutdown that does not go through can open them again.
+    suspended: Vec<(Arc<SessionContext>, SocketAddr)>,
 }
 
 /// The session ports of one Sniper: the saved numbers and what is open now.
@@ -220,6 +223,7 @@ impl SessionPorts {
             inner: Mutex::new(Inner {
                 numbers,
                 open: HashMap::new(),
+                suspended: Vec::new(),
             }),
             own,
             #[cfg(test)]
@@ -328,6 +332,37 @@ impl SessionPorts {
         port.accept.abort();
         let _ = port.accept.await;
         Some(port.addr)
+    }
+
+    /// Stops every open port from accepting and remembers each, for a
+    /// shutdown that may yet be cancelled. Their connections are left for the
+    /// shutdown to drain.
+    pub(crate) async fn suspend_all(&self) {
+        let ports: Vec<OpenPort> = {
+            let mut inner = self.inner();
+            let ports = inner.open.drain().map(|(_, port)| port).collect();
+            self.own.write().session_ports.clear();
+            ports
+        };
+        for port in ports {
+            port.accept.abort();
+            let _ = port.accept.await;
+            self.inner().suspended.push((port.session, port.addr));
+        }
+    }
+
+    /// The sessions whose ports a shutdown stopped.
+    pub(crate) fn suspended_sessions(&self) -> Vec<Arc<SessionContext>> {
+        self.inner()
+            .suspended
+            .iter()
+            .map(|(session, _)| session.clone())
+            .collect()
+    }
+
+    /// The ports a shutdown stopped, for opening them again.
+    pub(crate) fn take_suspended(&self) -> Vec<(Arc<SessionContext>, SocketAddr)> {
+        std::mem::take(&mut self.inner().suspended)
     }
 
     /// Saves a change to the numbers and only then makes it visible, so a
@@ -996,6 +1031,175 @@ mod tests {
         assert!(!state.session().await.runtime.upstream_proxy().await.enabled);
         server.abort();
         state.close_session_port(agent).await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The main listener of `state`, serving as the binaries start it.
+    async fn serving_main_listener(state: &Arc<AppState>) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        state.set_active_proxy_addr(addr).await;
+        state.mark_proxy_listener_online();
+        let served = state.clone();
+        state
+            .set_proxy_task(tokio::spawn(async move {
+                let _ = crate::proxy::serve_proxy(listener, served).await;
+            }))
+            .await;
+        addr
+    }
+
+    // A request Intercept holds on the port is cut with the port. Its entry
+    // must not stay in the queue, where nobody could decide it any more.
+    #[tokio::test]
+    async fn closing_a_port_removes_the_requests_it_held() {
+        let _work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let dir = scratch("close-held");
+        let state = state_in(&dir);
+        let agent = inactive_session(&state, "agent").await;
+        let port = port_addr(&state.open_session_port(agent).await.unwrap());
+        let session = state.session_port_context(agent).unwrap();
+        session
+            .runtime
+            .update(crate::runtime::RuntimeSettingsUpdate {
+                intercept_enabled: Some(true),
+                intercept_scope_only: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let upstream = upstream().await;
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(port).await.unwrap();
+            let request =
+                format!("GET http://{upstream}/held HTTP/1.1\r\nHost: {upstream}\r\n\r\n");
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut answer = Vec::new();
+            let _ = stream.read_to_end(&mut answer).await;
+            answer
+        });
+        for _ in 0..250 {
+            if session.intercepts.held().await == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(session.intercepts.held().await, 1);
+
+        state.close_session_port(agent).await.unwrap();
+
+        assert_eq!(session.intercepts.held().await, 0);
+        let answer = client.await.unwrap();
+        assert!(!String::from_utf8_lossy(&answer).contains("200 OK"));
+        // Nothing was forwarded, so nothing was recorded.
+        assert!(session.store.list(&ListFilters::default()).await.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_on_a_session_port_survives_a_rebind_of_the_main_listener() {
+        let _work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let dir = scratch("tunnel-rebind");
+        let state = state_in(&dir);
+        let agent = inactive_session(&state, "agent").await;
+        let main = serving_main_listener(&state).await;
+        let port = port_addr(&state.open_session_port(agent).await.unwrap());
+        let mut tunnel = open_tunnel(port, echo_upstream().await).await;
+        assert!(echoes(&mut tunnel, b"\x00\x01before").await);
+        let free = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let moved_to = free.local_addr().unwrap();
+        drop(free);
+
+        crate::proxy::rebind_proxy(state.clone(), moved_to)
+            .await
+            .unwrap();
+
+        assert_eq!(state.get_active_proxy_addr().await, moved_to);
+        assert!(TcpStream::connect(main).await.is_err());
+        assert!(echoes(&mut tunnel, b"\x00\x02after").await);
+        drop(tunnel);
+        state.close_session_port(agent).await.unwrap();
+        state.abort_proxy_task().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // A shutdown that does not go through must leave Sniper as it was: three
+    // places stopped the listeners and then carried on without them.
+    #[tokio::test]
+    async fn a_cancelled_shutdown_brings_every_listener_back() {
+        let _work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let dir = scratch("resume");
+        let state = state_in(&dir);
+        let agent = inactive_session(&state, "agent").await;
+        let main = serving_main_listener(&state).await;
+        let opened = state.open_session_port(agent).await.unwrap();
+        let port = port_addr(&opened);
+        let held = state.session_port_context(agent).unwrap();
+        let upstream = upstream().await;
+
+        state.stop_background_jobs().await.unwrap();
+        state.stop_proxy_listeners().await;
+
+        assert!(TcpStream::connect(port).await.is_err());
+        assert!(TcpStream::connect(main).await.is_err());
+        assert!(!state.session_port_status(agent).open);
+        // Nothing opens while Sniper is on its way out.
+        let error = state.open_session_port(agent).await.unwrap_err();
+        assert!(error.is::<Refused>(), "{error:#}");
+
+        state.resume_after_cancelled_shutdown().await;
+
+        assert_eq!(state.session_port_status(agent), opened);
+        assert!(Arc::ptr_eq(
+            &held,
+            &state.session_port_context(agent).unwrap()
+        ));
+        assert!(get_through(port, upstream, "/port").await.contains("200"));
+        assert!(get_through(main, upstream, "/main").await.contains("200"));
+        assert!(state.is_proxy_online());
+        assert_eq!(recorded(&held, 1).await, ["/port"]);
+
+        // A port whose session was deleted meanwhile stays closed.
+        state.stop_proxy_listeners().await;
+        state.delete_session(agent).await.unwrap();
+        state.resume_after_cancelled_shutdown().await;
+        assert!(TcpStream::connect(port).await.is_err());
+        assert!(get_through(main, upstream, "/again").await.contains("200"));
+
+        state.abort_proxy_task().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // The session the main listener records into is saved in full at exit.
+    // A session a port fed must not lose what only its memory held.
+    #[tokio::test]
+    async fn a_shutdown_saves_the_sessions_that_ports_fed() {
+        let dir = scratch("shutdown-save");
+        let state = state_in(&dir);
+        let agent = inactive_session(&state, "agent").await;
+        state.open_session_port(agent).await.unwrap();
+        let session = state.session_port_context(agent).unwrap();
+        session
+            .event_log
+            .push(
+                crate::event_log::EventLevel::Info,
+                "test",
+                "Kept across the restart",
+                "",
+            )
+            .await;
+
+        state.stop_proxy_listeners().await;
+        state.persist_session_port_sessions().await.unwrap();
+
+        let saved = state.sessions.load_context_read_only(agent).unwrap();
+        let events = saved.event_log.snapshot(None).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.title == "Kept across the restart"),
+            "{events:?}"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

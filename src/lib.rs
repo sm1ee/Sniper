@@ -268,7 +268,7 @@ async fn shutdown_headless_runtime(
     )
     .await
     .context("failed to persist closed live WebSocket relays before headless shutdown");
-    state.abort_proxy_task().await;
+    state.stop_proxy_listeners().await;
     proxy::drain_proxy_connections(Duration::from_secs(1)).await;
     let flush_result = proxy::flush_pending_session_persists(state)
         .await
@@ -278,6 +278,7 @@ async fn shutdown_headless_runtime(
         .await
         .map(|_| ())
         .context("failed to persist active session before headless shutdown");
+    let active_result = active_result.and(state.persist_session_port_sessions().await);
     if let Err(error) = combine_api_and_shutdown_results(flush_result, active_result) {
         warn!(
             ?error,

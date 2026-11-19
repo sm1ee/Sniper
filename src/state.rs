@@ -1013,6 +1013,19 @@ impl AppState {
         // through the session's TCP capture.
         self.arm_tcp_capture(&session).await;
         release_tcp_intercept(&session).await;
+        self.start_session_port(session, listener, addr);
+        tracing::info!(session_id = %id, %addr, "session port opened");
+        Ok(self.session_ports.status(id))
+    }
+
+    /// Starts serving a bound session port and enters it in the registry.
+    /// The caller holds `session_activation_lock`.
+    fn start_session_port(
+        &self,
+        session: Arc<SessionContext>,
+        listener: tokio::net::TcpListener,
+        addr: SocketAddr,
+    ) {
         let state = Arc::new(self.clone());
         let served = session.clone();
         let accept = tokio::spawn(async move {
@@ -1021,8 +1034,113 @@ impl AppState {
             }
         });
         self.session_ports.register(session, addr, accept);
-        tracing::info!(session_id = %id, %addr, "session port opened");
-        Ok(self.session_ports.status(id))
+    }
+
+    /// Stops every proxy listener from accepting: each session port, then
+    /// the main listener. A shutdown calls this before it drains what they
+    /// carried, and `resume_after_cancelled_shutdown` undoes it.
+    pub async fn stop_proxy_listeners(&self) {
+        {
+            let _activation_guard = self.session_activation_lock.lock().await;
+            self.session_ports.suspend_all().await;
+        }
+        self.abort_proxy_task().await;
+    }
+
+    /// Saves the small components of each session a port fed until the
+    /// shutdown stopped it. Their traffic is in the journals already, and a
+    /// full save of sixteen sessions would hold the desktop's event loop for
+    /// all of them.
+    pub async fn persist_session_port_sessions(&self) -> Result<()> {
+        let mut failures = Vec::new();
+        for session in self.session_ports.suspended_sessions() {
+            if !self.sessions.contains_session(session.id()) {
+                continue;
+            }
+            if let Err(error) = session.persist_state_only().await {
+                failures.push(format!("{}: {error:#}", session.id()));
+            }
+        }
+        anyhow::ensure!(
+            failures.is_empty(),
+            "failed to save {} session(s) that recorded through their own ports: {}",
+            failures.len(),
+            failures.join("; ")
+        );
+        Ok(())
+    }
+
+    /// Brings back what a shutdown stopped when the shutdown does not go
+    /// through: the main listener, the TCP relay and the session ports.
+    /// Sniper then carries on, and must carry on as it was.
+    pub async fn resume_after_cancelled_shutdown(&self) {
+        self.cancel_tcp_shutdown();
+        let state = Arc::new(self.clone());
+        // The accept task is gone once the shutdown got as far as stopping
+        // it, whatever the status still says.
+        if self.proxy_task.read().await.is_none() {
+            self.set_proxy_online(false);
+            let proxy_addr = self.get_active_proxy_addr().await;
+            match crate::proxy::rebind_proxy(state, proxy_addr).await {
+                Ok(()) => {
+                    tracing::warn!(
+                        %proxy_addr,
+                        "restored proxy listener after a cancelled shutdown"
+                    );
+                }
+                Err(error) => {
+                    self.set_proxy_online(false);
+                    let ui_addr = self.get_active_ui_addr().await;
+                    if let Err(persist_error) = crate::runtime_state::persist_runtime_state(
+                        &self.config.data_dir,
+                        &crate::runtime_state::RuntimeStateSnapshot::with_proxy_status_and_instance(
+                            proxy_addr,
+                            ui_addr,
+                            false,
+                            self.runtime_instance_id,
+                        ),
+                    ) {
+                        tracing::warn!(
+                            ?persist_error,
+                            "failed to persist offline runtime state after a cancelled shutdown"
+                        );
+                    }
+                    tracing::warn!(
+                        %error,
+                        %proxy_addr,
+                        "failed to restore proxy listener after a cancelled shutdown"
+                    );
+                }
+            }
+        }
+        self.start_saved_tcp_listeners().await;
+        let _activation_guard = self.session_activation_lock.lock().await;
+        for (session, addr) in self.session_ports.take_suspended() {
+            let id = session.id();
+            // Deleted, reloaded or made the default while its port was
+            // stopped: then the port stays closed.
+            if !self.sessions.contains_session(id)
+                || self.sessions.active_session_id() == id
+                || !self.is_current_session_context(&session).await
+            {
+                continue;
+            }
+            match crate::session_ports::bind_exclusive(addr).await {
+                Ok(listener) => self.start_session_port(session, listener, addr),
+                Err(error) => {
+                    tracing::warn!(%error, session_id = %id, %addr, "session port did not reopen");
+                    self.log_warn(
+                        "runtime",
+                        "Session port did not reopen",
+                        format!(
+                            "Port {} of session {id} did not open again after the shutdown was cancelled ({error}). Open it again from the session.",
+                            addr.port()
+                        ),
+                    )
+                    .await;
+                }
+            }
+        }
     }
 
     /// Closes the session's port. The number stays the session's.
@@ -1033,14 +1151,21 @@ impl AppState {
         if !self.sessions.contains_session(id) {
             anyhow::bail!("session {id} was not found");
         }
-        let _activation_guard = self.session_activation_lock.lock().await;
-        // A delete that follows waits here until the port is fully closed.
+        let activation_guard = self.session_activation_lock.lock().await;
+        // A delete or a switch that follows waits here until the port is
+        // fully closed.
         let operation_lock = self.session_operation_lock(id).await;
         let _operation_guard = operation_lock.lock().await;
-        if let Some(addr) = self.session_ports.unregister(id).await {
-            let cut = crate::proxy::abort_session_port_connections(id);
-            tracing::info!(session_id = %id, %addr, cut, "session port closed");
-        }
+        let Some(session) = self.session_ports.context(id) else {
+            return Ok(self.session_ports.status(id));
+        };
+        let addr = self.session_ports.unregister(id).await;
+        // The registry is settled. What is left concerns this session alone,
+        // and can take seconds, so nothing else waits for it.
+        drop(activation_guard);
+        let ended = crate::proxy::end_session_port_work(self, &session).await;
+        tracing::info!(session_id = %id, ?addr, "session port closed");
+        ended.context("failed to save the session after its port was closed")?;
         Ok(self.session_ports.status(id))
     }
 
@@ -1183,6 +1308,22 @@ impl AppState {
                         )
                         .await;
                         if crate::proxy::session_has_active_proxy_work(session_id) {
+                            // Relays first, through their own handles: one cut
+                            // with its outer task stays registered and refuses
+                            // every later delete of the session.
+                            if let Err(error) = crate::proxy::close_session_websocket_relays(
+                                self,
+                                session_id,
+                                "A forced session switch closed the live WebSocket relay.",
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    ?error,
+                                    %session_id,
+                                    "failed to save WebSocket relays closed for a forced session switch"
+                                );
+                            }
                             let aborted = crate::proxy::abort_session_tracked_tasks(session_id);
                             tracing::warn!(
                                 %session_id,
@@ -2204,7 +2345,7 @@ impl AppState {
         artifact_guard.clear_detach_targets();
 
         if let Err(error) = self.prepare_for_self_update_shutdown().await {
-            self.cancel_tcp_shutdown();
+            self.resume_after_cancelled_shutdown().await;
             cleanup_update_artifacts(&[], &tmp_dir).await;
             return Err(error);
         }
@@ -2219,7 +2360,7 @@ impl AppState {
             installer_log,
         ) {
             cleanup_update_artifacts(&[], &tmp_dir).await;
-            self.restore_proxy_after_self_update_prepare_failure().await;
+            self.resume_after_cancelled_shutdown().await;
             return Err(error);
         }
 
@@ -2255,7 +2396,7 @@ impl AppState {
         )
         .await
         .context("failed to persist closed live WebSocket relays before self-update restart");
-        self.abort_proxy_task().await;
+        self.stop_proxy_listeners().await;
         self.set_proxy_online(false);
         crate::proxy::drain_proxy_connections(Duration::from_secs(1)).await;
         crate::proxy::flush_pending_session_persists(self)
@@ -2264,44 +2405,9 @@ impl AppState {
         self.persist_active_session()
             .await
             .context("failed to persist active session before self-update restart")?;
+        self.persist_session_port_sessions().await?;
         relay_result?;
         Ok(())
-    }
-
-    async fn restore_proxy_after_self_update_prepare_failure(self: &Arc<Self>) {
-        self.cancel_tcp_shutdown();
-        let proxy_addr = self.get_active_proxy_addr().await;
-        match crate::proxy::rebind_proxy(Arc::clone(self), proxy_addr).await {
-            Ok(()) => {
-                tracing::warn!(
-                    %proxy_addr,
-                    "restored proxy listener after self-update installer spawn failure"
-                );
-            }
-            Err(error) => {
-                self.set_proxy_online(false);
-                let ui_addr = self.get_active_ui_addr().await;
-                if let Err(persist_error) = crate::runtime_state::persist_runtime_state(
-                    &self.config.data_dir,
-                    &crate::runtime_state::RuntimeStateSnapshot::with_proxy_status_and_instance(
-                        proxy_addr,
-                        ui_addr,
-                        false,
-                        self.runtime_instance_id,
-                    ),
-                ) {
-                    tracing::warn!(
-                        ?persist_error,
-                        "failed to persist offline runtime state after self-update installer spawn failure"
-                    );
-                }
-                tracing::warn!(
-                    %error,
-                    %proxy_addr,
-                    "failed to restore proxy listener after self-update installer spawn failure"
-                );
-            }
-        }
     }
 
     fn remove_runtime_state_for_self_update_restart(&self) {
@@ -3987,9 +4093,7 @@ mod tests {
         state.prepare_for_self_update_shutdown().await.unwrap();
         assert!(!state.is_proxy_online());
 
-        state
-            .restore_proxy_after_self_update_prepare_failure()
-            .await;
+        state.resume_after_cancelled_shutdown().await;
         assert!(state.is_proxy_online());
         tokio::time::timeout(
             std::time::Duration::from_secs(2),

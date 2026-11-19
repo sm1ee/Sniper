@@ -474,7 +474,7 @@ fn run_desktop() -> Result<()> {
                     );
                 }
             }
-            runtime.block_on(state.abort_proxy_task());
+            runtime.block_on(state.stop_proxy_listeners());
             remove_runtime_state_file(&state.config.data_dir, state.runtime_instance_id);
             return Err(anyhow::anyhow!("failed to build desktop webview: {error}"));
         }
@@ -536,7 +536,7 @@ fn run_desktop() -> Result<()> {
                 }
             }
             runtime.block_on(close_state.ws_replay.disconnect_all());
-            runtime.block_on(close_state.abort_proxy_task());
+            runtime.block_on(close_state.stop_proxy_listeners());
             if let Err(error) = runtime.block_on(proxy::close_live_websocket_relays(
                 close_state.as_ref(),
                 "Sniper desktop shutdown closed the live WebSocket relay.",
@@ -824,7 +824,9 @@ fn persist_desktop_session_state(
 ) -> Result<()> {
     let result = persist_desktop_session_state_inner(runtime, state);
     if result.is_err() {
-        state.cancel_tcp_shutdown();
+        // The quit is stopped and Sniper carries on, so every listener the
+        // attempt stopped comes back with it.
+        runtime.block_on(state.resume_after_cancelled_shutdown());
     }
     result
 }
@@ -840,7 +842,7 @@ fn persist_desktop_session_state_inner(
             "Sniper desktop shutdown closed the live WebSocket relay.",
         ))
         .context("failed to persist closed live WebSocket relays before desktop shutdown");
-    runtime.block_on(state.abort_proxy_task());
+    runtime.block_on(state.stop_proxy_listeners());
     runtime.block_on(proxy::drain_proxy_connections(
         std::time::Duration::from_secs(1),
     ));
@@ -851,6 +853,7 @@ fn persist_desktop_session_state_inner(
         .block_on(state.persist_active_session())
         .map(|_| ())
         .context("failed to persist active session before desktop shutdown");
+    let active_result = active_result.and(runtime.block_on(state.persist_session_port_sessions()));
     combine_desktop_persist_results(flush_result, active_result)?;
     relay_result?;
     Ok(())
@@ -1776,6 +1779,57 @@ mod tests {
         });
         drop((client, server));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // A quit that a failed save stops leaves Sniper running, and it must run
+    // as before. The attempt had already stopped the proxy listener, and
+    // nothing brought it back.
+    #[test]
+    fn a_quit_stopped_by_a_failed_save_brings_the_proxy_listener_back() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "sniper-desktop-quit-stopped-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let state = Arc::new(
+            AppState::new(AppConfig {
+                proxy_addr: "127.0.0.1:0".parse().unwrap(),
+                ui_addr: "127.0.0.1:0".parse().unwrap(),
+                max_entries: 32,
+                max_transaction_entries: 32,
+                body_preview_bytes: 4096,
+                data_dir: root.clone(),
+            })
+            .unwrap(),
+        );
+        let (proxy_addr, session_dir) = runtime.block_on(async {
+            let start = state.get_active_proxy_addr().await;
+            sniper::proxy::rebind_proxy(state.clone(), start)
+                .await
+                .unwrap();
+            (
+                state.get_active_proxy_addr().await,
+                state.session().await.storage_dir().to_path_buf(),
+            )
+        });
+        // The active session cannot be saved.
+        let held = session_dir.with_extension("held");
+        std::fs::rename(&session_dir, &held).unwrap();
+        std::fs::write(&session_dir, b"storage unavailable").unwrap();
+
+        persist_desktop_session_state(&runtime, &state).unwrap_err();
+
+        assert!(state.is_proxy_online());
+        runtime.block_on(async {
+            tokio::net::TcpStream::connect(proxy_addr)
+                .await
+                .expect("the proxy listener answers again after the quit was stopped");
+            state.abort_proxy_task().await;
+        });
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

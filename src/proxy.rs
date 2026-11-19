@@ -302,8 +302,12 @@ pub async fn rebind_proxy_locked(
         ));
     }
 
-    close_live_websocket_relays(
+    // Only what the main listener carries moves with it: its connections and
+    // the work of the session it records into. A session port keeps its own.
+    let default_session = state.sessions.active_session_id();
+    close_session_websocket_relays(
         state.as_ref(),
+        default_session,
         "Proxy listener rebind closed the live WebSocket relay.",
     )
     .await
@@ -393,7 +397,7 @@ pub async fn rebind_proxy_locked(
         }
     };
 
-    drain_proxy_connections(Duration::from_millis(200)).await;
+    drain_main_listener(default_session, Duration::from_millis(200)).await;
 
     let bound_addr = listener
         .local_addr()
@@ -7002,12 +7006,33 @@ pub async fn drain_proxy_connections(timeout: Duration) {
 }
 
 pub async fn close_live_websocket_relays(state: &AppState, note: &'static str) -> Result<()> {
+    close_live_websocket_relays_where(state, note, |_| true).await
+}
+
+/// `close_live_websocket_relays` for one session. Each relay is closed
+/// through its own handle, so the close is recorded and the relay forgotten.
+/// One cut with its outer task stays registered, and that entry refuses every
+/// later delete of the session.
+pub(crate) async fn close_session_websocket_relays(
+    state: &AppState,
+    session_id: Uuid,
+    note: &'static str,
+) -> Result<()> {
+    close_live_websocket_relays_where(state, note, |id| id == session_id).await
+}
+
+async fn close_live_websocket_relays_where(
+    state: &AppState,
+    note: &'static str,
+    matches: impl Fn(Uuid) -> bool,
+) -> Result<()> {
     let relays = {
         let relays = LIVE_WEBSOCKET_RELAYS
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         relays
             .iter()
+            .filter(|(_, relay)| matches(relay.session.id()))
             .map(|(websocket_id, relay)| (*websocket_id, relay.clone()))
             .collect::<Vec<_>>()
     };
@@ -7136,6 +7161,13 @@ pub fn session_has_pending_persist(session_id: Uuid) -> bool {
 }
 
 pub async fn flush_pending_session_persists(state: &AppState) -> Result<()> {
+    flush_pending_persists_where(state, |_| true).await
+}
+
+async fn flush_pending_persists_where(
+    state: &AppState,
+    matches: impl Fn(Uuid) -> bool,
+) -> Result<()> {
     let mut failures = Vec::new();
 
     for _ in 0..PENDING_PERSIST_FLUSH_SWEEP_LIMIT {
@@ -7149,6 +7181,9 @@ pub async fn flush_pending_session_persists(state: &AppState) -> Result<()> {
             pending
                 .iter()
                 .filter_map(|(session_id, session)| {
+                    if !matches(*session_id) {
+                        return None;
+                    }
                     if !state.sessions.contains_session(*session_id)
                         && !pending_session_belongs_to_state(state, session.as_ref())
                     {
@@ -7219,11 +7254,11 @@ pub async fn flush_pending_session_persists(state: &AppState) -> Result<()> {
                 }
             }
         }
-        if !failures.is_empty() || pending_persist_session_count_for_state(state) == 0 {
+        if !failures.is_empty() || pending_persist_session_count_where(state, &matches) == 0 {
             break;
         }
     }
-    let remaining = pending_persist_session_count_for_state(state);
+    let remaining = pending_persist_session_count_where(state, &matches);
     if failures.is_empty() && remaining == 0 {
         Ok(())
     } else {
@@ -7251,17 +7286,103 @@ fn pending_session_belongs_to_state(state: &AppState, session: &SessionContext) 
         .is_some_and(|parent| parent == state.config.data_dir.join(crate::session::SESSIONS_DIR))
 }
 
-fn pending_persist_session_count_for_state(state: &AppState) -> usize {
+fn pending_persist_session_count_where(state: &AppState, matches: &impl Fn(Uuid) -> bool) -> usize {
     let pending = PERSIST_PENDING_CONTEXTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     pending
         .iter()
         .filter(|(session_id, session)| {
-            state.sessions.contains_session(**session_id)
-                || pending_session_belongs_to_state(state, session.as_ref())
+            matches(**session_id)
+                && (state.sessions.contains_session(**session_id)
+                    || pending_session_belongs_to_state(state, session.as_ref()))
         })
         .count()
+}
+
+/// How long a closing session port waits for a request that is about to
+/// finish, and then for what it cut to unwind.
+const SESSION_PORT_CLOSE_WAIT: Duration = Duration::from_secs(2);
+
+fn session_has_work_where(session_id: Uuid, matches: impl Fn(&'static str) -> bool) -> bool {
+    let owners = ACTIVE_PROXY_SESSION_OWNERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    owners.get(&session_id).is_some_and(|reasons| {
+        reasons
+            .iter()
+            .any(|(reason, count)| *count > 0 && matches(reason))
+    })
+}
+
+async fn wait_while(timeout: Duration, busy: impl Fn() -> bool) {
+    let deadline = Instant::now() + timeout;
+    while busy() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Ends what a session's own port carried, once the port has stopped
+/// accepting. Work the API started in the session is left alone.
+pub(crate) async fn end_session_port_work(
+    state: &AppState,
+    session: &Arc<SessionContext>,
+) -> Result<()> {
+    let session_id = session.id();
+    // A request about to finish gets a moment to do so. Idle tunnels and
+    // relays are not waited for: they end only when they are cut.
+    wait_while(SESSION_PORT_CLOSE_WAIT, || {
+        session_has_work_where(session_id, |reason| {
+            [
+                PROXY_WORK_HTTP_REQUEST,
+                PROXY_WORK_STREAMED_RESPONSE,
+                PROXY_WORK_CAPTURE_TASK,
+            ]
+            .contains(&reason)
+        })
+    })
+    .await;
+    // With one feed for each session, every tunnel, held request and
+    // streamed response of the session came through this port.
+    abort_session_port_connections(session_id);
+    abort_session_tasks_where(session_id, |reason| {
+        reason == PROXY_WORK_TUNNEL || reason == PROXY_WORK_HTTP_REQUEST
+    });
+    signal_streamed_response_pumps(session_id);
+    let relays = close_session_websocket_relays(
+        state,
+        session_id,
+        "Closing the session's port closed the live WebSocket relay.",
+    )
+    .await;
+    wait_while(SESSION_PORT_CLOSE_WAIT, || {
+        !connections_where(|owner| owner == ConnectionOwner::SessionPort(session_id)).is_empty()
+            || session_has_work_where(session_id, |reason| reason != PROXY_WORK_REPLAY)
+    })
+    .await;
+    // What the cut requests held for a decision went with them.
+    session.intercepts.discard_cancelled().await;
+    session.response_intercepts.discard_cancelled().await;
+    // A delete can follow at once only if no save is still pending.
+    let flushed = flush_pending_persists_where(state, |id| id == session_id).await;
+    relays.and(flushed)
+}
+
+/// `drain_proxy_connections` for the main listener alone: the connections it
+/// accepted and the work of the session it records into. A session port and
+/// its session are left as they are.
+async fn drain_main_listener(default_session: Uuid, timeout: Duration) {
+    let mine = move |owner| {
+        owner == ConnectionOwner::MainListener
+            || owner == ConnectionOwner::SessionTask(default_session)
+    };
+    let busy =
+        || !connections_where(mine).is_empty() || session_has_active_proxy_work(default_session);
+    wait_while(timeout, busy).await;
+    for connection in connections_where(mine) {
+        connection.abort();
+    }
+    wait_while(timeout, busy).await;
 }
 
 /// Waits for a session's in-flight proxy work, and if it is still busy at the
@@ -10462,6 +10583,124 @@ mod tests {
                 "{target}"
             );
         }
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    /// A WebSocket the session captured that a relay still carries.
+    async fn live_relay(session: &Arc<SessionContext>) -> Uuid {
+        let websocket_id = Uuid::new_v4();
+        session
+            .websockets
+            .open(WebSocketSessionRecord {
+                id: websocket_id,
+                sequence: 0,
+                started_at: Utc::now(),
+                closed_at: None,
+                duration_ms: None,
+                scheme: "wss".to_string(),
+                host: "example.test".to_string(),
+                path: "/ws".to_string(),
+                status: Some(StatusCode::SWITCHING_PROTOCOLS.as_u16()),
+                request: MessageRecord::from_headers_and_body(&HeaderMap::new(), &[], 1024),
+                response: None,
+                frames: Vec::new(),
+                notes: Vec::new(),
+            })
+            .await;
+        let (abort, registration) = AbortHandle::new_pair();
+        remember_live_websocket_relay(
+            websocket_id,
+            Some(websocket_id),
+            session,
+            Instant::now(),
+            abort,
+        );
+        // The relay's task, as `handle_websocket_upgrade` runs it.
+        spawn_tracked_proxy_task(session.id(), PROXY_WORK_WEBSOCKET, async move {
+            let _ = Abortable::new(std::future::pending::<()>(), registration).await;
+            forget_live_websocket_relay_unless_close_pending(websocket_id);
+        });
+        websocket_id
+    }
+
+    // Closing must leave nothing that refuses a delete: a relay cut from
+    // outside stays registered, and a save still pending holds the session.
+    #[tokio::test]
+    async fn closing_a_session_port_ends_its_work_so_the_session_can_be_deleted() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let (state, data_dir) = test_proxy_state("sniper-proxy-port-close");
+        let agent = state
+            .create_inactive_session(Some("agent".into()))
+            .await
+            .unwrap()
+            .id;
+        state.open_session_port(agent).await.unwrap();
+        let session = state.session_port_context(agent).unwrap();
+        let websocket_id = live_relay(&session).await;
+        spawn_tracked_proxy_task(agent, PROXY_WORK_TUNNEL, std::future::pending());
+        mark_session_persist_pending(&state, &session);
+        assert!(session_has_live_websocket_relays(agent));
+
+        state.close_session_port(agent).await.unwrap();
+
+        assert!(!session_has_live_websocket_relays(agent));
+        assert!(!session_has_active_proxy_work(agent));
+        assert!(!session_has_pending_persist(agent));
+        let closed = session.websockets.get(websocket_id).await.unwrap();
+        assert!(closed.closed_at.is_some());
+        assert!(closed.notes.iter().any(|note| note.contains("port")));
+        state.delete_session(agent).await.unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn closing_a_session_port_leaves_work_the_api_started() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let (state, data_dir) = test_proxy_state("sniper-proxy-port-close-api-work");
+        let agent = state
+            .create_inactive_session(Some("agent".into()))
+            .await
+            .unwrap()
+            .id;
+        state.open_session_port(agent).await.unwrap();
+        let replay = remember_active_proxy_session_owner(agent, PROXY_WORK_REPLAY);
+
+        state.close_session_port(agent).await.unwrap();
+
+        assert_eq!(describe_session_proxy_work(agent), "1 replay");
+        drop(replay);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A relay cut by its outer task never forgets itself, and that entry then
+    // refused every delete of the session until Sniper restarted.
+    #[tokio::test]
+    async fn a_forced_switch_leaves_no_relay_that_refuses_a_delete() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let (state, data_dir) = test_proxy_state("sniper-proxy-forced-switch-relay");
+        let first = state.session().await;
+        let websocket_id = live_relay(&first).await;
+
+        state
+            .create_inactive_session(Some("second".into()))
+            .await
+            .unwrap();
+        let second = state.list_sessions().await;
+        let second = second.iter().find(|s| s.id != first.id()).unwrap().id;
+        state
+            .activate_session_with_options(second, true)
+            .await
+            .unwrap();
+
+        assert!(!session_has_live_websocket_relays(first.id()));
+        assert!(first
+            .websockets
+            .get(websocket_id)
+            .await
+            .unwrap()
+            .closed_at
+            .is_some());
+        state.delete_session(first.id()).await.unwrap();
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
