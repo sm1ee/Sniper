@@ -481,6 +481,10 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         .route("/api/sessions/activity", get(get_session_activity))
         .route("/api/sessions/:id/activate", post(activate_session))
         .route(
+            "/api/sessions/:id/proxy-port",
+            post(open_session_port).delete(close_session_port),
+        )
+        .route(
             "/api/sessions/:id",
             delete(delete_session).patch(rename_session),
         )
@@ -3234,6 +3238,31 @@ async fn activate_session(
     }
 }
 
+/// Opens the session's own proxy port. Asking again returns the open port.
+async fn open_session_port(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let Ok(id) = Uuid::parse_str(&id) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match state.open_session_port(id).await {
+        Ok(status) => Json(status).into_response(),
+        Err(error) => session_operation_error_response(error),
+    }
+}
+
+/// Closes the session's port. The number stays the session's.
+async fn close_session_port(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Ok(id) = Uuid::parse_str(&id) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match state.close_session_port(id).await {
+        Ok(status) => Json(status).into_response(),
+        Err(error) => session_operation_error_response(error),
+    }
+}
+
 async fn delete_session(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let id = match Uuid::parse_str(&id) {
         Ok(id) => id,
@@ -3269,7 +3298,8 @@ fn session_operation_error_response(error: anyhow::Error) -> Response {
         StatusCode::INTERNAL_SERVER_ERROR
     } else if message.contains("was not found") {
         StatusCode::NOT_FOUND
-    } else if message.contains("cannot delete the active session")
+    } else if error.is::<crate::session_ports::Refused>()
+        || message.contains("cannot delete the active session")
         || message.contains("live captures are active")
         || message.contains("proxy activity is still running")
         || message.contains("capture persistence is pending")
@@ -10493,6 +10523,98 @@ mod tests {
         let created: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(created["active"], true);
         assert_eq!(state.session().await.id().to_string(), created["id"]);
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn a_session_port_opens_and_closes_over_the_api() {
+        let (state, data_dir) = test_state("session-port-routes");
+        let default = state.session().await.id();
+        let agent = state
+            .create_inactive_session(Some("agent".into()))
+            .await
+            .unwrap()
+            .id;
+        let port_path = |id: Uuid| format!("/api/sessions/{id}/proxy-port");
+
+        let (status, body) = api_route_response(
+            state.clone(),
+            reqwest::Method::POST,
+            &port_path(agent),
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        let opened: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(opened["session_id"], agent.to_string());
+        assert_eq!(opened["open"], true);
+        let port = opened["proxy_port"].as_u64().unwrap();
+        assert_eq!(opened["proxy_addr"], format!("127.0.0.1:{port}"));
+
+        let (status, body) = api_route_response(
+            state.clone(),
+            reqwest::Method::GET,
+            "/api/sessions/activity",
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        let activity: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        let entry = activity
+            .iter()
+            .find(|entry| entry["id"] == agent.to_string())
+            .unwrap();
+        assert_eq!(entry["proxy_port"], port);
+        assert_eq!(entry["proxy_port_open"], true);
+
+        // What is refused says why, and is a conflict the caller can clear.
+        let (status, body) = api_route_response(
+            state.clone(),
+            reqwest::Method::POST,
+            &port_path(default),
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("records into this session"), "{body}");
+        let (status, _) = api_route_response(
+            state.clone(),
+            reqwest::Method::POST,
+            &port_path(Uuid::new_v4()),
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+        let (status, _) = api_route_response(
+            state.clone(),
+            reqwest::Method::POST,
+            "/api/sessions/not-a-uuid/proxy-port",
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+
+        let (status, body) = api_route_response(
+            state.clone(),
+            reqwest::Method::DELETE,
+            &port_path(agent),
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        let closed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(closed["open"], false);
+        assert_eq!(closed["proxy_port"], port);
+        assert!(closed["proxy_addr"].is_null());
+        let (status, _) = api_route_response(
+            state.clone(),
+            reqwest::Method::DELETE,
+            &port_path(Uuid::new_v4()),
+            None,
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
 
         let _ = std::fs::remove_dir_all(data_dir);
     }

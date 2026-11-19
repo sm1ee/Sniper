@@ -133,6 +133,9 @@ pub struct AppState {
     session_contexts: Arc<AsyncMutex<HashMap<uuid::Uuid, Arc<SessionContext>>>>,
     /// Cached read-only inactive sessions for repeated pinned history/detail reads.
     read_only_session_contexts: Arc<AsyncMutex<HashMap<uuid::Uuid, Arc<SessionContext>>>>,
+    /// The proxy ports that each record into one session. Opened and closed
+    /// under `session_activation_lock`.
+    session_ports: Arc<crate::session_ports::SessionPorts>,
     /// WebSocket replay connections.
     pub ws_replay: Arc<WsReplayStore>,
     /// Stable owner token for runtime-state writes from this app process.
@@ -145,6 +148,25 @@ pub struct AppState {
     /// Bounds queued plus running ordinary Service Map jobs across all sessions.
     /// Other API reads and proxy work never acquire this permit.
     service_map_read_slot: Arc<Semaphore>,
+}
+
+/// The TCP intercept controls reach only the session the main listener
+/// records into, so a read held in a session with its own port could never
+/// be let go. Such a session relays and records, and holds nothing.
+async fn release_tcp_intercept(session: &SessionContext) {
+    let policy = session.tcp_capture.policy();
+    if !policy.enabled {
+        return;
+    }
+    let off = crate::tcp_capture::PolicyUpdate {
+        enabled: false,
+        direction: policy.direction,
+        expected_revision: policy.revision,
+        filter: policy.filter,
+    };
+    if let Err(error) = session.tcp_capture.update_policy(off).await {
+        tracing::warn!(?error, session_id = %session.id(), "failed to turn TCP intercept off for a session port");
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -204,6 +226,7 @@ impl AppState {
         )?;
 
         let saved_operations = Arc::new(SavedOperationLedger::new(&config.data_dir));
+        let session_ports = Arc::new(crate::session_ports::SessionPorts::load(&config.data_dir));
         let active_proxy_addr = config.proxy_addr;
         let active_ui_addr = config.ui_addr;
         let runtime_instance_id = uuid::Uuid::new_v4();
@@ -233,6 +256,7 @@ impl AppState {
             session_activation_lock: Arc::new(AsyncMutex::new(())),
             session_contexts: Arc::new(AsyncMutex::new(HashMap::new())),
             read_only_session_contexts: Arc::new(AsyncMutex::new(HashMap::new())),
+            session_ports,
             ws_replay: Arc::new(WsReplayStore::new()),
             runtime_instance_id,
             workspace_retention_uncertain: Arc::new(Default::default()),
@@ -794,11 +818,14 @@ impl AppState {
                 Some(session) => session.activity().await,
                 None => (Vec::new(), 0),
             };
+            let port = self.session_ports.status(summary.id);
             activity.push(crate::session::SessionActivity {
                 id: summary.id,
                 name: summary.name,
                 running,
                 held,
+                proxy_port: port.proxy_port,
+                proxy_port_open: port.open,
             });
         }
         activity
@@ -854,6 +881,152 @@ impl AppState {
             .into_iter()
             .find(|session| session.id == metadata.id)
             .ok_or_else(|| anyhow::anyhow!("session {} was not found", metadata.id))
+    }
+
+    /// The session's port as the API reports it: the number it holds, and
+    /// the address while the port is open.
+    pub fn session_port_status(&self, id: uuid::Uuid) -> crate::session_ports::SessionPortStatus {
+        self.session_ports.status(id)
+    }
+
+    /// The context an open session port records into, which is the session's
+    /// one writable context.
+    pub fn session_port_context(&self, id: uuid::Uuid) -> Option<Arc<SessionContext>> {
+        self.session_ports.context(id)
+    }
+
+    /// The proxy address that records into the session: its own port while
+    /// one is open, else the main listener.
+    pub async fn proxy_addr_for_session(&self, id: uuid::Uuid) -> SocketAddr {
+        match self.session_ports.addr(id) {
+            Some(addr) => addr,
+            None => self.get_active_proxy_addr().await,
+        }
+    }
+
+    /// Opens the session's own proxy port, or returns it when it is open.
+    pub async fn open_session_port(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<crate::session_ports::SessionPortStatus> {
+        use crate::session_ports::{bind_exclusive, loopback, refused, MAX_OPEN};
+        // Loaded before any lock is taken: activation, shutdown and the
+        // desktop's quit all wait on the activation lock, and a load can take
+        // seconds.
+        let session = self.session_context_for_id(id).await?;
+        let _activation_guard = self.session_activation_lock.lock().await;
+        let operation_lock = self.session_operation_lock(id).await;
+        let _operation_guard = operation_lock.lock().await;
+        if !self.sessions.contains_session(id) {
+            anyhow::bail!("session {id} was not found");
+        }
+        if self.tcp_shutdown.load(Ordering::Acquire) {
+            return Err(refused("Sniper is shutting down"));
+        }
+        if self.session_ports.is_open(id) {
+            return Ok(self.session_ports.status(id));
+        }
+        let main = self.get_active_proxy_addr().await;
+        // One feed for each session: the session the main listener records
+        // into has that listener, and a switch never touches a session port.
+        if self.sessions.active_session_id() == id
+            || self.active_session_for_read().await.id() == id
+        {
+            return Err(refused(format!(
+                "the proxy on {main} records into this session already; a session port is for a session it does not record into"
+            )));
+        }
+        // The port must hold the session's one writable context. If it was
+        // replaced since the load above, holding this one would make a second.
+        if !self.is_current_session_context(&session).await {
+            return Err(refused(
+                "the session was reloaded while its port was opening; try again",
+            ));
+        }
+        if self.session_ports.open_count() >= MAX_OPEN {
+            return Err(refused(format!(
+                "{MAX_OPEN} session ports are open, which is the most; close one first"
+            )));
+        }
+        let numbers = self.session_ports.numbers()?;
+        let (listener, port) = match numbers.of(id) {
+            // A client set to this number gains nothing from another one, so
+            // the session is not given a second.
+            Some(port) => match bind_exclusive(loopback(port)).await {
+                Ok(listener) => (listener, port),
+                Err(error) => {
+                    return Err(refused(format!(
+                        "port {port}, which this session keeps, did not open ({error}); free it and try again"
+                    )))
+                }
+            },
+            None => {
+                let avoid = [
+                    main.port(),
+                    self.get_active_ui_addr().await.port(),
+                    self.startup.snapshot().await.proxy_port,
+                ];
+                let mut bound = None;
+                // ponytail: gives up after 64 taken numbers in a row.
+                for port in numbers
+                    .candidates(self.session_ports.first_port())
+                    .filter(|port| !avoid.contains(port))
+                    .take(64)
+                {
+                    match bind_exclusive(loopback(port)).await {
+                        Ok(listener) => {
+                            bound = Some((listener, port));
+                            break;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+                        Err(error) => {
+                            return Err(anyhow::Error::new(error)
+                                .context(format!("failed to open a session port on {port}")))
+                        }
+                    }
+                }
+                let Some((listener, port)) = bound else {
+                    return Err(refused(
+                        "no free port was found for this session; try again",
+                    ));
+                };
+                // Saved before anything is accepted, so no request arrives on
+                // a number that a restart would give to another session.
+                self.session_ports.give(id, port).await?;
+                (listener, port)
+            }
+        };
+        let addr = listener.local_addr().unwrap_or_else(|_| loopback(port));
+        // A tunnel on this port that is neither TLS nor HTTP is relayed
+        // through the session's TCP capture.
+        self.arm_tcp_capture(&session).await;
+        release_tcp_intercept(&session).await;
+        let state = Arc::new(self.clone());
+        let served = session.clone();
+        let accept = tokio::spawn(async move {
+            if let Err(error) = crate::proxy::serve_session_port(listener, state, served).await {
+                tracing::error!(?error, %addr, "session port stopped");
+            }
+        });
+        self.session_ports.register(session, addr, accept);
+        tracing::info!(session_id = %id, %addr, "session port opened");
+        Ok(self.session_ports.status(id))
+    }
+
+    /// Closes the session's port. The number stays the session's.
+    pub async fn close_session_port(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<crate::session_ports::SessionPortStatus> {
+        if !self.sessions.contains_session(id) {
+            anyhow::bail!("session {id} was not found");
+        }
+        let _activation_guard = self.session_activation_lock.lock().await;
+        if let Some(addr) = self.session_ports.unregister(id).await {
+            let cut = crate::proxy::abort_session_port_connections(id);
+            tracing::info!(session_id = %id, %addr, cut, "session port closed");
+        }
+        Ok(self.session_ports.status(id))
     }
 
     pub async fn rename_session(&self, id: uuid::Uuid, name: String) -> Result<SessionSummary> {
@@ -1268,6 +1441,11 @@ impl AppState {
                     .await
                     .context("session delete writer panicked")??;
             state.ws_replay.remove_session(id).await;
+            // The number goes with the session and is given to no other. A
+            // failed save leaves it held, which only keeps it unused.
+            if let Err(error) = state.session_ports.forget(id).await {
+                tracing::warn!(?error, session_id = %id, "failed to forget a deleted session's port number");
+            }
             if let Some(removed) = state.session_contexts.lock().await.remove(&id) {
                 removed.store.notify_retention_work();
             }

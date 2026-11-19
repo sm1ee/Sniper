@@ -44,6 +44,7 @@ pub mod service_map_peer_matches;
 pub mod service_map_servers;
 pub mod service_map_technology;
 pub mod session;
+pub mod session_ports;
 pub mod skill_status;
 pub mod skills;
 pub mod special_host;

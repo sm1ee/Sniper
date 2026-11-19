@@ -135,6 +135,10 @@ pub struct SessionActivity {
     pub running: Vec<&'static str>,
     /// Requests, responses and TCP reads Intercept holds for a decision.
     pub held: usize,
+    /// The proxy port the session keeps for itself until it is deleted.
+    pub proxy_port: Option<u16>,
+    /// Whether that port is open now. Nothing is open after a restart.
+    pub proxy_port_open: bool,
 }
 
 /// Findings counted by severity.

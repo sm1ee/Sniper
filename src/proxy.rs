@@ -495,6 +495,28 @@ pub async fn mark_proxy_offline_after_task_exit(
 }
 
 pub async fn serve_proxy(listener: TcpListener, state: Arc<AppState>) -> Result<()> {
+    serve_listener(listener, state, None).await
+}
+
+/// Serves a session's own port: every request on it is recorded into
+/// `session`, whichever session the main listener records into.
+pub(crate) async fn serve_session_port(
+    listener: TcpListener,
+    state: Arc<AppState>,
+    session: Arc<SessionContext>,
+) -> Result<()> {
+    serve_listener(listener, state, Some(session)).await
+}
+
+async fn serve_listener(
+    listener: TcpListener,
+    state: Arc<AppState>,
+    bound: Option<Arc<SessionContext>>,
+) -> Result<()> {
+    let owner = match &bound {
+        Some(session) => ConnectionOwner::SessionPort(session.id()),
+        None => ConnectionOwner::MainListener,
+    };
     let mut accept_retry_delay = PROXY_ACCEPT_RETRY_INITIAL_DELAY;
     loop {
         let (stream, peer_addr) = match listener.accept().await {
@@ -519,16 +541,17 @@ pub async fn serve_proxy(listener: TcpListener, state: Arc<AppState>) -> Result<
         };
         let io = TokioIo::new(stream);
         let state = state.clone();
+        let bound = bound.clone();
 
         let connection_id = Uuid::new_v4();
         let (abort, registration) = AbortHandle::new_pair();
-        remember_proxy_connection(connection_id, abort);
+        remember_proxy_connection(connection_id, owner, abort);
         tokio::spawn(async move {
             let service = service_fn(move |request| {
                 // A dual-stack `[::]` listener sees IPv4 clients as `::ffff:a.b.c.d`.
                 CLIENT_ADDRESS.scope(
                     peer_addr.ip().to_canonical(),
-                    handle_request(request, state.clone(), peer_addr),
+                    handle_request(request, state.clone(), peer_addr, bound.clone()),
                 )
             });
 
@@ -1325,8 +1348,17 @@ async fn handle_request(
     request: Request<Incoming>,
     state: Arc<AppState>,
     peer_addr: SocketAddr,
+    bound: Option<Arc<SessionContext>>,
 ) -> Result<Response<Body>, Infallible> {
-    let (session, _session_owner) = state.session_with_proxy_owner().await;
+    let (session, _session_owner) = match bound {
+        // A session port holds its session's one writable context, so its
+        // requests never ask which session is active.
+        Some(session) => {
+            let owner = remember_active_proxy_session_owner(session.id(), PROXY_WORK_HTTP_REQUEST);
+            (session, owner)
+        }
+        None => state.session_with_proxy_owner().await,
+    };
     let response = if request.method() == Method::CONNECT {
         handle_connect(request, state, session, peer_addr).await
     } else {
@@ -3307,7 +3339,7 @@ async fn handle_special_host_request(
         body_bytes.as_ref(),
         state.config.body_preview_bytes,
     );
-    let proxy_addr = state.get_active_proxy_addr().await;
+    let proxy_addr = state.proxy_addr_for_session(session.id()).await;
     let response = special_host::respond(&path, &parts.method, state.as_ref(), true, proxy_addr);
     let special_host::SpecialHostResponse {
         status,
@@ -5169,7 +5201,7 @@ async fn execute_http_exchange_with_rules(
     };
 
     if special_host::is_special_host(&request.host) {
-        let proxy_addr = state.get_active_proxy_addr().await;
+        let proxy_addr = state.proxy_addr_for_session(session.id()).await;
         let response = special_host::respond(
             &path,
             &method,
@@ -6258,7 +6290,19 @@ static ACTIVE_STREAMED_RESPONSE_PUMPS: LazyLock<Mutex<HashMap<Uuid, StreamedResp
 pub(crate) static GLOBAL_PROXY_WORK_TEST_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
 
-static ACTIVE_PROXY_CONNECTIONS: LazyLock<Mutex<HashMap<Uuid, AbortHandle>>> =
+/// What a connection in the process-wide list belongs to, so one listener can
+/// be drained or cut without touching another's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectionOwner {
+    /// Accepted by the main listener.
+    MainListener,
+    /// Accepted by this session's own port.
+    SessionPort(Uuid),
+    /// A long-running task of this session: a tunnel, a relay, post-capture work.
+    SessionTask(Uuid),
+}
+
+static ACTIVE_PROXY_CONNECTIONS: LazyLock<Mutex<HashMap<Uuid, (ConnectionOwner, AbortHandle)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 /// Per session, how much work is in flight broken down by what is holding it.
 /// The breakdown exists so a refused session switch can say what to close, and so
@@ -6677,11 +6721,30 @@ fn signal_streamed_response_pumps(session_id: Uuid) -> usize {
     count
 }
 
-fn remember_proxy_connection(connection_id: Uuid, abort: AbortHandle) {
+fn remember_proxy_connection(connection_id: Uuid, owner: ConnectionOwner, abort: AbortHandle) {
     let mut connections = ACTIVE_PROXY_CONNECTIONS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    connections.insert(connection_id, abort);
+    connections.insert(connection_id, (owner, abort));
+}
+
+fn connections_where(matches: impl Fn(ConnectionOwner) -> bool) -> Vec<AbortHandle> {
+    ACTIVE_PROXY_CONNECTIONS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .values()
+        .filter(|(owner, _)| matches(*owner))
+        .map(|(_, abort)| abort.clone())
+        .collect()
+}
+
+/// Cuts the connections a session's own port accepted and says how many.
+pub(crate) fn abort_session_port_connections(session_id: Uuid) -> usize {
+    let connections = connections_where(|owner| owner == ConnectionOwner::SessionPort(session_id));
+    for connection in &connections {
+        connection.abort();
+    }
+    connections.len()
 }
 
 fn forget_proxy_connection(connection_id: Uuid) {
@@ -6791,7 +6854,11 @@ where
     let connection_id = Uuid::new_v4();
     let (abort, registration) = AbortHandle::new_pair();
     let session_owner = remember_active_proxy_session_owner(session_id, reason);
-    remember_proxy_connection(connection_id, abort.clone());
+    remember_proxy_connection(
+        connection_id,
+        ConnectionOwner::SessionTask(session_id),
+        abort.clone(),
+    );
     remember_session_task(session_id, connection_id, reason, abort);
     let client = current_client_address();
     tokio::spawn(async move {
@@ -6899,13 +6966,7 @@ pub async fn drain_proxy_connections(timeout: Duration) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    let connections = {
-        let connections = ACTIVE_PROXY_CONNECTIONS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        connections.values().cloned().collect::<Vec<_>>()
-    };
-    for connection in connections {
+    for connection in connections_where(|_| true) {
         connection.abort();
     }
 
