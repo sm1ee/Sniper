@@ -257,17 +257,12 @@ pub async fn run_proxy(state: Arc<AppState>) -> Result<()> {
     serve_proxy(listener, state).await
 }
 
-/// Bind a TCP listener with `SO_REUSEADDR` so that recently-closed sockets
-/// on the same port don't block us.
+/// Binds a proxy listener that nothing else answers on. `SO_REUSEADDR` is
+/// used only for a port that is waiting out its last connections, so a
+/// listener that was just closed starts again at once; see
+/// `session_ports::bind_exclusive` for what the option did before.
 pub async fn bind_proxy_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
-    let socket = if addr.is_ipv6() {
-        tokio::net::TcpSocket::new_v6()?
-    } else {
-        tokio::net::TcpSocket::new_v4()?
-    };
-    socket.set_reuseaddr(true)?;
-    socket.bind(addr)?;
-    socket.listen(1024)
+    crate::session_ports::bind_exclusive(addr).await
 }
 
 /// Try to rebind the proxy listener to a new address at runtime.

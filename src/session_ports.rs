@@ -467,14 +467,27 @@ fn open_addrs(inner: &Inner) -> Vec<SocketAddr> {
     addrs
 }
 
-/// Whether something accepts a connection on `addr` now.
+/// Whether something accepts a connection now where a listener on `addr`
+/// would. A listener on every interface is reached through loopback.
 async fn answers(addr: SocketAddr) -> bool {
-    // A listener on this machine accepts at once. Windows takes seconds to
-    // refuse a port nobody listens on, so no answer in time is "nobody".
-    matches!(
-        tokio::time::timeout(Duration::from_millis(250), TcpStream::connect(addr)).await,
-        Ok(Ok(_))
-    )
+    let reached_at: Vec<SocketAddr> = match addr.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => vec![loopback(addr.port())],
+        // A listener on every IPv6 address usually takes IPv4 clients too.
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => vec![
+            SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, addr.port())),
+            loopback(addr.port()),
+        ],
+        _ => vec![addr],
+    };
+    for target in reached_at {
+        // A listener on this machine accepts at once. Windows takes seconds
+        // to refuse a port nobody listens on, so no answer in time is "nobody".
+        let connect = tokio::time::timeout(Duration::from_millis(250), TcpStream::connect(target));
+        if matches!(connect.await, Ok(Ok(_))) {
+            return true;
+        }
+    }
+    false
 }
 
 fn bind(addr: SocketAddr, reuse: bool) -> std::io::Result<TcpListener> {
@@ -1652,6 +1665,28 @@ mod tests {
         let taken_addr = loopback(taken.local_addr().unwrap().port());
         assert!(bind_announced(&own, taken_addr).await.is_err());
         assert!(own.proxies().is_empty());
+    }
+
+    // The main listener was bound with SO_REUSEADDR, so on macOS it started
+    // beside another program's listener on the same port and the two shared
+    // the port: which one a client reached depended on the address it used.
+    #[tokio::test]
+    async fn the_main_listener_does_not_start_beside_another_programs_listener() {
+        let everywhere = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = everywhere.local_addr().unwrap().port();
+        let error = crate::proxy::bind_proxy_listener(loopback(port))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+        drop(everywhere);
+
+        // The other way round: a loopback listener, and a bind on every interface.
+        let local = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = local.local_addr().unwrap().port();
+        let error = crate::proxy::bind_proxy_listener(SocketAddr::from(([0, 0, 0, 0], port)))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
     }
 
     #[tokio::test]
