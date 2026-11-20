@@ -61,7 +61,9 @@ sniper-cli session port close --id <session-uuid> --yes
 - No port is open after Sniper restarts. Open it again and it has the same
   number. At most 16 are open at once.
 - The active session has the proxy listener and gets no port. A session with an
-  open port is not switched to or deleted: close its port first.
+  open port is not switched to or deleted: close its port first. `session
+  switch` and `session delete` then answer 409, and the CLI reports only that
+  status, so check `session port list`.
 - Name the session on every command with `--session-id <session-uuid>`.
 
 ## Reads, writes and the manifest

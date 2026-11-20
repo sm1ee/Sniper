@@ -95,7 +95,26 @@ struct OwnAddrs {
     ui: Option<SocketAddr>,
     main: Option<SocketAddr>,
     session_ports: Vec<SocketAddr>,
+    /// Session ports that are being opened; see `OwnListeners::announce`.
+    opening: Vec<SocketAddr>,
     held: Vec<u16>,
+}
+
+/// An address the guards know while its port is being opened. Dropping it
+/// takes the address out again: by then the port is registered, or it did
+/// not open.
+pub(crate) struct Announced {
+    own: OwnListeners,
+    addr: SocketAddr,
+}
+
+impl Drop for Announced {
+    fn drop(&mut self) {
+        let mut own = self.own.write();
+        if let Some(index) = own.opening.iter().position(|addr| *addr == self.addr) {
+            own.opening.swap_remove(index);
+        }
+    }
 }
 
 impl OwnListeners {
@@ -115,13 +134,29 @@ impl OwnListeners {
         self.write().main = Some(addr);
     }
 
-    /// Sniper's proxy listeners: the main one and every open session port.
+    /// Makes the guards know `addr` before anything listens there. A listener
+    /// takes connections from the moment it listens: one that a client on
+    /// another machine got through the main listener in that moment would
+    /// wait in the backlog and arrive on the new port as a local client.
+    pub(crate) fn announce(&self, addr: SocketAddr) -> Announced {
+        self.write().opening.push(addr);
+        Announced {
+            own: self.clone(),
+            addr,
+        }
+    }
+
+    /// Sniper's proxy listeners: the main one and every session port that is
+    /// open or being opened.
     pub fn proxies(&self) -> Vec<SocketAddr> {
         let own = self.read();
-        own.main
-            .into_iter()
-            .chain(own.session_ports.iter().copied())
-            .collect()
+        let mut proxies: Vec<SocketAddr> = own.main.into_iter().collect();
+        for addr in own.session_ports.iter().chain(&own.opening) {
+            if !proxies.contains(addr) {
+                proxies.push(*addr);
+            }
+        }
+        proxies
     }
 
     /// Every listener of Sniper's: the UI and the proxies.
@@ -367,7 +402,22 @@ impl SessionPorts {
 
     /// Saves a change to the numbers and only then makes it visible, so a
     /// number that was not saved is never in use.
-    async fn change_numbers(&self, change: impl FnOnce(&mut Numbers) -> bool) -> Result<()> {
+    ///
+    /// The change runs in a task of its own. The API drops a request's future
+    /// when its client disconnects, and the write, once begun, goes on without
+    /// it: a number on disk that memory did not keep would be given to the
+    /// next session too, and after a restart it would be the first one's.
+    async fn change_numbers(
+        self: &Arc<Self>,
+        change: impl FnOnce(&mut Numbers) -> bool + Send + 'static,
+    ) -> Result<()> {
+        let ports = self.clone();
+        tokio::spawn(async move { ports.write_numbers(change).await })
+            .await
+            .context("session port number task failed")?
+    }
+
+    async fn write_numbers(&self, change: impl FnOnce(&mut Numbers) -> bool) -> Result<()> {
         let _writer = self.numbers_write.lock().await;
         let mut numbers = self.numbers()?;
         if !change(&mut numbers) {
@@ -386,7 +436,7 @@ impl SessionPorts {
 
     /// Takes `port` from the session that keeps it, when the main listener
     /// was started there, and says which session that was.
-    pub(crate) async fn release(&self, port: u16) -> Result<Option<Uuid>> {
+    pub(crate) async fn release(self: &Arc<Self>, port: u16) -> Result<Option<Uuid>> {
         let Some(session) = self.numbers()?.holder_of(port) else {
             return Ok(None);
         };
@@ -394,8 +444,8 @@ impl SessionPorts {
         Ok(Some(session))
     }
 
-    pub(crate) async fn give(&self, session: Uuid, port: u16) -> Result<()> {
-        self.change_numbers(|numbers| {
+    pub(crate) async fn give(self: &Arc<Self>, session: Uuid, port: u16) -> Result<()> {
+        self.change_numbers(move |numbers| {
             numbers.give(session, port);
             true
         })
@@ -403,8 +453,8 @@ impl SessionPorts {
     }
 
     /// Forgets a deleted session's number. No session gets it again.
-    pub(crate) async fn forget(&self, session: Uuid) -> Result<()> {
-        self.change_numbers(|numbers| numbers.forget(session).is_some())
+    pub(crate) async fn forget(self: &Arc<Self>, session: Uuid) -> Result<()> {
+        self.change_numbers(move |numbers| numbers.forget(session).is_some())
             .await
     }
 }
@@ -438,6 +488,17 @@ fn bind(addr: SocketAddr, reuse: bool) -> std::io::Result<TcpListener> {
     socket.listen(1024)
 }
 
+/// Binds a session port with the guards knowing its address first. The
+/// caller keeps the announcement until the port is in the registry.
+pub(crate) async fn bind_announced(
+    own: &OwnListeners,
+    addr: SocketAddr,
+) -> std::io::Result<(TcpListener, Announced)> {
+    let announced = own.announce(addr);
+    let listener = bind_exclusive(addr).await?;
+    Ok((listener, announced))
+}
+
 /// Binds a listener that nothing else answers on.
 ///
 /// `SO_REUSEADDR` lets a loopback bind succeed on macOS beside another
@@ -448,7 +509,9 @@ fn bind(addr: SocketAddr, reuse: bool) -> std::io::Result<TcpListener> {
 /// with nothing answering, is the option used, so a port that was closed opens
 /// again at once.
 // ponytail: a listener that starts between the second probe and the bind is
-// not seen. Closing that takes the platform's own exclusive-bind option.
+// not seen, nor is a socket that holds the port and does not answer: one
+// bound and not yet listening, or one with a full backlog. Closing that takes
+// the platform's own exclusive-bind option.
 pub(crate) async fn bind_exclusive(addr: SocketAddr) -> std::io::Result<TcpListener> {
     let taken = || std::io::Error::from(std::io::ErrorKind::AddrInUse);
     if answers(addr).await {
@@ -1230,11 +1293,28 @@ mod tests {
     // A session a port fed must not lose what only its memory held.
     #[tokio::test]
     async fn a_shutdown_saves_the_sessions_that_ports_fed() {
+        let _work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
         let dir = scratch("shutdown-save");
         let state = state_in(&dir);
         let agent = inactive_session(&state, "agent").await;
-        state.open_session_port(agent).await.unwrap();
+        let port = port_addr(&state.open_session_port(agent).await.unwrap());
         let session = state.session_port_context(agent).unwrap();
+        let upstream = upstream().await;
+        for path in ["/one", "/two", "/three"] {
+            assert!(get_through(port, upstream, path).await.contains("200"));
+        }
+        recorded(&session, 3).await;
+        let listed = |state: &AppState| {
+            state
+                .sessions
+                .summaries()
+                .into_iter()
+                .find(|summary| summary.id == agent)
+                .unwrap()
+                .request_count
+        };
+        // Captures go to the journal, and only a full save tells the registry.
+        assert_eq!(listed(&state), 0);
         session
             .event_log
             .push(
@@ -1248,6 +1328,9 @@ mod tests {
         state.stop_proxy_listeners().await;
         state.persist_session_port_sessions().await.unwrap();
 
+        // The session list must not show the count of the last full save
+        // until the session happens to be loaded again.
+        assert_eq!(listed(&state), 3);
         let saved = state.sessions.load_context_read_only(agent).unwrap();
         let events = saved.event_log.snapshot(None).await;
         assert!(
@@ -1511,6 +1594,64 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+    }
+
+    // The API drops a request's future when its client disconnects. A number
+    // written to disk and not kept in memory would be given to the next
+    // session too, and after a restart it would belong to the first.
+    #[tokio::test]
+    async fn a_number_is_kept_even_when_whoever_asked_for_it_goes_away() {
+        let dir = scratch("number-cancelled");
+        std::fs::create_dir_all(&dir).unwrap();
+        let ports = Arc::new(SessionPorts::load(&dir, OwnListeners::default()));
+        let session = Uuid::new_v4();
+        let giving = tokio::spawn({
+            let ports = ports.clone();
+            async move { ports.give(session, 18081).await }
+        });
+        // Far enough to have begun the write, and then its caller leaves.
+        tokio::task::yield_now().await;
+        giving.abort();
+        let _ = giving.await;
+        for _ in 0..200 {
+            if dir.join(NUMBERS_FILE).exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let on_disk = Numbers::load(&dir.join(NUMBERS_FILE)).unwrap();
+        assert_eq!(on_disk.of(session), Some(18081));
+        assert_eq!(ports.numbers().unwrap(), on_disk);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // A listener takes connections from the moment it listens. If the guards
+    // learned its address only afterwards, a client on another machine could
+    // get a connection into its backlog through the main listener meanwhile,
+    // and arrive on the session port as a local client.
+    #[tokio::test]
+    async fn the_guards_know_a_session_port_before_it_listens() {
+        let own = OwnListeners::default();
+        let free = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = free.local_addr().unwrap();
+        drop(free);
+
+        let (listener, announced) = bind_announced(&own, addr).await.unwrap();
+
+        // It listens, and nothing has registered it yet.
+        assert!(TcpStream::connect(addr).await.is_ok());
+        assert_eq!(own.proxies(), [addr]);
+        drop(announced);
+        assert!(own.proxies().is_empty());
+        drop(listener);
+
+        // An address that does not open is not left guarded.
+        let taken = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let taken_addr = loopback(taken.local_addr().unwrap().port());
+        assert!(bind_announced(&own, taken_addr).await.is_err());
+        assert!(own.proxies().is_empty());
     }
 
     #[tokio::test]

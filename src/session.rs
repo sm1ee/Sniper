@@ -2324,6 +2324,30 @@ impl SessionRegistry {
         registry.sessions.iter().any(|session| session.id == id)
     }
 
+    /// Tells the registry what a session holds now without saving the session
+    /// in full. A full save does this as it finishes, and a load does when it
+    /// replays the journal. Between the two the session list shows the counts
+    /// of the last full save, so whoever saves less than that says here what
+    /// changed.
+    pub(crate) fn refresh_metadata(
+        &self,
+        id: Uuid,
+        refresh: impl FnOnce(&mut SessionMetadata),
+    ) -> Result<()> {
+        let mut metadata = self
+            .inner
+            .read()
+            .expect("session registry lock poisoned")
+            .sessions
+            .iter()
+            .find(|session| session.id == id)
+            .cloned()
+            .ok_or_else(|| anyhow!("session {id} was not found"))?;
+        refresh(&mut metadata);
+        metadata.updated_at = Utc::now();
+        self.update_metadata(metadata)
+    }
+
     pub fn delete_session(&self, id: Uuid) -> Result<()> {
         let commit = self.delete_session_with_commit_status(id)?;
         match commit.finalization_error {

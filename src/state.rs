@@ -921,7 +921,7 @@ impl AppState {
         &self,
         id: uuid::Uuid,
     ) -> Result<crate::session_ports::SessionPortStatus> {
-        use crate::session_ports::{bind_exclusive, loopback, refused, MAX_OPEN};
+        use crate::session_ports::{bind_announced, loopback, refused, MAX_OPEN};
         // Loaded before any lock is taken: activation, shutdown and the
         // desktop's quit all wait on the activation lock, and a load can take
         // seconds.
@@ -961,11 +961,13 @@ impl AppState {
             )));
         }
         let numbers = self.session_ports.numbers()?;
-        let (listener, port) = match numbers.of(id) {
+        // Each bind is announced to the guards first, and the announcement is
+        // kept until the port is in the registry.
+        let (listener, announced, port) = match numbers.of(id) {
             // A client set to this number gains nothing from another one, so
             // the session is not given a second.
-            Some(port) => match bind_exclusive(loopback(port)).await {
-                Ok(listener) => (listener, port),
+            Some(port) => match bind_announced(&self.own_listeners, loopback(port)).await {
+                Ok((listener, announced)) => (listener, announced, port),
                 Err(error) => {
                     return Err(refused(format!(
                         "port {port}, which this session keeps, did not open ({error}); free it and try again"
@@ -985,9 +987,9 @@ impl AppState {
                     .filter(|port| !avoid.contains(port))
                     .take(64)
                 {
-                    match bind_exclusive(loopback(port)).await {
-                        Ok(listener) => {
-                            bound = Some((listener, port));
+                    match bind_announced(&self.own_listeners, loopback(port)).await {
+                        Ok((listener, announced)) => {
+                            bound = Some((listener, announced, port));
                             break;
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
@@ -997,7 +999,7 @@ impl AppState {
                         }
                     }
                 }
-                let Some((listener, port)) = bound else {
+                let Some((listener, announced, port)) = bound else {
                     return Err(refused(
                         "the next 64 port numbers are all in use; free one and try again",
                     ));
@@ -1005,7 +1007,7 @@ impl AppState {
                 // Saved before anything is accepted, so no request arrives on
                 // a number that a restart would give to another session.
                 self.session_ports.give(id, port).await?;
-                (listener, port)
+                (listener, announced, port)
             }
         };
         let addr = listener.local_addr().unwrap_or_else(|_| loopback(port));
@@ -1014,6 +1016,7 @@ impl AppState {
         self.arm_tcp_capture(&session).await;
         release_tcp_intercept(&session).await;
         self.start_session_port(session, listener, addr);
+        drop(announced);
         tracing::info!(session_id = %id, %addr, "session port opened");
         Ok(self.session_ports.status(id))
     }
@@ -1059,6 +1062,30 @@ impl AppState {
             }
             if let Err(error) = session.persist_state_only().await {
                 failures.push(format!("{}: {error:#}", session.id()));
+                continue;
+            }
+            // Only a full save tells the registry how much a session holds.
+            // Without this the session list would show the counts of the
+            // last one until the session is loaded again.
+            let counts = session_live_counts(&session).await;
+            let overview = session.overview().await;
+            let sessions = self.sessions.clone();
+            let id = session.id();
+            let refreshed = tokio::task::spawn_blocking(move || {
+                sessions.refresh_metadata(id, |metadata| {
+                    metadata.request_count = counts.request_count;
+                    metadata.websocket_count = counts.websocket_count;
+                    metadata.event_count = counts.event_count;
+                    metadata.fuzzer_count = counts.fuzzer_count;
+                    metadata.rule_count = counts.rule_count;
+                    metadata.overview = overview;
+                })
+            })
+            .await;
+            match refreshed {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => failures.push(format!("{id}: {error:#}")),
+                Err(error) => failures.push(format!("{id}: {error}")),
             }
         }
         anyhow::ensure!(
@@ -1125,8 +1152,11 @@ impl AppState {
             {
                 continue;
             }
-            match crate::session_ports::bind_exclusive(addr).await {
-                Ok(listener) => self.start_session_port(session, listener, addr),
+            match crate::session_ports::bind_announced(&self.own_listeners, addr).await {
+                Ok((listener, announced)) => {
+                    self.start_session_port(session, listener, addr);
+                    drop(announced);
+                }
                 Err(error) => {
                     tracing::warn!(%error, session_id = %id, %addr, "session port did not reopen");
                     self.log_warn(
@@ -1179,8 +1209,29 @@ impl AppState {
         drop(activation_guard);
         let ended = crate::proxy::end_session_port_work(self, &session).await;
         tracing::info!(session_id = %id, ?addr, "session port closed");
-        ended.context("failed to save the session after its port was closed")?;
+        // The port is closed, which is what was asked, so a save that failed
+        // is not answered as a failed close. It stays pending, a delete says
+        // so, and the session's event log has why.
+        if let Err(error) = ended {
+            tracing::warn!(?error, session_id = %id, "session port closed, but its session was not saved");
+            session
+                .event_log
+                .push(
+                    crate::event_log::EventLevel::Warn,
+                    "runtime",
+                    "Session port closed, session not saved",
+                    format!("The port is closed. Saving the session failed and is still pending: {error:#}"),
+                )
+                .await;
+        }
         Ok(self.session_ports.status(id))
+    }
+
+    /// Held by a rebind of the main listener, so that the session it records
+    /// into does not change, and no session port opens, while the rebind
+    /// closes and drains what that listener carried.
+    pub(crate) async fn hold_session_activation(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.session_activation_lock.clone().lock_owned().await
     }
 
     pub async fn rename_session(&self, id: uuid::Uuid, name: String) -> Result<SessionSummary> {
@@ -1325,15 +1376,22 @@ impl AppState {
                             // Relays first, through their own handles: one cut
                             // with its outer task stays registered and refuses
                             // every later delete of the session.
-                            if let Err(error) = crate::proxy::close_session_websocket_relays(
-                                self,
-                                session_id,
-                                "A forced session switch closed the live WebSocket relay.",
-                            )
-                            .await
-                            {
+                            // In a task of its own: this part of a switch is
+                            // dropped when its caller goes away, and a close
+                            // dropped half way leaves the relay registered too.
+                            let state = self.clone();
+                            let closed = tokio::spawn(async move {
+                                crate::proxy::close_session_websocket_relays(
+                                    &state,
+                                    session_id,
+                                    "A forced session switch closed the live WebSocket relay.",
+                                )
+                                .await
+                            })
+                            .await;
+                            if !matches!(closed, Ok(Ok(()))) {
                                 tracing::warn!(
-                                    ?error,
+                                    ?closed,
                                     %session_id,
                                     "failed to save WebSocket relays closed for a forced session switch"
                                 );

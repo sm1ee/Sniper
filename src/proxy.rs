@@ -304,6 +304,10 @@ pub async fn rebind_proxy_locked(
 
     // Only what the main listener carries moves with it: its connections and
     // the work of the session it records into. A session port keeps its own.
+    // The activation lock keeps that session the same until the drain is
+    // done: were it to change, and the session it was to get a port
+    // meanwhile, the drain would cut that port's tunnels.
+    let _activation_guard = state.hold_session_activation().await;
     let default_session = state.sessions.active_session_id();
     close_session_websocket_relays(
         state.as_ref(),
@@ -10664,11 +10668,57 @@ mod tests {
             .id;
         state.open_session_port(agent).await.unwrap();
         let replay = remember_active_proxy_session_owner(agent, PROXY_WORK_REPLAY);
+        // Post-capture work, as a Replay starts it. It outlasts the moment the
+        // close gives a request to finish, so it is still running when the
+        // close cuts what the port carried.
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = finished.clone();
+        spawn_tracked_proxy_task(agent, PROXY_WORK_CAPTURE_TASK, async move {
+            tokio::time::sleep(SESSION_PORT_CLOSE_WAIT + Duration::from_millis(500)).await;
+            done.store(true, Ordering::Release);
+        });
 
         state.close_session_port(agent).await.unwrap();
 
+        assert!(finished.load(Ordering::Acquire), "the close cut it");
         assert_eq!(describe_session_proxy_work(agent), "1 replay");
         drop(replay);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // Closing is what was asked, and it happened. A save that then fails is
+    // not a reason to answer that the close failed.
+    #[tokio::test]
+    async fn a_port_is_closed_even_when_its_session_cannot_be_saved() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let (state, data_dir) = test_proxy_state("sniper-proxy-port-close-unsaved");
+        let agent = state
+            .create_inactive_session(Some("agent".into()))
+            .await
+            .unwrap()
+            .id;
+        let opened = state.open_session_port(agent).await.unwrap();
+        let session = state.session_port_context(agent).unwrap();
+        mark_session_persist_pending(&state, &session);
+        let storage = session.storage_dir().to_path_buf();
+        let held = storage.with_extension("held");
+        std::fs::rename(&storage, &held).unwrap();
+        std::fs::write(&storage, b"storage unavailable").unwrap();
+
+        let closed = state.close_session_port(agent).await.unwrap();
+
+        assert!(!closed.open);
+        assert_eq!(closed.proxy_port, opened.proxy_port);
+        assert!(session_has_pending_persist(agent));
+        let events = session.event_log.snapshot(None).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.title == "Session port closed, session not saved"),
+            "{events:?}"
+        );
+        std::fs::remove_file(&storage).unwrap();
+        std::fs::rename(&held, &storage).unwrap();
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

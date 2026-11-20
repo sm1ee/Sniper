@@ -12534,6 +12534,7 @@ async fn handle_session(mut api: ApiClient, command: SessionCommand) -> Result<(
         }
         SessionCommand::Create(args) => {
             let session: SessionSummary = api.post_json("/api/sessions", &args.body()).await?;
+            ensure_left_inactive(args.no_activate, &session)?;
             print_json(&session)
         }
         SessionCommand::Switch(args) => {
@@ -12588,6 +12589,19 @@ async fn handle_session(mut api: ApiClient, command: SessionCommand) -> Result<(
             }
         },
     }
+}
+
+/// `--no-activate` is a promise not to move the proxy. A Sniper that does not
+/// know the option creates the session and activates it all the same, and the
+/// caller must hear that rather than a plain success.
+fn ensure_left_inactive(no_activate: bool, session: &SessionSummary) -> Result<()> {
+    if no_activate && session.active {
+        bail!(
+            "this Sniper does not know --no-activate: session {} was created and is now the active session",
+            session.id
+        );
+    }
+    Ok(())
 }
 
 /// A session's own proxy port, as `session port list` prints it.
@@ -23933,6 +23947,21 @@ mod tests {
                 ["type"],
             "boolean"
         );
+    }
+
+    // `--no-activate` is a promise not to move the proxy. A Sniper that does
+    // not know the option, such as one still running from before an update,
+    // creates the session and activates it all the same.
+    #[test]
+    fn no_activate_says_so_when_the_server_activated_the_session_anyway() {
+        let id = Uuid::new_v4();
+        use super::ensure_left_inactive;
+        assert!(ensure_left_inactive(true, &test_session_summary(id, false)).is_ok());
+        assert!(ensure_left_inactive(false, &test_session_summary(id, true)).is_ok());
+
+        let error = ensure_left_inactive(true, &test_session_summary(id, true)).unwrap_err();
+        assert!(error.to_string().contains(&id.to_string()), "{error}");
+        assert!(error.to_string().contains("active session"), "{error}");
     }
 
     // An agent gives its session a port of its own, and finds the commands
