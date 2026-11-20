@@ -56,11 +56,11 @@ One snapshot of Sniper's own listeners (`OwnListeners`) feeds every guard.
 -> Result<SessionSummary>`. `CreateSessionPayload.activate: Option<bool>`
 (absent means true). CLI: `session create --no-activate`.
 
-- [ ] Test `creating_a_session_without_activating_moves_nothing` (state.rs):
+- [x] Test `creating_a_session_without_activating_moves_nothing` (state.rs):
   the active session id is unchanged, the summary has `active == false`, the
   session is listed.
-- [ ] Implement; API handler passes `payload.activate.unwrap_or(true)`.
-- [ ] CLI flag, payload field and preview text; test the payload it sends.
+- [x] Implement; API handler passes `payload.activate.unwrap_or(true)`.
+- [x] CLI flag, payload field and preview text; test the payload it sends.
 
 ### T2: Saved numbers
 
@@ -74,7 +74,7 @@ One snapshot of Sniper's own listeners (`OwnListeners`) feeds every guard.
   that does not parse is an error that names the file.
 - `Numbers::next_candidate(&self) -> Option<u16>`: `max(last + 1, FIRST_PORT)`.
 
-- [ ] Tests: missing file is empty; a number survives save and load; a
+- [x] Tests: missing file is empty; a number survives save and load; a
   forgotten session's number is not given again; an unreadable file is an
   error.
 
@@ -87,7 +87,7 @@ io::Result<TcpListener>`: refuse when something answers on the address; bind
 without `SO_REUSEADDR`; on `AddrInUse` with nothing answering, bind with it
 (the port is only waiting out old connections).
 
-- [ ] Tests: refuses beside a listener on `0.0.0.0:N`; binds again at once
+- [x] Tests: refuses beside a listener on `0.0.0.0:N`; binds again at once
   after its own listener closed a connection first.
 
 ### T4: The registry, the serve loop, open and close
@@ -105,7 +105,7 @@ without `SO_REUSEADDR`; on `AddrInUse` with nothing answering, bind with it
 - `SessionActivity` gains `proxy_port: Option<u16>` and `proxy_port_open: bool`.
 - Routes `POST` and `DELETE /api/sessions/:id/proxy-port`.
 
-- [ ] Tests: a request through the port is recorded in its session while
+- [x] Tests: a request through the port is recorded in its session while
   another session is active; the port's context is pointer-equal to
   `session_context_for_id` for a session never switched to, for one that was,
   and after a workspace write; opening twice returns the same address; the
@@ -117,7 +117,7 @@ without `SO_REUSEADDR`; on `AddrInUse` with nothing answering, bind with it
 
 **Files:** `src/state.rs`, `src/api.rs`.
 
-- [ ] Tests: activating a session with an open port is refused and the port
+- [x] Tests: activating a session with an open port is refused and the port
   stays open; deleting one is refused before its Fuzzer is stopped; both
   answer 409; a tunnel on a session port survives a switch between two other
   sessions.
@@ -126,10 +126,10 @@ without `SO_REUSEADDR`; on `AddrInUse` with nothing answering, bind with it
 
 **Files:** `src/api.rs`.
 
-- [ ] One predicate for the eight checks; a session with an open port is
+- [x] One predicate for the eight checks; a session with an open port is
   exempt and resolves to the registry's context, the two workspace handlers
   included.
-- [ ] Tests: forward a held request, change runtime settings and save the
+- [x] Tests: forward a held request, change runtime settings and save the
   workspace of a session with an open port while it has proxy work.
 
 ### T7: Guards know every listener
@@ -138,15 +138,15 @@ without `SO_REUSEADDR`; on `AddrInUse` with nothing answering, bind with it
 `src/api.rs`, `src/tcp_capture.rs`, `src/runtime.rs`, `src/upstream_proxy.rs`,
 `src/state.rs`.
 
-- [ ] `OwnListeners`: one snapshot of the UI, the main listener and the open
+- [x] `OwnListeners`: one snapshot of the UI, the main listener and the open
   session ports. The remote-client guard, the loop guard,
   `targets_own_listener`, Render, the upstream-proxy check (saved and used)
   and TCP capture read it.
-- [ ] The main listener and a TCP relay listener are not started on a held
+- [x] The main listener and a TCP relay listener are not started on a held
   number; the startup-settings API refuses one before it saves; a main
   listener started on one from the environment takes it from the session and
   logs that.
-- [ ] Tests: a client that is not loopback is refused a session port by
+- [x] Tests: a client that is not loopback is refused a session port by
   address and by name; a request to a session port through any listener gets
   508; an upstream proxy that is a session port is refused when saved and when
   used.
@@ -156,15 +156,15 @@ without `SO_REUSEADDR`; on `AddrInUse` with nothing answering, bind with it
 **Files:** `src/session_ports.rs`, `src/proxy.rs`, `src/state.rs`,
 `src/lib.rs`, `src/bin/sniper-desktop.rs`.
 
-- [ ] Close: stop accepting, wait two seconds, cut the port's connections and
+- [x] Close: stop accepting, wait two seconds, cut the port's connections and
   the session's tunnels and streamed responses, close its WebSocket relays
   through their own handles, `discard_cancelled`, flush the pending save.
-- [ ] The five shutdown paths stop session ports first and save the fed
+- [x] The five shutdown paths stop session ports first and save the fed
   sessions' small components afterwards.
-- [ ] One resume function for the three cancelled shutdowns.
-- [ ] Rebind closes the default session's relays and drains the main
+- [x] One resume function for the three cancelled shutdowns.
+- [x] Rebind closes the default session's relays and drains the main
   listener's connections only.
-- [ ] Tests: delete right after a close; a tunnel on a session port survives a
+- [x] Tests: delete right after a close; a tunnel on a session port survives a
   rebind; a cancelled shutdown brings the ports back.
 
 ### T9: CLI and documents
@@ -172,11 +172,11 @@ without `SO_REUSEADDR`; on `AddrInUse` with nothing answering, bind with it
 **Files:** `src/bin/sniper-cli.rs`, `docs/guides/cli.md`,
 `docs/architecture.md`, `AGENTS.md`, the operator skill.
 
-- [ ] `session port open|close|list`.
+- [x] `session port open|close|list`.
 
 ### T10: Runtime test, deploy, review
 
-- [ ] Isolated instance: concurrent capture into three sessions counted for
+- [x] Isolated instance: concurrent capture into three sessions counted for
   each; close, reopen, delete and restart keep the numbers; a client that is
   not loopback is refused; quit right after a capture, restart, count.
-- [ ] Deploy to `~/Desktop/Sniper.app`. One reviewer.
+- [x] Deploy to `~/Desktop/Sniper.app`. One reviewer.

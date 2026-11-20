@@ -3,7 +3,8 @@
 Status: design, written after the step 2 spike (`spike/session-ports`,
 `f1df80d`, local only) and revised after a builder check, a second review by
 the author and an adversarial review. The guard of decision 5 is fixed
-(`74c9114`); nothing else is built yet.
+(`74c9114`) and phase 1 is built (`9e6c130` to `fa41681`); see "Phase 1 as
+built" at the end. Phases 2 to 4 are not built.
 
 ## Problem
 
@@ -550,6 +551,42 @@ is the only phase that changes what an existing user sees.
   port, and the two places the UI prints the proxy address.
 - The exact wording and placement of the new menu items and the one-line
   notices, within the minimal-controls convention.
+
+## Phase 1 as built
+
+What the builder settled, and where the build went past the design.
+
+- **The registry** is `SessionPorts` in `src/session_ports.rs`. Connections stay
+  in the process-wide list and say what they belong to: the main listener, a
+  session's port, or a session's task. No task-local was needed.
+- **The exclusive bind** connects to the address first. Something that answers
+  refuses the bind. `SO_REUSEADDR` is used only when the plain bind fails and
+  nothing answers, which is a port waiting out old connections. The main
+  listener is bound the same way now.
+- **One list of own listeners** (`OwnListeners`) feeds every guard. A session
+  reaches it through its runtime settings, which is how TCP capture and the
+  upstream proxy, when it is used, learn of a port opened later. An address is
+  announced to the list before its port is bound: a listener takes connections
+  from the moment it listens.
+- **Lock order**: `proxy_rebind_lock`, then `session_activation_lock`, then a
+  session's operation lock, then the registry's own mutex. A rebind holds the
+  activation lock while it drains.
+- **A tunnel that is neither TLS nor HTTP**: opening a port gives the session's
+  TCP capture the CA and turns its TCP intercept off, so nothing is held where
+  no control reaches.
+- **The special-host page** read through a session port prints that port.
+- **Close** runs in a task of its own, so a caller that disconnects cannot
+  leave it half done, and a save that fails afterwards does not make the close
+  an error. Writing a number does the same.
+- **Shutdown** also tells the registry how much each session a port fed holds.
+  Only a full save did, so the session list showed an old count after a
+  restart.
+- **Measured**: moving the main listener off a 199 MB session took 0.16 s.
+  Meanwhile a request through another session's port took 13 ms at most, and
+  an API read 140 ms.
+- **Not changed**: `sniper-cli` reports a refused `session switch` or `session
+  delete` by its status alone, as it does for every session write. The reason
+  is in the API's answer and in the guide.
 
 ## Constraints
 
