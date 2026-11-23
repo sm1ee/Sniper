@@ -227,6 +227,11 @@ impl AppState {
             config.max_transaction_entries,
             MAX_WEBSOCKET_FRAMES_PER_SESSION,
         )?;
+        // The browser profiles of sessions deleted while Sniper was not running,
+        // or deleted while a browser still held them.
+        crate::browser::sweep_session_profiles(&config.data_dir, |id| {
+            sessions.contains_session(id)
+        });
 
         let saved_operations = Arc::new(SavedOperationLedger::new(&config.data_dir));
         let own_listeners = crate::session_ports::OwnListeners::default();
@@ -1689,6 +1694,13 @@ impl AppState {
             if let Err(error) = state.session_ports.forget(id).await {
                 tracing::warn!(?error, session_id = %id, "failed to forget a deleted session's port number");
             }
+            // Its browsers' profiles hold logged-in sessions and nothing opens
+            // them again. One a browser still holds is swept once it has quit.
+            let data_dir = state.config.data_dir.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::browser::remove_session_profiles(&data_dir, id)
+            })
+            .await;
             if let Some(removed) = state.session_contexts.lock().await.remove(&id) {
                 removed.store.notify_retention_work();
             }

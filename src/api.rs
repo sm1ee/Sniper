@@ -7166,6 +7166,67 @@ struct BrowserLaunchPayload {
     url: Option<String>,
     fresh: bool,
     agent: bool,
+    /// The session the browser is for. One that is not the session the proxy
+    /// listener records into gets its own port, opened if it is closed, and a
+    /// profile of its own.
+    session_id: Option<Uuid>,
+}
+
+/// Where a browser's traffic goes: the main listener, or the port of the
+/// session it is opened for.
+struct LaunchTarget {
+    proxy_addr: SocketAddr,
+    main_proxy_addr: SocketAddr,
+    /// Set when the browser is for a session with its own port.
+    session: Option<Uuid>,
+    /// This call opened the session's port. A launch that then fails closes it
+    /// again, so a failed launch leaves nothing changed.
+    opened_port: bool,
+}
+
+async fn browser_launch_target(
+    state: &AppState,
+    session_id: Option<Uuid>,
+) -> std::result::Result<LaunchTarget, Response> {
+    let main_proxy_addr = state.get_active_proxy_addr().await;
+    // The session the main listener records into has the shared browser,
+    // whether it is named or not.
+    let session = session_id.filter(|id| *id != state.sessions.active_session_id());
+    let Some(session) = session else {
+        if !state.is_proxy_online() {
+            return Err((
+                StatusCode::CONFLICT,
+                "the proxy is not listening, so a browser opened now would have nowhere to send its traffic",
+            )
+                .into_response());
+        }
+        return Ok(LaunchTarget {
+            proxy_addr: main_proxy_addr,
+            main_proxy_addr,
+            session: None,
+            opened_port: false,
+        });
+    };
+    // Its own port is the only thing that records into this session, so the
+    // launch opens it. It does not depend on the main listener being up.
+    let opened_port = !state.session_port_status(session).open;
+    let status = state
+        .open_session_port(session)
+        .await
+        .map_err(session_operation_error_response)?;
+    let Some(proxy_addr) = status.proxy_addr.and_then(|addr| addr.parse().ok()) else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to read the session port's address",
+        )
+            .into_response());
+    };
+    Ok(LaunchTarget {
+        proxy_addr,
+        main_proxy_addr,
+        session: Some(session),
+        opened_port,
+    })
 }
 
 /// The saved default, or none if it is unset or names a browser this build does not
@@ -7258,19 +7319,27 @@ async fn launch_browser(
             }
         },
     };
-    let proxy_addr = state.get_active_proxy_addr().await;
-    if !state.is_proxy_online() {
-        return (
-            StatusCode::CONFLICT,
-            "the proxy is not listening, so a browser opened now would have nowhere to send its traffic",
-        )
-            .into_response();
+    let target = match browser_launch_target(&state, payload.session_id).await {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    // The profiles of sessions deleted since: one a browser held at the time is
+    // removed here, once that browser has quit.
+    {
+        let (data_dir, sessions) = (state.config.data_dir.clone(), state.sessions.clone());
+        let _ = tokio::task::spawn_blocking(move || {
+            browser::sweep_session_profiles(&data_dir, |id| sessions.contains_session(id))
+        })
+        .await;
     }
     let mut ctx = LaunchContext::new(
         &state.config.data_dir,
-        proxy_addr,
+        target.proxy_addr,
         state.certificates.root_der_bytes(),
     );
+    if let Some(session) = target.session {
+        ctx = ctx.for_session(session, target.main_proxy_addr);
+    }
     ctx.preferred = preferred_browser(&state).await;
     let request = LaunchRequest {
         browser: kind,
@@ -7281,6 +7350,16 @@ async fn launch_browser(
     match browser::launch(&ctx, request).await {
         Ok(launched) => Json(launched).into_response(),
         Err(error) => {
+            // The port was opened for this browser, which did not open.
+            if let (Some(session), true) = (target.session, target.opened_port) {
+                if let Err(close_error) = state.close_session_port(session).await {
+                    tracing::warn!(
+                        ?close_error,
+                        session_id = %session,
+                        "failed to close the port opened for a browser that did not start"
+                    );
+                }
+            }
             let status = match error {
                 LaunchError::NotInstalled(_) => StatusCode::NOT_FOUND,
                 LaunchError::BadRequest(_) => StatusCode::BAD_REQUEST,
@@ -11773,6 +11852,110 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
         server.abort();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // No test here starts a browser: the target is worked out before the launch,
+    // and the launch itself is tested in `browser` with a script for a browser.
+    #[tokio::test]
+    async fn a_browser_is_pointed_at_the_port_of_the_session_it_is_for() {
+        let (state, data_dir) = test_state("sniper-api-browser-target");
+        let main: std::net::SocketAddr = "127.0.0.1:18890".parse().unwrap();
+        state.set_active_proxy_addr(main).await;
+        state.set_proxy_online(true);
+        let default = state.session().await.id();
+        let agent = state
+            .create_inactive_session(Some("agent".into()))
+            .await
+            .unwrap()
+            .id;
+
+        // No session, or the one the main listener records into, is today's
+        // launch: the main listener and the shared profile. No port is opened.
+        for named in [None, Some(default)] {
+            let target = super::browser_launch_target(&state, named)
+                .await
+                .ok()
+                .expect("the default session's browser uses the main listener");
+            assert_eq!(target.proxy_addr, main);
+            assert_eq!(target.session, None);
+            assert!(!target.opened_port);
+        }
+        assert_eq!(state.session_port_status(default).proxy_port, None);
+
+        // Another session: its own port, opened for the launch.
+        let target = super::browser_launch_target(&state, Some(agent))
+            .await
+            .ok()
+            .expect("a session gets its own port");
+        assert_eq!(target.session, Some(agent));
+        assert_eq!(target.main_proxy_addr, main);
+        assert!(target.proxy_addr.ip().is_loopback());
+        assert!(target.opened_port);
+        assert_eq!(
+            state.session_port_status(agent).proxy_addr,
+            Some(target.proxy_addr.to_string())
+        );
+        // A second browser for it finds the port open.
+        let again = super::browser_launch_target(&state, Some(agent))
+            .await
+            .ok()
+            .unwrap();
+        assert_eq!(again.proxy_addr, target.proxy_addr);
+        assert!(!again.opened_port);
+
+        // The main listener being down stops only the browser that needs it.
+        state.set_proxy_online(false);
+        assert!(super::browser_launch_target(&state, Some(agent))
+            .await
+            .is_ok());
+        let offline = super::browser_launch_target(&state, None)
+            .await
+            .err()
+            .expect("the main listener is down");
+        assert_eq!(offline.status(), StatusCode::CONFLICT);
+
+        let unknown = super::browser_launch_target(&state, Some(Uuid::new_v4()))
+            .await
+            .err()
+            .expect("no such session");
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        state.close_session_port(agent).await.unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A profile holds the logged-in sessions of whoever used the browser.
+    #[tokio::test]
+    async fn a_sessions_browser_profiles_go_with_the_session() {
+        let config = test_app_config("sniper-api-browser-profiles");
+        let data_dir = config.data_dir.clone();
+        let profiles = data_dir.join("browser-profiles");
+        // Left by a session deleted while Sniper was not running.
+        let orphan = profiles
+            .join(format!("session-{}", Uuid::new_v4()))
+            .join("chrome");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("Cookies"), b"logged in").unwrap();
+
+        let state = Arc::new(AppState::new(config).unwrap());
+        assert!(!orphan.exists(), "start-up sweeps what no session owns");
+
+        let agent = state
+            .create_inactive_session(Some("agent".into()))
+            .await
+            .unwrap()
+            .id;
+        let profile = profiles.join(format!("session-{agent}")).join("chrome");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join("Cookies"), b"logged in").unwrap();
+        let shared = profiles.join("chrome");
+        std::fs::create_dir_all(&shared).unwrap();
+
+        state.delete_session(agent).await.unwrap();
+
+        assert!(!profile.parent().unwrap().exists());
+        assert!(shared.exists(), "the shared profile is no session's");
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
