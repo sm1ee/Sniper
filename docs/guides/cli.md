@@ -47,6 +47,7 @@ session a port of its own.
 sniper-cli session create --name 'agent-a' --no-activate --yes
 sniper-cli session port open --id <session-uuid> --yes
 curl -x http://127.0.0.1:18081 https://example.com/
+sniper-cli capture browser open --session-id <session-uuid> --agent --yes
 sniper-cli --output compact capture http list --session-id <session-uuid> --limit 10
 sniper-cli session port list
 sniper-cli session port close --id <session-uuid> --yes
@@ -64,6 +65,10 @@ sniper-cli session port close --id <session-uuid> --yes
   open port is not switched to or deleted: close its port first. `session
   switch` and `session delete` then answer 409, and the CLI reports only that
   status, so check `session port list`.
+- `capture browser open --session-id` opens a browser for the session: through
+  its port, which it opens if it is closed, and on a browser profile no other
+  session shares. Aside is not opened that way, because its command cannot be
+  pointed at one window.
 - Name the session on every command with `--session-id <session-uuid>`.
 
 ## Reads, writes and the manifest

@@ -2073,6 +2073,11 @@ struct BrowserOpenArgs {
     /// `control`, so this changes nothing for them.
     #[arg(long)]
     agent: bool,
+    /// Open the browser for this session. A session the proxy listener does not
+    /// record into gets its own port, opened if it is closed, and a browser
+    /// profile of its own.
+    #[arg(long)]
+    session_id: Option<Uuid>,
 }
 
 impl BrowserCommand {
@@ -4891,7 +4896,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "capture.browser.open",
             "capture browser open",
-            "Open a browser already wired to this Sniper: proxy set, CA trusted, persistent Sniper profile. With no browser named it opens the saved default, else ego, Aside or BrowserOS neo when installed, else Chrome or another Chromium-family browser, so read `control` rather than assume a DevTools endpoint. Pass agent to get a `control` an agent can drive it with.",
+            "Open a browser already wired to this Sniper: proxy set, CA trusted, persistent Sniper profile. With no browser named it opens the saved default, else ego, Aside or BrowserOS neo when installed, else Chrome or another Chromium-family browser, so read `control` rather than assume a DevTools endpoint. Pass agent to get a `control` an agent can drive it with. Pass session_id to open it for a session of your own: it goes through that session's own port, opened if it is closed, and has a browser profile of its own; Aside is not opened that way.",
             Write,
             false,
             &[],
@@ -8302,7 +8307,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "templates.auto.set_templates" => &["enabled", "ids", "search", "severity", "tag"],
         "templates.scan.get" | "templates.scan.stop" => &["session_id", "id"],
         "capture.browser.list" => &[],
-        "capture.browser.open" => &["browser", "url", "fresh", "agent"],
+        "capture.browser.open" => &["browser", "url", "fresh", "agent", "session_id"],
         "capture.browser.prefer" => &["browser"],
         "capture.http.get" => &["id", "session_id"],
         "capture.http.search" => &[
@@ -9955,6 +9960,7 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                     url: call_optional(operation, input, "url")?,
                     fresh: call_bool(operation, input, "fresh")?,
                     agent: call_bool(operation, input, "agent")?,
+                    session_id: call_optional(operation, input, "session_id")?,
                 }),
             },
         },
@@ -11994,12 +12000,19 @@ fn browser_choices() -> Vec<&'static str> {
 }
 
 fn browser_open_body(args: &BrowserOpenArgs) -> Value {
-    json!({
+    let mut body = json!({
         "browser": args.browser,
         "url": args.url,
         "fresh": args.fresh,
         "agent": args.agent,
-    })
+    });
+    // Only when it is named: a Sniper that does not know the field refuses it,
+    // which is right for a caller who asked for a session and wrong for one who
+    // did not.
+    if let Some(session_id) = args.session_id {
+        body["session_id"] = json!(session_id);
+    }
+    body
 }
 
 /// How long a download or import may take before the CLI stops waiting; the
@@ -23947,6 +23960,55 @@ mod tests {
                 ["type"],
             "boolean"
         );
+    }
+
+    // A browser for a session with its own port. The plain body must stay what
+    // older Snipers accept: they refuse a field they do not know.
+    #[test]
+    fn capture_browser_open_names_the_session_only_when_asked() {
+        let id = "11111111-1111-1111-1111-111111111111";
+        let direct = Cli::try_parse_from([
+            "sniper-cli",
+            "capture",
+            "browser",
+            "open",
+            "--browser",
+            "chrome",
+            "--session-id",
+            id,
+        ])
+        .unwrap()
+        .command;
+        let call = command_from_operation_input(
+            "capture.browser.open",
+            &json!({ "browser": "chrome", "session_id": id }),
+        )
+        .unwrap();
+        assert_eq!(command_input_preview(&direct), command_input_preview(&call));
+        let preview = super::command_api_preview(&direct).unwrap();
+        assert_eq!(preview["path"], "/api/browser/launch");
+        assert_eq!(preview["body"]["session_id"], id);
+
+        let plain = Cli::try_parse_from(["sniper-cli", "capture", "browser", "open"])
+            .unwrap()
+            .command;
+        assert!(super::command_api_preview(&plain).unwrap()["body"]
+            .get("session_id")
+            .is_none());
+        assert!(
+            operation_spec("capture.browser.open").unwrap().input_schema["properties"]
+                .get("session_id")
+                .is_some()
+        );
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "capture",
+            "browser",
+            "open",
+            "--session-id",
+            "not-a-uuid",
+        ])
+        .is_err());
     }
 
     // `--no-activate` is a promise not to move the proxy. A Sniper that does
