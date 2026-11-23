@@ -3259,14 +3259,14 @@ async fn connect_tls(
     name: &str,
     insecure: bool,
     alpn: Vec<Vec<u8>>,
-) -> Result<tokio_rustls26::client::TlsStream<TcpStream>, TcpFailure> {
-    let name = rustls23::pki_types::ServerName::try_from(name.trim_matches(['[', ']']).to_owned())
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>, TcpFailure> {
+    let name = rustls::pki_types::ServerName::try_from(name.trim_matches(['[', ']']).to_owned())
         .map_err(|_| TcpFailure::TlsFailed)?;
     let mut config = (*crate::ws_tls::client_config(insecure)).clone();
     config.alpn_protocols = alpn;
     tokio::time::timeout(
         Duration::from_secs(10),
-        tokio_rustls26::TlsConnector::from(Arc::new(config)).connect(name, upstream),
+        tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, upstream),
     )
     .await
     .map_err(|_| TcpFailure::TlsFailed)?
@@ -5976,17 +5976,21 @@ mod tests {
         });
         port
     }
-    fn trusting(ca: &crate::certificate::CertificateAuthority) -> tokio_rustls26::TlsConnector {
-        let mut roots = rustls23::RootCertStore::empty();
+    fn trusting(ca: &crate::certificate::CertificateAuthority) -> tokio_rustls::TlsConnector {
+        let mut roots = rustls::RootCertStore::empty();
         roots
-            .add(rustls23::pki_types::CertificateDer::from(
+            .add(rustls::pki_types::CertificateDer::from(
                 ca.root_der_bytes().to_vec(),
             ))
             .unwrap();
-        let config = rustls23::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        tokio_rustls26::TlsConnector::from(Arc::new(config))
+        let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        tokio_rustls::TlsConnector::from(Arc::new(config))
     }
     async fn tls_listener(
         ca: &Arc<crate::certificate::CertificateAuthority>,
@@ -6027,7 +6031,7 @@ mod tests {
         let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
             .await
             .unwrap();
-        let name = rustls23::pki_types::ServerName::try_from("db.example.com").unwrap();
+        let name = rustls::pki_types::ServerName::try_from("db.example.com").unwrap();
         let mut tls = trusting(&ca).connect(name, stream).await.unwrap();
         tls.write_all(b"secret").await.unwrap();
         let mut back = [0; 6];
@@ -6848,21 +6852,25 @@ mod tests {
         let ca = test_ca();
         let server = alpn_server(&ca, b"postgresql").await;
         let (capture, port) = tls_listener(&ca, server, TlsMode::Decrypt).await;
-        let mut roots = rustls23::RootCertStore::empty();
+        let mut roots = rustls::RootCertStore::empty();
         roots
-            .add(rustls23::pki_types::CertificateDer::from(
+            .add(rustls::pki_types::CertificateDer::from(
                 ca.root_der_bytes().to_vec(),
             ))
             .unwrap();
-        let mut config = rustls23::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
         config.alpn_protocols = vec![b"postgresql".to_vec()];
         let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
             .await
             .unwrap();
-        let name = rustls23::pki_types::ServerName::try_from("db.example.com").unwrap();
-        let mut tls = tokio_rustls26::TlsConnector::from(Arc::new(config))
+        let name = rustls::pki_types::ServerName::try_from("db.example.com").unwrap();
+        let mut tls = tokio_rustls::TlsConnector::from(Arc::new(config))
             .connect(name, stream)
             .await
             .expect("an ALPN-only client completes its handshake");

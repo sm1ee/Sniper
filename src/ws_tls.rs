@@ -1,6 +1,6 @@
 use std::{fmt, sync::Arc};
 
-use rustls23::{
+use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     crypto::CryptoProvider,
     pki_types::{CertificateDer, ServerName, UnixTime},
@@ -14,17 +14,21 @@ pub fn insecure_connector(accept_invalid: bool) -> Option<Connector> {
 
 /// A TLS client for an upstream connection: certificates are checked against
 /// the public roots unless the session accepts invalid ones, as HTTP does.
-pub(crate) fn client_config(accept_invalid: bool) -> Arc<rustls23::ClientConfig> {
+pub(crate) fn client_config(accept_invalid: bool) -> Arc<rustls::ClientConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = if accept_invalid {
-        let provider = Arc::new(rustls23::crypto::ring::default_provider());
-        rustls23::ClientConfig::builder()
+        rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .expect("ring provider supports default TLS protocol versions")
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AcceptInvalidServerCerts { provider }))
             .with_no_client_auth()
     } else {
         let roots =
-            rustls23::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        rustls23::ClientConfig::builder()
+            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("ring provider supports default TLS protocol versions")
             .with_root_certificates(roots)
             .with_no_client_auth()
     };
@@ -59,7 +63,7 @@ impl ServerCertVerifier for AcceptInvalidServerCerts {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, RustlsError> {
-        rustls23::crypto::verify_tls12_signature(
+        rustls::crypto::verify_tls12_signature(
             message,
             cert,
             dss,
@@ -73,7 +77,7 @@ impl ServerCertVerifier for AcceptInvalidServerCerts {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, RustlsError> {
-        rustls23::crypto::verify_tls13_signature(
+        rustls::crypto::verify_tls13_signature(
             message,
             cert,
             dss,
