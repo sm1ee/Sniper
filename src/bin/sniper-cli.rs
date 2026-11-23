@@ -11960,26 +11960,22 @@ async fn handle_tcp(api: ApiClient, command: TcpCommand) -> Result<()> {
     let explicit = command.session_id();
     // Reads pin the active session once; writes also guard that it is still
     // the active one, as the relay runs only there.
-    let client = &api;
-    let read = |path: String| async move {
-        let session_id = resolve_session_id_arg(client, explicit).await?;
-        anyhow::Ok(session_query_path(&path, session_id))
-    };
     let (session_id, expected) = if command_is_tcp_write(&command) {
         runtime_write_session_ids(&api, explicit).await?
     } else {
-        (None, None)
+        (resolve_session_id_arg(&api, explicit).await?, None)
     };
+    let read = |path: String| session_query_path(&path, session_id);
     let write = |path: String| session_query_path_with_expected_active(&path, session_id, expected);
     let read_in_write = |path: String| session_query_path(&path, session_id);
     match command {
         TcpCommand::Status(_) => print_json(
-            &api.get_json::<Value>(&read("/api/tcp/status".into()).await?)
+            &api.get_json::<Value>(&read("/api/tcp/status".into()))
                 .await?,
         ),
         TcpCommand::Listeners { command } => match command {
             TcpListenersCommand::List(_) => {
-                let status: Value = api.get_json(&read("/api/tcp/status".into()).await?).await?;
+                let status: Value = api.get_json(&read("/api/tcp/status".into())).await?;
                 print_json(&json!({ "listeners": status["listeners"] }))
             }
             TcpListenersCommand::Add(args) => print_json(
@@ -12022,13 +12018,12 @@ async fn handle_tcp(api: ApiClient, command: TcpCommand) -> Result<()> {
             ),
         },
         TcpCommand::List(args) => {
-            let mut connections: Vec<Value> = api
-                .get_json(&read("/api/tcp/connections".into()).await?)
-                .await?;
+            let mut connections: Vec<Value> =
+                api.get_json(&read("/api/tcp/connections".into())).await?;
             let mut truncated = false;
             if let Some(contains) = &args.contains {
                 let found: Value = api
-                    .get_json(&read(tcp_search_path(contains, &args.kind)).await?)
+                    .get_json(&read(tcp_search_path(contains, &args.kind)))
                     .await?;
                 let ids = found["ids"].as_array().cloned().unwrap_or_default();
                 connections.retain(|connection| ids.contains(&connection["id"]));
@@ -12037,18 +12032,15 @@ async fn handle_tcp(api: ApiClient, command: TcpCommand) -> Result<()> {
             print_json(&json!({ "connections": connections, "truncated": truncated }))
         }
         TcpCommand::Get(args) => print_json(
-            &api.get_json::<Value>(&read(format!("/api/tcp/connections/{}", args.id)).await?)
+            &api.get_json::<Value>(&read(format!("/api/tcp/connections/{}", args.id)))
                 .await?,
         ),
         TcpCommand::Raw(args) => {
             let bytes = api
-                .get_bytes(
-                    &read(format!(
-                        "/api/tcp/connections/{}/raw?direction={}",
-                        args.id, args.direction
-                    ))
-                    .await?,
-                )
+                .get_bytes(&read(format!(
+                    "/api/tcp/connections/{}/raw?direction={}",
+                    args.id, args.direction
+                )))
                 .await?;
             print_json(&json!({
                 "id": args.id,
@@ -12063,7 +12055,7 @@ async fn handle_tcp(api: ApiClient, command: TcpCommand) -> Result<()> {
         ),
         TcpCommand::Intercept { command } => match command {
             TcpInterceptCommand::Get(_) => print_json(
-                &api.get_json::<Value>(&read("/api/tcp/intercept".into()).await?)
+                &api.get_json::<Value>(&read("/api/tcp/intercept".into()))
                     .await?,
             ),
             TcpInterceptCommand::Set(args) => {
@@ -12083,10 +12075,8 @@ async fn handle_tcp(api: ApiClient, command: TcpCommand) -> Result<()> {
             }
         },
         TcpCommand::Pending(args) => print_json(
-            &api.get_json::<Value>(
-                &read(format!("/api/tcp/connections/{}/pending", args.id)).await?,
-            )
-            .await?,
+            &api.get_json::<Value>(&read(format!("/api/tcp/connections/{}/pending", args.id)))
+                .await?,
         ),
         TcpCommand::Decide(args) => {
             let pending: Value = api

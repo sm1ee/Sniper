@@ -1440,6 +1440,25 @@ async fn handle_connect(
             )
             .await;
         }
+        let proxy_addr = state.get_active_proxy_addr().await;
+        if request_targets_own_listener(uri, proxy_addr)
+            || name_resolves_to_own_listener(&session, uri, proxy_addr).await
+        {
+            return record_connect_rejection(
+                &state,
+                &session,
+                request.uri(),
+                request.headers(),
+                started_at,
+                started,
+                StatusCode::LOOP_DETECTED,
+                format!(
+                    "CONNECT target resolves to Sniper's own proxy listener ({proxy_addr}); refusing to open a proxy loop."
+                ),
+                request_http_version,
+            )
+            .await;
+        }
     }
     let request_capture = MessageRecord::from_headers_and_body(
         request.headers(),
@@ -2005,7 +2024,21 @@ async fn remote_client_reaches_guarded(
     if client.to_canonical().is_loopback() {
         return false;
     }
-    let mut guarded = vec![state.get_active_ui_addr().await];
+    // Guard every address of this machine on the UI and proxy ports: a wildcard
+    // UI bind is announced as 127.0.0.1, and a tunnel back to Sniper's own proxy
+    // port would re-enter from 127.0.0.1 and bypass remote-client guards.
+    let mut guarded = Vec::new();
+    let ui_port = state.get_active_ui_addr().await.port();
+    if ui_port != 0 {
+        guarded.push(SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, ui_port)));
+    }
+    let proxy_port = state.get_active_proxy_addr().await.port();
+    if proxy_port != 0 {
+        guarded.push(SocketAddr::from((
+            std::net::Ipv4Addr::UNSPECIFIED,
+            proxy_port,
+        )));
+    }
     guarded.extend(
         crate::browser::driver_ports()
             .into_iter()
@@ -10328,6 +10361,21 @@ mod tests {
         // Once the browser exits the port is anyone's again.
         crate::browser::forget_driver_ports(&profile);
         assert!(!remote_client_reaches_guarded(&state, &session, remote, &devtools).await);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn another_machine_is_refused_the_proxy_listener_itself() {
+        let (state, data_dir) = test_proxy_state("sniper-proxy-self-guard");
+        state
+            .set_active_proxy_addr("0.0.0.0:18080".parse().unwrap())
+            .await;
+        let session = state.session().await;
+        let remote: IpAddr = "192.0.2.10".parse().unwrap();
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let proxy_loopback: Uri = "http://127.0.0.1:18080/".parse().unwrap();
+        assert!(remote_client_reaches_guarded(&state, &session, remote, &proxy_loopback).await);
+        assert!(!remote_client_reaches_guarded(&state, &session, local, &proxy_loopback).await);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

@@ -89,8 +89,6 @@ pub async fn run_with_config(config: AppConfig) -> Result<()> {
         state.templates.clone(),
     ));
     tokio::spawn(vulndata::run_daily_update(state.vulndata.clone()));
-    let tcp_state = state.clone();
-    tokio::spawn(async move { tcp_state.start_saved_tcp_listeners().await });
 
     info!(
         proxy_addr = %config.proxy_addr,
@@ -136,6 +134,9 @@ pub async fn run_with_config(config: AppConfig) -> Result<()> {
             });
             state.set_proxy_task(proxy_task).await;
 
+            let tcp_state = state.clone();
+            tokio::spawn(async move { tcp_state.start_saved_tcp_listeners().await });
+
             let api_result = run_api_until_shutdown(state.clone()).await;
             let shutdown_result = shutdown_headless_runtime(&state, oast_task).await;
             combine_api_and_shutdown_results(api_result, shutdown_result)
@@ -152,6 +153,9 @@ pub async fn run_with_config(config: AppConfig) -> Result<()> {
                     ),
                 )
                 .await;
+
+            let tcp_state = state.clone();
+            tokio::spawn(async move { tcp_state.start_saved_tcp_listeners().await });
 
             let api_result = run_api_until_shutdown(state.clone()).await;
             let shutdown_result = shutdown_headless_runtime(&state, oast_task).await;
@@ -268,6 +272,11 @@ async fn shutdown_headless_runtime(
     .context("failed to persist closed live WebSocket relays before headless shutdown");
     state.abort_proxy_task().await;
     proxy::drain_proxy_connections(Duration::from_secs(1)).await;
+    // Any CONNECT or passthrough tunnel accepted before the proxy stopped
+    // finishes persisting its TCP history record here before process exit.
+    if let Err(error) = state.stop_tcp_captures_for_shutdown().await {
+        warn!(%error, "late TCP tunnel persistence failed during headless shutdown");
+    }
     let flush_result = proxy::flush_pending_session_persists(state)
         .await
         .context("failed to flush pending session snapshots before headless shutdown");

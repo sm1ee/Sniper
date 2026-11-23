@@ -1,5 +1,5 @@
-//! Opt-in, fixed-destination TCP capture. Read chunks are not protocol messages.
-//! Interception is opt-in; read ranges are not application messages. No TLS termination.
+//! Opt-in, fixed-destination TCP and UDP capture. Read chunks are not protocol
+//! messages. Interception is opt-in; TLS decryption and upstream TLS are per listener.
 mod history_io;
 use history_io::HistoryDirectory;
 
@@ -653,20 +653,41 @@ fn reaches_guarded(addresses: &[std::net::SocketAddr], guarded: &[std::net::Sock
     })
 }
 
+/// Whether `address` resolves back to the listener described by `settings`.
+/// A remote listener binds every interface, so any address of this machine on
+/// `local_port` loops back into it.
+fn targets_self_listener(address: std::net::SocketAddr, settings: &TcpSettings) -> bool {
+    if settings.local_port == 0 || address.port() != settings.local_port {
+        return false;
+    }
+    let ip = address.ip().to_canonical();
+    if settings.remote {
+        crate::proxy::ip_belongs_to_this_machine(ip, Ipv4Addr::UNSPECIFIED.into())
+    } else {
+        is_loopback(ip)
+    }
+}
+
 /// The socket a UDP flow reaches its target from. A target that resolves to
 /// the listener itself is refused.
 async fn open_udp_upstream(settings: &TcpSettings) -> Result<tokio::net::UdpSocket, TcpFailure> {
-    let target = connection_stage(
+    let addresses: Vec<_> = connection_stage(
         tokio::net::lookup_host((settings.target_host.as_str(), settings.target_port)),
         Duration::from_secs(10),
         true,
     )
     .await?
-    .next()
-    .ok_or(TcpFailure::ResolutionFailed)?;
-    if is_loopback(target.ip()) && target.port() == settings.local_port {
+    .collect();
+    if addresses.is_empty() {
+        return Err(TcpFailure::ResolutionFailed);
+    }
+    if addresses
+        .iter()
+        .any(|address| targets_self_listener(*address, settings))
+    {
         return Err(TcpFailure::SelfTarget);
     }
+    let target = addresses[0];
     let local = if target.is_ipv6() {
         std::net::SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
     } else {
@@ -682,30 +703,61 @@ async fn open_udp_upstream(settings: &TcpSettings) -> Result<tokio::net::UdpSock
     Ok(socket)
 }
 
-/// Every interface for a UDP listener, IPv6 and IPv4 on one socket.
+/// Every interface for a UDP listener, IPv6 and IPv4 on one socket (falling
+/// back to IPv4 when IPv6 is unavailable on the host).
 fn bind_udp_every_interface(port: u16) -> std::io::Result<tokio::net::UdpSocket> {
+    let dual_stack = (|| -> std::io::Result<tokio::net::UdpSocket> {
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV6,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+        socket.set_only_v6(false)?;
+        socket.bind(&std::net::SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+        socket.set_nonblocking(true)?;
+        tokio::net::UdpSocket::from_std(socket.into())
+    })();
+    if dual_stack.is_ok() {
+        return dual_stack;
+    }
     let socket = socket2::Socket::new(
-        socket2::Domain::IPV6,
+        socket2::Domain::IPV4,
         socket2::Type::DGRAM,
         Some(socket2::Protocol::UDP),
     )?;
-    socket.set_only_v6(false)?;
-    socket.bind(&std::net::SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+    socket.bind(&std::net::SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
     socket.set_nonblocking(true)?;
     tokio::net::UdpSocket::from_std(socket.into())
 }
 
-/// Every interface, IPv6 and IPv4 on one socket.
+/// Every interface, IPv6 and IPv4 on one socket (falling back to IPv4 when
+/// IPv6 is unavailable on the host).
 fn bind_every_interface(port: u16) -> std::io::Result<TcpListener> {
+    let dual_stack = (|| -> std::io::Result<TcpListener> {
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV6,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )?;
+        socket.set_only_v6(false)?;
+        #[cfg(unix)]
+        socket.set_reuse_address(true)?;
+        socket.bind(&std::net::SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+        socket.listen(1024)?;
+        socket.set_nonblocking(true)?;
+        TcpListener::from_std(socket.into())
+    })();
+    if dual_stack.is_ok() {
+        return dual_stack;
+    }
     let socket = socket2::Socket::new(
-        socket2::Domain::IPV6,
+        socket2::Domain::IPV4,
         socket2::Type::STREAM,
         Some(socket2::Protocol::TCP),
     )?;
-    socket.set_only_v6(false)?;
     #[cfg(unix)]
     socket.set_reuse_address(true)?;
-    socket.bind(&std::net::SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+    socket.bind(&std::net::SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
     socket.listen(1024)?;
     socket.set_nonblocking(true)?;
     TcpListener::from_std(socket.into())
@@ -1349,6 +1401,9 @@ pub struct TcpCapture {
     own_addresses: std::sync::Mutex<Vec<std::net::SocketAddr>>,
     /// How long a UDP flow may go without a datagram before it ends.
     udp_idle: std::sync::Mutex<Duration>,
+    /// Completion signals for detached `relay_tunnel` tasks so `stop()` can
+    /// await their final `finish()` persistence before shutdown or session switch.
+    tunnel_done: std::sync::Mutex<BTreeMap<Uuid, watch::Receiver<bool>>>,
     intercept: std::sync::Mutex<InterceptRuntime>,
 }
 impl TcpCapture {
@@ -1691,6 +1746,7 @@ impl TcpCapture {
             certificates: std::sync::OnceLock::new(),
             own_addresses: std::sync::Mutex::new(Vec::new()),
             udp_idle: std::sync::Mutex::new(Duration::from_secs(60)),
+            tunnel_done: std::sync::Mutex::new(BTreeMap::new()),
             intercept: std::sync::Mutex::new(InterceptRuntime::default()),
         }
     }
@@ -2215,6 +2271,24 @@ impl TcpCapture {
             let _ = (&mut worker.task).await;
         }
         running.clear();
+        // Close any non-listener connections (CONNECT/passthrough tunnels and
+        // in-flight replays) and wait for detached tunnel tasks to finish
+        // persisting their terminal records before the final retry.
+        let active_connections: Vec<_> = self
+            .intercept
+            .lock()
+            .unwrap()
+            .connections
+            .values()
+            .cloned()
+            .collect();
+        for close in active_connections {
+            let _ = close.send(true);
+        }
+        let tunnels: Vec<_> = self.tunnel_done.lock().unwrap().values().cloned().collect();
+        for mut done in tunnels {
+            let _ = done.wait_for(|finished| *finished).await;
+        }
         // Keep start/stop serialized through the retry. Terminal records are
         // immutable, so cancellation can only cause the same bytes to be saved
         // again, never an older snapshot to overwrite a newer one.
@@ -2369,8 +2443,9 @@ impl TcpCapture {
         let socket = Arc::new(socket);
         let mut flows: std::collections::HashMap<
             std::net::SocketAddr,
-            tokio::sync::mpsc::Sender<Vec<u8>>,
+            (u64, tokio::sync::mpsc::Sender<Vec<u8>>),
         > = std::collections::HashMap::new();
+        let mut next_flow_id = 0u64;
         let mut tasks = JoinSet::new();
         let (children_stop, children_receiver) = watch::channel(false);
         let mut buffer = vec![0u8; 65536];
@@ -2380,8 +2455,10 @@ impl TcpCapture {
                 _ = stop.changed() => break,
                 Some(done) = tasks.join_next(), if !tasks.is_empty() => {
                     self.active_count.fetch_sub(1, Ordering::Relaxed);
-                    if let Ok(peer) = done {
-                        flows.remove(&peer);
+                    if let Ok((peer, flow_id)) = done {
+                        if flows.get(&peer).is_some_and(|(id, _)| *id == flow_id) {
+                            flows.remove(&peer);
+                        }
                     }
                 },
                 received = socket.recv_from(&mut buffer) => {
@@ -2392,7 +2469,7 @@ impl TcpCapture {
                         continue;
                     }
                     let mut datagram = buffer[..length].to_vec();
-                    if let Some(flow) = flows.get(&peer) {
+                    if let Some((_, flow)) = flows.get(&peer) {
                         match flow.try_send(datagram) {
                             // A flow that cannot keep up loses the datagram, as UDP may.
                             Ok(()) | Err(TrySendError::Full(_)) => continue,
@@ -2405,14 +2482,16 @@ impl TcpCapture {
                     if tasks.len() >= MAX_ACTIVE {
                         continue;
                     }
+                    next_flow_id = next_flow_id.wrapping_add(1);
+                    let flow_id = next_flow_id;
                     let (sender, receiver) = tokio::sync::mpsc::channel(256);
                     let _ = sender.try_send(datagram);
-                    flows.insert(peer, sender);
+                    flows.insert(peer, (flow_id, sender));
                     let flow = self.clone();
                     let (socket, settings, stop) = (socket.clone(), settings.clone(), children_receiver.clone());
                     tasks.spawn(async move {
                         flow.udp_flow(socket, peer, settings, receiver, stop).await;
-                        peer
+                        (peer, flow_id)
                     });
                     self.active_count.fetch_add(1, Ordering::Relaxed);
                 }
@@ -2609,7 +2688,11 @@ impl TcpCapture {
                     >= MAX_PASSTHROUGH_RECORDS;
             if history.persistence_error || history.load_error {
                 None
-            } else if history.records.len() >= MAX_CONNECTIONS || passthrough_full {
+            } else if target.len() > MAX_TARGET_BYTES
+                || peer.len() > MAX_PEER_BYTES
+                || history.records.len() >= MAX_CONNECTIONS
+                || passthrough_full
+            {
                 self.unrecorded.fetch_add(1, Ordering::Relaxed);
                 None
             } else {
@@ -2628,7 +2711,13 @@ impl TcpCapture {
             return tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
         };
         let id = record.id;
-        let relay = tokio::spawn(self.clone().tunnel(record, client, upstream, closed));
+        let (done_tx, done_rx) = watch::channel(false);
+        self.tunnel_done.lock().unwrap().insert(id, done_rx);
+        let finished = TunnelFinishGuard(self.clone(), id, done_tx);
+        let relay = tokio::spawn(
+            self.clone()
+                .tunnel(record, client, upstream, closed, finished),
+        );
         let _close = CloseOnDrop(self.clone(), id);
         relay.await.map_err(std::io::Error::other)?
     }
@@ -2638,6 +2727,7 @@ impl TcpCapture {
         mut client: Box<dyn Io>,
         mut upstream: Box<dyn Io>,
         mut closed: watch::Receiver<bool>,
+        _finished: TunnelFinishGuard,
     ) -> std::io::Result<(u64, u64)> {
         let id = record.id;
         if !self.persist(&record).await {
@@ -2742,27 +2832,29 @@ impl TcpCapture {
             let wait = Duration::from_millis(request.wait_ms);
             let result = connection_outcome(
                 async {
-                    let proxy = self.upstream_proxy().await;
-                    let unspecified = std::net::SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
-                    let (upstream, via_proxy) =
-                        open_upstream(&settings, unspecified, proxy.as_ref(), &[]).await?;
-                    let stream: Box<dyn Io> = if request.tls {
-                        let insecure = self.upstream_insecure().await;
-                        Box::new(
-                            connect_tls(upstream, &settings.target_host, insecure, Vec::new())
-                                .await?,
-                        )
-                    } else {
-                        Box::new(upstream)
-                    };
-                    if let Some(r) = self.history.lock().unwrap().records.get_mut(&id) {
-                        r.status = "open".into();
-                        r.via_proxy = via_proxy;
-                        r.server_tls = request.tls;
-                    }
-                    tokio::time::timeout(REPLAY_LIMIT, self.exchange(id, stream, messages, wait))
-                        .await
-                        .unwrap_or(Ok(()))
+                    tokio::time::timeout(REPLAY_LIMIT, async {
+                        let proxy = self.upstream_proxy().await;
+                        let unspecified = std::net::SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
+                        let (upstream, via_proxy) =
+                            open_upstream(&settings, unspecified, proxy.as_ref(), &[]).await?;
+                        let stream: Box<dyn Io> = if request.tls {
+                            let insecure = self.upstream_insecure().await;
+                            Box::new(
+                                connect_tls(upstream, &settings.target_host, insecure, Vec::new())
+                                    .await?,
+                            )
+                        } else {
+                            Box::new(upstream)
+                        };
+                        if let Some(r) = self.history.lock().unwrap().records.get_mut(&id) {
+                            r.status = "open".into();
+                            r.via_proxy = via_proxy;
+                            r.server_tls = request.tls;
+                        }
+                        self.exchange(id, stream, messages, wait).await
+                    })
+                    .await
+                    .unwrap_or(Ok(()))
                 },
                 &mut stop,
                 &mut closed,
@@ -2955,7 +3047,9 @@ impl TcpCapture {
         direction: Direction,
         read: &[u8],
     ) -> std::io::Result<Option<(Option<Uuid>, Option<Arc<[u8]>>)>> {
-        let admitted = if read.len() > MAX_PENDING_BYTES {
+        // Empty UDP datagrams have no bytes to hold and would violate stored
+        // intercept event invariants (`original_length > 0`).
+        let admitted = if read.is_empty() || read.len() > MAX_PENDING_BYTES {
             self.count_received(id, direction, read.len());
             None
         } else {
@@ -3120,6 +3214,16 @@ impl Drop for CloseOnDrop {
     }
 }
 
+/// Signals `TcpCapture::stop` once a detached `relay_tunnel` task has finished
+/// persisting its terminal record, even if it exits early or panics.
+struct TunnelFinishGuard(Arc<TcpCapture>, Uuid, watch::Sender<bool>);
+impl Drop for TunnelFinishGuard {
+    fn drop(&mut self) {
+        self.0.tunnel_done.lock().unwrap().remove(&self.1);
+        let _ = self.2.send(true);
+    }
+}
+
 /// Whether the client's first bytes are a TLS handshake record (16 03 0x). A
 /// server that speaks first, as SMTP or MySQL do, decides it: not TLS.
 async fn client_starts_tls(client: &TcpStream, upstream: &TcpStream) -> bool {
@@ -3160,21 +3264,28 @@ async fn connect_tls(
         .map_err(|_| TcpFailure::TlsFailed)?;
     let mut config = (*crate::ws_tls::client_config(insecure)).clone();
     config.alpn_protocols = alpn;
-    tokio_rustls26::TlsConnector::from(Arc::new(config))
-        .connect(name, upstream)
-        .await
-        .map_err(|_| TcpFailure::TlsFailed)
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_rustls26::TlsConnector::from(Arc::new(config)).connect(name, upstream),
+    )
+    .await
+    .map_err(|_| TcpFailure::TlsFailed)?
+    .map_err(|_| TcpFailure::TlsFailed)
 }
 
 /// Whether a target goes through the upstream proxy: only while it is on, and
 /// never for a bypassed host or this machine, which a proxy elsewhere cannot
 /// reach.
 fn routes_through(proxy: &crate::upstream_proxy::UpstreamProxy, host: &str) -> bool {
-    let local = host.eq_ignore_ascii_case("localhost")
-        || host
-            .trim_matches(['[', ']'])
+    let bare = host.trim_matches(['[', ']']).trim_end_matches('.');
+    let local = bare.eq_ignore_ascii_case("localhost")
+        || bare
             .parse::<std::net::IpAddr>()
-            .is_ok_and(is_loopback);
+            .map(|ip| ip.to_canonical())
+            .is_ok_and(|ip| {
+                is_loopback(ip)
+                    || crate::proxy::ip_belongs_to_this_machine(ip, Ipv4Addr::UNSPECIFIED.into())
+            });
     proxy.enabled && !local && !proxy.bypasses(host)
 }
 
@@ -3207,7 +3318,7 @@ async fn open_upstream(
     }
     if addresses
         .iter()
-        .any(|a| is_loopback(a.ip()) && a.port() == settings.local_port)
+        .any(|address| targets_self_listener(*address, settings))
     {
         return Err(TcpFailure::SelfTarget);
     }
@@ -3220,12 +3331,10 @@ async fn open_upstream(
         false,
     )
     .await?;
-    if same_address(
-        upstream
-            .peer_addr()
-            .map_err(|_| TcpFailure::ConnectFailed)?,
-        listener,
-    ) {
+    let peer = upstream
+        .peer_addr()
+        .map_err(|_| TcpFailure::ConnectFailed)?;
+    if same_address(peer, listener) || targets_self_listener(peer, settings) {
         return Err(TcpFailure::SelfTarget);
     }
     Ok((upstream, false))
@@ -6766,6 +6875,129 @@ mod tests {
             .unwrap();
         assert_eq!(&back, b"startup");
         capture.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn zero_byte_udp_datagram_with_intercept_does_not_corrupt_history() {
+        let capture = temporary();
+        capture.set_udp_idle(Duration::from_millis(120));
+        let policy = capture.policy();
+        capture
+            .set_policy(PolicyUpdate {
+                enabled: true,
+                direction: PolicyDirection::Both,
+                expected_revision: policy.revision,
+                filter: None,
+            })
+            .unwrap();
+        let local_port = udp_listener(&capture, udp_echo().await).await;
+        let client = udp_client(local_port).await;
+        client.send(&[]).await.unwrap();
+        assert_eq!(reply(&client).await, Some(Vec::new()));
+        capture.stop().await.unwrap();
+        let reloaded = TcpCapture::load(capture.directory.clone());
+        assert!(!reloaded.status().await.load_error);
+        assert_eq!(reloaded.summaries().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stop_closes_and_persists_active_connect_tunnel() {
+        let capture = temporary();
+        let (client_end, _client_peer) = tokio::io::duplex(256);
+        let (upstream_end, _upstream_peer) = tokio::io::duplex(256);
+        let copy = capture.clone();
+        let relaying = tokio::spawn(async move {
+            copy.relay_tunnel(
+                Box::new(client_end),
+                Box::new(upstream_end),
+                "127.0.0.1:40000".into(),
+                "example.com:9000".into(),
+                TcpSource::Connect,
+                false,
+            )
+            .await
+        });
+        for _ in 0..50 {
+            if !capture.summaries().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(capture.summaries().await.len(), 1);
+        capture.stop().await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(2), relaying)
+            .await
+            .expect("stop closes active relay_tunnel");
+        let reloaded = TcpCapture::load(capture.directory.clone());
+        assert!(!reloaded.status().await.load_error);
+        let records = reloaded.summaries().await;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, "stopped");
+    }
+
+    #[tokio::test]
+    async fn oversized_tunnel_target_relays_unrecorded_without_corrupting_history() {
+        let capture = temporary();
+        let (mut client_peer, client_end) = tokio::io::duplex(256);
+        let (upstream_end, mut upstream_peer) = tokio::io::duplex(256);
+        let oversized = format!("{}.example.com:443", "a".repeat(260));
+        let copy = capture.clone();
+        let relaying = tokio::spawn(async move {
+            copy.relay_tunnel(
+                Box::new(client_end),
+                Box::new(upstream_end),
+                "127.0.0.1:40001".into(),
+                oversized,
+                TcpSource::Passthrough,
+                false,
+            )
+            .await
+        });
+        client_peer.write_all(b"hi").await.unwrap();
+        drop(client_peer);
+        let mut got = [0u8; 2];
+        upstream_peer.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"hi");
+        drop(upstream_peer);
+        relaying.await.unwrap().unwrap();
+        assert_eq!(capture.summaries().await.len(), 0);
+        assert_eq!(capture.status().await.unrecorded_count, 1);
+        assert!(
+            !TcpCapture::load(capture.directory.clone())
+                .status()
+                .await
+                .load_error
+        );
+    }
+
+    #[test]
+    fn remote_self_target_and_local_routes_through_guards() {
+        let remote_settings = TcpSettings {
+            local_port: 9000,
+            remote: true,
+            ..Default::default()
+        };
+        assert!(targets_self_listener(
+            "0.0.0.0:9000".parse().unwrap(),
+            &remote_settings
+        ));
+        assert!(targets_self_listener(
+            "127.0.0.1:9000".parse().unwrap(),
+            &remote_settings
+        ));
+        assert!(!targets_self_listener(
+            "127.0.0.1:9001".parse().unwrap(),
+            &remote_settings
+        ));
+        let proxy = crate::upstream_proxy::UpstreamProxy {
+            enabled: true,
+            url: "http://127.0.0.1:8080".into(),
+            ..Default::default()
+        };
+        assert!(!routes_through(&proxy, "localhost."));
+        assert!(!routes_through(&proxy, "0.0.0.0"));
+        assert!(!routes_through(&proxy, "::"));
+        assert!(routes_through(&proxy, "example.com"));
     }
 }
 

@@ -1525,12 +1525,32 @@ impl AppState {
         Ok(session.summary(active))
     }
 
+    async fn sync_tcp_own_addresses(&self) {
+        let addresses = vec![
+            self.get_active_ui_addr().await,
+            self.get_active_proxy_addr().await,
+        ];
+        let active = self.active_session.read().await.clone();
+        active.tcp_capture.use_own_addresses(addresses.clone());
+        let contexts: Vec<_> = self
+            .session_contexts
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect();
+        for session in contexts {
+            session.tcp_capture.use_own_addresses(addresses.clone());
+        }
+    }
+
     pub async fn get_active_proxy_addr(&self) -> SocketAddr {
         *self.active_proxy_addr.read().await
     }
 
     pub async fn set_active_proxy_addr(&self, addr: SocketAddr) {
         *self.active_proxy_addr.write().await = addr;
+        self.sync_tcp_own_addresses().await;
     }
 
     pub async fn get_active_ui_addr(&self) -> SocketAddr {
@@ -1550,6 +1570,7 @@ impl AppState {
 
     pub async fn set_active_ui_addr(&self, addr: SocketAddr) {
         *self.active_ui_addr.write().await = addr;
+        self.sync_tcp_own_addresses().await;
     }
 
     pub async fn set_proxy_task(&self, handle: JoinHandle<()>) {
