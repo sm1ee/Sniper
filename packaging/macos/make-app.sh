@@ -167,9 +167,14 @@ fi
 
 SIGN_IDENTITY="${DEVELOPER_ID_APP:-${SIGN_IDENTITY:-}}"
 if [[ -n "$SIGN_IDENTITY" ]]; then
-  codesign --force --deep --timestamp --options runtime --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+  # Sign nested executables inside-out before the bundle; Apple deprecated --deep for notarization.
+  codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$MACOS_DIR/sniper-cli"
+  codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$MACOS_DIR/$SERVER_NAME"
+  codesign --force --timestamp --options runtime --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
 else
-  codesign --force --deep --sign - "$APP_BUNDLE"
+  codesign --force --sign - "$MACOS_DIR/sniper-cli"
+  codesign --force --sign - "$MACOS_DIR/$SERVER_NAME"
+  codesign --force --sign - "$APP_BUNDLE"
 fi
 
 echo "Created app bundle: $APP_BUNDLE"

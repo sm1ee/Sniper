@@ -351,10 +351,11 @@ function binaryBodyText(base64) {
 function binaryBodyBase64(text) {
   const source = String(text ?? "");
   if (!/[^\x00-\xff]/.test(source)) return btoa(source);
+  const encoder = new TextEncoder();
   let bytes = "";
   for (const character of source) {
     if (character.codePointAt(0) <= 0xff) bytes += character;
-    else for (const byte of new TextEncoder().encode(character)) bytes += String.fromCharCode(byte);
+    else for (const byte of encoder.encode(character)) bytes += String.fromCharCode(byte);
   }
   return btoa(bytes);
 }

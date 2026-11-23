@@ -1154,12 +1154,12 @@
   function createReplayController({ document, sessionId, writePath, request, onSent = () => {} }) {
     const el = id => document.getElementById(id);
     const replayLimits = { maxBytes: MAX_DISPLAY_BYTES, limitLabel: "Messages are limited to 1 MiB.", emptyHint: "" };
-    let messages = [""], mode = "hex", source = null, busy = false, epoch = 0;
+    let messages = [""], mode = "hex", source = null, busy = false, dirty = false, epoch = 0;
     const view = (bytes, as) => as === "text" ? encodeEditable(bytes) : Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join(" ");
     const read = (value, as) => as === "text" ? decodeEditable(value, replayLimits) : parseHex(value, replayLimits);
     const showError = message => { el("tcpReplayError").textContent = message; };
     function reset() {
-      epoch++; busy = false; source = null; messages = [""];
+      epoch++; busy = false; dirty = false; source = null; messages = [""];
       showError(""); render();
     }
     function render() {
@@ -1168,7 +1168,7 @@
         block.className = "tcp-replay-message";
         editor.value = value; editor.spellcheck = false;
         editor.setAttribute("aria-label", "Message " + (index + 1) + " as " + mode);
-        editor.addEventListener("input", () => { messages[index] = editor.value; });
+        editor.addEventListener("input", () => { messages[index] = editor.value; dirty = true; });
         remove.type = "button"; remove.className = "secondary-action"; remove.textContent = "Remove";
         remove.dataset.replayRemove = String(index); remove.disabled = messages.length < 2;
         block.append(editor, remove);
@@ -1181,10 +1181,14 @@
     }
     function load(record) {
       if (!record) return;
+      // Switching to Stream to inspect bytes and returning to Replay for the
+      // same connection keeps unsent edits rather than overwriting them.
+      if (record.id && record.id === source && dirty) return;
       const target = splitTarget(record.target);
       el("tcpReplayHost").value = target.host; el("tcpReplayPort").value = target.port;
       el("tcpReplayTls").checked = Boolean(record.server_tls || record.client_tls);
       source = record.id || null;
+      dirty = false;
       let parts = [];
       try { parts = conversation(record, "client_to_server"); } catch (_) { parts = []; }
       messages = parts.length ? parts.map(part => view(part.bytes, mode)) : [""];
@@ -1231,7 +1235,7 @@
         }
         const record = await response.json();
         if (!owns()) return;
-        busy = false; render();
+        busy = false; dirty = false; render();
         await onSent(record);
       } catch (error) {
         if (!owns()) return;
@@ -1239,13 +1243,13 @@
       }
     }
     el("tcpReplaySend").addEventListener("click", () => void send());
-    el("tcpReplayAdd").addEventListener("click", () => { messages.push(""); render(); });
+    el("tcpReplayAdd").addEventListener("click", () => { messages.push(""); dirty = true; render(); });
     el("tcpReplayHexMode").addEventListener("click", () => setMode("hex"));
     el("tcpReplayTextMode").addEventListener("click", () => setMode("text"));
     el("tcpReplayMessages").addEventListener("click", event => {
       const remove = event.target.closest?.("[data-replay-remove]");
       if (!remove || messages.length < 2) return;
-      messages.splice(Number(remove.dataset.replayRemove), 1); render();
+      messages.splice(Number(remove.dataset.replayRemove), 1); dirty = true; render();
     });
     render();
     return { load, render, reset };

@@ -100,3 +100,14 @@ test("requestError maps 404 unknown TCP listener to the removed-listener message
   const message = await tcp.requestError({ status: 404, text: async () => "unknown TCP listener" });
   assert.equal(message, "This listener was removed. Refresh and try again.");
 });
+
+test("Replay preserves unsent edits when reloading the same connection, and reloads on another", () => {
+  const f = fixture();
+  f.controller.load(record);
+  f.get("tcpReplayTextMode").listeners.click();
+  f.editors()[0].value = "edited"; f.editors()[0].listeners.input();
+  f.controller.load(record);
+  assert.deepEqual(f.editors().map(editor => editor.value), ["edited", "two"]);
+  f.controller.load({ ...record, id: "c2" });
+  assert.deepEqual(f.editors().map(editor => editor.value), ["one", "two"]);
+});
