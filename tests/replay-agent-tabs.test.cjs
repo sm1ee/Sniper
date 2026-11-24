@@ -60,6 +60,22 @@ test("only the selected tab and a pinned one hold a pin button", () => {
   assert.match(css, /\.replay-tab-button\[data-actor\]::before \{[^}]*content: attr\(data-actor\);/);
 });
 
+// Claude and Codex show as a glyph in the name's colour; the screen reader and
+// the tooltip still get the name. Any other name stays text.
+test("Claude and Codex show as a glyph that keeps their name", () => {
+  const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8");
+  for (const actor of ["Claude", "Codex"]) {
+    assert.match(css, new RegExp(`\\.replay-tab-button\\[data-actor="${actor}" i\\]::before \\{\\s*--actor-glyph: url\\("data:image/svg\\+xml,[^}]*content: "" / "Opened by ${actor}";`));
+  }
+  const glyph = css.match(/\.replay-tab-button:is\(\[data-actor="Claude" i\], \[data-actor="Codex" i\]\)::before \{([^}]*)\}/)[1];
+  assert.match(glyph, /color: inherit;[^}]*background: currentColor;/, "the name's colour, not the badge's");
+  assert.match(glyph, /\n  mask: var\(--actor-glyph\)/);
+  const { replayTabTooltipLabel } = loadFunctions(["replayTabTooltipLabel"], {});
+  assert.equal(replayTabTooltipLabel({ openedBy: "Codex" }, "1. GET example.com", "1. GET example.com"), "1. GET example.com\nOpened by Codex");
+  assert.equal(replayTabTooltipLabel({ openedBy: "Codex", pinned: true }, "x", "auto"), "auto");
+  assert.equal(replayTabTooltipLabel({ customLabel: "mine" }, "mine", "auto"), "mine");
+});
+
 // A pin sits before the name the way the name of who opened a tab does, with
 // no line between them.
 test("no line separates a tab's pin from its name", () => {

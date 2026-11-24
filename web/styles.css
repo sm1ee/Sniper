@@ -5239,6 +5239,37 @@ body.pane-resizing-y {
   font-size: var(--font-2xs);
 }
 
+/* Claude and Codex show as a one-colour glyph in the name's colour, the way a
+   menu bar icon takes the bar's; any other name stays text. The glyphs are
+   generic shapes, not the vendors' logos: both brands' guidelines forbid using
+   or recolouring their marks without permission. The spark names Claude, it is
+   not a sign for AI. */
+.replay-tab-button:is([data-actor="Claude" i], [data-actor="Codex" i])::before {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  padding: 0;
+  border-radius: 0;
+  color: inherit;
+  font-size: inherit;
+  vertical-align: -0.125em;
+  background: currentColor;
+  -webkit-mask: var(--actor-glyph) center / contain no-repeat;
+  mask: var(--actor-glyph) center / contain no-repeat;
+}
+
+.replay-tab-button[data-actor="Claude" i]::before {
+  --actor-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.5v13M1.5 8h13M3.4 3.4l9.2 9.2M12.6 3.4l-9.2 9.2' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E");
+  content: "";
+  content: "" / "Opened by Claude";
+}
+
+.replay-tab-button[data-actor="Codex" i]::before {
+  --actor-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2.5 4l4 4-4 4M8 12h5.5' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  content: "";
+  content: "" / "Opened by Codex";
+}
+
 /* A tab of the person's that sniper-cli changed since they last looked at it. */
 .replay-tab-agent-dot {
   flex: 0 0 auto;

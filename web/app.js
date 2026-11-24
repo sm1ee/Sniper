@@ -24280,7 +24280,9 @@ function replayTabLabel(tab) {
 }
 
 function replayTabTooltipLabel(tab, label = replayTabLabel(tab), autoLabel = replayTabAutoLabel(tab)) {
-  return tab.customLabel ? label : autoLabel;
+  const name = tab.customLabel ? label : autoLabel;
+  // The agent's row may show who opened a tab as a glyph alone.
+  return tab.openedBy && !tab.pinned ? `${name}\nOpened by ${tab.openedBy}` : name;
 }
 
 function replayTabAutoLabel(tab) {
