@@ -289,7 +289,7 @@ async fn shutdown_headless_runtime(
         .await
         .map(|_| ())
         .context("failed to persist active session before headless shutdown");
-    let active_result = active_result.and(state.persist_session_port_sessions().await);
+    let active_result = active_result.and(state.persist_other_loaded_sessions().await);
     if let Err(error) = combine_api_and_shutdown_results(flush_result, active_result) {
         warn!(
             ?error,

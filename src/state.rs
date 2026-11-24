@@ -1087,19 +1087,36 @@ impl AppState {
         self.abort_proxy_task().await;
     }
 
-    /// Saves the small components of each session a port fed until the
-    /// shutdown stopped it. Their traffic is in the journals already, and a
-    /// full save of sixteen sessions would hold the desktop's event loop for
-    /// all of them.
-    pub async fn persist_session_port_sessions(&self) -> Result<()> {
+    /// For a shutdown, the sessions the main listener does not record into.
+    /// Saves the small components of each one a port fed until the shutdown
+    /// stopped it, and tells the registry what every loaded one holds. Their
+    /// traffic is in the journals already, and a full save of each would hold
+    /// the desktop's event loop for all of them.
+    pub async fn persist_other_loaded_sessions(&self) -> Result<()> {
         let mut failures = Vec::new();
-        for session in self.session_ports.suspended_sessions() {
-            if !self.sessions.contains_session(session.id()) {
+        let fed = self.session_ports.suspended_sessions();
+        // A session the API wrote to has no port: a window showed it, and a
+        // Replay was sent or a rule added there.
+        let mut sessions = fed.clone();
+        for session in self.session_contexts.lock().await.values() {
+            if !sessions.iter().any(|known| known.id() == session.id()) {
+                sessions.push(session.clone());
+            }
+        }
+        let default = self.sessions.active_session_id();
+        for (index, session) in sessions.into_iter().enumerate() {
+            // The default session was saved in full just before.
+            if session.id() == default || !self.sessions.contains_session(session.id()) {
                 continue;
             }
-            if let Err(error) = session.persist_state_only().await {
-                failures.push(format!("{}: {error:#}", session.id()));
-                continue;
+            // A port's work changes the small components with no save, and
+            // the exit does not wait for a save that is still queued. What
+            // else the API changed was saved as it changed.
+            if index < fed.len() || session.state_persist_pending() {
+                if let Err(error) = session.persist_state_only().await {
+                    failures.push(format!("{}: {error:#}", session.id()));
+                    continue;
+                }
             }
             // Only a full save tells the registry how much a session holds.
             // Without this the session list would show the counts of the
@@ -1127,7 +1144,7 @@ impl AppState {
         }
         anyhow::ensure!(
             failures.is_empty(),
-            "failed to save {} session(s) that recorded through their own ports: {}",
+            "failed to save {} session(s) beside the one the proxy records into: {}",
             failures.len(),
             failures.join("; ")
         );
@@ -2567,7 +2584,7 @@ impl AppState {
         self.persist_active_session()
             .await
             .context("failed to persist active session before self-update restart")?;
-        self.persist_session_port_sessions().await?;
+        self.persist_other_loaded_sessions().await?;
         relay_result?;
         Ok(())
     }

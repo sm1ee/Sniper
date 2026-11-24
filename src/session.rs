@@ -76,7 +76,7 @@ const WEBSOCKET_JOURNAL_FILE: &str = "websockets.journal";
 const MAX_SESSION_NAME_BYTES: usize = 256;
 const MAX_PERSISTED_WEBSOCKET_FRAMES_PER_SESSION: usize = 1_000;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionMetadata {
     pub id: Uuid,
     pub name: String,
@@ -898,6 +898,12 @@ impl SessionContext {
             #[cfg(test)]
             snapshot_capture_gate: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Whether a save `schedule_state_persist` queued is not written yet.
+    pub(crate) fn state_persist_pending(&self) -> bool {
+        self.state_persist_scheduled.load(Ordering::SeqCst)
+            || self.state_persist_dirty.load(Ordering::SeqCst)
     }
 
     /// Queues a state-only persist and returns immediately.
@@ -2346,7 +2352,13 @@ impl SessionRegistry {
             .find(|session| session.id == id)
             .cloned()
             .ok_or_else(|| anyhow!("session {id} was not found"))?;
+        let before = metadata.clone();
         refresh(&mut metadata);
+        // Nothing to tell: the registry is not written, and the session is
+        // not said to have changed now.
+        if metadata == before {
+            return Ok(());
+        }
         metadata.updated_at = Utc::now();
         self.update_metadata(metadata)
     }

@@ -855,7 +855,7 @@ fn persist_desktop_session_state_inner(
         .block_on(state.persist_active_session())
         .map(|_| ())
         .context("failed to persist active session before desktop shutdown");
-    let active_result = active_result.and(runtime.block_on(state.persist_session_port_sessions()));
+    let active_result = active_result.and(runtime.block_on(state.persist_other_loaded_sessions()));
     combine_desktop_persist_results(flush_result, active_result)?;
     relay_result?;
     Ok(())

@@ -1442,7 +1442,7 @@ mod tests {
             .await;
 
         state.stop_proxy_listeners().await;
-        state.persist_session_port_sessions().await.unwrap();
+        state.persist_other_loaded_sessions().await.unwrap();
 
         // The session list must not show the count of the last full save
         // until the session happens to be loaded again.
@@ -1455,6 +1455,51 @@ mod tests {
                 .any(|event| event.title == "Kept across the restart"),
             "{events:?}"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // A window shows a session and works in it with no port: a Replay sent
+    // there adds to what the session holds. Only a full save told the
+    // registry, so after a restart the list showed the counts of the last one.
+    #[tokio::test]
+    async fn a_shutdown_tells_the_registry_what_a_session_without_a_port_holds() {
+        let dir = scratch("shutdown-counts");
+        let state = state_in(&dir);
+        let worked_in = inactive_session(&state, "worked in").await;
+        let looked_at = inactive_session(&state, "looked at").await;
+        let listed = |id: Uuid| {
+            state
+                .sessions
+                .summaries()
+                .into_iter()
+                .find(|summary| summary.id == id)
+                .unwrap()
+        };
+        let session = state.session_context_for_id(worked_in).await.unwrap();
+        state.session_context_for_id(looked_at).await.unwrap();
+        session
+            .event_log
+            .push(
+                crate::event_log::EventLevel::Info,
+                "test",
+                "Sent from Replay",
+                "",
+            )
+            .await;
+        // As the Fuzzer saves a result: queued, and written a moment later.
+        session.schedule_state_persist();
+        assert_eq!(listed(worked_in).event_count, 0);
+        let before = listed(looked_at).updated_at;
+
+        state.persist_other_loaded_sessions().await.unwrap();
+
+        assert_eq!(listed(worked_in).event_count, 1);
+        // The exit does not wait for the queued save, so it is written here.
+        let saved = state.sessions.load_context_read_only(worked_in).unwrap();
+        assert_eq!(saved.event_log.snapshot(None).await.len(), 1);
+        // A session that was only looked at is not written, nor said to
+        // have changed now.
+        assert_eq!(listed(looked_at).updated_at, before);
         let _ = std::fs::remove_dir_all(dir);
     }
 
