@@ -43,6 +43,7 @@ function fixture({ sessions, activeId, hidden = false }) {
     currentSessionId: () => state.activeSession?.id || null,
     escapeHtml: value => String(value).replace(/[&<>"]/g, char => `&#${char.charCodeAt(0)};`),
     wireSessionRenameInput() {},
+    renderSessionFeed() {},
     loadSessions: options => { reloads.push(options); return new Promise(() => {}); },
   });
   return { state, els, context, reloads };

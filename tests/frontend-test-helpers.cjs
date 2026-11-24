@@ -36,6 +36,17 @@ function loadFunctions(names, globals = {}) {
   }
   // The Session table names a session as the sidebar does.
   if (names.includes("renderDashboard")) names = [...new Set([...names, "sessionIdentity"])];
+  // Whatever says where a session's traffic comes from asks these. A fixture
+  // that supplies one of its own keeps it.
+  const feedCallers = ["renderDashboard", "sessionSidebarRow", "syncHttpCapturePill", "emptySessionMessage",
+    "emptySessionActions", "showSessionContextMenu", "sessionFeedMenuItems", "updateProxyStatusIndicator"];
+  // An empty history offers what makes traffic reach the session.
+  if (names.includes("renderHistory") && !("emptySessionActions" in globals)) names = [...new Set([...names, "emptySessionActions"])];
+  if (names.some(name => feedCallers.includes(name))) {
+    const feed = ["sessionFeed", "mainProxyPort", "mainListenerSession", "sessionProxyAddress", "recordHereLabel",
+      "sessionFeedMenuItems"];
+    names = [...new Set([...names, ...feed.filter(name => !(name in globals))])];
+  }
   // Intercept shows a held binary body as bytes through the raw build and parse.
   const rawBodyCallers = ["buildEditableRawRequest", "parseEditableRawRequest", "buildEditableRawResponse", "parseEditableRawResponse"];
   if (names.some(name => rawBodyCallers.includes(name))) {

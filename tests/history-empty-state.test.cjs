@@ -24,6 +24,8 @@ function fixture(rows = [http, tunnel], query = "") {
     SERVICE_MAP_FILTER_MIME_LABELS: { html: "HTML", script: "script", json: "JSON", css: "CSS", image: "images", websocket: "WebSocket", other: "other types" },
     SERVICE_MAP_FILTER_STATUS_LABELS: { success: "2xx", redirect: "3xx", clientError: "4xx", serverError: "5xx", other: "other status" },
     currentSessionId: () => "fixture-session",
+    // The proxy listener records into the session these tests show.
+    sessionFeed: () => ({ kind: "main", port: "8080" }),
     getVisibleEntries: () => state.items.filter(row => c.summaryMatchesActiveHistoryFilters(row)).map(item => ({ item })),
     renderSortHeaders() {},
     renderHistoryVirtual() { visibleRows = state._historyEntries.map(entry => entry.item.id); },

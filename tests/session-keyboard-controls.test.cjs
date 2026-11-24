@@ -99,7 +99,8 @@ test('long session names stay within the cell with a full-name tooltip', () => {
   assert.match(f.body.innerHTML, /title="Saved &quot;review&quot;"/);
   const css = fs.readFileSync(path.join(__dirname, '../web/styles.css'), 'utf8');
   const rule = css.match(/\.session-table \.session-select-button \{([^}]+)\}/)[1];
-  for (const declaration of ['display: block', 'max-width: 100%', 'box-sizing: border-box', 'overflow: hidden', 'text-overflow: ellipsis', 'white-space: nowrap', 'margin: -3px 0']) {
+  // Inline, and narrower than the cell by the port that can sit beside the name.
+  for (const declaration of ['display: inline-block', 'max-width: calc(100% - 64px)', 'box-sizing: border-box', 'overflow: hidden', 'text-overflow: ellipsis', 'white-space: nowrap', 'margin: -3px 0']) {
     assert.ok(rule.includes(declaration), declaration);
   }
 });

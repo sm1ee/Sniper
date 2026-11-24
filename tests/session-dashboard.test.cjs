@@ -156,13 +156,20 @@ test("a refreshed dashboard never restores a removed selection from a stale work
   assert.equal(f.state.activeSession.id, "fixture-old-active", "render must not change workspace write ownership");
 });
 
-test("a refreshed dashboard does not label the previous workspace session as still active", () => {
+// The mark is the session on screen. Where the proxy listener records is the
+// port beside a name, and the two can be different sessions.
+test("the dashboard marks the session on screen and names the port where the proxy records", () => {
   const f = dashboardFixture([session("fixture-new-active", true), session("fixture-old-active")], "fixture-old-active");
-  f.state.activeSession = session("fixture-old-active", true);
+  f.state.activeSession = session("fixture-old-active");
+  f.state.settings = { proxy_addr: "127.0.0.1:8080" };
   f.context.renderDashboard();
   assert.equal(f.state.selectedSessionId, "fixture-old-active");
-  assert.match(f.els.dashboardSessionsBody.innerHTML, /class="history-row session-active" data-id="fixture-new-active"/);
-  assert.doesNotMatch(f.els.dashboardSessionsBody.innerHTML, /session-active" data-id="fixture-old-active"/);
+  const html = f.els.dashboardSessionsBody.innerHTML;
+  assert.match(html, /session-active" data-id="fixture-old-active"/);
+  assert.doesNotMatch(html, /session-active" data-id="fixture-new-active"/);
+  const row = id => html.match(new RegExp(`data-id="${id}">([^]*?)</tr>`))[1];
+  assert.match(row("fixture-new-active"), /<span class="session-sidebar-port in-table"[^>]*>:8080<\/span>/);
+  assert.doesNotMatch(row("fixture-old-active"), /session-sidebar-port/);
 });
 
 // Promise ordering is controlled here; these never call a real API or session action.

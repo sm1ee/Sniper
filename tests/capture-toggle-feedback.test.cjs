@@ -31,6 +31,8 @@ function fixture(capturing) {
     "requireOkResponse", "readApiErrorMessage", "formatStructuredApiErrorMessage",
   ], {
     state, URLSearchParams, BUTTON_PROGRESS_DELAY_MS: 180,
+    // The proxy listener records into whichever session these tests show.
+    sessionFeed: () => ({ kind: "main", port: "8080" }),
     workspaceStateGeneration: 0,
     els: { targetScopeEditor: { value: "" }, targetScopeExcludeEditor: { value: "" } },
     syncTargetScopeDraft() {}, renderInterceptStatus() {}, renderProxySettings() {}, renderTarget() {},

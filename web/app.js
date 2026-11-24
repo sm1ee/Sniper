@@ -2031,6 +2031,19 @@ function bindEvents() {
     if (!id || id === currentSessionId()) return;
     withButtonProgress(row, () => viewSessionById(id)).catch(handleWorkspaceActionError);
   });
+  // "Not receiving" opens the two actions that change it.
+  els.proxyStatusIndicator?.addEventListener("click", (event) => {
+    // The document closes this menu on any click that reaches it.
+    event.stopPropagation();
+    showSessionFeedMenu(els.proxyStatusIndicator);
+  });
+  // The same two, beside the browser button of an empty history.
+  els.historyTableBody.addEventListener("click", (event) => {
+    const button = event.target.closest?.("[data-feed-action]");
+    if (!button) return;
+    withButtonProgress(button, () => runSessionFeedAction(button.dataset.feedAction, currentSessionId()))
+      .catch(handleWorkspaceActionError);
+  });
   els.sessionSidebarList.addEventListener("contextmenu", (event) => {
     const id = event.target.closest?.(".session-sidebar-row")?.dataset.id;
     if (!id) return;
@@ -10267,9 +10280,9 @@ function renderDashboard() {
   // A redraw replaces the rename field too; keep the caret where it was.
   const renameSelection = focusedControl?.classList?.contains("session-name-input")
     ? [focusedControl.selectionStart, focusedControl.selectionEnd] : null;
-  // Ensure selectedSessionId defaults to active session
-  const activeSession = state.sessions.find((session) => session.active)
-    || state.sessions.find((session) => session.id === state.activeSession?.id) || null;
+  // The selection starts on the session on screen.
+  const activeSession = state.sessions.find((session) => session.id === state.activeSession?.id)
+    || state.sessions.find((session) => session.active) || null;
   if (!state.sessions.some((session) => session.id === state.selectedSessionId)) {
     state.selectedSessionId = null;
   }
@@ -10384,11 +10397,17 @@ function renderDashboard() {
   if (renamingHere) sessionRenameInput = null;
   els.dashboardSessionsBody.innerHTML = sortedSessions.length
     ? sortedSessions
-        .map((session) => `
-          <tr class="${["history-row", session.id === state.selectedSessionId && "selected", session.active && "session-active"].filter(Boolean).join(" ")}" data-id="${session.id}">
+        .map((session) => {
+          const shown = session.id === state.activeSession?.id;
+          const feed = sessionFeed(session.id);
+          const port = feed.kind !== "none" && feed.port ? `:${feed.port}` : "";
+          const portTitle = feed.kind === "main" ? "The proxy listener records into this session"
+            : "This session records from its own port";
+          return `
+          <tr class="${["history-row", session.id === state.selectedSessionId && "selected", shown && "session-active"].filter(Boolean).join(" ")}" data-id="${session.id}">
             <td>${renamingHere && state.sessionRename.id === session.id
               ? `<input class="session-name-input" type="text" value="${escapeHtml(state.sessionRename.draft)}" aria-label="Rename session ${escapeHtml(session.name)}" spellcheck="false" autocomplete="off" />`
-              : `<button class="session-name session-select-button" type="button" title="${escapeHtml(session.name)}" aria-pressed="${session.id === state.selectedSessionId}" aria-label="Select session ${escapeHtml(session.name)}">${escapeHtml(session.name)}</button>`}${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
+              : `<button class="session-name session-select-button" type="button" title="${escapeHtml(session.name)}" aria-pressed="${session.id === state.selectedSessionId}" aria-label="Select session ${escapeHtml(session.name)}">${escapeHtml(session.name)}</button>`}${port ? `<span class="session-sidebar-port in-table" title="${portTitle}">${escapeHtml(port)}</span>` : ""}${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
             <td><div class="session-size"><span class="session-size-bar"><span style="width:${Math.max(2, Math.round((Number(session.storage_bytes) || 0) / largest * 100))}%"></span></span>${formatSize(session.storage_bytes)}</div></td>
             <td>${formatCappedCount(session.request_count)}</td>
             <td>${formatCappedCount(session.websocket_count, retainedEntriesCap())}</td>
@@ -10397,13 +10416,14 @@ function renderDashboard() {
             <td>${session.overview?.last_captured_at ? escapeHtml(formatTimestamp(session.overview.last_captured_at)) : "-"}</td>
             <td>${escapeHtml(formatTimestamp(session.created_at))}</td>
             <td>
-              ${session.active ? "" : `<div class="session-actions">
+              ${shown ? "" : `<div class="session-actions">
                 <button class="secondary-action session-open-button" type="button" aria-label="Open session ${escapeHtml(session.name)}">Open</button>
-                <button class="session-delete-button" type="button" aria-label="Delete session ${escapeHtml(session.name)}">Delete</button>
+                ${feed.kind === "none" ? `<button class="session-delete-button" type="button" aria-label="Delete session ${escapeHtml(session.name)}">Delete</button>` : ""}
               </div>`}
             </td>
           </tr>
-        `)
+        `;
+        })
         .join("")
     : `
         <tr class="empty-row">
@@ -10536,11 +10556,17 @@ function sessionSidebarRow(session, active, editing) {
   const finished = !running && state.sessionsFinished.has(session.id)
     ? `${jobs(state.sessionsFinished.get(session.id))} finished` : "";
   const identity = sessionIdentity(session.overview);
-  const label = [session.name, heldLabel, running, finished].filter(Boolean).join(", ");
+  // Which port feeds the session, if any: the list is where that is read.
+  const feed = sessionFeed(session.id);
+  const port = feed.kind !== "none" && feed.port ? `:${feed.port}` : "";
+  const portTitle = feed.kind === "main" ? "The proxy listener records into this session"
+    : "This session records from its own port";
+  const label = [session.name, port && `proxy ${port}`, heldLabel, running, finished].filter(Boolean).join(", ");
   return `<li><button class="session-sidebar-row${active ? " active" : ""}" type="button" data-id="${escapeHtml(session.id)}"`
     + `${active ? ' aria-current="true"' : ""} tabindex="${active ? 0 : -1}" aria-label="${escapeHtml(label)}">`
     + `<span class="session-sidebar-text"><span class="session-sidebar-name">${name}</span>`
     + `${identity ? `<span class="session-sidebar-identity">${escapeHtml(identity)}</span>` : ""}</span>`
+    + `${port ? `<span class="session-sidebar-port" title="${portTitle}">${escapeHtml(port)}</span>` : ""}`
     + `${held ? `<span class="findings-badge session-sidebar-held" title="${heldLabel}">${held.toLocaleString()}</span>` : ""}`
     + `${running ? `<span class="session-sidebar-running" title="${escapeHtml(running)}"></span>` : ""}`
     + `${finished ? `<span class="session-sidebar-finished" title="${escapeHtml(finished)}"></span>` : ""}`
@@ -10566,6 +10592,9 @@ async function loadSessionActivity() {
 function applySessionActivity(entries) {
   if (!Array.isArray(entries)) return;
   const activeId = currentSessionId();
+  const feeds = (activity) => [...activity]
+    .map(([id, entry]) => `${id}:${entry.active ? "main" : entry.portOpen ? entry.port : ""}`).join(",");
+  const feedsBefore = feeds(state.sessionActivity);
   const next = new Map();
   for (const entry of entries) {
     if (typeof entry?.id !== "string" || typeof entry.name !== "string") continue;
@@ -10573,6 +10602,10 @@ function applySessionActivity(entries) {
       name: entry.name,
       running: Array.isArray(entry.running) ? entry.running.filter((kind) => typeof kind === "string") : [],
       held: Number.isSafeInteger(entry.held) && entry.held > 0 ? entry.held : 0,
+      // Where the session's traffic comes from.
+      active: entry.active === true,
+      port: Number.isSafeInteger(entry.proxy_port) ? entry.proxy_port : null,
+      portOpen: entry.proxy_port_open === true,
     });
   }
   for (const [id, before] of state.sessionActivity) {
@@ -10585,6 +10618,13 @@ function applySessionActivity(entries) {
     if (!next.has(id)) state.sessionsFinished.delete(id);
   }
   state.sessionActivity = next;
+  // Another client can move the proxy listener. The rows follow without a
+  // list read, and the window keeps the session it shows.
+  for (const session of state.sessions) {
+    const activity = next.get(session.id);
+    if (activity) session.active = activity.active;
+  }
+  if (feeds(next) !== feedsBefore) renderSessionFeed();
   // sniper-cli and agents create, rename and delete sessions too.
   const listed = new Map(state.sessions.map((session) => [session.id, session.name]));
   if (!sessionListRefresh
@@ -10733,10 +10773,14 @@ function showSessionContextMenu(event, sessionId, place = "dashboard") {
 
   const menu = document.createElement("div");
   menu.className = "context-menu session-context-menu";
+  // The server deletes no session that has a feed.
+  const fed = sessionFeed(sessionId).kind !== "none";
   menu.innerHTML = `
+    ${sessionFeedMenuItems(sessionId)}
+    <div class="context-menu-divider"></div>
     <button class="context-menu-item" data-action="rename">Rename session</button>
     <button class="context-menu-item" data-action="folder">Open session folder</button>
-    ${session.active ? "" : `<button class="context-menu-item danger" data-action="delete">Delete session</button>`}
+    ${fed ? "" : `<button class="context-menu-item danger" data-action="delete">Delete session</button>`}
   `;
   document.body.appendChild(menu);
 
@@ -10762,6 +10806,8 @@ function showSessionContextMenu(event, sessionId, place = "dashboard") {
       });
     } else if (action === "delete") {
       deleteSessionById(sessionId);
+    } else {
+      runSessionFeedAction(action, sessionId).catch(handleWorkspaceActionError);
     }
     closeSessionContextMenu();
   });
@@ -13166,15 +13212,134 @@ function updateRemoteUiIndicator(exposed) {
     "Traffic to it is not encrypted — use an SSH tunnel or a TLS reverse proxy across an untrusted network.";
 }
 
-function updateProxyStatusIndicator(online) {
-  if (!els.proxyStatusIndicator) return;
-  const isOnline = Boolean(online);
-  els.proxyStatusIndicator.classList.toggle("online", isOnline);
-  els.proxyStatusIndicator.classList.toggle("offline", !isOnline);
-  els.proxyStatusLabel.textContent = isOnline ? "Proxy" : "Offline";
-  els.proxyStatusIndicator.title = isOnline
-    ? `Proxy listening on ${state.settings?.proxy_addr || "..."}`
-    : `Proxy failed to bind on ${state.settings?.proxy_addr || "..."}. Restart the app after freeing the port.`;
+// ── Where a session's traffic comes from ──
+// A session receives through the main proxy listener, through a port of its
+// own, or not at all. The top strip says which for the session on screen,
+// and each row of the session list for its own.
+function sessionFeed(sessionId) {
+  const activity = state.sessionActivity?.get(sessionId);
+  // The activity rows are read every few seconds, the list only on a change.
+  const main = activity ? activity.active : state.sessions?.find((session) => session.id === sessionId)?.active;
+  if (main) return { kind: "main", port: mainProxyPort() };
+  if (activity?.portOpen && activity.port) return { kind: "port", port: activity.port };
+  return { kind: "none", port: null };
+}
+
+function mainProxyPort() {
+  // "127.0.0.1:8080" and "[::1]:8080" both end in the port.
+  return String(state.settings?.proxy_addr || "").match(/:(\d+)$/)?.[1] || "";
+}
+
+// The session the main proxy listener records into.
+function mainListenerSession() {
+  for (const [id, activity] of state.sessionActivity || []) {
+    if (activity.active) return state.sessions?.find((session) => session.id === id) || { id, name: activity.name };
+  }
+  return state.sessions?.find((session) => session.active) || null;
+}
+
+// Where a client connects to be recorded in the session, if anywhere.
+function sessionProxyAddress(sessionId) {
+  const feed = sessionFeed(sessionId);
+  if (feed.kind === "main") return state.settings?.proxy_addr || null;
+  return feed.kind === "port" ? `127.0.0.1:${feed.port}` : null;
+}
+
+function updateProxyStatusIndicator(online = state.settings?.proxy_online) {
+  const indicator = els.proxyStatusIndicator;
+  if (!indicator) return;
+  const feed = sessionFeed(currentSessionId());
+  const addr = state.settings?.proxy_addr || "...";
+  // The listener being down matters to the session it records into. A
+  // session with a port of its own receives all the same.
+  const status = feed.kind === "none" ? "idle" : feed.kind === "main" && !online ? "offline" : "online";
+  for (const name of ["online", "offline", "idle"]) indicator.classList.toggle(name, name === status);
+  els.proxyStatusLabel.textContent = status === "offline" ? "Offline"
+    : status === "idle" ? "Not receiving" : `Proxy :${feed.port}`;
+  // Only a session nothing reaches has something to choose here.
+  indicator.disabled = status !== "idle";
+  indicator.title = status === "offline"
+    ? `Proxy failed to bind on ${addr}. Restart the app after freeing the port.`
+    : status === "idle"
+      ? `No traffic reaches this session. The proxy on ${addr} records into ${mainListenerSession()?.name || "another session"}. Click to change that.`
+      : feed.kind === "main"
+        ? `Proxy listening on ${addr}. It records into this session.`
+        : `This session records from its own port 127.0.0.1:${feed.port}.`;
+}
+
+// What changes how a session receives, as menu items. An action the server
+// refuses is not offered: the listener's session gets no port, and the
+// listener does not record into a session whose own port is open.
+function sessionFeedMenuItems(sessionId) {
+  const feed = sessionFeed(sessionId);
+  const item = (action, label) => `<button class="context-menu-item" data-action="${action}">${escapeHtml(label)}</button>`;
+  if (feed.kind === "none") return item("record", recordHereLabel()) + item("open-port", "Open a port");
+  return (feed.kind === "port" ? item("close-port", `Close port :${feed.port}`) : "")
+    + item("copy-address", "Copy proxy address");
+}
+
+function recordHereLabel() {
+  const port = mainProxyPort();
+  return port ? `Record :${port} here` : "Record the proxy here";
+}
+
+async function runSessionFeedAction(action, sessionId) {
+  if (action === "record") {
+    await recordMainListenerInto(sessionId);
+    return;
+  }
+  if (action === "copy-address") {
+    const address = sessionProxyAddress(sessionId);
+    if (!address) return;
+    await copyTextToClipboard(address);
+    showToast(`Copied ${address}`);
+    return;
+  }
+  const opening = action === "open-port";
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/proxy-port`, {
+    method: opening ? "POST" : "DELETE",
+  });
+  await requireOkResponse(response, opening ? "Failed to open a port." : "Failed to close the port.");
+  await refreshSessionFeeds();
+}
+
+// The two actions that make traffic reach the session on screen, under the
+// indicator that says none does.
+function showSessionFeedMenu(anchor) {
+  closeSessionContextMenu();
+  const sessionId = currentSessionId();
+  if (!sessionId || sessionFeed(sessionId).kind !== "none") return;
+  const menu = document.createElement("div");
+  menu.className = "context-menu session-context-menu";
+  menu.innerHTML = sessionFeedMenuItems(sessionId);
+  document.body.appendChild(menu);
+  const at = anchor.getBoundingClientRect();
+  const size = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(at.left, window.innerWidth - size.width - 4))}px`;
+  menu.style.top = `${at.bottom + 4}px`;
+  sessionContextMenuEl = menu;
+  menu.addEventListener("click", (event) => {
+    const action = event.target.closest("[data-action]")?.dataset.action;
+    if (action) runSessionFeedAction(action, sessionId).catch(handleWorkspaceActionError);
+    closeSessionContextMenu();
+  });
+}
+
+// Everything that says where the session on screen receives from.
+function renderSessionFeed() {
+  updateProxyStatusIndicator();
+  syncHttpCapturePill();
+  renderDashboard();
+  // An empty history names the feed and offers what changes it.
+  if (Array.isArray(state._historyEntries) && !state._historyEntries.length) renderHistory();
+}
+
+// Beside the browser button of an empty history: what makes traffic reach a
+// session that gets none.
+function emptySessionActions() {
+  if (sessionFeed(currentSessionId()).kind !== "none") return "";
+  return `<button class="secondary-action" type="button" data-feed-action="record">${escapeHtml(recordHereLabel())}</button>`
+    + '<button class="secondary-action" type="button" data-feed-action="open-port">Open a port</button>';
 }
 
 function renderHistory(options = {}) {
@@ -13219,7 +13384,7 @@ function renderHistory(options = {}) {
       <tr class="empty-row">
         <td colspan="${state.historyColumnOrder.length}">
           ${escapeHtml(nothingCaptured ? emptySessionMessage() : historyEmptyMessage(hiddenConnectCount, paging))}
-          ${nothingCaptured ? '<div class="empty-row-action"><span data-browser-launcher></span></div>' : ""}
+          ${nothingCaptured ? `<div class="empty-row-action">${emptySessionActions()}<span data-browser-launcher></span></div>` : ""}
         </td>
       </tr>
     `;
@@ -13311,7 +13476,11 @@ function isSessionEmpty(hiddenConnectCount, paging) {
 }
 
 function emptySessionMessage() {
-  return `Nothing captured yet. Open a browser that already sends its traffic through Sniper, or point any client at ${state.settings?.proxy_addr || "the proxy"}.`;
+  const address = sessionProxyAddress(currentSessionId());
+  if (!address && sessionFeed(currentSessionId()).kind === "none") {
+    return `No traffic reaches this session. The proxy on ${state.settings?.proxy_addr || "its port"} records into ${mainListenerSession()?.name || "another session"}.`;
+  }
+  return `Nothing captured yet. Open a browser that already sends its traffic through Sniper, or point any client at ${address || "the proxy"}.`;
 }
 
 function historyEmptyMessage(hiddenConnectCount, paging) {
@@ -26675,16 +26844,20 @@ function syncHttpCapturePill({ confirmed = false } = {}) {
   if (!pill) return;
   const unconfirmed = state.httpCaptureUnconfirmedSessions?.has(currentSessionId()) || false;
   const capturing = state.runtime?.http_capture_enabled !== false;
-  pill.classList.toggle("active", capturing && !unconfirmed);
+  // Recording is on and nothing arrives: "Capturing" would not be true.
+  const idle = capturing && !unconfirmed && sessionFeed(currentSessionId()).kind === "none";
+  pill.classList.toggle("active", capturing && !unconfirmed && !idle);
   pill.classList.toggle("paused", !capturing && !unconfirmed);
-  pill.textContent = unconfirmed ? "Capture unconfirmed" : capturing ? "Capturing" : "Paused";
+  pill.textContent = unconfirmed ? "Capture unconfirmed" : idle ? "Not receiving" : capturing ? "Capturing" : "Paused";
   if (unconfirmed) {
     pill.title = `Capture state is unconfirmed. Last confirmed: ${capturing ? "Capturing" : "Paused"}. Click to request capture ${capturing ? "off" : "on"}. Traffic still passes through.`;
     return;
   }
-  pill.title = capturing
-    ? "Recording proxied traffic. Click to pause; traffic still passes through."
-    : "Not recording. Traffic still passes through. Click to resume.";
+  pill.title = idle
+    ? "Recording is on, but no traffic reaches this session. Click to pause."
+    : capturing
+      ? "Recording proxied traffic. Click to pause; traffic still passes through."
+      : "Not recording. Traffic still passes through. Click to resume.";
 }
 
 function hydrateFilterForm({ preserveDraft = false } = {}) {

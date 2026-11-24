@@ -34,7 +34,7 @@ function setup() {
     console: { error() {}, warn: (...args) => f.warnings.push(args) },
   });
   for (const name of ['createSession', 'viewSessionById', 'deleteSessionById', 'loadSessions',
-    'reconcileSessionsAfterActionError', 'renderDashboard', 'sessionIdentity', 'sessionFindingCount', 'formatSize', 'toggleReplayTabPin', 'expectedActiveSessionIdForWrite']) {
+    'reconcileSessionsAfterActionError', 'renderDashboard', 'sessionIdentity', 'sessionFeed', 'mainProxyPort', 'sessionFindingCount', 'formatSize', 'toggleReplayTabPin', 'expectedActiveSessionIdForWrite']) {
     const source = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, 'm'));
     // Keep the fixture behavioral: baseline handlers do not yet use this helper.
     if (!source && name === 'reconcileSessionsAfterActionError') continue;
@@ -96,7 +96,8 @@ for (const operation of ['create', 'view', 'delete']) {
       // A view that fails changed nothing, so there is nothing to warn about
       // beyond its own error. The rows still say where the proxy records.
       assert.equal(f.toasts.length, 0);
-      assert.match(f.els.dashboardSessionsBody.innerHTML, /session-active" data-id="session-b"/);
+      // The mark stays on the session on screen, wherever the proxy records.
+      assert.match(f.els.dashboardSessionsBody.innerHTML, /session-active" data-id="session-a"/);
     } else assert.match(f.toasts[0][0], /may have completed/);
   });
 
