@@ -122,3 +122,17 @@ for (const sameId of [false, true]) for (const outcome of ['success', 'failure']
     f.succeed(1, 'same-note'); await tick(); assert.equal(f.state._pendingAnnotations.size, 0);
   });
 }
+// The session on screen was deleted elsewhere and the window moved on. A note
+// still queued for it answers 404 on every try. Kept, it refused every later
+// session change and every close of the desktop window.
+test('a note whose session is gone is dropped and the drain goes on', async () => {
+  const f = fixture(); f.entry('note-gone', 'session-deleted'); f.entry('note-here');
+  const draining = f.context.flushAllPendingAnnotations().then(() => null, error => error);
+  assert.equal(f.requests.length, 2);
+  const gone = [0, 1].find(index => f.url(index).searchParams.get('session_id') === 'session-deleted');
+  f.requests[gone].resolve({ ok: false, status: 404, text: async () => '' });
+  f.succeed(1 - gone, 'note-here');
+  assert.equal(await draining, null);
+  assert.equal(f.state._pendingAnnotations.size, 0);
+  assert.equal(f.state._annotationInFlight.size, 0);
+});

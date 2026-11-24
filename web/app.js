@@ -3348,13 +3348,14 @@ async function loadSettings(retries = 5, { isCurrent = () => true } = {}) {
     if (!isCurrent()) return false;
     try {
       const response = await fetch(sessionQueryPath("/api/settings", sessionId));
+      if (response.status === 404 && sessionId) throw new WorkspaceSessionMismatchError(sessionId, true);
       if (!response.ok) {
         throw new Error(`loadSettings failed: ${response.status}`);
       }
       return await _applySettings(response, { isCurrent, sessionId });
     } catch (err) {
       if (!isCurrent()) return false;
-      if (attempt < retries) {
+      if (attempt < retries && !err?.gone) {
         await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
         continue;
       }
@@ -3684,6 +3685,8 @@ async function loadSessions({ preserveWorkspaceOwner = false, isCurrent = () => 
   // A window that shows no session yet, or whose session is gone, takes the
   // one the proxy listener records into.
   const nextActiveSession = shown || sessions.find((session) => session.active) || sessions[0] || null;
+  // A click asked for a session that was deleted before it loaded.
+  if (wanted && !shown) showToast("The session was deleted. Showing the session the proxy records into.", "info", 6000);
   state.sessions = sessions;
   state.activeSession = nextActiveSession;
   state.viewedSessionId = nextActiveSession?.id || null;
@@ -3751,8 +3754,10 @@ async function loadWorkspaceState({ isCurrent = () => true, onAdopt = () => {} }
   if (!workspaceLoaded) renderFuzzer();
   let snapshot;
   try {
-    const response = await fetch(sessionQueryPath("/api/workspace-state", state.viewedSessionId || currentSessionId()));
+    const sessionId = state.viewedSessionId || currentSessionId();
+    const response = await fetch(sessionQueryPath("/api/workspace-state", sessionId));
     if (!isCurrent()) return false;
+    if (response.status === 404 && sessionId) throw new WorkspaceSessionMismatchError(sessionId, true);
     // Callers may toast this error; never surface captured data from a response body.
     if (!response.ok) throw new Error("Could not load session workspace.");
     snapshot = await response.json();
@@ -3791,10 +3796,13 @@ async function loadWorkspaceState({ isCurrent = () => true, onAdopt = () => {} }
 }
 
 class WorkspaceSessionMismatchError extends Error {
-  constructor(sessionId) {
-    super("Workspace state belongs to a different active session.");
+  // `gone`: a read named a session that was deleted, here, by sniper-cli or
+  // by an agent. No retry brings it back; the list says what to show.
+  constructor(sessionId, gone = false) {
+    super(gone ? "The session was deleted." : "Workspace state belongs to a different active session.");
     this.name = "WorkspaceSessionMismatchError";
     this.sessionId = sessionId;
+    this.gone = gone;
   }
 }
 
@@ -5984,13 +5992,15 @@ async function reloadSessionWorkspace({ cleanupBeforeReset = true } = {}) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await loadSessions({ isCurrent });
       if (!isCurrent()) return false;
-      await loadSettings(5, { isCurrent });
-      if (!isCurrent()) return false;
       try {
+        await loadSettings(5, { isCurrent });
+        if (!isCurrent()) return false;
         if (await loadWorkspaceState({ isCurrent, onAdopt: () => { generation = workspaceStateGeneration; } }) === false) return false;
         if (!isCurrent()) return false;
         break;
       } catch (error) {
+        // The list is read again. It names another session, and says so,
+        // when this one was deleted while it loaded.
         if (error instanceof WorkspaceSessionMismatchError && attempt === 0) {
           continue;
         }
@@ -6286,7 +6296,7 @@ async function recordMainListenerInto(id, { force = false } = {}) {
 async function refreshSessionFeeds() {
   await Promise.all([
     loadSessions({ preserveWorkspaceOwner: true }),
-    loadSessionActivity(),
+    loadSessionActivity({ fresh: true }),
     loadIntercepts(false),
     loadResponseIntercepts(false),
   ]);
@@ -10499,7 +10509,8 @@ let sessionSidebarMarkup = "";
 // The rename whose field the rows last drawn hold.
 let sidebarRenameEdit = null;
 let sessionListRefresh = null;
-let sessionActivityReading = false;
+// The activity read in flight, if one is.
+let sessionActivityReading = null;
 let sidebarSessionCreating = false;
 
 function renderSessionSidebar() {
@@ -10573,17 +10584,24 @@ function sessionSidebarRow(session, active, editing) {
     + "</button></li>";
 }
 
-async function loadSessionActivity() {
-  // A read held up, as by a switch saving a large session, is not asked again.
-  if (sessionActivityReading) return;
-  sessionActivityReading = true;
-  try {
+async function loadSessionActivity({ fresh = false } = {}) {
+  // A read held up, as by a switch saving a large session, is not asked
+  // again. After a change to a feed it is: the read in flight may have been
+  // answered before the change, and the rows would show that until the next.
+  while (sessionActivityReading) {
+    if (!fresh) return;
+    await sessionActivityReading.catch(() => {});
+  }
+  const read = (async () => {
     const response = await fetch("/api/sessions/activity");
     // The next read asks again; the rows keep what they last showed.
-    if (!response.ok) return;
-    applySessionActivity(await response.json());
+    if (response.ok) applySessionActivity(await response.json());
+  })();
+  sessionActivityReading = read;
+  try {
+    await read;
   } finally {
-    sessionActivityReading = false;
+    if (sessionActivityReading === read) sessionActivityReading = null;
   }
 }
 
@@ -21617,9 +21635,12 @@ async function saveProxySettings() {
     state.settings.startup = startupResult;
   }
 
-  // If proxy was rebound, update the main proxy_addr in settings too
+  // A rebind leaves the listener up on its new address, and the indicator,
+  // the sidebar and the Session tab print its port.
   if (startupResult?.rebound === true) {
     state.settings.proxy_addr = startupResult.active_proxy_addr;
+    state.settings.proxy_online = true;
+    renderSessionFeed();
   }
 
   renderInterceptStatus();
@@ -32865,6 +32886,7 @@ async function flushPendingAnnotations(transactionId, options = {}) {
   state._annotationInFlight.add(transactionId);
   let failureMessage = "";
   let saved = false;
+  let gone = false;
   try {
     const response = await fetch(sessionWritePath(
       `/api/transactions/${encodeURIComponent(transactionId)}/annotations?search_headers=true`,
@@ -32878,6 +32900,13 @@ async function flushPendingAnnotations(transactionId, options = {}) {
     if (entry.retentionDeleted) return false;
     if (response.status === 404 && currentSessionId() === sessionId) {
       applyConfirmedHistoryRemoval([transactionId], sessionId);
+      return false;
+    }
+    if (response.status === 404) {
+      // The request, or its whole session, was deleted while the window shows
+      // another one. Nothing takes this annotation any more, and kept in the
+      // queue it would refuse every session change and every close.
+      gone = true;
       return false;
     }
     if (!response.ok) {
@@ -32984,7 +33013,7 @@ async function flushPendingAnnotations(transactionId, options = {}) {
   } finally {
     state._annotationInFlight.delete(transactionId);
     if (pending.get(transactionId) === entry) {
-      if (saved) {
+      if (saved || gone) {
         pending.delete(transactionId);
       }
     } else if (pending.has(transactionId)) {

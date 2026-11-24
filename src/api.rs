@@ -7365,6 +7365,10 @@ async fn launch_browser(
         Err(error) => {
             // The port was opened for this browser, which did not open.
             // Whoever else asked for the port meanwhile keeps it.
+            // ponytail: a port that two failed launches shared, or one whose
+            // caller went away before the launch ended, stays open with no
+            // browser. It shows as open and closes from the session's menu;
+            // count a port's users if that comes to matter.
             if let (Some(session), Some(opening)) = (target.session, target.opened) {
                 if let Err(close_error) = state.close_session_port_opened_as(session, opening).await
                 {

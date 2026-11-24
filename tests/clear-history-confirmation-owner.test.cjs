@@ -106,6 +106,8 @@ function fixture() {
   function confirm(modal) { modal.querySelector(".confirm-dialog-ok").dispatch("click"); return actions.at(-1); }
   async function change(id = "session-b") {
     const previous = c.currentSessionId(); serverSession = { id, name: `Active ${id}`, active: true };
+    // As a click does: the session the next load shows.
+    state.viewedSessionId = id;
     await c.handleExternalSessionChanged(previous);
     assert.equal(c.currentSessionId(), id); assert.equal(c.workspaceLoaded, true);
   }

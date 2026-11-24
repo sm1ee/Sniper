@@ -210,3 +210,27 @@ test("Save and Revert show only while the form differs from what was loaded", ()
   assert.equal(hidden, false, "clearing the OAST token is a change");
   assert.equal(f.posts.length, 0, "showing the bar saves nothing");
 });
+
+// The indicator, the sidebar and the Session tab print the main listener's
+// port. A rebind changed the address in memory and redrew none of them, and a
+// listener that had failed to bind stayed "Offline" on its new port.
+test("a rebind redraws what prints the proxy's port, with the listener up", async () => {
+  const f = fixture();
+  f.state.settings.proxy_online = false;
+  const drawn = [];
+  f.c.renderSessionFeed = () => drawn.push([f.state.settings.proxy_addr, f.state.settings.proxy_online]);
+  f.c.renderProxySettings();
+  f.element("proxySettingPort").value = "8090";
+  f.c.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    f.posts.push({ url, body });
+    if (url !== "/api/startup-settings") return { ok: true, json: async () => ({ ...f.state.runtime, ...body }) };
+    return { ok: true, json: async () => ({
+      proxy_bind_host: "127.0.0.1", proxy_port: 8090, proxy_addr: "127.0.0.1:8090",
+      active_proxy_addr: "127.0.0.1:8090", rebound: true,
+    }) };
+  };
+  await f.c.saveProxySettings();
+  assert.equal(f.posts[0].url, "/api/startup-settings");
+  assert.deepEqual(drawn, [["127.0.0.1:8090", true]]);
+});

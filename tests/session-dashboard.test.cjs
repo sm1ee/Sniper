@@ -333,6 +333,23 @@ test("a click on a session is the one the next list read shows", async () => {
   assert.equal(f.state.activeSession, listed[1]);
 });
 
+// A click asked for a session that was deleted before the window loaded it.
+// The window takes the session the proxy records into, and says why.
+test("a session deleted before it loaded gives way to the proxy's session, with a notice", async () => {
+  const f = raceFixture(), toasts = [];
+  f.context.workspaceLoaded = false;
+  f.context.showToast = (...args) => toasts.push(args);
+  f.state.viewedSessionId = "fixture-gone";
+  const reading = f.context.loadSessions();
+  const listed = [session("fixture-active", true), session("fixture-stored")];
+  f.requests[0].resolve(response(listed));
+  await reading;
+  assert.equal(f.state.activeSession, listed[0]);
+  assert.equal(f.state.viewedSessionId, "fixture-active");
+  assert.equal(toasts.length, 1);
+  assert.match(toasts[0][0], /was deleted/);
+});
+
 test("errors from leaving a deleted session are not swallowed by a newer list", async () => {
   const f = raceFixture(), change = deferred();
   f.context.workspaceLoaded = true;

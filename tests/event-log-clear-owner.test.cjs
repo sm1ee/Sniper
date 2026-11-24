@@ -98,6 +98,8 @@ function fixture() {
     assert.equal(c.workspaceLoaded, true);
     const previous = c.currentSessionId(), generation = c.workspaceStateGeneration;
     serverSession = { id, name: `Active ${id}`, active: true };
+    // As a click does: the session the next load shows.
+    state.viewedSessionId = id;
     await c.handleExternalSessionChanged(previous);
     assert.equal(c.currentSessionId(), id);
     assert.equal(c.workspaceLoaded, true);

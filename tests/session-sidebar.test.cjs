@@ -185,3 +185,25 @@ test("a session activity read still waiting is not asked again", () => {
   context.loadSessionActivity();
   assert.equal(reads, 1);
 });
+
+// A read sent before a port opened can be answered after it, with the session
+// still without the port. The read that follows the change was skipped as "one
+// is in flight", so the rows showed the old answer for up to three seconds.
+test("a read asked for after a change follows the one in flight", async () => {
+  const answers = [];
+  const applied = [];
+  const context = loadFunctions(["loadSessionActivity"], {
+    sessionActivityReading: null, applySessionActivity: (rows) => applied.push(rows),
+    fetch: () => new Promise((resolve) => answers.push((rows) => resolve({ ok: true, json: async () => rows }))),
+  });
+  const periodic = context.loadSessionActivity();
+  const afterChange = context.loadSessionActivity({ fresh: true });
+  assert.equal(answers.length, 1, "one read at a time");
+  answers[0]("before the change");
+  await periodic;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(answers.length, 2, "the read after the change was not sent");
+  answers[1]("after the change");
+  await afterChange;
+  assert.deepEqual(applied, ["before the change", "after the change"]);
+});

@@ -105,7 +105,7 @@ function feedFixture() {
   const refreshed = [];
   const f = fixture(["recordMainListenerInto", "refreshSessionFeeds"], {
     loadSessions: async options => { refreshed.push(["sessions", options]); },
-    loadSessionActivity: async () => { refreshed.push(["activity"]); },
+    loadSessionActivity: async options => { refreshed.push(["activity", options]); },
     loadIntercepts: async () => { refreshed.push(["intercepts"]); },
     loadResponseIntercepts: async () => { refreshed.push(["response intercepts"]); },
   });
@@ -125,6 +125,8 @@ test("moving the proxy listener leaves the window on its session and refreshes w
   assert.equal(f.reloads.length, 0, "the workspace on screen is not reloaded");
   assert.deepEqual(f.refreshed.map(entry => entry[0]).sort(), ["activity", "intercepts", "response intercepts", "sessions"]);
   assert.deepEqual(plain(f.refreshed.find(entry => entry[0] === "sessions")[1]), { preserveWorkspaceOwner: true });
+  // Not the answer of a read that was sent before the move.
+  assert.deepEqual(plain(f.refreshed.find(entry => entry[0] === "activity")[1]), { fresh: true });
 });
 
 test("a busy proxy asks before it is moved by force, and cuts nothing until then", async () => {
