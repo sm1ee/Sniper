@@ -3,8 +3,8 @@
 Status: design, written after the step 2 spike (`spike/session-ports`,
 `f1df80d`, local only) and revised after a builder check, a second review by
 the author and an adversarial review. The guard of decision 5 is fixed
-(`74c9114`) and phase 1 is built (`9e6c130` to `fa41681`); see "Phase 1 as
-built" at the end. Phases 2 to 4 are not built.
+(`74c9114`), and phases 1 (`9e6c130` to `fa41681`) and 2 (`35ff9d4`,
+`28ff659`) are built; see "As built" at the end. Phases 3 and 4 are not built.
 
 ## Problem
 
@@ -552,7 +552,9 @@ is the only phase that changes what an existing user sees.
 - The exact wording and placement of the new menu items and the one-line
   notices, within the minimal-controls convention.
 
-## Phase 1 as built
+## As built
+
+### Phase 1
 
 What the builder settled, and where the build went past the design.
 
@@ -587,6 +589,33 @@ What the builder settled, and where the build went past the design.
 - **Not changed**: `sniper-cli` reports a refused `session switch` or `session
   delete` by its status alone, as it does for every session write. The reason
   is in the API's answer and in the guide.
+
+### Phase 2
+
+- **The launch target** is worked out in `browser_launch_target`
+  (`src/api.rs`) before anything starts: the main listener for no session or
+  for the session it records into, else the session's port, which the launch
+  opens. `LaunchContext::for_session` carries the session and the main
+  listener's address into `launch_at`.
+- **A launch that fails closes the port it opened**, so a refused browser
+  leaves nothing changed. A port that was open already stays open.
+- **Aside** is refused by what its driver is (`shared_instance_hint`), not by
+  its name, so a later driver of the same kind is refused too. With no browser
+  named the saved default or the first installed one is still chosen, and a
+  session's launch fails if that is Aside: name another browser.
+- **Profiles** of a deleted session are removed at the delete, and by a sweep
+  at start-up and before each launch for one a browser still held.
+  `recover_driver_ports` reads the session directories as well.
+- **Not tested with a real browser.** A script stands in for Chromium, in the
+  unit tests and on the isolated instance.
+
+### Merged with the remote
+
+`origin/release/0.3.6` fixed the remote-client guard on its own
+(`2ffc6b5`). The merge (`2b6ee78`) keeps this design's one list of own
+listeners, and takes the remote's refusal of a CONNECT to the proxy's own
+listener, which now covers a session's port too: a tunnel to any proxy
+listener of Sniper's gets 508, for any client.
 
 ## Constraints
 

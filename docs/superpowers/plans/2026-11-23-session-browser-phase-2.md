@@ -7,7 +7,7 @@ a session. A browser opened for a session that is not the default goes through
 that session's own port and has a profile of its own.
 
 **Spec:** `docs/superpowers/specs/2026-11-19-session-proxy-ports-design.md`,
-decision 10, and "Phase 1 as built".
+decision 10, and "As built".
 
 **Architecture:** `LaunchContext` learns which session the browser is for and
 where the main listener is. `launch_at` picks the profile and makes the two
@@ -53,13 +53,13 @@ it opens the session's port and gives its address.
 `proxy_addr`. `LaunchContext::for_session(self, session: Uuid, main_proxy_addr:
 SocketAddr) -> Self`.
 
-- [ ] Tests (fixture): a session's browser gets `session-<id>/<kind>` and the
+- [x] Tests (fixture): a session's browser gets `session-<id>/<kind>` and the
   session port as its proxy, while the default profile is untouched; a
   throwaway launch for a session still gets `fresh-<uuid>`; Aside is refused
   for a session and opened without one; a driver port is refused for a session
   while the main listener is beyond loopback, although the session port is on
   loopback.
-- [ ] Implement.
+- [x] Implement.
 
 ### B2: Session profiles are recovered, swept and removed
 
@@ -70,11 +70,11 @@ SocketAddr) -> Self`.
 - `pub fn sweep_session_profiles(data_dir: &Path, exists: impl Fn(Uuid) -> bool)`.
 - `pub fn remove_session_profiles(data_dir: &Path, session: Uuid)`.
 
-- [ ] Tests: a running browser on a session profile has its port guarded again;
+- [x] Tests: a running browser on a session profile has its port guarded again;
   a sweep removes the profiles of a session that is gone, leaves one a browser
   still holds, leaves the profiles of a session that exists, and leaves
   directories that are not session profiles.
-- [ ] Implement.
+- [x] Implement.
 
 ### B3: The API opens a browser for a session
 
@@ -84,25 +84,25 @@ SocketAddr) -> Self`.
 `async fn browser_launch_target(state, session_id) -> Result<LaunchTarget,
 Response>` with `LaunchTarget { proxy_addr, main_proxy_addr, session }`.
 
-- [ ] Tests: no session and the active session's id give the main listener and
+- [x] Tests: no session and the active session's id give the main listener and
   no session, and are refused while the proxy is offline; another session gives
   its port, opens it, and is not refused while the main listener is offline; an
   unknown session is 404; deleting a session removes its profiles.
-- [ ] Implement; sweep session profiles at start-up and at each launch.
+- [x] Implement; sweep session profiles at start-up and at each launch.
 
 ### B4: CLI and documents
 
 **Files:** `src/bin/sniper-cli.rs`, `docs/guides/cli.md`, the operator skill,
 `AGENTS.md`.
 
-- [ ] `capture browser open --session-id <uuid>`; the body carries `session_id`
+- [x] `capture browser open --session-id <uuid>`; the body carries `session_id`
   only when it is given.
 
 ### B5: Runtime test, deploy, review
 
-- [ ] Isolated instance with a scratch `HOME` and a script for Chromium: a
+- [x] Isolated instance with a scratch `HOME` and a script for Chromium: a
   launch for a session reports the session port and the session profile, and
   the script was given that proxy; a launch without a session reports the main
   listener and the shared profile; deleting the session removes its profile
   once the script has ended.
-- [ ] Deploy. One reviewer.
+- [x] Deploy. One reviewer.
