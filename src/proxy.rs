@@ -1498,6 +1498,24 @@ async fn handle_connect(
             )
             .await;
         }
+        // A tunnel to one of Sniper's own proxy listeners, the main one or a
+        // session's port, comes back in as a local client.
+        if let Some(proxy_addr) = own_proxy_listener_for(&state, &session, uri).await {
+            return record_connect_rejection(
+                &state,
+                &session,
+                request.uri(),
+                request.headers(),
+                started_at,
+                started,
+                StatusCode::LOOP_DETECTED,
+                format!(
+                    "CONNECT target resolves to Sniper's own proxy listener ({proxy_addr}); refusing to open a proxy loop."
+                ),
+                request_http_version,
+            )
+            .await;
+        }
     }
     let request_capture = MessageRecord::from_headers_and_body(
         request.headers(),
@@ -10803,6 +10821,20 @@ mod tests {
                 "{open}"
             );
         }
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn another_machine_is_refused_the_proxy_listener_itself() {
+        let (state, data_dir) = test_proxy_state("sniper-proxy-self-guard");
+        state
+            .set_active_proxy_addr("0.0.0.0:18080".parse().unwrap())
+            .await;
+        let remote: IpAddr = "192.0.2.10".parse().unwrap();
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let proxy_loopback: Uri = "http://127.0.0.1:18080/".parse().unwrap();
+        assert!(remote_client_reaches_guarded(&state, remote, &proxy_loopback).await);
+        assert!(!remote_client_reaches_guarded(&state, local, &proxy_loopback).await);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

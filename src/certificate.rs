@@ -17,7 +17,10 @@ use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
     ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
 };
-use rustls::{Certificate as RustlsCertificate, PrivateKey, ServerConfig};
+use rustls::{
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    ServerConfig,
+};
 use serde::{Deserialize, Serialize};
 use tokio_rustls::TlsAcceptor;
 use tracing::warn;
@@ -595,17 +598,19 @@ fn build_special_host_tls_config(
         .signed_by(&leaf_key, issuer_certificate, issuer_key)
         .context("failed to sign special host certificate")?;
 
-    let mut server_config = ServerConfig::builder()
-        .with_safe_defaults()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![
-                RustlsCertificate(leaf_certificate.der().as_ref().to_vec()),
-                RustlsCertificate(root_cert_der.to_vec()),
-            ],
-            PrivateKey(leaf_key.serialize_der()),
-        )
-        .context("failed to build special host TLS config")?;
+    let mut server_config =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .context("failed to select TLS protocol versions for special host")?
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![
+                    CertificateDer::from(leaf_certificate.der().as_ref().to_vec()),
+                    CertificateDer::from(root_cert_der.to_vec()),
+                ],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
+            )
+            .context("failed to build special host TLS config")?;
     server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
     Ok(CachedTlsConfig {
@@ -654,17 +659,19 @@ fn build_signed_host_tls_config(
         .signed_by(&leaf_key, issuer_certificate, issuer_key)
         .context("failed to sign host MITM certificate")?;
 
-    let mut server_config = ServerConfig::builder()
-        .with_safe_defaults()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![
-                RustlsCertificate(leaf_certificate.der().as_ref().to_vec()),
-                RustlsCertificate(root_cert_der.to_vec()),
-            ],
-            PrivateKey(leaf_key.serialize_der()),
-        )
-        .context("failed to build host MITM TLS config")?;
+    let mut server_config =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .context("failed to select TLS protocol versions for host MITM")?
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![
+                    CertificateDer::from(leaf_certificate.der().as_ref().to_vec()),
+                    CertificateDer::from(root_cert_der.to_vec()),
+                ],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
+            )
+            .context("failed to build host MITM TLS config")?;
     server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
     Ok(CachedTlsConfig {

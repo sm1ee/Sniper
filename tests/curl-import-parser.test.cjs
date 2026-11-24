@@ -237,6 +237,11 @@ test('-F parameters, quoting and file fields follow curl', () => {
   assert.deepEqual(field('a=@x.bin;filename="b;c.png"'), part('a', { file: 'x.bin', filename: 'b;c.png', type: 'image/png' }));
   assert.deepEqual(field('a=@x;type=text/plain; charset=utf-8 ;filename=y'),
     part('a', { file: 'x', filename: 'y', type: 'text/plain; charset=utf-8' }));
+  assert.deepEqual(field('a=@x;type=text/plain ;filename=y'),
+    part('a', { file: 'x', filename: 'y', type: 'text/plain' }));
+  assert.deepEqual(field('a=@x;type="application/json";filename=y'),
+    part('a', { file: 'x', filename: 'y', type: 'application/json' }));
+  assert.deepEqual(field('a=@x;filename='), part('a', { file: 'x', filename: null, type: 'application/octet-stream' }));
   // curl drops a guessed text/plain from a part without a file name.
   assert.deepEqual(field('a=<notes.txt;filename=ignored'), part('a', { file: 'notes.txt' }));
   assert.deepEqual(field('a=<page.html'), part('a', { file: 'page.html', type: 'text/html' }));
@@ -252,7 +257,7 @@ test('-F parameters, quoting and file fields follow curl', () => {
   assert.deepEqual(field('a=v;filename=r.txt'), part('a', { content: 'v', filename: 'r.txt', type: 'text/plain' }));
   assert.deepEqual(field('=v'), part('', { content: 'v' }));
   assert.deepEqual(field('a=@x;type=y', true), part('a', { content: '@x;type=y' }));
-  for (const value of ['novalue', 'a=@x,y', 'a=v;encoder=base64', 'a=v;headers=@h.txt', 'a=(', '=)']) {
+  for (const value of ['novalue', 'a=@x,y', 'a=v;encoder=base64', 'a=@x;type=text/plain ;encoder=base64', 'a=v;headers=@h.txt', 'a=v;headers= @h.txt', 'a=(', '=)']) {
     assert.ok(c.parseCurlFormField(value).error, value);
   }
 });

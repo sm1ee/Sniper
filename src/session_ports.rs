@@ -1079,6 +1079,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    // A tunnel to one of Sniper's own proxy listeners comes back in as a local
+    // client, whatever it then carries. That holds for a session's port as it
+    // does for the main listener.
+    #[tokio::test]
+    async fn a_tunnel_to_one_of_snipers_proxy_listeners_is_refused_as_a_loop() {
+        let _work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let dir = scratch("tunnel-loop");
+        let state = state_in(&dir);
+        let agent = inactive_session(&state, "agent").await;
+        let main = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let main_addr = main.local_addr().unwrap();
+        state.set_active_proxy_addr(main_addr).await;
+        let main_task = tokio::spawn(crate::proxy::serve_proxy(main, state.clone()));
+        let port = port_addr(&state.open_session_port(agent).await.unwrap());
+
+        for (through, target) in [(main_addr, port), (port, main_addr), (port, port)] {
+            let mut stream = TcpStream::connect(through).await.unwrap();
+            stream
+                .write_all(
+                    format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                match stream.read_u8().await {
+                    Ok(byte) => head.push(byte),
+                    Err(_) => break,
+                }
+            }
+            let status = String::from_utf8_lossy(&head);
+            assert!(
+                status.starts_with("HTTP/1.1 508"),
+                "{through} to {target}: {status}"
+            );
+        }
+
+        state.close_session_port(agent).await.unwrap();
+        main_task.abort();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn an_upstream_proxy_that_is_a_session_port_is_not_saved() {
         let dir = scratch("upstream-save");

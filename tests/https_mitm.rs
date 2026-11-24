@@ -6,7 +6,10 @@ use http_body_util::BodyExt;
 use hyper::{body::Incoming, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use rcgen::generate_simple_self_signed;
-use rustls::{Certificate, ClientConfig, PrivateKey, RootCertStore, ServerConfig, ServerName};
+use rustls::{
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName},
+    ClientConfig, RootCertStore, ServerConfig,
+};
 use sniper::{
     config::AppConfig,
     model::{MessageRecord, TransactionRecord, TransactionSummary},
@@ -53,12 +56,16 @@ async fn proxy_mitm_captures_inner_https_requests() {
 
     let mut roots = RootCertStore::empty();
     roots
-        .add(&Certificate(state.certificates.root_der_bytes().to_vec()))
+        .add(CertificateDer::from(
+            state.certificates.root_der_bytes().to_vec(),
+        ))
         .unwrap();
-    let client_config = ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let client_config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(client_config));
     let server_name = ServerName::try_from("localhost").unwrap();
     let mut tls_stream = connector.connect(server_name, stream).await.unwrap();
@@ -216,11 +223,16 @@ async fn start_https_upstream() -> HttpsUpstream {
     let certificate = generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
     let cert_der = certificate.cert.der().to_vec();
     let key_der = certificate.key_pair.serialize_der();
-    let server_config = ServerConfig::builder()
-        .with_safe_defaults()
-        .with_no_client_auth()
-        .with_single_cert(vec![Certificate(cert_der)], PrivateKey(key_der))
-        .unwrap();
+    let server_config =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(cert_der)],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der)),
+            )
+            .unwrap();
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();

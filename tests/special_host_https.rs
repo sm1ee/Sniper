@@ -1,6 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
-use rustls::{Certificate, ClientConfig, RootCertStore, ServerName};
+use rustls::{
+    pki_types::{CertificateDer, ServerName},
+    ClientConfig, RootCertStore,
+};
 use sniper::{config::AppConfig, proxy::serve_proxy, state::AppState, store::ListFilters};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -41,13 +44,17 @@ async fn https_sniper_serves_the_certificate_portal() {
 
     let mut roots = RootCertStore::empty();
     roots
-        .add(&Certificate(state.certificates.root_der_bytes().to_vec()))
+        .add(CertificateDer::from(
+            state.certificates.root_der_bytes().to_vec(),
+        ))
         .unwrap();
 
-    let client_config = ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let client_config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(client_config));
     let server_name = ServerName::try_from("sniper").unwrap();
     let mut tls_stream = connector.connect(server_name, stream).await.unwrap();
@@ -115,13 +122,17 @@ async fn https_sniper_head_special_host_does_not_send_body() {
 
     let mut roots = RootCertStore::empty();
     roots
-        .add(&Certificate(state.certificates.root_der_bytes().to_vec()))
+        .add(CertificateDer::from(
+            state.certificates.root_der_bytes().to_vec(),
+        ))
         .unwrap();
 
-    let client_config = ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let client_config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(client_config));
     let server_name = ServerName::try_from("sniper").unwrap();
     let mut tls_stream = connector.connect(server_name, stream).await.unwrap();
@@ -207,13 +218,17 @@ async fn https_sniper_records_non_default_connect_port() {
 
     let mut roots = RootCertStore::empty();
     roots
-        .add(&Certificate(state.certificates.root_der_bytes().to_vec()))
+        .add(CertificateDer::from(
+            state.certificates.root_der_bytes().to_vec(),
+        ))
         .unwrap();
 
-    let client_config = ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let client_config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(client_config));
     let server_name = ServerName::try_from("sniper").unwrap();
     let mut tls_stream = connector.connect(server_name, stream).await.unwrap();

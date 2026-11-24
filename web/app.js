@@ -351,10 +351,11 @@ function binaryBodyText(base64) {
 function binaryBodyBase64(text) {
   const source = String(text ?? "");
   if (!/[^\x00-\xff]/.test(source)) return btoa(source);
+  const encoder = new TextEncoder();
   let bytes = "";
   for (const character of source) {
     if (character.codePointAt(0) <= 0xff) bytes += character;
-    else for (const byte of new TextEncoder().encode(character)) bytes += String.fromCharCode(byte);
+    else for (const byte of encoder.encode(character)) bytes += String.fromCharCode(byte);
   }
   return btoa(bytes);
 }
@@ -14706,12 +14707,13 @@ function handleInterceptDraftReadFailure(queue, status, { capture = false, owner
   const bytes = Boolean(view);
   const original = response ? buildEditableRawResponse(record.response, { bytes })
     : buildEditableRawRequest(record.request, true, { bytes });
-  // A native textarea normalizes line endings. Compare without them, and keep
-  // the text retained for recovery as it is.
-  const comparableOriginal = original.replace(/\r\n?/g, "\n");
+  // Only a native textarea (or a view without exact line-ending tracking)
+  // normalizes line endings; SniperCodeView preserves exact CR/CRLF/LF bytes.
+  const normalize = value => (view?.preservesLineEndings ? value : value.replace(/\r\n?/g, "\n"));
+  const comparableOriginal = normalize(original);
   // Read at failure settlement so typing during the fetch is included. Empty
   // and invalid drafts are still edits; parsing belongs to explicit Forward.
-  state[key] = typeof text === "string" && text.replace(/\r\n?/g, "\n") !== comparableOriginal
+  state[key] = typeof text === "string" && normalize(text) !== comparableOriginal
     ? { sessionId: currentSessionId(), workspaceGeneration: workspaceStateGeneration, id, owner: {}, text } : null;
 }
 
@@ -16571,9 +16573,9 @@ function replayDraftShown(draft, tab = getActiveReplayTab(), shown = null) {
     : rawRequestWithBinaryBody(draft);
 }
 
-function replayEditorShowsDraft(shown, draft) {
-  return replayRequestTextsEquivalent(shown, draft) || shown === replayRequestEditorText(draft)
-    || replayDraftFromEditor(shown) === draft;
+function replayEditorShowsDraft(shown, draft, tab = getActiveReplayTab()) {
+  return replayRequestTextsEquivalent(shown, draft) || shown === replayRequestEditorText(draft, tab)
+    || replayDraftFromEditor(shown, tab) === draft;
 }
 
 function syncReplayRequestTextFromEditor(shownText, validatedCandidate = null) {
@@ -17623,8 +17625,10 @@ function renderFuzzer() {
     // A session/workspace replacement retires history even for identical text.
     // A binary body shows in bytes, and stays as typed while it holds the draft.
     const shown = fuzzerShownText(state.fuzzerRequestText);
+    // The exact text where the view keeps line endings, as the request has them.
+    const typed = cv && (typeof cv.getText === "function" ? cv.getText() : cv.getContent());
     if (!cv || cv._owner !== owner || cv._editable !== (workspaceLoaded && !binaryMarkersBlocked)
-      || (cv.getText() !== shown && fuzzerStoredText(cv.getText()) !== state.fuzzerRequestText)) {
+      || (typed !== shown && fuzzerStoredText(typed) !== state.fuzzerRequestText)) {
       updateCodePaneCM("fuzzerReq", els.fuzzerRequestCM, shown, {
         mode: "http", readOnly: !workspaceLoaded || binaryMarkersBlocked, owner,
         payloadHighlight: true,
@@ -18976,16 +18980,17 @@ function fuzzerMarkerDraft(raw) {
 
 function fuzzerRequestTextForAction() {
   const editor = getCMView("fuzzerReq");
+  const hasExact = typeof editor?.getText === "function";
   const saved = String(state.fuzzerRequestText || "");
-  if (fuzzerBodyIsBinary() && editor?.getText) {
+  if (fuzzerBodyIsBinary() && hasExact) {
     const shown = editor.getText();
     // A body that will not show as bytes is shown as it is stored.
     return shown === fuzzerShownText(saved) ? saved : fuzzerStoredText(shown);
   }
-  const visible = editor ? editor.getContent() : els.fuzzerRequestEditor?.value;
-  // CodeMirror normalizes line breaks. Preserve the untouched source bytes when
-  // its displayed document still matches that source (notably multipart CRLF).
-  if (visible == null || String(visible) === saved.replace(/\r\n?/g, "\n")) return saved;
+  const visible = editor ? (hasExact ? editor.getText() : editor.getContent()) : els.fuzzerRequestEditor?.value;
+  // Native textareas (and views without getText) normalize line breaks; keep
+  // untouched source bytes when their text still matches (notably CRLF).
+  if (visible == null || (!hasExact && String(visible) === saved.replace(/\r\n?/g, "\n"))) return saved;
   return String(visible);
 }
 
@@ -21740,8 +21745,10 @@ async function forwardSelectedIntercept() {
   // Comparing the parsed request against the held one on the server reports edits
   // that never happened, because the round trip through text normalises headers
   // and can rewrite Content-Length on its own.
-  const edited = interceptReqText.replace(/\r\n?/g, "\n")
-    !== buildEditableRawRequest(state.selectedInterceptRecord.request, true, { bytes }).replace(/\r\n?/g, "\n");
+  const originalReqText = buildEditableRawRequest(state.selectedInterceptRecord.request, true, { bytes });
+  const edited = view?.preservesLineEndings
+    ? interceptReqText !== originalReqText
+    : interceptReqText.replace(/\r\n?/g, "\n") !== originalReqText.replace(/\r\n?/g, "\n");
   if (state.selectedInterceptRecord.is_websocket && request.body) {
     showToast("WebSocket upgrade requests must not include a request body.", "error");
     return;
@@ -22085,8 +22092,10 @@ async function forwardSelectedResponseIntercept() {
     state.selectedResponseInterceptRecord.method,
     { bytes },
   );
-  const edited = interceptResText.replace(/\r\n?/g, "\n")
-    !== buildEditableRawResponse(state.selectedResponseInterceptRecord.response, { bytes }).replace(/\r\n?/g, "\n");
+  const originalResText = buildEditableRawResponse(state.selectedResponseInterceptRecord.response, { bytes });
+  const edited = view?.preservesLineEndings
+    ? interceptResText !== originalResText
+    : interceptResText.replace(/\r\n?/g, "\n") !== originalResText.replace(/\r\n?/g, "\n");
 
   // Optimistic UI
   state.responseIntercepts = state.responseIntercepts.filter((i) => i.id !== id);
@@ -23099,7 +23108,7 @@ function replayRequestEditCandidate(tab, newText) {
 }
 
 function acceptReplayRequestEdit(text, tab = getActiveReplayTab(), acceptedCandidate = null) {
-  if (!tab || tab.type === "websocket" || replayEditorShowsDraft(text, tab.requestText)) return true;
+  if (!tab || tab.type === "websocket" || replayEditorShowsDraft(text, tab.requestText, tab)) return true;
   if (!canStoreReplayRequest(text, null)) return false;
   const candidate = replayRequestEditCandidate(tab, text);
   if (!canStoreReplayRequest(candidate.requestText, candidate.request || tab.baseRequest)) return false;
@@ -33898,15 +33907,23 @@ function parseCurlFormField(value, literal = false) {
     const p = skipSpace(at + 1);
     const key = /^(type|filename|headers|encoder)=/i.exec(text.slice(p))?.[1].toLowerCase();
     if (key === "type" && typeStart < 0) {
-      typeStart = at = skipSpace(p + 5);
-      while (at < text.length && !'()<>@,;:\\"[]?=\r\n '.includes(text[at])) at += 1;
-      field.type = text.slice(typeStart, at);
+      const valueStart = skipSpace(p + 5);
+      if (text[valueStart] === '"') {
+        const [found, end] = word(valueStart);
+        field.type = found;
+        at = end;
+      } else {
+        typeStart = at = valueStart;
+        while (at < text.length && !'()<>@,;:\\"[]?=\r\n '.includes(text[at])) at += 1;
+        field.type = text.slice(typeStart, at);
+        at = skipSpace(at);
+      }
     } else if (key && key !== "type") {
       typeStart = -1;
       if (key === "encoder") return { error: "cURL -F encoder= imports are not supported." };
-      if (key === "headers" && /[@<]/.test(text[p + 8] || "")) return { error: "cURL -F headers= files are not supported." };
+      if (key === "headers" && /[@<]/.test(text[skipSpace(p + 8)] || "")) return { error: "cURL -F headers= files are not supported." };
       const [found, end] = word(p + key.length + 1);
-      if (key === "filename") field.filename = found;
+      if (key === "filename") field.filename = found || null;
       else field.headers.push(found);
       at = end;
     } else if (typeStart >= 0) {
@@ -35504,6 +35521,7 @@ class SniperCodeView {
   constructor(container, options = {}, editorState = null) {
     this._options = options;
     this._searchNavIndex = -1;
+    this.preservesLineEndings = true;
     this.view = new CM.EditorView({
       state: editorState || CM.EditorState.create({
         // Initial content is a baseline, not an undoable edit from an empty pane.

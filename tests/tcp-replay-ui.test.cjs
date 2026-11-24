@@ -80,3 +80,34 @@ test("messages can be added and removed, and one that does not parse stops the s
   f.requests[0].resolve("TCP history is full. Clear it to replay.", 409); await tick();
   assert.equal(f.get("tcpReplayError").textContent, "TCP history is full. Clear it to replay.");
 });
+
+test("Replay supports messages larger than 16 KiB and ignores responses after reset", async () => {
+  const f = fixture();
+  const large = Buffer.alloc(20 * 1024, 0x41);
+  f.controller.load({ ...record, chunks: [{ sequence: 0, direction: "client_to_server", offset: 0, data_base64: large.toString("base64") }] });
+  f.get("tcpReplayTextMode").listeners.click();
+  assert.equal(f.editors()[0].value.length, 20 * 1024);
+  f.get("tcpReplaySend").listeners.click();
+  assert.equal(f.requests.length, 1);
+  assert.equal(JSON.parse(f.requests[0].options.body).messages[0], large.toString("base64"));
+  f.controller.reset();
+  assert.equal(f.get("tcpReplaySend").disabled, false);
+  f.requests[0].resolve({ id: "stale", source: "replay" }); await tick();
+  assert.deepEqual(f.sent, [], "stale replay completion after session reset must be ignored");
+});
+
+test("requestError maps 404 unknown TCP listener to the removed-listener message", async () => {
+  const message = await tcp.requestError({ status: 404, text: async () => "unknown TCP listener" });
+  assert.equal(message, "This listener was removed. Refresh and try again.");
+});
+
+test("Replay preserves unsent edits when reloading the same connection, and reloads on another", () => {
+  const f = fixture();
+  f.controller.load(record);
+  f.get("tcpReplayTextMode").listeners.click();
+  f.editors()[0].value = "edited"; f.editors()[0].listeners.input();
+  f.controller.load(record);
+  assert.deepEqual(f.editors().map(editor => editor.value), ["edited", "two"]);
+  f.controller.load({ ...record, id: "c2" });
+  assert.deepEqual(f.editors().map(editor => editor.value), ["one", "two"]);
+});
