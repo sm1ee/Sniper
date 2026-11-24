@@ -320,6 +320,7 @@ impl AppState {
             }
         }
         self.proxy_online.store(online, Ordering::Relaxed);
+        self.own_listeners.set_main_listening(online);
     }
 
     pub fn is_proxy_online(&self) -> bool {
@@ -337,6 +338,7 @@ impl AppState {
                 .is_ok()
             {
                 self.proxy_online.store(true, Ordering::Relaxed);
+                self.own_listeners.set_main_listening(true);
                 return next_generation;
             }
         }
@@ -356,6 +358,7 @@ impl AppState {
             .is_ok()
         {
             self.proxy_online.store(false, Ordering::Relaxed);
+            self.own_listeners.set_main_listening(false);
             true
         } else {
             false
@@ -926,6 +929,17 @@ impl AppState {
         &self,
         id: uuid::Uuid,
     ) -> Result<crate::session_ports::SessionPortStatus> {
+        Ok(self.open_session_port_as(id).await?.0)
+    }
+
+    /// `open_session_port`, and which opening this call made when it was the
+    /// one that opened the port. A caller that opens the port for something
+    /// that then falls through closes it with that
+    /// (`close_session_port_opened_as`).
+    pub(crate) async fn open_session_port_as(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<(crate::session_ports::SessionPortStatus, Option<u64>)> {
         use crate::session_ports::{bind_announced, loopback, refused, MAX_OPEN};
         // Loaded before any lock is taken: activation, shutdown and the
         // desktop's quit all wait on the activation lock, and a load can take
@@ -941,7 +955,8 @@ impl AppState {
             return Err(refused("Sniper is shutting down"));
         }
         if self.session_ports.is_open(id) {
-            return Ok(self.session_ports.status(id));
+            self.session_ports.share(id);
+            return Ok((self.session_ports.status(id), None));
         }
         let main = self.get_active_proxy_addr().await;
         // One feed for each session: the session the main listener records
@@ -1020,10 +1035,10 @@ impl AppState {
         // through the session's TCP capture.
         self.arm_tcp_capture(&session).await;
         release_tcp_intercept(&session).await;
-        self.start_session_port(session, listener, addr);
+        let opening = self.start_session_port(session, listener, addr);
         drop(announced);
         tracing::info!(session_id = %id, %addr, "session port opened");
-        Ok(self.session_ports.status(id))
+        Ok((self.session_ports.status(id), Some(opening)))
     }
 
     /// Starts serving a bound session port and enters it in the registry.
@@ -1033,7 +1048,7 @@ impl AppState {
         session: Arc<SessionContext>,
         listener: tokio::net::TcpListener,
         addr: SocketAddr,
-    ) {
+    ) -> u64 {
         let state = Arc::new(self.clone());
         let served = session.clone();
         let accept = tokio::spawn(async move {
@@ -1041,7 +1056,7 @@ impl AppState {
                 tracing::error!(?error, %addr, "session port stopped");
             }
         });
-        self.session_ports.register(session, addr, accept);
+        self.session_ports.register(session, addr, accept)
     }
 
     /// Stops every proxy listener from accepting: each session port, then
@@ -1159,7 +1174,7 @@ impl AppState {
             }
             match crate::session_ports::bind_announced(&self.own_listeners, addr).await {
                 Ok((listener, announced)) => {
-                    self.start_session_port(session, listener, addr);
+                    let _ = self.start_session_port(session, listener, addr);
                     drop(announced);
                 }
                 Err(error) => {
@@ -1191,7 +1206,22 @@ impl AppState {
         // The API drops a request's future when the client disconnects, and a
         // port left half closed would be closed in the registry and still
         // serve the connections it had.
-        tokio::spawn(async move { state.finish_closing_session_port(id).await })
+        tokio::spawn(async move { state.finish_closing_session_port(id, None).await })
+            .await
+            .context("session port close task failed")?
+    }
+
+    /// Closes the port for the caller that opened it and has no use for it
+    /// after all, as a browser launch does when its browser does not start.
+    /// The port stays open when someone else asked for it since, or when it
+    /// is a later opening: that caller's connections must not be cut.
+    pub(crate) async fn close_session_port_opened_as(
+        &self,
+        id: uuid::Uuid,
+        opening: u64,
+    ) -> Result<crate::session_ports::SessionPortStatus> {
+        let state = self.clone();
+        tokio::spawn(async move { state.finish_closing_session_port(id, Some(opening)).await })
             .await
             .context("session port close task failed")?
     }
@@ -1199,12 +1229,17 @@ impl AppState {
     async fn finish_closing_session_port(
         &self,
         id: uuid::Uuid,
+        opening: Option<u64>,
     ) -> Result<crate::session_ports::SessionPortStatus> {
         let activation_guard = self.session_activation_lock.lock().await;
         // A delete or a switch that follows waits here until the port is
         // fully closed.
         let operation_lock = self.session_operation_lock(id).await;
         let _operation_guard = operation_lock.lock().await;
+        // Asked under the lock a port opens under, so the answer holds.
+        if opening.is_some_and(|opening| !self.session_ports.opened_alone(id, opening)) {
+            return Ok(self.session_ports.status(id));
+        }
         let Some(session) = self.session_ports.context(id) else {
             return Ok(self.session_ports.status(id));
         };
@@ -1479,6 +1514,9 @@ impl AppState {
                         session.clone()
                     } else {
                         let session = self.sessions.load_context(id)?;
+                        // Bound here and not only once the switch is
+                        // committed: it stays cached when that fails.
+                        self.bind_upstream_peer_durability(&session);
                         contexts.insert(id, session.clone());
                         session
                     }
@@ -5348,6 +5386,33 @@ mod tests {
             .change_tcp_listeners(crate::tcp_capture::ListenerChange::StopAll, None, None)
             .await
             .unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A context that an activation loaded stays cached when the activation
+    // does not go through, and a later write or a session port uses it. It
+    // must check its upstream proxy and its TCP relay against Sniper's own
+    // listeners like every other context.
+    #[tokio::test]
+    async fn a_context_loaded_by_a_failed_activation_knows_sniper_s_listeners() {
+        let (data_dir, state) = activation_commit_test_state();
+        let target = state
+            .sessions
+            .create_session(Some("target".to_owned()))
+            .unwrap();
+        state
+            .sessions
+            .fail_next_activation(crate::session::SessionActivationFault::BeforeReplacement);
+        assert!(state.activate_session(target.id).await.is_err());
+
+        let cached = state
+            .session_contexts
+            .lock()
+            .await
+            .get(&target.id)
+            .cloned()
+            .expect("the loaded context stays cached");
+        assert!(!cached.runtime.own_listeners().all().is_empty());
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

@@ -145,6 +145,8 @@ pub async fn run_with_config(config: AppConfig) -> Result<()> {
         }
         Err(bind_error) => {
             warn!(%bind_error, "proxy listener failed to bind — starting UI only");
+            // Something else has the port: its address is not Sniper's.
+            state.set_proxy_online(false);
             state
                 .log_error(
                     "runtime",

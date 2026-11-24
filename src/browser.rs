@@ -889,25 +889,26 @@ pub fn not_installed_message(kind: BrowserKind) -> String {
     }
 }
 
-enum Started {
-    /// A new process. `exited` reports its exit status text when it ends.
-    New {
-        pid: u32,
-        exited: mpsc::Receiver<Exit>,
-    },
-    /// An already-running browser took the request.
-    Reused(Owner),
+/// What `launch` refuses before it starts anything: a browser that is not
+/// installed, one that is not opened in this context, a URL it does not open.
+/// A caller that must open a port for the browser asks first, so that a
+/// launch refused for what it asks opens none.
+pub fn refusal(ctx: &LaunchContext<'_>, request: &LaunchRequest) -> Option<LaunchError> {
+    let kind = match choose(request.browser, ctx.preferred, find_executable) {
+        Ok((kind, ..)) => kind,
+        Err(error) => return Some(error),
+    };
+    refuse_before_start(ctx, kind, request).err()
 }
 
-async fn launch_at(
+/// The refusals that need nothing started, and the URL the browser opens.
+fn refuse_before_start(
     ctx: &LaunchContext<'_>,
     kind: BrowserKind,
-    exe: &Path,
-    request: LaunchRequest,
-) -> Result<LaunchedBrowser, LaunchError> {
+    request: &LaunchRequest,
+) -> Result<String, LaunchError> {
     let driver = kind.driver();
-    let wants_port = driver.opens_port(request.agent);
-    if wants_port && !ctx.main_proxy_addr.ip().is_loopback() {
+    if driver.opens_port(request.agent) && !ctx.main_proxy_addr.ip().is_loopback() {
         // The header guards on the API only keep web pages out, and a proxy that
         // listens beyond loopback relays requests to local ports, including this
         // one, which hands over the browser's logged-in sessions. A session's own
@@ -926,7 +927,28 @@ async fn launch_at(
             kind.name()
         )));
     }
-    let url = validate_url(request.url.as_deref().unwrap_or("about:blank"))?;
+    validate_url(request.url.as_deref().unwrap_or("about:blank"))
+}
+
+enum Started {
+    /// A new process. `exited` reports its exit status text when it ends.
+    New {
+        pid: u32,
+        exited: mpsc::Receiver<Exit>,
+    },
+    /// An already-running browser took the request.
+    Reused(Owner),
+}
+
+async fn launch_at(
+    ctx: &LaunchContext<'_>,
+    kind: BrowserKind,
+    exe: &Path,
+    request: LaunchRequest,
+) -> Result<LaunchedBrowser, LaunchError> {
+    let driver = kind.driver();
+    let wants_port = driver.opens_port(request.agent);
+    let url = refuse_before_start(ctx, kind, &request)?;
     let spki =
         spki_sha256_base64(ctx.cert_der).map_err(|error| LaunchError::Failed(error.to_string()))?;
     let proxy = proxy_arg(ctx.proxy_addr);
@@ -1826,12 +1848,22 @@ fn profile_is_held(profile: &Path) -> bool {
     live || read_owner(profile).is_some_and(|owner| {
         process_runs_as(owner.pid, &owner.exe) || lock_holder(profile, &owner.exe).is_some()
     })
+        // The record itself goes when the process Sniper started ends, so
+        // after a relaunch only the lock is left. With no executable to check
+        // its pid against, the process must be running on this profile.
+        || singleton_lock_pid(profile)
+            .and_then(process_args)
+            .is_some_and(|args| args.contains(&format!("--user-data-dir={}", profile.display())))
 }
 
 /// Removes the profiles in one session's directory, and the directory once it
 /// is empty. A profile a browser still holds is left for a later call: its
 /// files are in use, and removing them would break the browser.
 fn remove_idle_session_profiles(dir: &Path) {
+    // A link with a session's name leads somewhere that is not Sniper's.
+    if !fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()) {
+        return;
+    }
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -2942,6 +2974,48 @@ mod tests {
             fs::remove_file(profile.join("SingletonLock")).unwrap();
             assert_eq!(singleton_lock_pid(&profile), None, "no lock, no holder");
             let _ = fs::remove_dir_all(&profile);
+        }
+
+        // A browser that relaunched itself is named by no record: the record of
+        // the process Sniper started went when that process ended. Deleting its
+        // session must not remove the profile under it.
+        #[test]
+        fn a_session_profile_held_through_its_lock_alone_is_kept() {
+            let data_dir = scratch("session-profile-lock");
+            let session = Uuid::new_v4();
+            let profile =
+                session_profiles_dir(&data_dir.join("browser-profiles"), session).join("ego");
+            fs::create_dir_all(&profile).unwrap();
+            let successor = held_browser(&[format!("--user-data-dir={}", profile.display())]);
+            lock(&profile, &format!("host-{}", successor.id()));
+
+            remove_session_profiles(&data_dir, session);
+            assert!(profile.exists(), "a browser still runs on it");
+
+            // A lock left by a browser that has gone names nothing that holds it.
+            drop(successor);
+            remove_session_profiles(&data_dir, session);
+            assert!(!profile.exists());
+            let _ = fs::remove_dir_all(data_dir);
+        }
+
+        // The directory of a session that is gone can be a link someone put
+        // there. What it points at is not Sniper's to remove.
+        #[test]
+        fn a_link_named_like_a_session_s_profiles_is_not_followed() {
+            let data_dir = scratch("session-profile-link");
+            let root = data_dir.join("browser-profiles");
+            let outside = data_dir.join("elsewhere");
+            fs::create_dir_all(&root).unwrap();
+            fs::create_dir_all(outside.join("kept")).unwrap();
+            let session = Uuid::new_v4();
+            symlink(&outside, session_profiles_dir(&root, session)).unwrap();
+
+            sweep_session_profiles(&data_dir, |_| false);
+            remove_session_profiles(&data_dir, session);
+
+            assert!(outside.join("kept").exists());
+            let _ = fs::remove_dir_all(data_dir);
         }
 
         #[test]

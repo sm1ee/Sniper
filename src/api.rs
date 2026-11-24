@@ -7136,9 +7136,10 @@ struct LaunchTarget {
     main_proxy_addr: SocketAddr,
     /// Set when the browser is for a session with its own port.
     session: Option<Uuid>,
-    /// This call opened the session's port. A launch that then fails closes it
-    /// again, so a failed launch leaves nothing changed.
-    opened_port: bool,
+    /// Set when this call opened the session's port: which opening it made.
+    /// A launch that then fails closes that opening again, so a failed launch
+    /// leaves nothing changed.
+    opened: Option<u64>,
 }
 
 async fn browser_launch_target(
@@ -7161,16 +7162,19 @@ async fn browser_launch_target(
             proxy_addr: main_proxy_addr,
             main_proxy_addr,
             session: None,
-            opened_port: false,
+            opened: None,
         });
     };
     // Its own port is the only thing that records into this session, so the
     // launch opens it. It does not depend on the main listener being up.
-    let opened_port = !state.session_port_status(session).open;
-    let status = state
-        .open_session_port(session)
+    let (status, opened) = state
+        .open_session_port_as(session)
         .await
         .map_err(session_operation_error_response)?;
+    // Read again: a rebind of the main listener holds the lock the open
+    // waited for, and what the launch refuses depends on where that listener
+    // is now.
+    let main_proxy_addr = state.get_active_proxy_addr().await;
     let Some(proxy_addr) = status.proxy_addr.and_then(|addr| addr.parse().ok()) else {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -7182,8 +7186,20 @@ async fn browser_launch_target(
         proxy_addr,
         main_proxy_addr,
         session: Some(session),
-        opened_port,
+        opened,
     })
+}
+
+fn launch_error_response(error: LaunchError) -> Response {
+    let status = match error {
+        LaunchError::NotInstalled(_) => StatusCode::NOT_FOUND,
+        LaunchError::BadRequest(_) => StatusCode::BAD_REQUEST,
+        LaunchError::AlreadyRunning { .. } => StatusCode::CONFLICT,
+        LaunchError::TooMany(_) => StatusCode::TOO_MANY_REQUESTS,
+        LaunchError::Forbidden(_) => StatusCode::FORBIDDEN,
+        LaunchError::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, error.to_string()).into_response()
 }
 
 /// The saved default, or none if it is unset or names a browser this build does not
@@ -7276,6 +7292,34 @@ async fn launch_browser(
             }
         },
     };
+    let request = LaunchRequest {
+        browser: kind,
+        url: payload.url,
+        fresh: payload.fresh,
+        agent: payload.agent,
+    };
+    let preferred = preferred_browser(&state).await;
+    // Asked before the session's port is opened. A launch refused for what it
+    // asks would otherwise leave the session with a number it keeps for good,
+    // and with its TCP intercept released.
+    {
+        let main = state.get_active_proxy_addr().await;
+        let mut ctx = LaunchContext::new(
+            &state.config.data_dir,
+            main,
+            state.certificates.root_der_bytes(),
+        );
+        if let Some(session) = payload
+            .session_id
+            .filter(|id| *id != state.sessions.active_session_id())
+        {
+            ctx = ctx.for_session(session, main);
+        }
+        ctx.preferred = preferred;
+        if let Some(error) = browser::refusal(&ctx, &request) {
+            return launch_error_response(error);
+        }
+    }
     let target = match browser_launch_target(&state, payload.session_id).await {
         Ok(target) => target,
         Err(response) => return response,
@@ -7297,19 +7341,15 @@ async fn launch_browser(
     if let Some(session) = target.session {
         ctx = ctx.for_session(session, target.main_proxy_addr);
     }
-    ctx.preferred = preferred_browser(&state).await;
-    let request = LaunchRequest {
-        browser: kind,
-        url: payload.url,
-        fresh: payload.fresh,
-        agent: payload.agent,
-    };
+    ctx.preferred = preferred;
     match browser::launch(&ctx, request).await {
         Ok(launched) => Json(launched).into_response(),
         Err(error) => {
             // The port was opened for this browser, which did not open.
-            if let (Some(session), true) = (target.session, target.opened_port) {
-                if let Err(close_error) = state.close_session_port(session).await {
+            // Whoever else asked for the port meanwhile keeps it.
+            if let (Some(session), Some(opening)) = (target.session, target.opened) {
+                if let Err(close_error) = state.close_session_port_opened_as(session, opening).await
+                {
                     tracing::warn!(
                         ?close_error,
                         session_id = %session,
@@ -7317,15 +7357,7 @@ async fn launch_browser(
                     );
                 }
             }
-            let status = match error {
-                LaunchError::NotInstalled(_) => StatusCode::NOT_FOUND,
-                LaunchError::BadRequest(_) => StatusCode::BAD_REQUEST,
-                LaunchError::AlreadyRunning { .. } => StatusCode::CONFLICT,
-                LaunchError::TooMany(_) => StatusCode::TOO_MANY_REQUESTS,
-                LaunchError::Forbidden(_) => StatusCode::FORBIDDEN,
-                LaunchError::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (status, error.to_string()).into_response()
+            launch_error_response(error)
         }
     }
 }
@@ -11840,7 +11872,7 @@ mod tests {
                 .expect("the default session's browser uses the main listener");
             assert_eq!(target.proxy_addr, main);
             assert_eq!(target.session, None);
-            assert!(!target.opened_port);
+            assert!(target.opened.is_none());
         }
         assert_eq!(state.session_port_status(default).proxy_port, None);
 
@@ -11852,7 +11884,7 @@ mod tests {
         assert_eq!(target.session, Some(agent));
         assert_eq!(target.main_proxy_addr, main);
         assert!(target.proxy_addr.ip().is_loopback());
-        assert!(target.opened_port);
+        assert!(target.opened.is_some());
         assert_eq!(
             state.session_port_status(agent).proxy_addr,
             Some(target.proxy_addr.to_string())
@@ -11863,7 +11895,7 @@ mod tests {
             .ok()
             .unwrap();
         assert_eq!(again.proxy_addr, target.proxy_addr);
-        assert!(!again.opened_port);
+        assert!(again.opened.is_none());
 
         // The main listener being down stops only the browser that needs it.
         state.set_proxy_online(false);
@@ -11882,6 +11914,83 @@ mod tests {
             .expect("no such session");
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
 
+        state.close_session_port(agent).await.unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A launch refused for what it asks, and not for anything it started,
+    // leaves the session as it was: no port open, and no number given to it
+    // for good. No browser starts here: each request is refused before one
+    // would, whichever browsers this machine has.
+    #[tokio::test]
+    async fn a_browser_refused_before_it_starts_opens_no_port() {
+        let (state, data_dir) = test_state("sniper-api-browser-refused");
+        let agent = state
+            .create_inactive_session(Some("agent".into()))
+            .await
+            .unwrap()
+            .id;
+        for (payload, refusals) in [
+            // Not a URL a browser is opened with, or no browser to open.
+            (
+                serde_json::json!({ "session_id": agent, "url": "javascript:alert(1)" }),
+                [StatusCode::BAD_REQUEST, StatusCode::NOT_FOUND],
+            ),
+            // Aside is driven as one instance for the whole machine, or is
+            // not installed.
+            (
+                serde_json::json!({ "session_id": agent, "browser": "aside" }),
+                [StatusCode::FORBIDDEN, StatusCode::NOT_FOUND],
+            ),
+        ] {
+            let response = super::launch_browser(
+                State(state.clone()),
+                Json(serde_json::from_value(payload).unwrap()),
+            )
+            .await;
+            assert!(
+                refusals.contains(&response.status()),
+                "{}",
+                response.status()
+            );
+            let port = state.session_port_status(agent);
+            assert!(!port.open);
+            assert_eq!(port.proxy_port, None, "the session is given no number");
+        }
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // The driver-port refusal asks where the main listener is. A rebind holds
+    // the lock a port opens under, so the address read before the open can be
+    // the one from before the rebind.
+    #[tokio::test]
+    async fn a_launch_reads_where_the_main_listener_is_after_its_port_opens() {
+        let (state, data_dir) = test_state("sniper-api-browser-rebind");
+        state
+            .set_active_proxy_addr("127.0.0.1:18890".parse().unwrap())
+            .await;
+        let agent = state
+            .create_inactive_session(Some("agent".into()))
+            .await
+            .unwrap()
+            .id;
+        let rebind = state.hold_session_activation().await;
+        let launching = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                super::browser_launch_target(&state, Some(agent))
+                    .await
+                    .ok()
+                    .map(|target| target.main_proxy_addr)
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!launching.is_finished(), "the open waits for the rebind");
+        let moved: std::net::SocketAddr = "0.0.0.0:18890".parse().unwrap();
+        state.set_active_proxy_addr(moved).await;
+        drop(rebind);
+
+        assert_eq!(launching.await.unwrap(), Some(moved));
         state.close_session_port(agent).await.unwrap();
         let _ = std::fs::remove_dir_all(data_dir);
     }

@@ -94,6 +94,9 @@ pub struct OwnListeners(Arc<std::sync::RwLock<OwnAddrs>>);
 struct OwnAddrs {
     ui: Option<SocketAddr>,
     main: Option<SocketAddr>,
+    /// The main listener is not bound. Its address is then whoever has the
+    /// port, which can be the application under test.
+    main_down: bool,
     session_ports: Vec<SocketAddr>,
     /// Session ports that are being opened; see `OwnListeners::announce`.
     opening: Vec<SocketAddr>,
@@ -134,6 +137,12 @@ impl OwnListeners {
         self.write().main = Some(addr);
     }
 
+    /// Whether the main listener is bound. Until it is first told otherwise
+    /// the address counts, so the guards know it before the listener starts.
+    pub(crate) fn set_main_listening(&self, listening: bool) {
+        self.write().main_down = !listening;
+    }
+
     /// Makes the guards know `addr` before anything listens there. A listener
     /// takes connections from the moment it listens: one that a client on
     /// another machine got through the main listener in that moment would
@@ -150,7 +159,8 @@ impl OwnListeners {
     /// open or being opened.
     pub fn proxies(&self) -> Vec<SocketAddr> {
         let own = self.read();
-        let mut proxies: Vec<SocketAddr> = own.main.into_iter().collect();
+        let mut proxies: Vec<SocketAddr> =
+            own.main.filter(|_| !own.main_down).into_iter().collect();
         for addr in own.session_ports.iter().chain(&own.opening) {
             if !proxies.contains(addr) {
                 proxies.push(*addr);
@@ -215,6 +225,11 @@ struct OpenPort {
     addr: SocketAddr,
     session: Arc<SessionContext>,
     accept: JoinHandle<()>,
+    /// Which opening this is. A caller that opened the port for something
+    /// that then fell through closes this opening and no later one.
+    opening: u64,
+    /// Someone asked for the port after it was open, and uses it.
+    shared: bool,
 }
 
 struct Inner {
@@ -222,6 +237,8 @@ struct Inner {
     /// then stay closed, because nobody knows which numbers are taken.
     numbers: std::result::Result<Numbers, String>,
     open: HashMap<Uuid, OpenPort>,
+    /// How many ports were opened so far, which numbers each opening.
+    openings: u64,
     /// The ports a shutdown stopped, with the context each held, so a
     /// shutdown that does not go through can open them again.
     suspended: Vec<(Arc<SessionContext>, SocketAddr)>,
@@ -258,6 +275,7 @@ impl SessionPorts {
             inner: Mutex::new(Inner {
                 numbers,
                 open: HashMap::new(),
+                openings: 0,
                 suspended: Vec::new(),
             }),
             own,
@@ -333,19 +351,24 @@ impl SessionPorts {
         }
     }
 
+    /// Enters an open port and says which opening it is.
     pub(crate) fn register(
         &self,
         session: Arc<SessionContext>,
         addr: SocketAddr,
         accept: JoinHandle<()>,
-    ) {
+    ) -> u64 {
         let mut inner = self.inner();
+        inner.openings += 1;
+        let opening = inner.openings;
         let replaced = inner.open.insert(
             session.id(),
             OpenPort {
                 addr,
                 session,
                 accept,
+                opening,
+                shared: false,
             },
         );
         debug_assert!(replaced.is_none(), "a session has one port");
@@ -353,6 +376,23 @@ impl SessionPorts {
             replaced.accept.abort();
         }
         self.own.write().session_ports = open_addrs(&inner);
+        opening
+    }
+
+    /// Notes that a caller was handed a port that was open already.
+    pub(crate) fn share(&self, session: Uuid) {
+        if let Some(port) = self.inner().open.get_mut(&session) {
+            port.shared = true;
+        }
+    }
+
+    /// Whether the session's port is still the one `opening` made, and
+    /// nobody else asked for it since.
+    pub(crate) fn opened_alone(&self, session: Uuid, opening: u64) -> bool {
+        self.inner()
+            .open
+            .get(&session)
+            .is_some_and(|port| port.opening == opening && !port.shared)
     }
 
     /// Stops the port from accepting and forgets it. The listener is closed
@@ -1729,6 +1769,85 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+    }
+
+    // The main listener's address is whoever has the port while that listener
+    // is down, and that can be the application under test. Requests to it
+    // through a session port were refused as a loop.
+    #[tokio::test]
+    async fn the_main_listeners_address_is_not_sniper_s_while_that_listener_is_down() {
+        let _work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let data_dir = scratch("main-down");
+        let state = state_in(&data_dir);
+        let agent = inactive_session(&state, "agent").await;
+        let port = port_addr(&state.open_session_port(agent).await.unwrap());
+
+        // The address the main listener is set to, which another program has.
+        let app = upstream().await;
+        state.set_active_proxy_addr(app).await;
+        state.set_proxy_online(false);
+        assert!(get_through(port, app, "/app").await.contains(" 200"));
+        assert!(!state.own_listeners().all().contains(&app));
+
+        let echo = echo_upstream().await;
+        state.set_active_proxy_addr(echo).await;
+        let mut tunnel = open_tunnel(port, echo).await;
+        assert!(echoes(&mut tunnel, b"\x00not http").await);
+        drop(tunnel);
+
+        // Up again, it is Sniper's own, and a request to it would go round.
+        state.set_active_proxy_addr(app).await;
+        state.set_proxy_online(true);
+        assert!(get_through(port, app, "/loop").await.contains(" 508"));
+
+        state.close_session_port(agent).await.unwrap();
+        drop(state);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A browser launch opens the session's port and closes it again when the
+    // browser does not start. It must not close a port another caller asked
+    // for meanwhile, or one that was closed and opened again since.
+    #[tokio::test]
+    async fn a_port_is_given_back_only_by_the_call_that_opened_it_alone() {
+        let data_dir = scratch("give-back");
+        let state = state_in(&data_dir);
+        let agent = inactive_session(&state, "agent").await;
+
+        let (_, opening) = state.open_session_port_as(agent).await.unwrap();
+        let opening = opening.expect("this call opened the port");
+        // Another caller asks and is handed the open port.
+        let (status, second) = state.open_session_port_as(agent).await.unwrap();
+        assert!(status.open && second.is_none());
+        state
+            .close_session_port_opened_as(agent, opening)
+            .await
+            .unwrap();
+        assert!(
+            state.session_port_status(agent).open,
+            "another caller uses it"
+        );
+
+        // Closed and opened again by someone else: not the first opener's.
+        state.close_session_port(agent).await.unwrap();
+        state.open_session_port(agent).await.unwrap();
+        state
+            .close_session_port_opened_as(agent, opening)
+            .await
+            .unwrap();
+        assert!(state.session_port_status(agent).open);
+        state.close_session_port(agent).await.unwrap();
+
+        // Alone, the opener gives it back.
+        let (_, opening) = state.open_session_port_as(agent).await.unwrap();
+        state
+            .close_session_port_opened_as(agent, opening.unwrap())
+            .await
+            .unwrap();
+        assert!(!state.session_port_status(agent).open);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]

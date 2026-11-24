@@ -294,6 +294,8 @@ fn run_desktop() -> Result<()> {
         ));
         Some(proxy_generation)
     } else {
+        // Something else has the port: its address is not Sniper's.
+        state.set_proxy_online(false);
         runtime.block_on(state.log_error(
             "runtime",
             "Proxy listener failed",
