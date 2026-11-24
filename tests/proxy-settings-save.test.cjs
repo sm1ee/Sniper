@@ -211,7 +211,7 @@ test("Save and Revert show only while the form differs from what was loaded", ()
   assert.equal(f.posts.length, 0, "showing the bar saves nothing");
 });
 
-// The indicator, the sidebar and the Session tab print the main listener's
+// The indicator, the sidebar and the session page print the main listener's
 // port. A rebind changed the address in memory and redrew none of them, and a
 // listener that had failed to bind stayed "Offline" on its new port.
 test("a rebind redraws what prints the proxy's port, with the listener up", async () => {

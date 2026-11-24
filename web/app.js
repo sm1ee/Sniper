@@ -510,6 +510,9 @@ const state = {
   // Sessions whose jobs ended while another session was open: id → job kinds.
   sessionsFinished: new Map(),
   dashboardStorageSessionId: null,
+  // The session page's view, and the session its Overview shows.
+  sessionPageView: "overview",
+  overviewSessionId: null,
   sessionSortKey: "created_at",
   sessionSortDir: "desc",
   activeTool: "proxy",
@@ -714,10 +717,17 @@ const els = {
   dashboardTiles: document.getElementById("dashboardTiles"),
   dashboardDetail: document.getElementById("dashboardDetail"),
   dashboardOpenStorageBtn: document.getElementById("dashboardOpenStorageBtn"),
-  dashboardCreateSessionName: document.getElementById("dashboardCreateSessionName"),
-  dashboardCreateSessionButton: document.getElementById("dashboardCreateSessionButton"),
-  dashboardCreateSessionForm: document.getElementById("dashboardCreateSessionForm"),
-  dashboardNewSessionButton: document.getElementById("dashboardNewSessionButton"),
+  sessionPageButton: document.getElementById("sessionPageButton"),
+  sessionPageTabs: Array.from(document.querySelectorAll("[data-session-view]")),
+  sessionOverviewPanel: document.getElementById("sessionOverviewPanel"),
+  sessionAllPanel: document.getElementById("sessionAllPanel"),
+  sessionOverviewName: document.getElementById("sessionOverviewName"),
+  sessionOverviewStorage: document.getElementById("sessionOverviewStorage"),
+  sessionOverviewPath: document.getElementById("sessionOverviewPath"),
+  sessionOverviewOpenStorageBtn: document.getElementById("sessionOverviewOpenStorageBtn"),
+  sessionOverviewMoreButton: document.getElementById("sessionOverviewMoreButton"),
+  sessionOverviewTiles: document.getElementById("sessionOverviewTiles"),
+  sessionOverviewDetail: document.getElementById("sessionOverviewDetail"),
   dashboardSessionsMore: document.getElementById("dashboardSessionsMore"),
   dashboardReloadSessionsButton: document.getElementById("dashboardReloadSessionsButton"),
   dashboardSessionsBody: document.getElementById("dashboardSessionsBody"),
@@ -1452,9 +1462,6 @@ function bindEvents() {
     tab.addEventListener("click", () => {
       setActiveTool(tab.dataset.tool === "templates" ? state.scanTool || "templates" : tab.dataset.tool);
       renderToolPanels();
-      if (state.activeTool === "dashboard") {
-        loadSessions().catch(handleWorkspaceActionError);
-      }
       if (state.activeTool === "map") targetServiceMapController?.refresh({ force: true });
       if (state.activeTool === "target") loadTargetSiteMap(true).catch((error) => console.error(error));
       if (state.activeTool === "logger") {
@@ -2015,11 +2022,22 @@ function bindEvents() {
   });
   onClickWithProgress(els.dashboardReloadSessionsButton, () =>
     loadSessions().catch(handleWorkspaceActionError));
-  onClickWithProgress(els.dashboardCreateSessionButton, () =>
-    createSession()
-      .then(() => { if (!els.dashboardCreateSessionName.value) closeSessionCreateForm(); })
-      .catch(handleWorkspaceActionError));
-  els.dashboardNewSessionButton.addEventListener("click", openSessionCreateForm);
+  els.sessionPageButton.addEventListener("click", toggleSessionPage);
+  els.sessionPageTabs.forEach((tab) => {
+    tab.addEventListener("click", () => setSessionPageView(tab.dataset.sessionView));
+  });
+  els.sessionOverviewMoreButton.addEventListener("click", openSessionOverviewMenu);
+  els.sessionOverviewName.addEventListener("dblclick", () => {
+    if (state.overviewSessionId && !state.sessionRename) startSessionRename(state.overviewSessionId, "overview");
+  });
+  onClickWithProgress(els.sessionOverviewOpenStorageBtn, () => {
+    const sessionId = state.overviewSessionId;
+    if (!sessionId) return undefined;
+    return revealSessionFolder(sessionId).catch((error) => {
+      console.error(error);
+      showToast(error?.message || "Failed to open session folder.", "error");
+    });
+  });
   els.sessionSidebarToggle.addEventListener("click", toggleSessionSidebar);
   els.sessionSidebarNewButton.addEventListener("click", openSidebarSessionCreate);
   els.sessionSidebarCreateName.addEventListener("keydown", (event) => {
@@ -2113,10 +2131,6 @@ function bindEvents() {
     event.preventDefault();
     rows[Math.max(0, Math.min(rows.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)))].focus();
   });
-  els.dashboardCreateSessionName.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") els.dashboardCreateSessionButton.click();
-    else if (event.key === "Escape") closeSessionCreateForm();
-  });
   // The ⋯ menu closes once an item is chosen or the click lands elsewhere.
   els.dashboardSessionsMore.addEventListener("click", (event) => {
     if (event.target.closest(".context-menu-item")) els.dashboardSessionsMore.open = false;
@@ -2149,7 +2163,7 @@ function bindEvents() {
         state.sessionSortDir = state.sessionSortDir === "asc" ? "desc" : "asc";
       } else {
         state.sessionSortKey = key;
-        state.sessionSortDir = key === "name" ? "asc" : "desc";
+        state.sessionSortDir = key === "name" || key === "group" ? "asc" : "desc";
       }
       renderDashboard();
     });
@@ -3087,6 +3101,7 @@ function bindEvents() {
       !event.altKey &&
       !event.shiftKey &&
       state.activeTool === "dashboard" &&
+      state.sessionPageView === "all" &&
       !isEditableTarget(event.target)
     ) {
       if (event.key === "ArrowUp") {
@@ -6167,7 +6182,7 @@ async function handleExternalSessionChanged(previousSessionId = currentSessionId
   }
 }
 
-async function createSession(nameInput = els.dashboardCreateSessionName) {
+async function createSession(nameInput = els.sessionSidebarCreateName) {
   if (!preserveActiveHttpReplayDraftBeforeSessionChange("creating a session")) return;
   const entrySessionId = currentSessionId();
   const entryWorkspaceGeneration = workspaceStateGeneration;
@@ -10023,6 +10038,7 @@ function renderToolPanels() {
   const reconVisible = state.activeTool === "recon";
   const templatesVisible = state.activeTool === "templates";
   els.dashboardShell.classList.toggle("hidden", !dashboardVisible);
+  els.sessionPageButton?.setAttribute("aria-pressed", String(dashboardVisible));
   els.proxyShell.classList.toggle("hidden", !proxyVisible);
   els.replayShell.classList.toggle("hidden", !replayVisible);
   els.toolsShell.classList.toggle("hidden", !decoderVisible);
@@ -10309,17 +10325,49 @@ function loadScriptOnce(source) {
   });
 }
 
-// New session gives its place to a name field; Escape, or a created session,
-// gives it back.
-function openSessionCreateForm() {
-  els.dashboardNewSessionButton.classList.add("hidden");
-  els.dashboardCreateSessionForm.classList.remove("hidden");
-  els.dashboardCreateSessionName.focus();
+// ── Session page ──
+// The session on screen first, and every session beside it. It has no tab in
+// the top strip: the gear beside the session list opens it over the tool in
+// use and gives that tool back.
+function toggleSessionPage() {
+  if (state.activeTool !== "dashboard") {
+    state.toolUnderSessionPage = state.activeTool;
+    state.sessionPageView = "overview";
+    setActiveTool("dashboard");
+    renderToolPanels();
+    loadSessions().catch(handleWorkspaceActionError);
+    return;
+  }
+  // As a click on that tool's tab, which also loads what the tool shows. With
+  // none remembered the page was open when the window loaded.
+  const tool = state.toolUnderSessionPage || "proxy";
+  const tabName = tool === "recon" || tool === "templates" ? "templates" : tool;
+  mainTabs.find((tab) => tab.dataset.tool === tabName)?.click();
 }
 
-function closeSessionCreateForm() {
-  els.dashboardCreateSessionForm.classList.add("hidden");
-  els.dashboardNewSessionButton.classList.remove("hidden");
+function setSessionPageView(view) {
+  state.sessionPageView = view === "all" ? "all" : "overview";
+  renderDashboard();
+}
+
+function renderSessionPageView() {
+  const view = state.sessionPageView === "all" ? "all" : "overview";
+  (els.sessionPageTabs || []).forEach((tab) => tab.classList.toggle("active", tab.dataset.sessionView === view));
+  els.sessionOverviewPanel.classList.toggle("hidden", view !== "overview");
+  els.sessionAllPanel.classList.toggle("hidden", view !== "all");
+}
+
+// The menu a session has in the list, under the Overview's ⋯.
+function openSessionOverviewMenu(event) {
+  // The document closes this menu on any click that reaches it.
+  event.stopPropagation();
+  if (!state.overviewSessionId) return;
+  const at = els.sessionOverviewMoreButton.getBoundingClientRect();
+  showSessionContextMenu({ clientX: at.left, clientY: at.bottom + 4 }, state.overviewSessionId, "overview");
+  // Its right edge under the button's, as the ⋯ menu of All sessions opens.
+  if (sessionContextMenuEl) {
+    sessionContextMenuEl.style.left = `${Math.max(4, at.right - sessionContextMenuEl.getBoundingClientRect().width)}px`;
+  }
 }
 
 // What a session is about: its scope, or else the hosts it captured most.
@@ -10395,44 +10443,75 @@ function renderDashboard() {
   ].join("") : "";
   const largest = Math.max(1, ...state.sessions.map((session) => Number(session.storage_bytes) || 0));
 
-  const overview = current?.overview || {};
   const section = (title, body) => (body ? `<section><h4>${title}</h4>${body}</section>` : "");
   const list = (items) => (items.length ? `<ul>${items.map((item) => `<li>${item}</li>`).join("")}</ul>` : "");
-  const scopeBody = (overview.scope || []).length
-    ? `<div class="dashboard-chips">${overview.scope.map((pattern) => `<span class="dashboard-chip">${escapeHtml(pattern)}</span>`).join("")}`
-      + `${more(overview.scope.length, overview.scope_count)}</div>`
-    : "";
-  const excludedBody = (overview.excluded_scope || []).length
-    ? `<p class="dashboard-dim">Excluded: ${escapeHtml(overview.excluded_scope.join(", "))}${more(overview.excluded_scope.length, overview.excluded_scope_count)}</p>`
-    : "";
-  const kept = [
-    overview.marked_requests ? `${Number(overview.marked_requests).toLocaleString()} marked in HTTP history` : "",
-    overview.pinned_replay_count ? `Pinned in Replay: ${escapeHtml(overview.pinned_replays.join(", "))}${more(overview.pinned_replays.length, overview.pinned_replay_count)}` : "",
-    overview.replace_rule_count ? `Replace: ${escapeHtml(overview.replace_rules.join(", "))}${more(overview.replace_rules.length, overview.replace_rule_count)}` : "",
-  ].filter(Boolean);
   const KINDS = { "manual scan": "Manual scan", "auto scan": "Auto scan", recon: "Recon" };
-  const scans = (overview.activity || []).map((entry) => [
-    KINDS[entry.kind] || escapeHtml(entry.kind),
-    entry.status && entry.status !== "completed" ? escapeHtml(entry.status) : "", escapeHtml(entry.target),
-    entry.matched != null ? `${Number(entry.matched).toLocaleString()} matched` : "",
-    escapeHtml(formatTimestamp(entry.started_at)),
-  ].filter(Boolean).join(" · "));
-  const findingBadges = SEVERITIES.filter((name) => overview.findings?.[name])
-    .map((name) => `<span class="dashboard-severity"><span class="severity-badge severity-${name}">${name.toUpperCase()}</span>${Number(overview.findings[name]).toLocaleString()}</span>`)
-    .join("");
-  const sections = [
-    section("Scope", scopeBody + excludedBody),
-    section("Hosts", list((overview.top_hosts || []).map((entry) => `${escapeHtml(entry.host)} <span class="dashboard-dim">${Number(entry.requests).toLocaleString()}</span>`))),
-    section("Marked and kept", list(kept)),
-    section("TCP", current?.tcp_connection_count > 0
-      ? `<p>${Number(current.tcp_connection_count).toLocaleString()} retained connection${current.tcp_connection_count === 1 ? "" : "s"} · Open this session, then Capture → TCP.</p>`
-      : current?.tcp_connection_count === null ? '<p class="dashboard-dim">History count unavailable. Open this session, then Capture → TCP to inspect.</p>' : ""),
-    section("Scans", list(scans) + (overview.activity_count > scans.length ? `<p class="dashboard-dim">${more(scans.length, overview.activity_count).trim()} earlier</p>` : "")),
-    section("Findings", findingBadges ? `<div class="dashboard-severities">${findingBadges}</div>` : ""),
-  ].join("");
-  els.dashboardDetail.innerHTML = current
-    ? `<h3>${escapeHtml(current.name)}</h3>${sections ? `<div class="dashboard-detail-grid">${sections}</div>` : '<p class="dashboard-dim">Nothing recorded in this session yet.</p>'}`
-    : "";
+  // What was set up and done in one session.
+  const summary = (session) => {
+    const overview = session.overview || {};
+    const scopeBody = (overview.scope || []).length
+      ? `<div class="dashboard-chips">${overview.scope.map((pattern) => `<span class="dashboard-chip">${escapeHtml(pattern)}</span>`).join("")}`
+        + `${more(overview.scope.length, overview.scope_count)}</div>`
+      : "";
+    const excludedBody = (overview.excluded_scope || []).length
+      ? `<p class="dashboard-dim">Excluded: ${escapeHtml(overview.excluded_scope.join(", "))}${more(overview.excluded_scope.length, overview.excluded_scope_count)}</p>`
+      : "";
+    const kept = [
+      overview.marked_requests ? `${Number(overview.marked_requests).toLocaleString()} marked in HTTP history` : "",
+      overview.pinned_replay_count ? `Pinned in Replay: ${escapeHtml(overview.pinned_replays.join(", "))}${more(overview.pinned_replays.length, overview.pinned_replay_count)}` : "",
+      overview.replace_rule_count ? `Replace: ${escapeHtml(overview.replace_rules.join(", "))}${more(overview.replace_rules.length, overview.replace_rule_count)}` : "",
+    ].filter(Boolean);
+    const scans = (overview.activity || []).map((entry) => [
+      KINDS[entry.kind] || escapeHtml(entry.kind),
+      entry.status && entry.status !== "completed" ? escapeHtml(entry.status) : "", escapeHtml(entry.target),
+      entry.matched != null ? `${Number(entry.matched).toLocaleString()} matched` : "",
+      escapeHtml(formatTimestamp(entry.started_at)),
+    ].filter(Boolean).join(" · "));
+    const findingBadges = SEVERITIES.filter((name) => overview.findings?.[name])
+      .map((name) => `<span class="dashboard-severity"><span class="severity-badge severity-${name}">${name.toUpperCase()}</span>${Number(overview.findings[name]).toLocaleString()}</span>`)
+      .join("");
+    // Its TCP history is in Capture, once the session is the one on screen.
+    const tcpWhere = session.id === state.activeSession?.id ? "Capture → TCP" : "Open this session, then Capture → TCP";
+    const sections = [
+      section("Scope", scopeBody + excludedBody),
+      section("Hosts", list((overview.top_hosts || []).map((entry) => `${escapeHtml(entry.host)} <span class="dashboard-dim">${Number(entry.requests).toLocaleString()}</span>`))),
+      section("Marked and kept", list(kept)),
+      section("TCP", session.tcp_connection_count > 0
+        ? `<p>${Number(session.tcp_connection_count).toLocaleString()} retained connection${session.tcp_connection_count === 1 ? "" : "s"} · ${tcpWhere}.</p>`
+        : session.tcp_connection_count === null ? `<p class="dashboard-dim">History count unavailable. ${tcpWhere} to inspect.</p>` : ""),
+      section("Scans", list(scans) + (overview.activity_count > scans.length ? `<p class="dashboard-dim">${more(scans.length, overview.activity_count).trim()} earlier</p>` : "")),
+      section("Findings", findingBadges ? `<div class="dashboard-severities">${findingBadges}</div>` : ""),
+    ].join("");
+    return sections ? `<div class="dashboard-detail-grid">${sections}</div>` : '<p class="dashboard-dim">Nothing recorded in this session yet.</p>';
+  };
+  els.dashboardDetail.innerHTML = current ? `<h3>${escapeHtml(current.name)}</h3>${summary(current)}` : "";
+
+  // The Overview: the session on screen, by itself. Its actions keep to the
+  // session drawn here, as the folder button above keeps to its path.
+  const shown = activeSession;
+  state.overviewSessionId = shown?.id || null;
+  const renamingTitle = Boolean(shown) && state.sessionRename?.place === "overview" && state.sessionRename.id === shown.id;
+  // The field being replaced is no longer the editor: its blur must not save.
+  if (renamingTitle) sessionRenameInput = null;
+  els.sessionOverviewName.innerHTML = !shown ? "No session"
+    : renamingTitle
+      ? `<input class="session-name-input" type="text" value="${escapeHtml(state.sessionRename.draft)}" aria-label="Rename session ${escapeHtml(shown.name)}" spellcheck="false" autocomplete="off" />`
+      : `${sessionMakerMark(shown)}${escapeHtml(shown.name)}`;
+  els.sessionOverviewPath.textContent = shown?.storage_path || "";
+  els.sessionOverviewStorage.hidden = !shown;
+  const websockets = Number(shown?.websocket_count) || 0;
+  const tcp = Number(shown?.tcp_connection_count) || 0;
+  els.sessionOverviewTiles.innerHTML = shown ? [
+    tile("Requests", formatCappedCount(shown.request_count),
+      [websockets ? `and ${websockets.toLocaleString()} WebSocket session${websockets === 1 ? "" : "s"}` : "",
+        tcp ? `${tcp.toLocaleString()} TCP connection${tcp === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ")),
+    tile("Findings", sessionFindingCount(shown).toLocaleString(), severityLine(shown.overview?.findings)),
+    tile("Last HTTP capture", shown.overview?.last_captured_at ? escapeHtml(formatTimestamp(shown.overview.last_captured_at)) : "None yet"),
+    tile("On disk", formatSize(shown.storage_bytes)),
+  ].join("") : "";
+  els.sessionOverviewDetail.innerHTML = shown ? summary(shown) : "";
+  if (renamingTitle) wireSessionRenameInput(renameSelection, els.sessionOverviewName);
+  renderSessionPageView();
 
   // Sort sessions
   const sortedSessions = getSortedSessions();
@@ -10455,7 +10534,7 @@ function renderDashboard() {
     });
   }
 
-  const renamingHere = state.sessionRename && state.sessionRename.place !== "sidebar";
+  const renamingHere = state.sessionRename?.place === "dashboard";
   // The field being replaced is no longer the editor: its blur must not save.
   if (renamingHere) sessionRenameInput = null;
   els.dashboardSessionsBody.innerHTML = sortedSessions.length
@@ -10471,6 +10550,7 @@ function renderDashboard() {
             <td>${renamingHere && state.sessionRename.id === session.id
               ? `<input class="session-name-input" type="text" value="${escapeHtml(state.sessionRename.draft)}" aria-label="Rename session ${escapeHtml(session.name)}" spellcheck="false" autocomplete="off" />`
               : `<button class="session-name session-select-button" type="button" title="${escapeHtml(session.name)}" aria-pressed="${session.id === state.selectedSessionId}" aria-label="Select session ${escapeHtml(session.name)}">${sessionMakerMark(session)}${escapeHtml(session.name)}</button>`}${port ? `<span class="session-sidebar-port in-table" title="${portTitle}">${escapeHtml(port)}</span>` : ""}${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
+            <td class="session-group-cell"${session.group ? ` title="${escapeHtml(session.group)}"` : ""}>${session.group ? escapeHtml(session.group) : '<span class="dashboard-dim">-</span>'}</td>
             <td><div class="session-size"><span class="session-size-bar"><span style="width:${Math.max(2, Math.round((Number(session.storage_bytes) || 0) / largest * 100))}%"></span></span>${formatSize(session.storage_bytes)}</div></td>
             <td>${formatCappedCount(session.request_count)}</td>
             <td>${formatCappedCount(session.websocket_count, retainedEntriesCap())}</td>
@@ -10490,7 +10570,7 @@ function renderDashboard() {
         .join("")
     : `
         <tr class="empty-row">
-          <td colspan="9">No sessions are available yet.</td>
+          <td colspan="10">No sessions are available yet.</td>
         </tr>
       `;
 
@@ -10554,8 +10634,7 @@ function renderDashboard() {
 
 // ── Session sidebar ──
 // Every session one click away, as Claude and Codex list their conversations.
-// A click opens the session as Session ▸ Open does, so the proxy records into
-// the session on screen.
+// A click shows the session, as Open does in the table of all sessions.
 // The rows last drawn: a read that changes nothing leaves focus, hover and a
 // click in progress alone.
 let sessionSidebarMarkup = "";
@@ -10850,6 +10929,8 @@ async function moveSessionToGroup(sessionId, group) {
 // `edit` is { session: id } for a new group that session starts, or
 // { group: name } to rename that group.
 function openSidebarGroupName(edit) {
+  // The field is in the list, which a menu elsewhere can ask for while hidden.
+  if (state.sessionSidebarHidden) toggleSessionSidebar();
   // One field at a time under the title: the two look alike.
   closeSidebarSessionCreate();
   sidebarGroupEdit = edit;
@@ -11062,6 +11143,10 @@ function wireSessionRenameInput(selection, container = els.dashboardSessionsBody
 }
 
 function focusSessionNameButton(id, place = "dashboard") {
+  if (place === "overview") {
+    els.sessionOverviewMoreButton.focus({ preventScroll: true });
+    return;
+  }
   if (place === "sidebar") {
     Array.from(els.sessionSidebarList.querySelectorAll(".session-sidebar-row"))
       .find((row) => row.dataset.id === id)?.focus({ preventScroll: true });
@@ -11089,7 +11174,9 @@ function showSessionContextMenu(event, sessionId, place = "dashboard") {
     <div class="context-menu-divider"></div>
     <button class="context-menu-item" data-action="rename">Rename session</button>
     <button class="context-menu-item" data-action="folder">Open session folder</button>
-    ${place === "sidebar" ? `<div class="context-menu-divider"></div>${sessionGroupMenuItems(session)}${fed ? "" : '<div class="context-menu-divider"></div>'}` : ""}
+    <div class="context-menu-divider"></div>
+    ${sessionGroupMenuItems(session)}
+    ${fed ? "" : '<div class="context-menu-divider"></div>'}
     ${fed ? "" : `<button class="context-menu-item danger" data-action="delete">Delete session</button>`}
   `;
   document.body.appendChild(menu);
@@ -11239,7 +11326,7 @@ function getSortedSessions() {
     const value = (session) => key === "finding_count" ? sessionFindingCount(session)
       : key === "last_captured_at" ? session.overview?.last_captured_at : session[key];
     let va = value(a), vb = value(b);
-    if (key === "name") {
+    if (key === "name" || key === "group") {
       va = (va || "").toLowerCase();
       vb = (vb || "").toLowerCase();
       const cmp = va < vb ? -1 : va > vb ? 1 : 0;
@@ -21932,7 +22019,7 @@ async function saveProxySettings() {
   }
 
   // A rebind leaves the listener up on its new address, and the indicator,
-  // the sidebar and the Session tab print its port.
+  // the sidebar and the session page print its port.
   if (startupResult?.rebound === true) {
     state.settings.proxy_addr = startupResult.active_proxy_addr;
     state.settings.proxy_online = true;

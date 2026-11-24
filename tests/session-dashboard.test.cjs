@@ -47,7 +47,7 @@ for (const failure of ["HTTP", "network", "JSON"]) {
     f.context.els = { dashboardReloadSessionsButton: {} };
     f.context.onClickWithProgress = (_, handler) => { f.context.reload = handler; };
     const start = appSource.indexOf("  onClickWithProgress(els.dashboardReloadSessionsButton,");
-    const end = appSource.indexOf("  onClickWithProgress(els.dashboardCreateSessionButton,", start);
+    const end = appSource.indexOf("  els.sessionPageButton.addEventListener(", start);
     assert.ok(start !== -1 && end > start);
     vm.runInContext(appSource.slice(start, end), f.context);
     await f.context.reload();
@@ -111,34 +111,11 @@ test("only the sessions not in use offer Open and Delete", () => {
   assert.equal(f.els.dashboardCurrentSessionStorage.hidden, false);
 });
 
-// New session swaps itself for a name field; Escape puts the button back.
-test("New session opens a name field in its place and closes back to the button", () => {
-  const classes = () => {
-    const names = new Set(["hidden"]);
-    return { add: (n) => names.add(n), remove: (n) => names.delete(n), contains: (n) => names.has(n) };
-  };
-  const focused = [];
-  const els = {
-    dashboardNewSessionButton: { classList: classes() },
-    dashboardCreateSessionForm: { classList: classes() },
-    dashboardCreateSessionName: { focus: () => focused.push("name") },
-  };
-  els.dashboardNewSessionButton.classList.remove("hidden");
-  const c = loadFunctions(["openSessionCreateForm", "closeSessionCreateForm"], { els });
-  c.openSessionCreateForm();
-  assert.equal(els.dashboardNewSessionButton.classList.contains("hidden"), true);
-  assert.equal(els.dashboardCreateSessionForm.classList.contains("hidden"), false);
-  assert.deepEqual(focused, ["name"]);
-  c.closeSessionCreateForm();
-  assert.equal(els.dashboardNewSessionButton.classList.contains("hidden"), false);
-  assert.equal(els.dashboardCreateSessionForm.classList.contains("hidden"), true);
-});
-
-test("the Session screen is one list with its actions in the header", () => {
+// A session is made with the list's +, so the page has no New session of its own.
+test("All sessions is one list with its actions in the header", () => {
   const html = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/index.html"), "utf8");
-  const shell = html.slice(html.indexOf('id="dashboardShell"'), html.indexOf('id="proxyShell"'));
+  const shell = html.slice(html.indexOf('id="sessionAllPanel"'), html.indexOf('id="proxyShell"'));
   assert.match(shell, /<h2>Sessions<\/h2>/);
-  assert.match(shell, /id="dashboardNewSessionButton"[^>]*>New session<\/button>/);
   // Reload stays reachable: the recovery messages tell people to use it.
   assert.match(shell, /<details class="more-menu"[^]*id="dashboardReloadSessionsButton"[^>]*>Reload sessions<\/button>/);
   for (const gone of ["Status", "Requests", "Websockets", "Events", "Fuzzer", "Rules", "Created", "Opened"]) {

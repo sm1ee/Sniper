@@ -18,7 +18,6 @@
           </svg>
         </button>
         <nav class="main-tabs" aria-label="Main tools">
-          <button class="main-tab" data-tool="dashboard">Session</button>
           <button class="main-tab" data-tool="target">Scope</button>
           <button class="main-tab active" data-tool="proxy">Capture</button>
           <button class="main-tab" data-tool="map">Map</button>
@@ -73,7 +72,14 @@
       <nav class="session-sidebar hidden" id="sessionSidebar" aria-label="Sessions">
         <header class="session-sidebar-header">
           <span class="session-sidebar-title">Sessions</span>
-          <button class="utility-button icon-button" id="sessionSidebarNewButton" type="button" aria-label="New session" title="New session">+</button>
+          <span class="session-sidebar-actions">
+            <button class="utility-button icon-button" id="sessionPageButton" type="button" aria-label="Manage sessions" title="Manage sessions" aria-pressed="false" aria-controls="dashboardShell">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false">
+                <path fill-rule="evenodd" d="M10.29 6.04 L10.61 4.12 L13.39 4.12 L13.71 6.04 L15.01 6.58 L16.59 5.45 L18.55 7.41 L17.42 8.99 L17.96 10.29 L19.88 10.61 L19.88 13.39 L17.96 13.71 L17.42 15.01 L18.55 16.59 L16.59 18.55 L15.01 17.42 L13.71 17.96 L13.39 19.88 L10.61 19.88 L10.29 17.96 L8.99 17.42 L7.41 18.55 L5.45 16.59 L6.58 15.01 L6.04 13.71 L4.12 13.39 L4.12 10.61 L6.04 10.29 L6.58 8.99 L5.45 7.41 L7.41 5.45 L8.99 6.58 Z M14.6 12 a2.6 2.6 0 1 0-5.2 0 a2.6 2.6 0 1 0 5.2 0 Z" />
+              </svg>
+            </button>
+            <button class="utility-button icon-button" id="sessionSidebarNewButton" type="button" aria-label="New session" title="New session">+</button>
+          </span>
         </header>
         <div class="session-sidebar-create hidden" id="sessionSidebarCreate">
           <input id="sessionSidebarCreateName" type="text" placeholder="Session name" aria-label="New session name" spellcheck="false" autocomplete="off" />
@@ -85,48 +91,63 @@
       </nav>
 
       <main class="workspace">
-        <section class="dashboard-shell hidden" id="dashboardShell">
-          <section class="panel-card">
-            <header class="panel-toolbar">
-              <div>
-                <h2>Sessions</h2>
-                <p class="dashboard-storage" id="dashboardCurrentSessionStorage"><span class="dashboard-storage-path" id="dashboardCurrentSessionPath">Loading…</span> <button class="session-path-open-btn" id="dashboardOpenStorageBtn" type="button">Open</button></p>
-              </div>
-              <div class="toolbar-actions">
-                <div class="dashboard-create hidden" id="dashboardCreateSessionForm">
-                  <input id="dashboardCreateSessionName" type="text" placeholder="Session name" aria-label="Session name" />
-                  <button class="primary-action" id="dashboardCreateSessionButton" type="button">Create</button>
+        <section class="session-page hidden" id="dashboardShell">
+          <nav class="sub-tabs" aria-label="Session views">
+            <button class="sub-tab active" type="button" data-session-view="overview">Overview</button>
+            <button class="sub-tab" type="button" data-session-view="all">All sessions</button>
+          </nav>
+          <div class="dashboard-shell">
+            <section class="panel-card" id="sessionOverviewPanel">
+              <header class="panel-toolbar">
+                <div>
+                  <h2 id="sessionOverviewName"></h2>
+                  <p class="dashboard-storage" id="sessionOverviewStorage"><span class="dashboard-storage-path" id="sessionOverviewPath">Loading…</span> <button class="session-path-open-btn" id="sessionOverviewOpenStorageBtn" type="button">Open</button></p>
                 </div>
-                <button class="primary-action" id="dashboardNewSessionButton" type="button" title="A session keeps its own traffic, rules, notes and settings">New session</button>
-                <details class="more-menu" id="dashboardSessionsMore">
-                  <summary class="secondary-action" aria-label="More">⋯</summary>
-                  <div class="context-menu more-menu-list" role="menu">
-                    <button class="context-menu-item" id="dashboardReloadSessionsButton" type="button" role="menuitem">Reload sessions</button>
-                  </div>
-                </details>
+                <div class="toolbar-actions">
+                  <button class="secondary-action session-more-button" id="sessionOverviewMoreButton" type="button" aria-label="More" aria-haspopup="menu">⋯</button>
+                </div>
+              </header>
+              <div class="dashboard-tiles" id="sessionOverviewTiles"></div>
+              <section class="dashboard-detail" id="sessionOverviewDetail" aria-label="This session"></section>
+            </section>
+            <section class="panel-card hidden" id="sessionAllPanel">
+              <header class="panel-toolbar">
+                <div>
+                  <h2>Sessions</h2>
+                  <p class="dashboard-storage" id="dashboardCurrentSessionStorage"><span class="dashboard-storage-path" id="dashboardCurrentSessionPath">Loading…</span> <button class="session-path-open-btn" id="dashboardOpenStorageBtn" type="button">Open</button></p>
+                </div>
+                <div class="toolbar-actions">
+                  <details class="more-menu" id="dashboardSessionsMore">
+                    <summary class="secondary-action" aria-label="More">⋯</summary>
+                    <div class="context-menu more-menu-list" role="menu">
+                      <button class="context-menu-item" id="dashboardReloadSessionsButton" type="button" role="menuitem">Reload sessions</button>
+                    </div>
+                  </details>
+                </div>
+              </header>
+              <div class="dashboard-tiles" id="dashboardTiles"></div>
+              <div class="history-table-shell">
+                <table class="history-table session-table" id="dashboardSessionsTable">
+                  <thead>
+                    <tr>
+                      <th data-sort-key="name" aria-sort="none"><button class="session-sort-button" type="button">Name</button></th>
+                      <th data-sort-key="group" aria-sort="none"><button class="session-sort-button" type="button">Group</button></th>
+                      <th data-sort-key="storage_bytes" aria-sort="none"><button class="session-sort-button" type="button">Size</button></th>
+                      <th data-sort-key="request_count" aria-sort="none"><button class="session-sort-button" type="button">Requests</button></th>
+                      <th data-sort-key="websocket_count" aria-sort="none"><button class="session-sort-button" type="button">WebSockets</button></th>
+                      <th data-sort-key="tcp_connection_count" aria-sort="none"><button class="session-sort-button" type="button">TCP</button></th>
+                      <th data-sort-key="finding_count" aria-sort="none"><button class="session-sort-button" type="button">Findings</button></th>
+                      <th data-sort-key="last_captured_at" aria-sort="none"><button class="session-sort-button" type="button">Last HTTP capture</button></th>
+                      <th data-sort-key="created_at" aria-sort="descending"><button class="session-sort-button" type="button">Created</button></th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="dashboardSessionsBody"></tbody>
+                </table>
               </div>
-            </header>
-            <div class="dashboard-tiles" id="dashboardTiles"></div>
-            <div class="history-table-shell">
-              <table class="history-table session-table" id="dashboardSessionsTable">
-                <thead>
-                  <tr>
-                    <th data-sort-key="name" aria-sort="none"><button class="session-sort-button" type="button">Name</button></th>
-                    <th data-sort-key="storage_bytes" aria-sort="none"><button class="session-sort-button" type="button">Size</button></th>
-                    <th data-sort-key="request_count" aria-sort="none"><button class="session-sort-button" type="button">Requests</button></th>
-                    <th data-sort-key="websocket_count" aria-sort="none"><button class="session-sort-button" type="button">WebSockets</button></th>
-                    <th data-sort-key="tcp_connection_count" aria-sort="none"><button class="session-sort-button" type="button">TCP</button></th>
-                    <th data-sort-key="finding_count" aria-sort="none"><button class="session-sort-button" type="button">Findings</button></th>
-                    <th data-sort-key="last_captured_at" aria-sort="none"><button class="session-sort-button" type="button">Last HTTP capture</button></th>
-                    <th data-sort-key="created_at" aria-sort="descending"><button class="session-sort-button" type="button">Created</button></th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody id="dashboardSessionsBody"></tbody>
-              </table>
-            </div>
-            <section class="dashboard-detail" id="dashboardDetail" aria-label="Selected session"></section>
-          </section>
+              <section class="dashboard-detail" id="dashboardDetail" aria-label="Selected session"></section>
+            </section>
+          </div>
         </section>
 
         <section class="proxy-shell" id="proxyShell">

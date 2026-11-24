@@ -284,10 +284,12 @@ test("moving a session asks the server, shows its group open, and reads the list
 
 for (const failing of [false, true]) test(`a new group's name ${failing ? "stays in its field when the server refuses it" : "moves the session and closes its field"}`, async () => {
   const moved = [];
-  let closed = 0;
+  let closed = 0, shown = 0;
+  const state = { sessionSidebarHidden: false };
   const els = { sessionSidebarGroup: element(), sessionSidebarGroupName: { value: "", focus() {}, select() {} } };
   const context = loadFunctions(["openSidebarGroupName", "closeSidebarGroupName", "submitSidebarGroupName"], {
-    els, sidebarGroupEdit: null,
+    els, state, sidebarGroupEdit: null,
+    toggleSessionSidebar: () => { shown += 1; state.sessionSidebarHidden = !state.sessionSidebarHidden; },
     closeSidebarSessionCreate: () => { closed += 1; },
     moveSessionToGroup: async (id, group) => { moved.push([id, group]); if (failing) throw new Error("refused"); },
     renameSessionGroup: async (from, to) => { moved.push(["rename", from, to]); },
@@ -317,6 +319,13 @@ for (const failing of [false, true]) test(`a new group's name ${failing ? "stays
     els.sessionSidebarGroupName.value = " lab ";
     await context.submitSidebarGroupName();
     assert.deepEqual(moved.slice(1), [["rename", "acme", "lab"]]);
+    // The field is in the list. A menu on the session page can ask for it
+    // while the list is hidden, so the list is shown first.
+    assert.equal(shown, 0, "a list on screen is left as it is");
+    state.sessionSidebarHidden = true;
+    context.openSidebarGroupName({ session: "s1" });
+    assert.equal(shown, 1);
+    assert.equal(state.sessionSidebarHidden, false);
   }
 });
 

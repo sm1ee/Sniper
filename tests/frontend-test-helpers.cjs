@@ -58,8 +58,11 @@ function loadFunctions(names, globals = {}) {
     assert.ok(match, `Missing frontend function: ${name}`);
     vm.runInContext(match[0], context, { filename: `web/app.js:${name}` });
   }
-  // Every Session table redraw redraws the sidebar, which these fixtures lack.
-  if (names.includes("renderDashboard") && !("renderSessionSidebar" in context)) context.renderSessionSidebar = () => {};
+  // Every Session table redraw redraws the sidebar and shows the page's view,
+  // which these fixtures lack.
+  for (const drawn of ["renderSessionSidebar", "renderSessionPageView"]) {
+    if (names.includes("renderDashboard") && !(drawn in context)) context[drawn] = () => {};
+  }
   return context;
 }
 

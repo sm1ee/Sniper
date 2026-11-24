@@ -73,7 +73,7 @@ function setup({ rendered = true } = {}) {
   f.context.reconcileSessionsAfterActionError = async (...args) => f.reconciles.push(args);
   f.context.showConfirmDialog = (message, callback, options) => f.confirms.push({ message, callback, options });
   f.context.handleWorkspaceActionError = error => { f.error = error; };
-  f.els.dashboardCreateSessionName = { value: 'new session' };
+  f.els.sessionSidebarCreateName = { value: 'new session' };
   f.els.replayRequestHighlight.setAttribute = () => {};
   f.els.replayRequestHighlight.removeAttribute = () => {};
   for (const name of [
@@ -332,7 +332,7 @@ function setupCompletedAction() {
   f.retained = () => ({ owner: f.state.activeSession, generation: f.context.workspaceStateGeneration,
     tabs: f.state.replayTabs, selected: f.state.selectedSessionId, active: f.state.activeReplayTabId,
     baseline: f.context.workspaceSaveCommittedSnapshot, text: f.els.replayRequestHighlight.innerText,
-    port: f.els.replayPortInput.value, name: f.els.dashboardCreateSessionName.value });
+    port: f.els.replayPortInput.value, name: f.els.sessionSidebarCreateName.value });
   f.assertRetained = before => {
     const after = f.retained();
     for (const key of Object.keys(before)) assert.equal(after[key], before[key], key);
@@ -442,11 +442,11 @@ test('a newer workspace supersedes completed-action row refresh without stale fe
   f.assertRetained(before); assert.equal(f.toasts.length, toasts); assert.equal(f.requests.length, 2);
 });
 for (const changedName of [false, true]) test(`create completion ${changedName ? 'preserves a newer' : 'clears only its submitted'} name field`, async () => {
-  const f = setupCompletedAction(); f.els.dashboardCreateSessionName.value = '  Original name  ';
+  const f = setupCompletedAction(); f.els.sessionSidebarCreateName.value = '  Original name  ';
   const action = await f.start('create'); assert.equal(JSON.parse(f.requests[0].options.body).name, 'Original name');
-  if (changedName) f.els.dashboardCreateSessionName.value = 'New name draft';
+  if (changedName) f.els.sessionSidebarCreateName.value = 'New name draft';
   await f.finishReload(action, 0);
-  assert.equal(f.els.dashboardCreateSessionName.value, changedName ? 'New name draft' : '');
+  assert.equal(f.els.sessionSidebarCreateName.value, changedName ? 'New name draft' : '');
 });
 
 for (const operation of ['create', 'view']) {
@@ -505,7 +505,7 @@ function replacePreflightWorkspace(f, sameId = false) {
   const id = sameId ? 'session-a' : 'session-b';
   f.context.resetSessionScopedUiState(); f.state.activeSession = { id };
   f.context.applyWorkspaceState(f.snapshots.get(id)); f.context.workspaceLoaded = true;
-  f.edit(); f.els.dashboardCreateSessionName.value = 'New workspace name';
+  f.edit(); f.els.sessionSidebarCreateName.value = 'New workspace name';
   f.state.targetScopeDraft = 'new.example.com'; f.state.targetScopeDirty = true;
   f.state.targetScopeEditorSessionId = id;
 }
@@ -592,7 +592,7 @@ for (const operation of ['create', 'view']) {
     f.succeed(1, { scope_patterns: ['example.com'], excluded_scope_patterns: [] }); await tick();
     assert.equal(f.requests[2].url, '/api/settings?session_id=session-b'); await f.finishReload(newer, 2);
     f.state.activeTool = 'target'; f.context.renderToolPanels(); input('new.example.com');
-    f.els.dashboardCreateSessionName.value = 'New B name draft';
+    f.els.sessionSidebarCreateName.value = 'New B name draft';
     const before = f.retained(), cleanup = f.log.filter(name => name === 'cleanupWsReplayTabsBeforeStateReset').length;
     f.succeed(0, { scope_patterns: ['example.com'], excluded_scope_patterns: [] }); await tick();
     assert.equal(f.requests.length, 5, 'old action must stop before a mutation or B draft save');
@@ -604,7 +604,7 @@ for (const operation of ['create', 'view']) {
   });
   test(`${operation}: real same-owner preflight saves and a waiting name edit still permit ordinary dispatch`, async () => {
     const f = setupCompletedAction(), input = useActualScopePreflight(f); input('example.com');
-    const action = await f.start(operation); f.els.dashboardCreateSessionName.value = '  Same owner new name  ';
+    const action = await f.start(operation); f.els.sessionSidebarCreateName.value = '  Same owner new name  ';
     f.succeed(0, { scope_patterns: ['example.com'], excluded_scope_patterns: [] }); await tick();
     assert.equal(f.requests[1].url, operation === 'create' ? '/api/sessions' : '/api/settings?session_id=session-b');
     if (operation === 'create') assert.equal(JSON.parse(f.requests[1].options.body).name, 'Same owner new name');

@@ -33,6 +33,8 @@ function fixture() {
   const state = {
     sessions, activeSession: sessions[1], selectedSessionId: sessions[1].id,
     sessionSortKey: "created_at", sessionSortDir: "asc", activeTool: "dashboard",
+    // The rows are in the page's second view.
+    sessionPageView: "all",
   };
   const rendered = [], scrolled = [], actions = [];
   const els = {
@@ -212,6 +214,11 @@ for (const key of ["ArrowUp", "ArrowDown"]) {
     hidden.state.activeTool = "tools";
     assert.equal(hidden.key(key).defaultPrevented, false);
     assertUnchanged(hidden);
+    // The Overview shows no rows: the selection under it stays.
+    const overview = fixture();
+    overview.state.sessionPageView = "overview";
+    assert.equal(overview.key(key).defaultPrevented, false);
+    assertUnchanged(overview);
     for (const modal of ["confirm", "displaySettingsModal", "filterModal", "curlImportModal"]) {
       const f = fixture();
       if (modal === "confirm") f.context.activeConfirmDialog = { modal: f.node() };

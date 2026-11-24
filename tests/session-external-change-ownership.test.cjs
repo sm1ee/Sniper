@@ -25,7 +25,7 @@ function setup() {
     reconcileSessionsAfterActionError: async () => assert.fail('unexpected mutation failure'),
     cleanupWsReplayTab: async () => {},
   });
-  f.els.dashboardCreateSessionName = { value: 'new session' };
+  f.els.sessionSidebarCreateName = { value: 'new session' };
   f.replace = (id = 'session-b', dirty = true) => {
     f.state.activeSession = { id };
     const snapshot = f.remote([f.b], 20); snapshot.session_id = id;

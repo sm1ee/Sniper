@@ -448,8 +448,8 @@ compared with what was sent.
   only whether the one listener is up.
 - The row of a fed session shows its port at the trailing edge, the main
   listener's for the default session. That label is how the list says where
-  the main listener records. The Session tab shows the same beside the name,
-  and its "Open" views the session.
+  the main listener records. The table of all sessions shows the same beside
+  the name, and its "Open" views the session.
 - The row's existing menu gains: "Record :8080 here" (the main listener's
   port), "Open a port" or "Close port :18081", and "Copy proxy address". An
   action the server would refuse (decision 4) is not offered.
@@ -719,6 +719,29 @@ listener of Sniper's gets 508, for any client.
 - **Not built**: a group change made by another client shows on the next read
   of the list, not at once. Dragging has no keyboard form; a session's menu
   moves it between groups from the keyboard.
+
+### After phase 3: the session page
+
+The session list made the Session tab say most things twice: the sessions, how
+to make one, and a session's menu. The tab is gone from the top strip, which
+now holds only the tools of the session on screen.
+
+- **A gear beside the list's title opens the page** over the tool in use and
+  gives that tool back, as a click on the tool's tab does. A tab in the top
+  strip closes it too. `active_tool` keeps `dashboard`, so the page is open
+  again after a restart.
+- **Overview is first, each time the gear opens the page**: the session on
+  screen by itself. Its name is the title, and the title is where it is
+  renamed. Below are its folder, its own numbers, and what was set up and done
+  in it. Showing another session from the list leaves the page open on that
+  session.
+- **All sessions is the table as it was**, with a Group column that sorts and
+  without New session: a session is made with the list's `+`.
+- **A session has one menu**, in the list, in the table and under the
+  Overview's `⋯`: where it records, its name, its folder, its group, and
+  delete. A new group's name is typed in the list, so the list is shown for it.
+- **Not checked in the desktop webview.** The page is a flex column with its
+  view strip first, as Scan is.
 
 ## Constraints
 

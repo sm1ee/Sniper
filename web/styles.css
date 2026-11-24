@@ -1124,6 +1124,19 @@ summary {
   font-weight: 600;
 }
 
+.session-sidebar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* The gear, while the page it opens is on screen. */
+#sessionPageButton[aria-pressed="true"] {
+  border-color: var(--point-border);
+  background: var(--point-soft);
+  color: var(--point);
+}
+
 .session-sidebar-create {
   padding: 0 8px 4px;
 }
@@ -1391,7 +1404,27 @@ summary {
   overflow: hidden;
 }
 
-/* Session reads top to bottom (totals, sessions, the selected one) and scrolls
+/* The session page: its two views under one strip, which stays in place while
+   a view scrolls. A flex column, as Scan is, places the strip first in WebKit
+   too. */
+.session-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--shell);
+}
+
+.session-page > .sub-tabs {
+  flex: 0 0 auto;
+}
+
+.session-page > .dashboard-shell {
+  flex: 1 1 auto;
+  height: auto;
+}
+
+/* A view reads top to bottom (totals, sessions, the selected one) and scrolls
    as one page, rather than squeezing the table between the others. */
 .dashboard-shell {
   display: grid;
@@ -1462,10 +1495,28 @@ summary {
   font-size: var(--font-md);
 }
 
-.dashboard-shell .more-menu > summary:not(:hover) {
+.dashboard-shell .more-menu > summary:not(:hover),
+.dashboard-shell .session-more-button:not(:hover) {
   border-color: transparent;
   background: none;
   color: var(--text-soft);
+}
+
+/* The Overview's title is the session's name, and the field that renames it. */
+#sessionOverviewName .session-name-input {
+  width: min(360px, 100%);
+  padding: 2px 6px;
+  margin: -3px 0 -3px -7px;
+  border: 1px solid var(--point-border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-code);
+  color: var(--text);
+  font: inherit;
+}
+
+#sessionOverviewName .session-name-input:focus {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--point-soft);
 }
 
 .dashboard-storage {
@@ -1476,22 +1527,6 @@ summary {
 
 .dashboard-storage-path {
   font-family: var(--mono);
-}
-
-.dashboard-create {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.dashboard-create input {
-  width: 220px;
-  min-height: var(--control-h);
-  padding: 4px 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  background: var(--panel-code);
-  color: var(--text);
 }
 
 .dashboard-shell > .panel-card {
@@ -5534,14 +5569,15 @@ button.utility-button.replay-tab-add {
   box-sizing: border-box;
 }
 
-.session-table thead th:nth-child(2) { width: 136px; }
-.session-table thead th:nth-child(3) { width: 88px; }
-.session-table thead th:nth-child(4) { width: 104px; }
-.session-table thead th:nth-child(5) { width: 64px; }
-.session-table thead th:nth-child(6) { width: 80px; }
-.session-table thead th:nth-child(7),
-.session-table thead th:nth-child(8) { width: 160px; }
-.session-table thead th:nth-child(9) { width: 180px; }
+.session-table thead th:nth-child(2) { width: 104px; }
+.session-table thead th:nth-child(3) { width: 128px; }
+.session-table thead th:nth-child(4) { width: 88px; }
+.session-table thead th:nth-child(5) { width: 96px; }
+.session-table thead th:nth-child(6) { width: 64px; }
+.session-table thead th:nth-child(7) { width: 80px; }
+.session-table thead th:nth-child(8) { width: 136px; }
+.session-table thead th:nth-child(9) { width: 120px; }
+.session-table thead th:nth-child(10) { width: 156px; }
 
 .session-table thead th[data-sort-key] {
   cursor: pointer;

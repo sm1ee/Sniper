@@ -15,9 +15,10 @@ function setup() {
   f.state.activeSession = f.a; f.state.sessions = [f.a, f.b]; f.state.selectedSessionId = f.b.id;
   f.old = f.tab('saved-a'); f.seed([f.old]);
   f.reloads = []; f.errors = []; f.warnings = [];
-  f.els.dashboardCreateSessionName = { value: 'New stored session' };
+  f.els.sessionSidebarCreateName = { value: 'New stored session' };
   for (const key of ['dashboardCurrentSessionStorage', 'dashboardCurrentSessionPath',
-    'dashboardSessionsBody', 'dashboardTiles', 'dashboardDetail']) f.els[key] = { querySelectorAll: () => [] };
+    'dashboardSessionsBody', 'dashboardTiles', 'dashboardDetail', 'sessionOverviewName', 'sessionOverviewStorage',
+    'sessionOverviewPath', 'sessionOverviewTiles', 'sessionOverviewDetail']) f.els[key] = { querySelectorAll: () => [] };
   Object.assign(f.context, {
     sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0, resetFindingsUiState() {},
     requireOkResponse: async response => { if (!response.ok) throw new Error('Synthetic session read failed'); },
@@ -30,7 +31,7 @@ function setup() {
     showConfirmDialog: (_, cb) => { f.confirm = cb; },
     getSortedSessions: () => f.state.sessions, formatCappedCount: value => String(value ?? 0),
     retainedTransactionsCap() {}, retainedEntriesCap() {}, formatTimestamp: () => '-', escapeHtml: String,
-    renderSessionSidebar() {},
+    renderSessionSidebar() {}, renderSessionPageView() {},
     console: { error() {}, warn: (...args) => f.warnings.push(args) },
   });
   for (const name of ['createSession', 'viewSessionById', 'deleteSessionById', 'loadSessions',
@@ -90,7 +91,7 @@ for (const operation of ['create', 'view', 'delete']) {
     assert.equal(f.context.workspaceSaveCommittedSnapshot, baseline);
     assert.equal(f.context.workspaceSaveConflictLatest, conflict); assert.equal(f.context.workspaceSaveConflictPending, true);
     assert.equal(f.context.workspaceSaveDirty, true); assert.equal(f.reloads.length, 0); assert.equal(f.requests.length, 2);
-    if (operation === 'create') assert.equal(f.els.dashboardCreateSessionName.value, 'New stored session');
+    if (operation === 'create') assert.equal(f.els.sessionSidebarCreateName.value, 'New stored session');
     if (operation === 'delete') assert.equal(f.state.selectedSessionId, 'session-a');
     if (operation === 'view') {
       // A view that fails changed nothing, so there is nothing to warn about
@@ -157,7 +158,7 @@ for (const operation of ['create', 'view', 'delete']) {
     f.succeed(0, {}); assert.equal(await result, undefined);
     assert.equal(f.requests.length, 1); assert.equal(f.toasts.length, 0);
     assert.equal(f.reloads.length, operation === 'delete' ? 0 : 1);
-    if (operation === 'create') assert.equal(f.els.dashboardCreateSessionName.value, '');
+    if (operation === 'create') assert.equal(f.els.sessionSidebarCreateName.value, '');
     if (operation === 'view') assert.equal(f.state.selectedSessionId, 'session-b');
     if (operation === 'delete') {
       assert.equal(f.state.sessions.length, 1); assert.equal(f.state.selectedSessionId, 'session-a');
