@@ -2742,9 +2742,18 @@ impl TcpCapture {
     ) -> std::io::Result<(u64, u64)> {
         let id = record.id;
         if !self.persist(&record).await {
+            // Relayed although it is not recorded, and ended like any tunnel
+            // when it is closed. Finished only then: finishing drops the
+            // channel that closes it, and a stop waits for every tunnel, so
+            // one finished first held a session switch and a quit until its
+            // two sides hung up.
+            let copied = tokio::select! {
+                copied = tokio::io::copy_bidirectional(&mut client, &mut upstream) => copied,
+                _ = closed.wait_for(|closed| *closed) => Ok((0, 0)),
+            };
             self.finish(id, "failed", Some(TcpFailure::StorageFailed))
                 .await;
-            return tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            return copied;
         }
         // No listener stops a tunnel: it ends with its sides, or when closed.
         let mut stop = closed.clone();
@@ -6610,6 +6619,52 @@ mod tests {
         assert_eq!(record.source, TcpSource::Connect);
         assert_eq!(record.target, "db.example.com:5432");
         assert_eq!(record.local_port, 0);
+    }
+    // A tunnel that could not be recorded is relayed all the same. It must
+    // still end when it is closed: a stop, which a session switch and a quit
+    // both wait on, waited for it until its two sides hung up.
+    #[tokio::test]
+    async fn a_tunnel_that_could_not_be_recorded_does_not_hold_up_a_stop() {
+        let capture = temporary();
+        std::fs::write(&capture.directory, b"not a directory").unwrap();
+        // Both ends stay open for the whole test.
+        let (client, upstream, _app, _target) = tunnel_ends();
+        let relay = tokio::spawn({
+            let capture = capture.clone();
+            async move {
+                capture
+                    .relay_tunnel(
+                        client,
+                        upstream,
+                        "127.0.0.1:50000".into(),
+                        "db.example.com:5432".into(),
+                        TcpSource::Connect,
+                        false,
+                    )
+                    .await
+            }
+        });
+        for _ in 0..100 {
+            if capture.status().await.persistence_error {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(capture.status().await.persistence_error);
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), capture.stop())
+                .await
+                .is_ok(),
+            "a stop does not wait for the tunnel's sides"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), relay)
+                .await
+                .is_ok(),
+            "the stop ends the relay"
+        );
+        std::fs::remove_file(&capture.directory).unwrap();
     }
     #[tokio::test]
     async fn passthrough_tunnels_are_recorded_but_never_held() {
