@@ -3652,15 +3652,14 @@ async fn update_workspace_state(
     }
     snapshot.expected_active_session_id = None;
     let active_session = state.session().await;
+    // A save for a session that is gone gets no workspace back. The active
+    // session's was sent here once, and a client can take that for its own.
     if target_session_id != active_session.id()
         && proxy::live_websocket_session_context(target_session_id).is_none()
         && proxy::pending_session_context(target_session_id).is_none()
-        && !busy_away_from_the_proxy(&state, target_session_id)
         && !state.sessions.contains_session(target_session_id)
     {
-        let mut current = active_session.workspace.snapshot().await;
-        current.session_id = Some(active_session.id());
-        return (StatusCode::CONFLICT, Json(current)).into_response();
+        return StatusCode::NOT_FOUND.into_response();
     }
     let workspace_update_lock = state.workspace_update_lock(target_session_id).await;
     let _workspace_update_guard = workspace_update_lock.lock().await;
@@ -3677,18 +3676,12 @@ async fn update_workspace_state(
     } else if let Some(session) = state.session_port_context(target_session_id) {
         // The context its port records into, so the save never loads another.
         session
-    } else if busy_away_from_the_proxy(&state, target_session_id) {
-        let mut current = active_session.workspace.snapshot().await;
-        current.session_id = Some(active_session.id());
-        return (StatusCode::CONFLICT, Json(current)).into_response();
     } else if let Some(session) = proxy::live_websocket_session_context(target_session_id) {
         session
     } else if let Some(session) = proxy::pending_session_context(target_session_id) {
         session
     } else if !state.sessions.contains_session(target_session_id) {
-        let mut current = active_session.workspace.snapshot().await;
-        current.session_id = Some(active_session.id());
-        return (StatusCode::CONFLICT, Json(current)).into_response();
+        return StatusCode::NOT_FOUND.into_response();
     } else {
         match state
             .session_context_for_id_operation_locked(target_session_id)
@@ -3758,10 +3751,9 @@ async fn update_workspace_state_keepalive(
     if target_session_id != active_session.id()
         && proxy::live_websocket_session_context(target_session_id).is_none()
         && proxy::pending_session_context(target_session_id).is_none()
-        && !busy_away_from_the_proxy(&state, target_session_id)
         && !state.sessions.contains_session(target_session_id)
     {
-        return StatusCode::CONFLICT.into_response();
+        return StatusCode::NOT_FOUND.into_response();
     }
     let workspace_update_lock = state.workspace_update_lock(target_session_id).await;
     let _workspace_update_guard = workspace_update_lock.lock().await;
@@ -3778,14 +3770,12 @@ async fn update_workspace_state_keepalive(
     } else if let Some(session) = state.session_port_context(target_session_id) {
         // The context its port records into, so the save never loads another.
         session
-    } else if busy_away_from_the_proxy(&state, target_session_id) {
-        return StatusCode::CONFLICT.into_response();
     } else if let Some(session) = proxy::live_websocket_session_context(target_session_id) {
         session
     } else if let Some(session) = proxy::pending_session_context(target_session_id) {
         session
     } else if !state.sessions.contains_session(target_session_id) {
-        return StatusCode::CONFLICT.into_response();
+        return StatusCode::NOT_FOUND.into_response();
     } else {
         match state
             .session_context_for_id_operation_locked(target_session_id)
@@ -4222,17 +4212,6 @@ fn expected_active_session_conflict_response(
     .then(|| active_session_conflict_response(state))
 }
 
-fn session_proxy_work_conflict_response(session_id: Uuid) -> Response {
-    (
-        StatusCode::CONFLICT,
-        Json(serde_json::json!({
-            "error": "session has active proxy work",
-            "session_id": session_id,
-        })),
-    )
-        .into_response()
-}
-
 fn ws_replay_connection_owner_conflict_response(owner_session_id: Uuid) -> Response {
     (
         StatusCode::CONFLICT,
@@ -4260,16 +4239,13 @@ fn session_load_failure_response(session_id: Uuid, error: anyhow::Error) -> Resp
         .into_response()
 }
 
-/// Whether a write that names a session which is not the active one is
-/// refused because the proxy still works in it. The rule catches a client
-/// that writes to a session the proxy has left. A session with its own port
-/// always has proxy work and is written while it flows; what keeps that safe
-/// is its one writable context, which the port holds.
-fn busy_away_from_the_proxy(state: &AppState, session_id: Uuid) -> bool {
-    proxy::session_has_active_proxy_work(session_id)
-        && state.session_port_context(session_id).is_none()
-}
-
+/// The writable context of the session a write names, or the default
+/// session's when it names none.
+///
+/// A write is not refused because its session has work in flight: a session
+/// the UI shows, and one with a port of its own, are written while a Replay or
+/// a capture runs in them. What keeps that safe is the one writable context
+/// each session has, which every branch below returns.
 pub(crate) async fn resolve_session_for_optional_id(
     state: &Arc<AppState>,
     target_session_id: Option<Uuid>,
@@ -4284,9 +4260,6 @@ pub(crate) async fn resolve_session_for_optional_id(
     // The context its port records into, so a write never loads another.
     if let Some(session) = state.session_port_context(target_session_id) {
         return Ok(session);
-    }
-    if busy_away_from_the_proxy(state, target_session_id) {
-        return Err(session_proxy_work_conflict_response(target_session_id));
     }
     if let Some(session) = proxy::live_websocket_session_context(target_session_id) {
         return Ok(session);
@@ -4342,12 +4315,6 @@ pub(crate) async fn guard_session_write_operation(
     if require_still_active && state.sessions.active_session_id() != session.id() {
         return Err(active_session_conflict_response(state));
     }
-    if !require_still_active
-        && state.sessions.active_session_id() != session.id()
-        && busy_away_from_the_proxy(state, session.id())
-    {
-        return Err(session_proxy_work_conflict_response(session.id()));
-    }
     Ok(guard)
 }
 
@@ -4368,11 +4335,6 @@ async fn begin_session_proxy_operation(
         Some(session.id()),
     ) {
         return Err(response);
-    }
-    if state.sessions.active_session_id() != session.id()
-        && busy_away_from_the_proxy(state, session.id())
-    {
-        return Err(session_proxy_work_conflict_response(session.id()));
     }
     if let Some(response) =
         expected_workspace_revision_conflict_response(session, expected_workspace_revision).await
@@ -4440,11 +4402,6 @@ async fn guard_ws_replay_connection_owner_operation(
         Some(session_id),
     ) {
         return Err(response);
-    }
-    if state.sessions.active_session_id() != session_id
-        && busy_away_from_the_proxy(state, session_id)
-    {
-        return Err(session_proxy_work_conflict_response(session_id));
     }
     if let Some(response) =
         expected_workspace_revision_conflict_response(session, expected_workspace_revision).await
@@ -10797,12 +10754,16 @@ mod tests {
                 .expect("a Replay in a session with an open port is not refused"),
         );
 
-        // A session without a port keeps the rule.
-        let refused = super::resolve_session_for_optional_id(&state, Some(no_port))
+        // A session without a port is written while it is busy too, and
+        // through the one context it has.
+        let resolved = super::resolve_session_for_optional_id(&state, Some(no_port))
             .await
-            .err()
-            .expect("a busy session without a port is still refused");
-        assert_eq!(refused.status(), StatusCode::CONFLICT);
+            .ok()
+            .expect("a busy session without a port resolves");
+        assert!(Arc::ptr_eq(
+            &resolved,
+            &state.session_context_for_id(no_port).await.unwrap()
+        ));
 
         let (status, body) = api_route_json(
             state.clone(),
@@ -19841,7 +19802,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_inactive_runtime_update_rechecks_proxy_work_after_lock_wait() {
+    async fn a_runtime_update_lands_in_a_session_the_api_works_in() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-runtime-proxy-work-race-{}",
             uuid::Uuid::new_v4()
@@ -19882,15 +19843,15 @@ mod tests {
         drop(operation_guard);
 
         let response = update_future.await;
-        assert_eq!(response.status(), super::StatusCode::CONFLICT);
-        assert!(!original.runtime.snapshot().await.intercept_enabled);
+        assert_eq!(response.status(), super::StatusCode::OK);
+        assert!(original.runtime.snapshot().await.intercept_enabled);
 
         drop(active_proxy_owner);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]
-    async fn session_proxy_operation_rechecks_proxy_work_after_lock_wait() {
+    async fn an_api_exchange_starts_in_a_session_the_api_works_in() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-proxy-operation-race-{}",
             uuid::Uuid::new_v4()
@@ -19925,11 +19886,11 @@ mod tests {
         drop(operation_guard);
 
         match proxy_future.await {
-            Ok(owner) => {
-                drop(owner);
-                panic!("proxy operation should reject inactive sessions with active proxy work");
-            }
-            Err(response) => assert_eq!(response.status(), super::StatusCode::CONFLICT),
+            Ok(owner) => drop(owner),
+            Err(response) => panic!(
+                "work in a session that is not the default must not refuse more: {}",
+                response.status()
+            ),
         }
 
         drop(active_proxy_owner);
@@ -20504,7 +20465,8 @@ mod tests {
         .await;
         assert_eq!(missing_events_response.status(), StatusCode::NOT_FOUND);
 
-        let blocked_clear_response = super::clear_event_log(
+        // Work in flight in the session does not refuse a write to it.
+        let busy_clear_response = super::clear_event_log(
             State(state.clone()),
             Query(super::SessionWriteQuery {
                 session_id: Some(inactive.id()),
@@ -20512,21 +20474,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(blocked_clear_response.status(), StatusCode::CONFLICT);
-        let blocked_clear_body = response_body_json(blocked_clear_response).await;
-        assert_eq!(
-            blocked_clear_body
-                .get("error")
-                .and_then(serde_json::Value::as_str),
-            Some("session has active proxy work")
-        );
-        let expected_inactive_id = inactive.id().to_string();
-        assert_eq!(
-            blocked_clear_body
-                .get("session_id")
-                .and_then(serde_json::Value::as_str),
-            Some(expected_inactive_id.as_str())
-        );
+        assert_eq!(busy_clear_response.status(), StatusCode::NO_CONTENT);
 
         drop(active_proxy_owner);
 
@@ -21769,42 +21717,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_update_rejects_snapshot_for_unknown_session() {
-        let data_dir = std::env::temp_dir().join(format!(
-            "sniper-test-workspace-session-guard-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let config = AppConfig {
-            proxy_addr: "127.0.0.1:0".parse().unwrap(),
-            ui_addr: "127.0.0.1:0".parse().unwrap(),
-            max_entries: 100,
-            max_transaction_entries: 100,
-            body_preview_bytes: 4096,
-            data_dir: data_dir.clone(),
-        };
-        let state = Arc::new(AppState::new(config).unwrap());
-        let active_session = state.session().await;
-
-        let mut snapshot = WorkspaceStateSnapshot {
-            session_id: Some(Uuid::new_v4()),
-            client_id: Some("test-ui".to_string()),
-            client_version: 1,
-            ..WorkspaceStateSnapshot::default()
-        };
-        snapshot.replay.active_tab_id = Some("unknown-session-tab".to_string());
-
-        let response =
-            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
-                .await;
-
-        assert_eq!(response.status(), super::StatusCode::CONFLICT);
-        let active = active_session.workspace.snapshot().await;
-        assert!(active.replay.active_tab_id.is_none());
-
-        let _ = std::fs::remove_dir_all(data_dir);
-    }
-
-    #[tokio::test]
     async fn workspace_update_rejects_snapshot_without_session_id() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-workspace-missing-session-guard-{}",
@@ -22155,7 +22067,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_update_rejects_inactive_session_with_pending_active_proxy_work() {
+    async fn a_workspace_save_lands_in_a_session_the_api_works_in() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-workspace-active-proxy-guard-{}",
             uuid::Uuid::new_v4()
@@ -22196,25 +22108,47 @@ mod tests {
             client_version: 1,
             ..WorkspaceStateSnapshot::default()
         };
-        snapshot.replay.active_tab_id = Some("blocked-inactive-tab".to_string());
+        snapshot.replay.active_tab_id = Some("busy-session-tab".to_string());
         snapshot.replay.tabs.push(ReplayTabState {
-            id: "blocked-inactive-tab".to_string(),
+            id: "busy-session-tab".to_string(),
             sequence: 1,
             ..ReplayTabState::default()
         });
 
-        let response =
-            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
-                .await;
+        let response = super::update_workspace_state(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(snapshot.clone()),
+        )
+        .await;
 
-        assert_eq!(response.status(), super::StatusCode::CONFLICT);
-        assert!(inactive
-            .workspace
-            .snapshot()
-            .await
-            .replay
-            .active_tab_id
-            .is_none());
+        assert_eq!(response.status(), super::StatusCode::OK);
+        let saved = inactive.workspace.snapshot().await;
+        assert_eq!(
+            saved.replay.active_tab_id.as_deref(),
+            Some("busy-session-tab")
+        );
+
+        // The save that a closing page sends takes the same path.
+        snapshot.revision = saved.revision;
+        snapshot.client_version = 2;
+        snapshot.replay.tabs[0].custom_label = "kept".to_string();
+        let response = super::update_workspace_state_keepalive(
+            State(state.clone()),
+            Json(super::WorkspaceKeepaliveUpdate {
+                snapshot,
+                keepalive: super::WorkspaceKeepaliveMetadata {
+                    replay_tabs_complete: true,
+                    ..Default::default()
+                },
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), super::StatusCode::OK);
+        assert_eq!(
+            inactive.workspace.snapshot().await.replay.tabs[0].custom_label,
+            "kept"
+        );
 
         drop(active_proxy_owner);
         assert!(crate::proxy::forget_pending_persist_context_for_test(
@@ -22223,6 +22157,280 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    /// A loopback upstream that answers each request with the body it was
+    /// sent. The request for `/held` is answered once its sender is used.
+    async fn echo_upstream_holding_one() -> (
+        std::net::SocketAddr,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let hold = Arc::new(std::sync::Mutex::new(Some((accepted_tx, release_rx))));
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let hold = hold.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buffer = [0u8; 4096];
+                    let body = loop {
+                        let read = stream.read(&mut buffer).await.unwrap_or(0);
+                        if read == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&buffer[..read]);
+                        let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                        let length = head
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break request[end + 4..end + 4 + length].to_vec();
+                        }
+                    };
+                    if request.starts_with(b"POST /held") {
+                        let hold = hold.lock().unwrap().take();
+                        if let Some((accepted, release)) = hold {
+                            let _ = accepted.send(());
+                            let _ = release.await;
+                        }
+                    }
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    let _ = stream.write_all(&body).await;
+                });
+            }
+        });
+        (addr, accepted_rx, release_tx)
+    }
+
+    /// Decision 8 of the session ports design. A session that is not the
+    /// default is written while the API works in it. What keeps that safe is
+    /// its one writable context, and a restart shows nothing was mixed up.
+    #[tokio::test]
+    async fn writes_to_a_session_that_is_busy_away_from_the_proxy_are_stored() {
+        let _work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let config = test_app_config("sniper-test-busy-session-writes");
+        let state = Arc::new(AppState::new(config.clone()).unwrap());
+        let viewed = state
+            .create_inactive_session(Some("viewed".to_string()))
+            .await
+            .unwrap()
+            .id;
+        let (upstream, accepted, release) = echo_upstream_holding_one().await;
+        let replay = |state: &Arc<AppState>, path: &str, body: &str| {
+            super::send_replay(
+                State(state.clone()),
+                Json(super::ReplaySendPayload {
+                    session_id: Some(viewed),
+                    expected_active_session_id: None,
+                    expected_workspace_revision: None,
+                    request: EditableRequest {
+                        scheme: "http".to_string(),
+                        host: upstream.to_string(),
+                        method: "POST".to_string(),
+                        path: path.to_string(),
+                        headers: Vec::new(),
+                        body: body.to_string(),
+                        body_encoding: BodyEncoding::Utf8,
+                        preview_truncated: false,
+                    },
+                    target: None,
+                    source_transaction_id: None,
+                    http_version: None,
+                }),
+            )
+        };
+
+        // A Replay that stays in flight: the session is busy, and the main
+        // listener does not record into it.
+        let held = tokio::spawn(replay(&state, "/held", "held body"));
+        tokio::time::timeout(Duration::from_secs(5), accepted)
+            .await
+            .expect("the held Replay reaches the upstream")
+            .unwrap();
+        assert!(crate::proxy::session_has_active_proxy_work(viewed));
+        assert_ne!(state.sessions.active_session_id(), viewed);
+
+        let response = replay(&state, "/quick", "quick body").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let quick_id = response_body_json(response).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let response = super::update_transaction_annotations(
+            State(state.clone()),
+            Path(quick_id.clone()),
+            Query(super::TransactionWriteQuery {
+                session_id: Some(viewed),
+                expected_active_session_id: None,
+                search_headers: false,
+            }),
+            Json(super::AnnotationsPayload {
+                session_id: None,
+                color_tag: None,
+                user_note: Some(Some("kept note".to_string())),
+                client_id: None,
+                client_version: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut snapshot = WorkspaceStateSnapshot {
+            session_id: Some(viewed),
+            client_id: Some("test-ui".to_string()),
+            client_version: 1,
+            ..WorkspaceStateSnapshot::default()
+        };
+        snapshot.replay.active_tab_id = Some("kept-tab".to_string());
+        snapshot.replay.tabs.push(ReplayTabState {
+            id: "kept-tab".to_string(),
+            sequence: 1,
+            ..ReplayTabState::default()
+        });
+        let response =
+            super::update_workspace_state(State(state.clone()), HeaderMap::new(), Json(snapshot))
+                .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = super::update_runtime_settings(
+            State(state.clone()),
+            Json(RuntimeSettingsUpdate {
+                session_id: Some(viewed),
+                intercept_scope_only: Some(false),
+                ..RuntimeSettingsUpdate::default()
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        release.send(()).unwrap();
+        let response = held.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let held_id = response_body_json(response).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Every write above went to one context: a second one would be
+        // missing some of them.
+        let context = state.session_context_for_id(viewed).await.unwrap();
+        assert!(!context.runtime.snapshot().await.intercept_scope_only);
+        assert_eq!(
+            context
+                .workspace
+                .snapshot()
+                .await
+                .replay
+                .active_tab_id
+                .as_deref(),
+            Some("kept-tab")
+        );
+        assert_eq!(context.store.len().await, 2);
+        drop(context);
+
+        // As a quit does, then a start on the same directory.
+        crate::proxy::flush_pending_session_persists(&state)
+            .await
+            .unwrap();
+        drop(state);
+        let restarted = Arc::new(AppState::new(config.clone()).unwrap());
+        for (id, body) in [(&quick_id, "quick body"), (&held_id, "held body")] {
+            let response = super::get_transaction(
+                State(restarted.clone()),
+                Path(id.clone()),
+                Query(super::TransactionGetQuery {
+                    session_id: Some(viewed),
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let record = response_body_json(response).await;
+            assert_eq!(record["request"]["body_preview"], body);
+            assert_eq!(record["response"]["body_preview"], body);
+        }
+        let record = response_body_json(
+            super::get_transaction(
+                State(restarted.clone()),
+                Path(quick_id),
+                Query(super::TransactionGetQuery {
+                    session_id: Some(viewed),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(record["user_note"], "kept note");
+        let context = restarted.session_context_for_id(viewed).await.unwrap();
+        assert!(!context.runtime.snapshot().await.intercept_scope_only);
+        assert_eq!(
+            context
+                .workspace
+                .snapshot()
+                .await
+                .replay
+                .active_tab_id
+                .as_deref(),
+            Some("kept-tab")
+        );
+        drop(context);
+        drop(restarted);
+        let _ = std::fs::remove_dir_all(config.data_dir);
+    }
+
+    /// A save for a session that is gone used to be answered with the active
+    /// session's workspace, which a client could take for its own.
+    #[tokio::test]
+    async fn a_workspace_save_for_a_deleted_session_is_not_answered_with_another_workspace() {
+        let config = test_app_config("sniper-test-workspace-save-deleted-session");
+        let state = Arc::new(AppState::new(config.clone()).unwrap());
+        let mut snapshot = WorkspaceStateSnapshot {
+            session_id: Some(Uuid::new_v4()),
+            client_id: Some("test-ui".to_string()),
+            client_version: 1,
+            ..WorkspaceStateSnapshot::default()
+        };
+        snapshot.replay.active_tab_id = Some("unknown-session-tab".to_string());
+
+        let response = super::update_workspace_state(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(snapshot.clone()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(body.is_empty(), "no workspace is sent back");
+        let active = state.session().await.workspace.snapshot().await;
+        assert!(active.replay.active_tab_id.is_none());
+
+        let response = super::update_workspace_state_keepalive(
+            State(state.clone()),
+            Json(super::WorkspaceKeepaliveUpdate {
+                snapshot,
+                keepalive: super::WorkspaceKeepaliveMetadata::default(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(config.data_dir);
     }
 
     #[tokio::test]
@@ -23736,7 +23944,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ws_replay_remove_rechecks_proxy_work_after_lock_wait() {
+    async fn a_ws_replay_connection_is_removed_in_a_session_the_api_works_in() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-ws-replay-remove-proxy-work-race-{}",
             uuid::Uuid::new_v4()
@@ -23778,7 +23986,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(
             !response_task.is_finished(),
-            "ws replay remove should wait before rechecking active proxy work"
+            "ws replay remove should wait for the session's operation lock"
         );
         let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
             original_id,
@@ -23787,8 +23995,8 @@ mod tests {
         drop(operation_guard);
 
         let response = response_task.await.unwrap();
-        assert_eq!(response.status(), super::StatusCode::CONFLICT);
-        assert!(state.ws_replay.snapshot(connection_id).await.is_some());
+        assert_eq!(response.status(), super::StatusCode::OK);
+        assert!(state.ws_replay.snapshot(connection_id).await.is_none());
 
         drop(active_proxy_owner);
         let _ = std::fs::remove_dir_all(data_dir);
@@ -23857,67 +24065,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ws_replay_send_rechecks_proxy_work_after_lock_wait() {
-        let data_dir = std::env::temp_dir().join(format!(
-            "sniper-test-ws-replay-send-proxy-work-race-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let config = AppConfig {
-            proxy_addr: "127.0.0.1:0".parse().unwrap(),
-            ui_addr: "127.0.0.1:0".parse().unwrap(),
-            max_entries: 100,
-            max_transaction_entries: 100,
-            body_preview_bytes: 4096,
-            data_dir: data_dir.clone(),
-        };
-        let state = Arc::new(AppState::new(config).unwrap());
-        let original = state.session().await;
-        let original_id = original.id();
-        state
-            .create_session(Some("new active".to_string()))
-            .await
-            .unwrap();
-        let connection_id = Uuid::new_v4();
-        state
-            .ws_replay
-            .remember_disconnected_connection_for_test(connection_id, original_id)
-            .await;
-        let operation_lock = state.session_operation_lock(original_id).await;
-        let operation_guard = operation_lock.lock_owned().await;
-
-        let response_task = tokio::spawn(super::ws_replay_send(
-            State(state.clone()),
-            Json(super::WsReplaySendPayload {
-                session_id: Some(original_id),
-                expected_active_session_id: None,
-                expected_workspace_revision: None,
-                id: connection_id,
-                body: "hello".to_string(),
-                binary: false,
-                kind: None,
-            }),
-        ));
-
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        assert!(
-            !response_task.is_finished(),
-            "ws replay send should wait before rechecking active proxy work"
-        );
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
-            original_id,
-            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
-        );
-        drop(operation_guard);
-
-        let response = response_task.await.unwrap();
-        assert_eq!(response.status(), super::StatusCode::CONFLICT);
-        assert!(state.ws_replay.snapshot(connection_id).await.is_some());
-
-        drop(active_proxy_owner);
-        let _ = std::fs::remove_dir_all(data_dir);
-    }
-
-    #[tokio::test]
     async fn ws_replay_connect_rechecks_workspace_revision_after_lock_wait() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-ws-replay-connect-workspace-revision-race-{}",
@@ -23976,65 +24123,6 @@ mod tests {
         );
         assert!(state.ws_replay.snapshot(connection_id).await.is_none());
 
-        let _ = std::fs::remove_dir_all(data_dir);
-    }
-
-    #[tokio::test]
-    async fn ws_replay_connect_rechecks_proxy_work_after_lock_wait() {
-        let data_dir = std::env::temp_dir().join(format!(
-            "sniper-test-ws-replay-connect-proxy-work-race-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let config = AppConfig {
-            proxy_addr: "127.0.0.1:0".parse().unwrap(),
-            ui_addr: "127.0.0.1:0".parse().unwrap(),
-            max_entries: 100,
-            max_transaction_entries: 100,
-            body_preview_bytes: 4096,
-            data_dir: data_dir.clone(),
-        };
-        let state = Arc::new(AppState::new(config).unwrap());
-        let original = state.session().await;
-        let original_id = original.id();
-        state
-            .create_session(Some("new active".to_string()))
-            .await
-            .unwrap();
-        let connection_id = Uuid::new_v4();
-        let operation_lock = state.session_operation_lock(original_id).await;
-        let operation_guard = operation_lock.lock_owned().await;
-
-        let response_task = tokio::spawn(super::ws_replay_connect(
-            State(state.clone()),
-            Json(super::WsReplayConnectPayload {
-                session_id: Some(original_id),
-                expected_active_session_id: None,
-                expected_workspace_revision: None,
-                id: connection_id,
-                scheme: "wss".to_string(),
-                host: "example.test".to_string(),
-                port: 443,
-                path: "/socket".to_string(),
-                headers: Vec::new(),
-            }),
-        ));
-
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        assert!(
-            !response_task.is_finished(),
-            "ws replay connect should wait before rechecking active proxy work"
-        );
-        let active_proxy_owner = crate::proxy::remember_active_proxy_session_owner(
-            original_id,
-            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
-        );
-        drop(operation_guard);
-
-        let response = response_task.await.unwrap();
-        assert_eq!(response.status(), super::StatusCode::CONFLICT);
-        assert!(state.ws_replay.snapshot(connection_id).await.is_none());
-
-        drop(active_proxy_owner);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -25516,7 +25604,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sequence_upsert_rechecks_proxy_work_after_lock_wait() {
+    async fn a_sequence_is_saved_in_a_session_the_api_works_in() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-sequence-upsert-proxy-work-race-{}",
             uuid::Uuid::new_v4()
@@ -25561,15 +25649,15 @@ mod tests {
         drop(operation_guard);
 
         let response = upsert_future.await;
-        assert_eq!(response.status(), super::StatusCode::CONFLICT);
-        assert!(original.sequence.list_definitions().await.is_empty());
+        assert!(response.status().is_success(), "{}", response.status());
+        assert_eq!(original.sequence.list_definitions().await.len(), 1);
 
         drop(active_proxy_owner);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]
-    async fn sequence_delete_rechecks_proxy_work_after_lock_wait() {
+    async fn a_sequence_is_deleted_in_a_session_the_api_works_in() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-sequence-delete-proxy-work-race-{}",
             uuid::Uuid::new_v4()
@@ -25618,12 +25706,12 @@ mod tests {
         drop(operation_guard);
 
         let response = delete_future.await;
-        assert_eq!(response.status(), super::StatusCode::CONFLICT);
+        assert!(response.status().is_success(), "{}", response.status());
         assert!(original
             .sequence
             .get_definition(definition.id)
             .await
-            .is_some());
+            .is_none());
 
         drop(active_proxy_owner);
         let _ = std::fs::remove_dir_all(data_dir);
@@ -25726,7 +25814,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sequence_run_rechecks_proxy_work_after_lock_wait() {
+    async fn a_sequence_runs_in_a_session_the_api_works_in() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-sequence-run-proxy-work-race-{}",
             uuid::Uuid::new_v4()
@@ -25774,9 +25862,9 @@ mod tests {
         );
         drop(operation_guard);
 
+        // Its definition has no steps, which is what refuses it now.
         let response = run_future.await;
-        assert_eq!(response.status(), super::StatusCode::CONFLICT);
-        assert!(original.sequence.list_runs(None).await.is_empty());
+        assert_eq!(response.status(), super::StatusCode::BAD_REQUEST);
 
         drop(active_proxy_owner);
         let _ = std::fs::remove_dir_all(data_dir);
