@@ -319,6 +319,11 @@ pub async fn rebind_proxy_locked(
     state.abort_proxy_task().await;
     state.set_proxy_online(false);
     persist_proxy_runtime_state(&state, current, false, "after stopping proxy for rebind").await;
+    // The guards know the new address before anything listens there, as for
+    // a session port: a connection the old listener accepted lives until the
+    // drain below, and must not reach the new one through it as a local
+    // client. Kept until the address is the main listener's.
+    let announced = state.own_listeners().announce(new_addr);
 
     // Bind the new address with SO_REUSEADDR.
     // Retry a few times because macOS may not release the port instantly
@@ -405,6 +410,7 @@ pub async fn rebind_proxy_locked(
     // Update active address
     state.set_active_proxy_addr(bound_addr).await;
     let proxy_generation = state.mark_proxy_listener_online();
+    drop(announced);
     persist_proxy_runtime_state(&state, bound_addr, true, "after proxy rebind").await;
 
     info!(old = %current, new = %bound_addr, "proxy listener rebound");
@@ -2098,7 +2104,7 @@ async fn remote_client_reaches_guarded(state: &AppState, client: IpAddr, uri: &U
     }
     let mut ports: Vec<u16> = state
         .own_listeners()
-        .all()
+        .refused_to_remote()
         .iter()
         .map(SocketAddr::port)
         .collect();
@@ -10852,6 +10858,38 @@ mod tests {
                 "{open}"
             );
         }
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // The connections a listener accepted live on after it goes down: its
+    // accept task ends and they do not. A client on another machine that
+    // keeps one must still be refused the listener's address, or it opens a
+    // tunnel there while the listener is down, sends nothing until it is back,
+    // and arrives on it as a local client, which the UI trusts.
+    #[tokio::test]
+    async fn another_machine_is_refused_the_main_listener_s_address_while_it_is_down() {
+        let (state, data_dir) = test_proxy_state("sniper-proxy-down-guard");
+        state
+            .set_active_proxy_addr("0.0.0.0:18080".parse().unwrap())
+            .await;
+        state.set_proxy_online(false);
+        let remote: IpAddr = "192.0.2.10".parse().unwrap();
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        for target in ["http://127.0.0.1:18080/", "http://example.com:18080/"] {
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                remote_client_reaches_guarded(&state, remote, &uri).await,
+                "{target}"
+            );
+            assert!(
+                !remote_client_reaches_guarded(&state, local, &uri).await,
+                "{target}"
+            );
+        }
+        // For this machine the address is whoever has the port now.
+        let session = state.session().await;
+        let uri: Uri = "http://127.0.0.1:18080/".parse().unwrap();
+        assert_eq!(own_proxy_listener_for(&state, &session, &uri).await, None);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

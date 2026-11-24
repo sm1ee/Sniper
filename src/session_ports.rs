@@ -139,6 +139,9 @@ impl OwnListeners {
 
     /// Whether the main listener is bound. Until it is first told otherwise
     /// the address counts, so the guards know it before the listener starts.
+    /// Only the question "does this lead back into Sniper" reads it
+    /// (`proxies`, `all`); what another machine is refused does not
+    /// (`refused_to_remote`).
     pub(crate) fn set_main_listening(&self, listening: bool) {
         self.write().main_down = !listening;
     }
@@ -155,24 +158,42 @@ impl OwnListeners {
         }
     }
 
-    /// Sniper's proxy listeners: the main one and every session port that is
-    /// open or being opened.
+    /// The proxy listeners a request can lead back into: the main one and
+    /// every session port that is open or being opened. The main listener's
+    /// address is left out while that listener is down, because another
+    /// program has the port then.
     pub fn proxies(&self) -> Vec<SocketAddr> {
         let own = self.read();
-        let mut proxies: Vec<SocketAddr> =
-            own.main.filter(|_| !own.main_down).into_iter().collect();
+        Self::with_ports(own.main.filter(|_| !own.main_down), &own)
+    }
+
+    /// Every listener a request can lead back into: the UI and `proxies`.
+    pub fn all(&self) -> Vec<SocketAddr> {
+        let ui = self.read().ui;
+        ui.into_iter().chain(self.proxies()).collect()
+    }
+
+    /// What a client on another machine is refused: the UI and every proxy
+    /// address, the main listener's also while that listener is down. The
+    /// connections it accepted live on after it stops accepting. A client
+    /// that keeps one could open a tunnel to the address then, send nothing
+    /// until the listener is back, and arrive on it as a local client.
+    pub fn refused_to_remote(&self) -> Vec<SocketAddr> {
+        let own = self.read();
+        own.ui
+            .into_iter()
+            .chain(Self::with_ports(own.main, &own))
+            .collect()
+    }
+
+    fn with_ports(main: Option<SocketAddr>, own: &OwnAddrs) -> Vec<SocketAddr> {
+        let mut proxies: Vec<SocketAddr> = main.into_iter().collect();
         for addr in own.session_ports.iter().chain(&own.opening) {
             if !proxies.contains(addr) {
                 proxies.push(*addr);
             }
         }
         proxies
-    }
-
-    /// Every listener of Sniper's: the UI and the proxies.
-    pub fn all(&self) -> Vec<SocketAddr> {
-        let ui = self.read().ui;
-        ui.into_iter().chain(self.proxies()).collect()
     }
 
     /// Whether a session keeps this number for its port, open or not.
@@ -1788,6 +1809,8 @@ mod tests {
         state.set_proxy_online(false);
         assert!(get_through(port, app, "/app").await.contains(" 200"));
         assert!(!state.own_listeners().all().contains(&app));
+        // Another machine is refused it all the same.
+        assert!(state.own_listeners().refused_to_remote().contains(&app));
 
         let echo = echo_upstream().await;
         state.set_active_proxy_addr(echo).await;
@@ -1802,6 +1825,38 @@ mod tests {
 
         state.close_session_port(agent).await.unwrap();
         drop(state);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A rebind binds the new address a moment before that address is the main
+    // listener's. The connections the old listener accepted live until the
+    // drain, so the guards must know the new address before it listens.
+    #[tokio::test]
+    async fn a_rebind_makes_the_new_address_known_to_the_guards_before_it_listens() {
+        let _work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let data_dir = scratch("rebind-announce");
+        let state = state_in(&data_dir);
+        let main = serving_main_listener(&state).await;
+        // Another program has the port, so the bind keeps trying and the
+        // moment before it is long enough to look at.
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let wanted = taken.local_addr().unwrap();
+
+        let rebinding = tokio::spawn(crate::proxy::rebind_proxy(state.clone(), wanted));
+        let mut known = false;
+        while !known && !rebinding.is_finished() {
+            known = state.own_listeners().refused_to_remote().contains(&wanted);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(known, "the guards did not know the address being bound");
+        rebinding.await.unwrap().unwrap_err();
+
+        // It did not become Sniper's, and the listener is back where it was.
+        let refused = state.own_listeners().refused_to_remote();
+        assert!(!refused.contains(&wanted));
+        assert!(refused.contains(&main));
+        assert_eq!(state.get_active_proxy_addr().await, main);
+        state.abort_proxy_task().await;
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

@@ -204,7 +204,11 @@ seriously.
   address of this machine and under any name (`remote_client_targets` in
   `src/proxy.rs`). A new port that Sniper listens on belongs in that list:
   `OwnListeners` (`src/session_ports.rs`) holds the UI, the proxy listener and
-  every open session port, and each guard reads it.
+  every open session port, and each guard reads it. It gives two lists. What
+  another machine is refused (`refused_to_remote`) keeps a listener's address
+  while that listener is down, because the connections it accepted live on.
+  The loop guards (`proxies`, `all`) leave it out then. Tell the guards an
+  address before anything listens on it (`announce`).
 - **Never log captured traffic content** — bodies, headers, cookies, or tokens —
   into event logs, error messages, or temp files.
 - **Never put a real hostname in a test fixture, UI placeholder, or example.**

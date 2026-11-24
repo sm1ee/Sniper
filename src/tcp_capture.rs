@@ -2002,7 +2002,7 @@ impl TcpCapture {
     /// and the driver ports of the browsers it opened.
     fn guarded(&self) -> Vec<std::net::SocketAddr> {
         let mut guarded = match self.runtime.get() {
-            Some(runtime) => runtime.own_listeners().all(),
+            Some(runtime) => runtime.own_listeners().refused_to_remote(),
             None => Vec::new(),
         };
         guarded.extend(
@@ -6405,6 +6405,8 @@ mod tests {
         let guarded_port = guarded.local_addr().unwrap().port();
         let own = crate::session_ports::OwnListeners::default();
         own.set_main(guarded.local_addr().unwrap());
+        // Also while that listener is down: what it accepted outlives it.
+        own.set_main_listening(false);
         let runtime = Arc::new(crate::runtime::RuntimeSettings::new());
         runtime.use_own_listeners(own);
         capture.use_runtime(runtime);
@@ -6452,7 +6454,8 @@ mod tests {
         };
         assert_eq!(of(closed).refused, 1);
         let mut looping = from_another_device(onto_sniper).await.unwrap();
-        let _ = looping.read(&mut nothing).await;
+        // Refused, it is closed at once. Relayed, it would wait for ever.
+        let _ = tokio::time::timeout(Duration::from_secs(5), looping.read(&mut nothing)).await;
         let failed = wait_saved(&capture, 3).await;
         assert!(failed
             .iter()
