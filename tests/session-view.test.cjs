@@ -2,7 +2,8 @@
 // functions run in a VM with deferred in-memory replies; no API is called.
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { loadFunctions } = require("./frontend-test-helpers.cjs");
+const vm = require("node:vm");
+const { appSource, loadFunctions } = require("./frontend-test-helpers.cjs");
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const session = (id, active = false) => ({ id, name: `Session ${id}`, active });
@@ -231,4 +232,26 @@ test("settings are read for the session a click asked for, and a late answer for
   const answer = { json: async () => ({ active_session: session("a", true), runtime: {} }) };
   assert.equal(await g.context._applySettings(answer, { sessionId: "a" }), false);
   assert.equal(g.state.settings, undefined, "an answer for a session the window has left changes nothing");
+});
+
+// The production binding, cut out of connectEvents.
+test("the stream saying its session was deleted moves the window off it", () => {
+  const marker = '  eventSource.addEventListener("session_deleted", () => {';
+  const binding = appSource.slice(appSource.indexOf(marker));
+  assert.ok(appSource.includes(marker));
+  let handler;
+  const left = [];
+  const stream = { addEventListener(name, callback) { assert.equal(name, "session_deleted"); handler = callback; } };
+  const context = vm.createContext({
+    eventSource: stream, eventStreamOwner: stream, eventSessionId: "a",
+    showDefaultSessionAfterDelete: async id => { left.push(id); },
+    handleWorkspaceActionError() {},
+  });
+  vm.runInContext(binding.slice(0, binding.indexOf("\n  });") + 6), context);
+  handler();
+  assert.deepEqual(left, ["a"]);
+  // A stream the window has replaced speaks for no session on screen.
+  context.eventSource = {};
+  handler();
+  assert.deepEqual(left, ["a"]);
 });
