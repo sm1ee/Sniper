@@ -164,7 +164,10 @@ the activity rows.
   and a session port both carry traffic; nothing is cut and each request is in
   its own session. Replay, a workspace save and an annotation on a session with
   no feed, then a restart: every body is the one sent.
-- [ ] The same in the desktop app's webview. Not done: the screen was locked.
+- [x] The desktop app's webview: the layout, the labels, a click that shows a
+  session, both menus and their actions. The window was behind another one,
+  so the indicator's colour after a change was not seen.
 - [x] `docs/guides/`, `docs/architecture.md`, `AGENTS.md`, the operator skill,
   the design's "As built".
-- [ ] Deploy. One reviewer.
+- [x] Deploy. One reviewer: what it found is in the design's "Review of
+  phase 3".

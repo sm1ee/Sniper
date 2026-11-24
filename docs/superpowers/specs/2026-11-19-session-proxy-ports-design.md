@@ -622,9 +622,10 @@ What the builder settled, and where the build went past the design.
 - **A browser that relaunched itself** is named by no record once the process
   Sniper started has ended. Its profile's lock is asked too, so deleting the
   session does not remove the profile under it.
-- **The main listener's address** counts as Sniper's own only while that
-  listener is bound. While it is down another program has the port, and that
-  can be the application under test, reached through a session port.
+- **The main listener's address** counts as a way back into Sniper only while
+  that listener is bound. While it is down another program has the port, and
+  that can be the application under test, reached through a session port.
+  The review of phase 3 took this back for a client on another machine.
 - **A tunnel that could not be recorded** is relayed, and now ends when it is
   closed. A stop waited for it, which held a session switch and a quit.
 
@@ -661,9 +662,35 @@ listener of Sniper's gets 508, for any client.
 - **What stays with the default session** says so: the TCP relay answers a
   change for another session with its own message, and OAST, Service Map
   bodies and socket peers were reworded.
-- **Not checked**: the desktop app's own webview. The screen was locked, and
-  the webview does not draw then. The browser panel showed the layout, the
-  indicator, the menus and each action.
+- **The desktop app's own webview** was checked after the review, pressed
+  through the accessibility tree: the layout, the port labels, a click that
+  shows a session, the indicator's menu and a row's menu, and each action
+  (open a port, close it, record here). The window was behind another one,
+  where the webview holds its transitions, so the colour of an indicator
+  that had just changed was not seen there.
+
+### Review of phase 3
+
+- **Two lists of Sniper's own addresses.** A client on another machine is
+  refused the main listener's address also while that listener is down
+  (`OwnListeners::refused_to_remote`). The connections the listener accepted
+  outlive it, and one could hold a tunnel to the address until the listener
+  is back, then arrive on it as a local client. The loop guards still leave
+  the address out then (`proxies`, `all`). A rebind announces the new address
+  before it binds it.
+- **A shutdown** tells the registry what every loaded session holds, not only
+  the ones that ports fed, and writes a state save that is still queued
+  (`persist_other_loaded_sessions`). A session a window worked in showed the
+  counts of its last full save after a restart.
+- **A session deleted by another client.** A note still queued for it is
+  dropped: kept, it refused every later session change and every close. A
+  session deleted while the window loads it gives way to the one the list
+  names, at once.
+- **What prints a feed** is read again after a change to one, even when a read
+  is in flight, and redrawn after a rebind.
+- **Left as it is**: a port that two failed launches shared, or one whose
+  caller went away before the launch ended, stays open with no browser. It
+  shows as open and closes from the session's menu.
 
 ## Constraints
 
