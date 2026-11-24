@@ -1396,11 +1396,16 @@ impl AppState {
             // spot — an ordinary request is done in milliseconds. This runs before the
             // active-session write lock is taken, so the rest of the app keeps serving
             // while we wait.
+            //
+            // Only the session the main listener leaves is asked: its capture
+            // stops being recorded there, so all of its work has to end. The
+            // session it moves to has only work the API started in it, such
+            // as a Replay or a Fuzzer attack from a window that shows it. That
+            // work goes on in the same context, so it is neither waited for
+            // nor cut.
+            let session_id = current_id;
             if current_id != id {
-                for session_id in [current_id, id] {
-                    if !crate::proxy::session_has_active_proxy_work(session_id) {
-                        continue;
-                    }
+                if crate::proxy::session_has_active_proxy_work(session_id) {
                     if force {
                         // Stops everything a session can be holding: streamed
                         // responses, and the long-running tasks behind HTTPS tunnels
@@ -1486,13 +1491,9 @@ impl AppState {
             let current = active_session.clone();
             let current_id = current.id();
             let session = if current_id != id {
-                if crate::proxy::session_has_active_proxy_work(current_id)
-                    || crate::proxy::session_has_active_proxy_work(id)
-                {
-                    let busy = [current_id, id]
-                        .into_iter()
-                        .map(crate::proxy::describe_session_proxy_work)
-                        .find(|description| !description.is_empty())
+                if crate::proxy::session_has_active_proxy_work(current_id) {
+                    let busy = Some(crate::proxy::describe_session_proxy_work(current_id))
+                        .filter(|description| !description.is_empty())
                         .unwrap_or_else(|| "proxy work".to_string());
                     anyhow::bail!(
                         "cannot switch sessions while proxy activity is still running ({busy})"
@@ -1513,6 +1514,16 @@ impl AppState {
                     if let Some(session) = contexts.get(&id) {
                         session.clone()
                     } else {
+                        // Work in a session runs in its context, which is
+                        // cached from then on. Should it ever not be, loading
+                        // one here would put a second writable context on the
+                        // session's directory.
+                        if crate::proxy::session_has_active_proxy_work(id) {
+                            anyhow::bail!(
+                                "cannot record into a session that has work in flight and no loaded context ({})",
+                                crate::proxy::describe_session_proxy_work(id)
+                            );
+                        }
                         let session = self.sessions.load_context(id)?;
                         // Bound here and not only once the switch is
                         // committed: it stays cached when that fails.
@@ -6809,8 +6820,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    // Work in a session always runs in its cached context. If that ever
+    // failed to hold, an activation must not load a second context beside it.
     #[tokio::test]
-    async fn activate_session_rejects_target_active_proxy_work_until_owner_dropped() {
+    async fn a_session_with_work_and_no_loaded_context_is_not_loaded_again() {
+        let (data_dir, state) = activation_commit_test_state();
+        let target = state
+            .sessions
+            .create_session(Some("never loaded".to_owned()))
+            .unwrap();
+        let owner = crate::proxy::remember_active_proxy_session_owner(
+            target.id,
+            crate::proxy::PROXY_WORK_REPLAY,
+        );
+
+        let error = state.activate_session(target.id).await.unwrap_err();
+        assert!(error.to_string().contains("no loaded context"), "{error}");
+        assert!(!state.session_contexts.lock().await.contains_key(&target.id));
+
+        drop(owner);
+        assert_eq!(
+            state.activate_session(target.id).await.unwrap().id,
+            target.id
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A window that shows a session runs a Replay or a Fuzzer in it while the
+    // main listener records into another. Moving the listener there must not
+    // be refused by that work, and the work goes on in the one context the
+    // session has.
+    #[tokio::test]
+    async fn the_main_listener_moves_to_a_session_the_api_works_in() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-activate-target-active-proxy-{}",
             uuid::Uuid::new_v4()
@@ -6824,28 +6865,25 @@ mod tests {
             data_dir: data_dir.clone(),
         })
         .unwrap();
-        let original_id = state.active_session_summary().await.id;
-        let next = state
+        let original = state.session().await;
+        let original_id = original.id();
+        state
             .create_session(Some("Second".to_string()))
             .await
             .unwrap();
 
         let owner = crate::proxy::remember_active_proxy_session_owner(
             original_id,
-            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+            crate::proxy::PROXY_WORK_REPLAY,
         );
-        let error = state.activate_session(original_id).await.unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("proxy activity is still running"));
-        assert_eq!(state.active_session_summary().await.id, next.id);
-
-        drop(owner);
         assert_eq!(
             state.activate_session(original_id).await.unwrap().id,
             original_id
         );
+        assert!(crate::proxy::session_has_active_proxy_work(original_id));
+        assert!(Arc::ptr_eq(&state.session().await, &original));
 
+        drop(owner);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

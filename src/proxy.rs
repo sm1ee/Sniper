@@ -10767,6 +10767,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    // `force` cuts what holds the session the main listener leaves. The
+    // session it moves to has only work the API started there, a Fuzzer
+    // attack for one, and cutting that would lose it for nothing.
+    #[tokio::test]
+    async fn a_forced_switch_cuts_nothing_in_the_session_it_moves_to() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let (state, data_dir) = test_proxy_state("sniper-proxy-forced-switch-target");
+        let target = state
+            .create_inactive_session(Some("target".into()))
+            .await
+            .unwrap()
+            .id;
+        let context = state.session_context_for_id(target).await.unwrap();
+        spawn_tracked_proxy_task(
+            target,
+            PROXY_WORK_CAPTURE_TASK,
+            std::future::pending::<()>(),
+        );
+
+        state
+            .activate_session_with_options(target, true)
+            .await
+            .unwrap();
+
+        assert!(session_has_active_proxy_work(target), "its task still runs");
+        assert!(Arc::ptr_eq(&state.session().await, &context));
+        assert_eq!(abort_session_tracked_tasks(target), 1);
+        wait_for_session_proxy_work_to_finish(target, Duration::from_secs(2)).await;
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
     #[tokio::test]
     async fn another_machine_is_refused_every_port_sniper_listens_on() {
         let (state, data_dir) = test_proxy_state("sniper-proxy-own-ports");
