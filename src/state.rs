@@ -842,6 +842,7 @@ impl AppState {
             activity.push(crate::session::SessionActivity {
                 id: summary.id,
                 name: summary.name,
+                active: summary.active,
                 running,
                 held,
                 proxy_port: port.proxy_port,
@@ -2136,7 +2137,19 @@ impl AppState {
 
     pub async fn runtime_info(&self) -> RuntimeInfo {
         let session = self.session().await;
-        let active_session = session_summary_with_live_counts(&session, true).await;
+        self.runtime_info_for(&session).await
+    }
+
+    /// The settings as a window that shows `session` reads them: Sniper's
+    /// own, and that session's runtime and summary. `active_session` keeps
+    /// its name from when the two were always the same session; its `active`
+    /// says whether the main listener records into it.
+    pub async fn runtime_info_for(&self, session: &Arc<SessionContext>) -> RuntimeInfo {
+        let active_session = session_summary_with_live_counts(
+            session,
+            session.id() == self.sessions.active_session_id(),
+        )
+        .await;
         let active_addr = self.get_active_proxy_addr().await;
         let ui_addr = self.get_active_ui_addr().await;
         RuntimeInfo {

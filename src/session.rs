@@ -131,6 +131,9 @@ pub struct SessionListing {
 pub struct SessionActivity {
     pub id: Uuid,
     pub name: String,
+    /// Whether the main listener records into the session. A window that
+    /// shows another session learns from this when the listener moves.
+    pub active: bool,
     /// Jobs running in the session: `fuzzer`, `scan`, `recon`.
     pub running: Vec<&'static str>,
     /// Requests, responses and TCP reads Intercept holds for a decision.

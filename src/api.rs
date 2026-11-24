@@ -3139,8 +3139,23 @@ where
     Option::<String>::deserialize(deserializer).map(Some)
 }
 
-async fn get_settings(State(state): State<Arc<AppState>>) -> Json<crate::state::RuntimeInfo> {
-    Json(state.runtime_info().await)
+/// Sniper's settings together with one session's: the session the main
+/// listener records into, or the one a window names because it shows it.
+async fn get_settings(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionScopedQuery>,
+) -> Response {
+    let Some(session_id) = query.session_id else {
+        return Json(state.runtime_info().await).into_response();
+    };
+    // A window that shows a session writes to it, and this is its first read
+    // of it. The writable context is loaded here: a read-only one, which the
+    // reads that follow would cache, is replaced by the first save, and that
+    // ends the window's event stream and reloads its workspace.
+    match resolve_session_for_optional_id(&state, Some(session_id)).await {
+        Ok(session) => Json(state.runtime_info_for(&session).await).into_response(),
+        Err(response) => response,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -9411,7 +9426,6 @@ async fn events(
     let mut workspace_receiver = session.workspace.subscribe();
     let latest_sequence = session.store.latest_event_sequence();
     let mut retention_event_boundary = 0;
-    let event_stream_started_for_active_session = state.sessions.active_session_id() == session_id;
 
     let stream = stream! {
         let mut session_check = tokio::time::interval(Duration::from_millis(500));
@@ -9561,7 +9575,6 @@ async fn events(
                     let active_session_id = state.sessions.active_session_id();
                     if should_reconnect_event_stream(
                         explicit_event_session,
-                        event_stream_started_for_active_session,
                         session_id,
                         active_session_id,
                     ) {
@@ -9584,16 +9597,17 @@ async fn events(
         .into_response()
 }
 
+/// Whether a stream ends because the main listener records into another
+/// session now. Only a stream that named no session follows the listener. One
+/// opened for a session is a window that shows that session, wherever the
+/// listener is; it ends when its session is deleted or its context replaced,
+/// which the caller asks first.
 fn should_reconnect_event_stream(
     explicit_event_session: bool,
-    event_stream_started_for_active_session: bool,
     watched_session_id: Uuid,
     active_session_id: Uuid,
 ) -> bool {
-    if active_session_id == watched_session_id {
-        return explicit_event_session && !event_stream_started_for_active_session;
-    }
-    !explicit_event_session || event_stream_started_for_active_session
+    !explicit_event_session && active_session_id != watched_session_id
 }
 
 async fn index() -> Response {
@@ -12265,23 +12279,101 @@ mod tests {
         assert!(validate_transaction_query(&query).is_err());
     }
 
+    // A window shows the session it named whichever session the main
+    // listener records into, so its stream does not end when that changes.
     #[test]
-    fn event_stream_reconnects_when_explicit_inactive_session_becomes_active() {
+    fn an_event_stream_for_a_session_outlives_a_move_of_the_main_listener() {
         let watched = Uuid::new_v4();
         let other = Uuid::new_v4();
 
+        assert!(!super::should_reconnect_event_stream(true, watched, other));
         assert!(!super::should_reconnect_event_stream(
-            true, false, watched, other
+            true, watched, watched
         ));
-        assert!(super::should_reconnect_event_stream(
-            true, false, watched, watched
+        // One that named no session follows the main listener.
+        assert!(super::should_reconnect_event_stream(false, watched, other));
+        assert!(!super::should_reconnect_event_stream(
+            false, watched, watched
         ));
-        assert!(super::should_reconnect_event_stream(
-            true, true, watched, other
-        ));
-        assert!(super::should_reconnect_event_stream(
-            false, true, watched, other
-        ));
+    }
+
+    #[tokio::test]
+    async fn settings_for_a_session_are_that_session_s_and_load_it_for_writing() {
+        let (state, data_dir) = test_state("sniper-api-settings-session");
+        let default = state.session().await.id();
+        let viewed = state
+            .create_inactive_session(Some("viewed".into()))
+            .await
+            .unwrap()
+            .id;
+        state
+            .session()
+            .await
+            .runtime
+            .update(RuntimeSettingsUpdate {
+                intercept_enabled: Some(true),
+                ..RuntimeSettingsUpdate::default()
+            })
+            .await
+            .unwrap();
+
+        let (status, body) = api_route_response(
+            state.clone(),
+            reqwest::Method::GET,
+            &format!("/api/settings?session_id={viewed}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let settings: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(settings["active_session"]["id"], viewed.to_string());
+        assert_eq!(settings["active_session"]["name"], "viewed");
+        assert_eq!(settings["active_session"]["active"], false);
+        assert_eq!(settings["runtime"]["intercept_enabled"], false);
+
+        // The reads that follow use the context a write will: a read-only one
+        // would be replaced by the first save, and the window's event stream
+        // would end.
+        let read = super::resolve_read_session_for_optional_id(&state, Some(viewed))
+            .await
+            .ok()
+            .unwrap();
+        let written = super::resolve_session_for_optional_id(&state, Some(viewed))
+            .await
+            .ok()
+            .unwrap();
+        assert!(Arc::ptr_eq(&read, &written));
+
+        // No session named is the one the main listener records into.
+        let (status, body) =
+            api_route_response(state.clone(), reqwest::Method::GET, "/api/settings", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let settings: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(settings["active_session"]["id"], default.to_string());
+        assert_eq!(settings["active_session"]["active"], true);
+        assert_eq!(settings["runtime"]["intercept_enabled"], true);
+
+        let (status, _) = api_route_response(
+            state.clone(),
+            reqwest::Method::GET,
+            &format!("/api/settings?session_id={}", Uuid::new_v4()),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // The list of what each session is doing says where the main
+        // listener records, which a window that keeps its view reads there.
+        let activity = serde_json::to_value(state.session_activity().await).unwrap();
+        let active: Vec<_> = activity
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["active"] == true)
+            .map(|entry| entry["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(active, [default.to_string()]);
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]
@@ -25287,8 +25379,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    // A stream opened for a session is a window that shows it. It stays open
+    // when the main listener moves; one that named no session follows the
+    // listener and ends.
     #[tokio::test]
-    async fn explicit_active_events_stream_emits_session_changed() {
+    async fn only_an_event_stream_that_named_no_session_ends_when_the_main_listener_moves() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-test-active-events-session-changed-{}",
             uuid::Uuid::new_v4()
@@ -25303,40 +25398,44 @@ mod tests {
         };
         let state = Arc::new(AppState::new(config).unwrap());
         let active = state.session().await;
-        let events_response = super::events(
-            State(state.clone()),
-            Query(super::EventsQuery {
-                session_id: Some(active.id()),
-            }),
-            HeaderMap::new(),
-        )
-        .await;
-        assert_eq!(events_response.status(), super::StatusCode::OK);
-        let mut events_body = events_response.into_body();
+        let mut streams = Vec::new();
+        for session_id in [Some(active.id()), None] {
+            let response = super::events(
+                State(state.clone()),
+                Query(super::EventsQuery { session_id }),
+                HeaderMap::new(),
+            )
+            .await;
+            assert_eq!(response.status(), super::StatusCode::OK);
+            streams.push(response.into_body());
+        }
 
         state
             .create_session(Some("new active".to_string()))
             .await
             .unwrap();
 
-        let mut text = String::new();
-        for _ in 0..8 {
-            let frame = tokio::time::timeout(Duration::from_secs(1), events_body.frame())
-                .await
-                .expect("active event stream should yield a frame")
-                .expect("active event stream should remain open")
-                .expect("active event frame should be ok");
-            if let Ok(bytes) = frame.into_data() {
-                text.push_str(&String::from_utf8_lossy(&bytes));
+        // The stream checks its session twice a second.
+        let mut texts = Vec::new();
+        for mut body in streams {
+            let mut text = String::new();
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+            while let Ok(Some(Ok(frame))) = tokio::time::timeout_at(deadline, body.frame()).await {
+                if let Ok(bytes) = frame.into_data() {
+                    text.push_str(&String::from_utf8_lossy(&bytes));
+                }
             }
-            if text.contains("event: session_changed") {
-                break;
-            }
+            texts.push(text);
         }
-
         assert!(
-            text.contains("event: session_changed"),
-            "active explicit event stream should include session_changed: {text}"
+            !texts[0].contains("event: session_changed"),
+            "a stream for a session stays open: {}",
+            texts[0]
+        );
+        assert!(
+            texts[1].contains("event: session_changed"),
+            "a stream that named no session follows the main listener: {}",
+            texts[1]
         );
 
         let _ = std::fs::remove_dir_all(data_dir);
