@@ -490,6 +490,7 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
         )
         .route("/api/sessions/:id/reveal", post(reveal_session_folder))
         .route("/api/sessions/:id/group", post(set_session_group))
+        .route("/api/session-groups/rename", post(rename_session_group))
         .route(
             "/api/runtime",
             get(get_runtime_settings).post(update_runtime_settings),
@@ -3096,6 +3097,13 @@ struct SessionGroupPayload {
 }
 
 #[derive(Debug, Deserialize)]
+struct RenameSessionGroupPayload {
+    from: String,
+    /// None or a blank name ends the group: its sessions are in none.
+    to: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct AnnotationsPayload {
     #[serde(default)]
     session_id: Option<Uuid>,
@@ -3239,6 +3247,27 @@ async fn create_session(
         .await;
     match created {
         Ok(summary) => Json(summary).into_response(),
+        Err(error) => session_operation_error_response(error),
+    }
+}
+
+/// Renames a group for all its sessions, or ends it.
+async fn rename_session_group(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<RenameSessionGroupPayload>,
+) -> Response {
+    let to = payload
+        .to
+        .map(|to| to.trim().to_owned())
+        .filter(|to| !to.is_empty());
+    match state
+        .rename_session_group(payload.from.clone(), to.clone())
+        .await
+    {
+        Ok(sessions) => Json(serde_json::json!({
+            "from": payload.from, "to": to, "sessions": sessions
+        }))
+        .into_response(),
         Err(error) => session_operation_error_response(error),
     }
 }
@@ -10756,6 +10785,43 @@ mod tests {
         )
         .await;
         assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+
+        // The group is renamed for the session in it, and a name no session
+        // carries is not one.
+        for (sent, status, group) in [
+            (
+                serde_json::json!({ "from": "acme", "to": " lab " }),
+                reqwest::StatusCode::OK,
+                serde_json::json!("lab"),
+            ),
+            (
+                serde_json::json!({ "from": "acme", "to": "lab" }),
+                reqwest::StatusCode::NOT_FOUND,
+                serde_json::json!("lab"),
+            ),
+            (
+                serde_json::json!({ "from": "lab", "to": null }),
+                reqwest::StatusCode::OK,
+                serde_json::Value::Null,
+            ),
+        ] {
+            let (answered, body) = api_route_json(
+                state.clone(),
+                reqwest::Method::POST,
+                "/api/session-groups/rename",
+                sent,
+            )
+            .await;
+            assert_eq!(answered, status, "{body}");
+            assert_eq!(
+                listed("agent")
+                    .await
+                    .get("group")
+                    .cloned()
+                    .unwrap_or_default(),
+                group
+            );
+        }
         let (status, _) = api_route_json(
             state.clone(),
             reqwest::Method::POST,

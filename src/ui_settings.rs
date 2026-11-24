@@ -402,6 +402,12 @@ pub struct AppUiSettingsSnapshot {
     pub session_sidebar_hidden: bool,
     /// The groups of the session list that are folded shut, by name.
     pub session_groups_collapsed: Vec<String>,
+    /// The order a person dragged sessions into, by id. A session not listed
+    /// comes before the listed ones of its group, newest first.
+    pub session_order: Vec<String>,
+    /// The order a person dragged the groups into. One not listed comes
+    /// after the listed ones, by name.
+    pub session_group_order: Vec<String>,
     pub websocket_stack_height: Option<u16>,
     pub ws_replay_left_width: Option<u16>,
     pub ws_replay_frame_detail_height: Option<u16>,
@@ -444,6 +450,8 @@ impl Default for AppUiSettingsSnapshot {
             replay_tabs_wrap: false,
             session_sidebar_hidden: false,
             session_groups_collapsed: Vec::new(),
+            session_order: Vec::new(),
+            session_group_order: Vec::new(),
             websocket_stack_height: None,
             ws_replay_left_width: None,
             ws_replay_frame_detail_height: None,
@@ -520,6 +528,15 @@ impl AppUiSettingsSnapshot {
         sanitized.replay_tabs_wrap = self.replay_tabs_wrap;
         sanitized.session_sidebar_hidden = self.session_sidebar_hidden;
         sanitized.session_groups_collapsed = sanitize_group_names(self.session_groups_collapsed);
+        sanitized.session_group_order = sanitize_group_names(self.session_group_order);
+        let mut seen = BTreeMap::new();
+        sanitized.session_order = self
+            .session_order
+            .into_iter()
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+            .filter(|id| seen.insert(id.clone(), ()).is_none())
+            .take(2_000)
+            .collect();
         sanitized.websocket_stack_height = self
             .websocket_stack_height
             .filter(|height| *height > 0)
@@ -1667,6 +1684,9 @@ mod tests {
         snapshot.replay_tabs_wrap = true;
         snapshot.session_sidebar_hidden = true;
         snapshot.session_groups_collapsed = vec![" acme ".into(), "acme".into(), "a\nb".into()];
+        snapshot.session_group_order = vec!["beta".into(), "acme".into(), "beta".into()];
+        let dragged = uuid::Uuid::new_v4().to_string();
+        snapshot.session_order = vec![dragged.clone(), "not an id".into(), dragged.clone()];
         snapshot.websocket_stack_height = Some(345);
         snapshot.ws_replay_left_width = Some(555);
         snapshot.ws_replay_frame_detail_height = Some(222);
@@ -1717,6 +1737,8 @@ mod tests {
         assert!(persisted.replay_tabs_wrap);
         assert!(persisted.session_sidebar_hidden);
         assert_eq!(persisted.session_groups_collapsed, ["acme"]);
+        assert_eq!(persisted.session_group_order, ["beta", "acme"]);
+        assert_eq!(persisted.session_order, [dragged]);
         assert_eq!(persisted.websocket_stack_height, Some(345));
         assert_eq!(persisted.ws_replay_left_width, Some(555));
         assert_eq!(persisted.ws_replay_frame_detail_height, Some(222));

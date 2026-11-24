@@ -2114,6 +2114,48 @@ enum SessionCommand {
         #[command(subcommand)]
         command: SessionPortCommand,
     },
+    /// Groups of the session list. A group is the sessions that carry its name.
+    Group {
+        #[command(subcommand)]
+        command: SessionGroupCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionGroupCommand {
+    /// Put a session in a group. The first session in makes the group.
+    Set(SessionGroupSetArgs),
+    /// Take a session out of its group. The last one out ends the group.
+    Clear(SessionGroupClearArgs),
+    /// Rename a group for all its sessions.
+    Rename(SessionGroupRenameArgs),
+    /// List each session's group and who made the session.
+    List,
+}
+
+#[derive(Args, Debug)]
+struct SessionGroupSetArgs {
+    #[arg(long)]
+    id: Uuid,
+    /// The group's name.
+    #[arg(long)]
+    name: String,
+}
+
+#[derive(Args, Debug)]
+struct SessionGroupClearArgs {
+    #[arg(long)]
+    id: Uuid,
+}
+
+#[derive(Args, Debug)]
+struct SessionGroupRenameArgs {
+    /// The group's name now.
+    #[arg(long)]
+    from: String,
+    /// Its new name. A group that has this name already takes the sessions in.
+    #[arg(long)]
+    to: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -2140,15 +2182,22 @@ struct CreateSessionArgs {
     /// Create the session and leave the proxy recording where it is.
     #[arg(long)]
     no_activate: bool,
+    /// The group the session list shows the session under.
+    #[arg(long)]
+    group: Option<String>,
 }
 
 impl CreateSessionArgs {
-    /// What the API is sent: `activate` only when it is turned off, so the
-    /// plain form stays what older tools expect.
+    /// What the API is sent: `activate` only when it is turned off and
+    /// `group` only when one is named, so the plain form stays what older
+    /// tools expect.
     fn body(&self) -> Value {
         let mut body = json!({ "name": self.name });
         if self.no_activate {
             body["activate"] = json!(false);
+        }
+        if let Some(group) = &self.group {
+            body["group"] = json!(group);
         }
         body
     }
@@ -4534,6 +4583,12 @@ impl SessionCommand {
                 SessionPortCommand::Close(_) => "session.port.close",
                 SessionPortCommand::List => "session.port.list",
             },
+            SessionCommand::Group { command } => match command {
+                SessionGroupCommand::Set(_) => "session.group.set",
+                SessionGroupCommand::Clear(_) => "session.group.clear",
+                SessionGroupCommand::Rename(_) => "session.group.rename",
+                SessionGroupCommand::List => "session.group.list",
+            },
         }
     }
 }
@@ -4859,6 +4914,42 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             "session.port.list",
             "session port list",
             "List each session's own proxy port and whether it is open. No port is open after Sniper restarts.",
+            Read,
+            false,
+            &[],
+            vec![json!({})],
+        ),
+        op(
+            "session.group.set",
+            "session group set --id <uuid> --name <group>",
+            "Put a session in a group of the UI's session list. A group is the sessions that carry its name, so the first session in makes it. Changes nothing else of the session.",
+            Write,
+            false,
+            &["id", "name"],
+            vec![json!({"id":"00000000-0000-0000-0000-000000000000","name":"acme"})],
+        ),
+        op(
+            "session.group.clear",
+            "session group clear --id <uuid>",
+            "Take a session out of its group. The last session out ends the group.",
+            Write,
+            false,
+            &["id"],
+            vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
+        ),
+        op(
+            "session.group.rename",
+            "session group rename --from <group> --to <group>",
+            "Rename a group for all its sessions at once. A group that has the new name already takes the sessions in.",
+            Write,
+            false,
+            &["from", "to"],
+            vec![json!({"from":"acme","to":"acme prod"})],
+        ),
+        op(
+            "session.group.list",
+            "session group list",
+            "List each session's group and who made the session: the agent that drove sniper-cli, or null for a session a person made.",
             Read,
             false,
             &[],
@@ -8073,6 +8164,27 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
             "default":true,
             "description":"False creates the session and leaves the proxy recording into the session it records into now. Give the new session a port with session.port.open."
         }));
+        properties.insert("group".into(), json!({
+            "type":["string","null"],
+            "description":"The group the UI's session list shows the session under. Omitted or null: no group."
+        }));
+    }
+    if operation == "session.group.set" {
+        properties.insert("name".into(), json!({
+            "type":"string",
+            "description":"The group's name: at most 256 UTF-8 bytes after trimming, with no control characters."
+        }));
+    }
+    if operation == "session.group.rename" {
+        properties.insert(
+            "from".into(),
+            json!({
+                "type":"string","description":"The group's name now."
+            }),
+        );
+        properties.insert("to".into(), json!({
+            "type":"string","description":"Its new name, held to the rules of session.group.set."
+        }));
     }
     if matches!(
         operation,
@@ -8081,6 +8193,8 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
             | "session.reveal"
             | "session.port.open"
             | "session.port.close"
+            | "session.group.set"
+            | "session.group.clear"
     ) {
         properties.insert(
             "id".into(),
@@ -8189,13 +8303,15 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         return Some(fields);
     }
     Some(match operation {
-        "manifest" | "session.list" | "session.port.list" => &[],
+        "manifest" | "session.list" | "session.port.list" | "session.group.list" => &[],
         "schema" => &["kind", "operation"],
         "examples" => &["operation"],
         "skills.install" | "skills.status" => {
             &["codex", "claude", "all", "codex_dir", "claude_dir"]
         }
-        "session.create" => &["name", "activate"],
+        "session.create" => &["name", "activate", "group"],
+        "session.group.set" => &["id", "name"],
+        "session.group.rename" => &["from", "to"],
         "session.rename" => &["id", "name"],
         "findings.list" | "event_log.list" => &["session_id", "limit"],
         "findings.get" => &["id", "session_id"],
@@ -8238,8 +8354,12 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "mime",
             "selection_token",
         ],
-        "session.switch" | "session.delete" | "session.reveal" | "session.port.open"
-        | "session.port.close" => &["id"],
+        "session.switch"
+        | "session.delete"
+        | "session.reveal"
+        | "session.port.open"
+        | "session.port.close"
+        | "session.group.clear" => &["id"],
         "capture.http.list" => &[
             "session_id",
             "query",
@@ -8537,6 +8657,12 @@ fn command_input_preview(command: &Command) -> Value {
                     json!({ "id": args.id })
                 }
                 SessionPortCommand::List => json!({}),
+            },
+            SessionCommand::Group { command } => match command {
+                SessionGroupCommand::Set(args) => json!({ "id": args.id, "name": args.name }),
+                SessionGroupCommand::Clear(args) => json!({ "id": args.id }),
+                SessionGroupCommand::Rename(args) => json!({ "from": args.from, "to": args.to }),
+                SessionGroupCommand::List => json!({}),
             },
         },
         Command::Capture { command } => match command {
@@ -9001,6 +9127,24 @@ fn command_api_preview(command: &Command) -> Result<Value> {
                     None,
                 ),
                 SessionPortCommand::List => api_preview("GET", "/api/sessions/activity", None),
+            },
+            SessionCommand::Group { command } => match command {
+                SessionGroupCommand::Set(args) => api_preview(
+                    "POST",
+                    format!("/api/sessions/{}/group", args.id),
+                    Some(json!({ "group": args.name })),
+                ),
+                SessionGroupCommand::Clear(args) => api_preview(
+                    "POST",
+                    format!("/api/sessions/{}/group", args.id),
+                    Some(json!({ "group": null })),
+                ),
+                SessionGroupCommand::Rename(args) => api_preview(
+                    "POST",
+                    "/api/session-groups/rename",
+                    Some(json!({ "from": args.from, "to": args.to })),
+                ),
+                SessionGroupCommand::List => api_preview("GET", "/api/sessions", None),
             },
         },
         Command::Recon { command } => recon_api_preview(command),
@@ -9793,6 +9937,7 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
             command: SessionCommand::Create(CreateSessionArgs {
                 name: call_optional(operation, input, "name")?,
                 no_activate: call_optional::<bool>(operation, input, "activate")? == Some(false),
+                group: call_optional(operation, input, "group")?,
             }),
         },
         "session.switch" => Command::Session {
@@ -9880,6 +10025,34 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
         "session.port.list" => Command::Session {
             command: SessionCommand::Port {
                 command: SessionPortCommand::List,
+            },
+        },
+        "session.group.set" => Command::Session {
+            command: SessionCommand::Group {
+                command: SessionGroupCommand::Set(SessionGroupSetArgs {
+                    id: call_required(operation, input, "id")?,
+                    name: call_required(operation, input, "name")?,
+                }),
+            },
+        },
+        "session.group.clear" => Command::Session {
+            command: SessionCommand::Group {
+                command: SessionGroupCommand::Clear(SessionGroupClearArgs {
+                    id: call_required(operation, input, "id")?,
+                }),
+            },
+        },
+        "session.group.rename" => Command::Session {
+            command: SessionCommand::Group {
+                command: SessionGroupCommand::Rename(SessionGroupRenameArgs {
+                    from: call_required(operation, input, "from")?,
+                    to: call_required(operation, input, "to")?,
+                }),
+            },
+        },
+        "session.group.list" => Command::Session {
+            command: SessionCommand::Group {
+                command: SessionGroupCommand::List,
             },
         },
         "capture.http.list" => {
@@ -12591,7 +12764,53 @@ async fn handle_session(mut api: ApiClient, command: SessionCommand) -> Result<(
                 print_json(&sessions)
             }
         },
+        SessionCommand::Group { command } => match command {
+            SessionGroupCommand::Set(args) => {
+                let group: serde_json::Value = api
+                    .post_json(
+                        &format!("/api/sessions/{}/group", args.id),
+                        &json!({ "group": args.name }),
+                    )
+                    .await?;
+                print_json(&group)
+            }
+            SessionGroupCommand::Clear(args) => {
+                let group: serde_json::Value = api
+                    .post_json(
+                        &format!("/api/sessions/{}/group", args.id),
+                        &json!({ "group": null }),
+                    )
+                    .await?;
+                print_json(&group)
+            }
+            SessionGroupCommand::Rename(args) => {
+                let renamed: serde_json::Value = api
+                    .post_json(
+                        "/api/session-groups/rename",
+                        &json!({ "from": args.from, "to": args.to }),
+                    )
+                    .await?;
+                print_json(&renamed)
+            }
+            SessionGroupCommand::List => {
+                let sessions: Vec<SessionGroupEntry> = api.get_json("/api/sessions").await?;
+                print_json(&sessions)
+            }
+        },
     }
+}
+
+/// A session's group and maker, as `session group list` prints them.
+#[derive(Deserialize, Serialize)]
+struct SessionGroupEntry {
+    id: Uuid,
+    name: String,
+    /// None for a session in no group.
+    #[serde(default)]
+    group: Option<String>,
+    /// Who made the session, when its maker said so.
+    #[serde(default)]
+    created_by: Option<String>,
 }
 
 /// `--no-activate` is a promise not to move the proxy. A Sniper that does not
@@ -24067,6 +24286,109 @@ mod tests {
         assert!(Cli::try_parse_from(["sniper-cli", "session", "port", "open"]).is_err());
         assert!(command_from_operation_input("session.port.close", &json!({})).is_err());
         assert!(command_from_operation_input("session.port.list", &json!({ "id": id })).is_err());
+    }
+
+    // An agent puts the sessions of one target in a group, and finds the
+    // commands in the manifest like any other.
+    #[test]
+    fn session_groups_are_set_cleared_renamed_and_listed_from_the_cli() {
+        let id = "11111111-1111-1111-1111-111111111111";
+        for (operation, args, input, method, path, body, writes) in [
+            (
+                "session.group.set",
+                vec!["session", "group", "set", "--id", id, "--name", "acme"],
+                json!({ "id": id, "name": "acme" }),
+                "POST",
+                format!("/api/sessions/{id}/group"),
+                json!({ "group": "acme" }),
+                true,
+            ),
+            (
+                "session.group.clear",
+                vec!["session", "group", "clear", "--id", id],
+                json!({ "id": id }),
+                "POST",
+                format!("/api/sessions/{id}/group"),
+                json!({ "group": null }),
+                true,
+            ),
+            (
+                "session.group.rename",
+                vec![
+                    "session", "group", "rename", "--from", "acme", "--to", "lab",
+                ],
+                json!({ "from": "acme", "to": "lab" }),
+                "POST",
+                "/api/session-groups/rename".to_string(),
+                json!({ "from": "acme", "to": "lab" }),
+                true,
+            ),
+            (
+                "session.group.list",
+                vec!["session", "group", "list"],
+                json!({}),
+                "GET",
+                "/api/sessions".to_string(),
+                Value::Null,
+                false,
+            ),
+        ] {
+            let mut argv = vec!["sniper-cli"];
+            argv.extend(args);
+            let direct = Cli::try_parse_from(argv).unwrap().command;
+            let call = command_from_operation_input(operation, &input).unwrap();
+            assert_eq!(direct.operation_name(), operation);
+            assert_eq!(call.operation_name(), operation);
+            assert_eq!(command_input_preview(&direct), input);
+            assert_eq!(command_input_preview(&call), input);
+            assert_eq!(direct.requires_confirmation(), writes);
+            let plan = dry_run_command(&direct).unwrap();
+            assert_eq!(plan["side_effect"], if writes { "write" } else { "read" });
+            assert_eq!(plan["api"]["method"], method);
+            assert_eq!(plan["api"]["path"], path);
+            if writes {
+                assert_eq!(plan["api"]["body"], body);
+            }
+            let spec = operation_spec(operation).unwrap();
+            assert_eq!(spec.input_schema["additionalProperties"], false);
+            assert!(spec.description.contains("group"), "{operation}");
+        }
+        assert!(
+            Cli::try_parse_from(["sniper-cli", "session", "group", "set", "--id", id]).is_err()
+        );
+        assert!(
+            command_from_operation_input("session.group.rename", &json!({ "from": "a" })).is_err()
+        );
+        assert!(command_from_operation_input("session.group.list", &json!({ "id": id })).is_err());
+
+        // A session starts in a group only when one is named: the plain body
+        // stays what an older Sniper accepts.
+        let grouped = Cli::try_parse_from([
+            "sniper-cli",
+            "session",
+            "create",
+            "--name",
+            "a",
+            "--group",
+            "acme",
+        ])
+        .unwrap()
+        .command;
+        let call =
+            command_from_operation_input("session.create", &json!({"name":"a","group":"acme"}))
+                .unwrap();
+        assert_eq!(
+            command_input_preview(&grouped),
+            json!({ "name": "a", "group": "acme" })
+        );
+        assert_eq!(
+            command_input_preview(&call),
+            command_input_preview(&grouped)
+        );
+        let plain = Cli::try_parse_from(["sniper-cli", "session", "create", "--name", "a"])
+            .unwrap()
+            .command;
+        assert_eq!(command_input_preview(&plain), json!({ "name": "a" }));
     }
 
     // Turning the daily update off is how an agent stops Sniper asking GitHub

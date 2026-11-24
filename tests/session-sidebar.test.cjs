@@ -36,8 +36,8 @@ function fixture({ sessions, activeId, hidden = false, names = [], globals = {} 
   };
   const els = { sessionSidebar: element(), sessionSidebarToggle: element(), sessionSidebarList: element() };
   const reloads = [];
-  const context = loadFunctions(["renderSessionSidebar", "sessionSidebarRow", "sessionIdentity", "applySessionActivity", ...names], {
-    state, els,
+  const context = loadFunctions(["renderSessionSidebar", "sessionSidebarLayout", "sessionSidebarRow", "sessionIdentity", "applySessionActivity", ...names], {
+    state, els, sidebarDrag: null,
     document: { activeElement: null },
     sessionRenameInput: null, sessionSidebarMarkup: "", sessionListRefresh: null, sidebarRenameEdit: null,
     currentSessionId: () => state.activeSession?.id || null,
@@ -285,14 +285,15 @@ test("moving a session asks the server, shows its group open, and reads the list
 for (const failing of [false, true]) test(`a new group's name ${failing ? "stays in its field when the server refuses it" : "moves the session and closes its field"}`, async () => {
   const moved = [];
   let closed = 0;
-  const els = { sessionSidebarGroup: element(), sessionSidebarGroupName: { value: "", focus() {} } };
+  const els = { sessionSidebarGroup: element(), sessionSidebarGroupName: { value: "", focus() {}, select() {} } };
   const context = loadFunctions(["openSidebarGroupName", "closeSidebarGroupName", "submitSidebarGroupName"], {
-    els, sidebarGroupSession: null,
+    els, sidebarGroupEdit: null,
     closeSidebarSessionCreate: () => { closed += 1; },
     moveSessionToGroup: async (id, group) => { moved.push([id, group]); if (failing) throw new Error("refused"); },
+    renameSessionGroup: async (from, to) => { moved.push(["rename", from, to]); },
   });
   els.sessionSidebarGroup.classList.add("hidden");
-  context.openSidebarGroupName("s1");
+  context.openSidebarGroupName({ session: "s1" });
   assert.equal(els.sessionSidebarGroup.classList.contains("hidden"), false);
   assert.equal(closed, 1, "the new-session field gives way: the two look alike");
   els.sessionSidebarGroupName.value = "  acme  ";
@@ -303,10 +304,176 @@ for (const failing of [false, true]) test(`a new group's name ${failing ? "stays
   assert.equal(els.sessionSidebarGroupName.value, failing ? "  acme  " : "");
   // An empty name moves nothing.
   if (!failing) {
-    context.openSidebarGroupName("s1");
+    context.openSidebarGroupName({ session: "s1" });
     await context.submitSidebarGroupName();
     assert.equal(moved.length, 1);
     assert.equal(els.sessionSidebarGroup.classList.contains("hidden"), true);
+    // The same field renames a group: it opens with the name, and the same
+    // name again changes nothing.
+    context.openSidebarGroupName({ group: "acme" });
+    assert.equal(els.sessionSidebarGroupName.value, "acme");
+    await context.submitSidebarGroupName();
+    context.openSidebarGroupName({ group: "acme" });
+    els.sessionSidebarGroupName.value = " lab ";
+    await context.submitSidebarGroupName();
+    assert.deepEqual(moved.slice(1), [["rename", "acme", "lab"]]);
   }
+});
+
+// ── dragging ──
+// The list keeps the order a person dragged it into. What was never dragged
+// keeps the order it had: a session newest first and ahead of the dragged
+// ones, so a new session shows at the top; a group by name, after them.
+test("the list is drawn in the order sessions and groups were dragged into", () => {
+  const f = fixture({
+    sessions: [session("a", "01"), session("b", "02"), session("c", "03"), session("new", "09"),
+      session("x1", "04", { group: "xeno" }), session("m1", "05", { group: "mid" }), session("a1", "06", { group: "acme" })],
+    activeId: "a",
+  });
+  f.state.sessionOrder = ["a", "c", "b", "gone"];
+  f.state.sessionGroupOrder = ["xeno"];
+  f.context.renderSessionSidebar();
+  const html = f.els.sessionSidebarList.innerHTML;
+  assert.deepEqual(rows(html), ["new", "a", "c", "b", "x1", "a1", "m1"]);
+  assert.deepEqual(groupHeaders(html).map(([name]) => name), ["xeno", "acme", "mid"]);
+});
+
+test("a row and a group can be dragged, a name being edited cannot", () => {
+  const f = fixture({ sessions: [session("a", "01"), session("b", "02", { group: "acme" })], activeId: "a" });
+  f.state.sessionRename = { id: "a", place: "sidebar", draft: "x" };
+  f.context.renderSessionSidebar();
+  const html = f.els.sessionSidebarList.innerHTML;
+  assert.match(html, /<li draggable="true" data-drag-session="b"><button class="session-sidebar-row/);
+  assert.match(html, /<li class="session-sidebar-group" draggable="true" data-drag-group="acme">/);
+  assert.match(html, /<li><input class="session-name-input session-sidebar-rename"/);
+});
+
+test("a render waits while something is dragged, so the dragged row stays", () => {
+  const f = fixture({ sessions: [session("a", "01")], activeId: "a" });
+  f.context.renderSessionSidebar();
+  const drawn = f.els.sessionSidebarList.innerHTML;
+  f.context.sidebarDrag = { session: "a" };
+  f.state.sessions = [session("a", "01"), session("b", "02")];
+  f.context.renderSessionSidebar();
+  assert.equal(f.els.sessionSidebarList.innerHTML, drawn);
+});
+
+test("ids are put before or after the one they are dropped on", () => {
+  const { reorderedIds } = loadFunctions(["reorderedIds"], {});
+  assert.deepEqual([...reorderedIds(["a", "b", "c"], "c", "a", false)], ["c", "a", "b"]);
+  assert.deepEqual([...reorderedIds(["a", "b", "c"], "a", "b", true)], ["b", "a", "c"]);
+  assert.deepEqual([...reorderedIds(["a", "b"], "new", "b", true)], ["a", "b", "new"]);
+  assert.deepEqual([...reorderedIds(["a", "b"], "new", "gone", false)], ["a", "b", "new"]);
+});
+
+function dropFixture(sessions) {
+  const moved = [], renders = [];
+  let saves = 0;
+  const state = { sessions, sessionOrder: [], sessionGroupOrder: [] };
+  const context = loadFunctions(["dropSidebarSession", "dropSidebarGroup", "sessionSidebarLayout", "reorderedIds"], {
+    state,
+    moveSessionToGroup: async (id, group) => { moved.push([id, group]); },
+    renderSessionSidebar: () => renders.push(1),
+    scheduleUiSettingsSave: () => { saves += 1; },
+  });
+  return { state, context, moved, renders, saves: () => saves };
+}
+
+test("a session dropped beside another in its own list changes place, and nothing is asked of the server", async () => {
+  // Drawn newest first: c, b, a.
+  const f = dropFixture([session("a", "01"), session("b", "02"), session("c", "03"), session("g", "04", { group: "acme" })]);
+  await f.context.dropSidebarSession("a", { session: "c", after: false });
+  assert.deepEqual([...f.state.sessionOrder], ["a", "c", "b"]);
+  await f.context.dropSidebarSession("c", { session: "b", after: true });
+  assert.deepEqual([...f.state.sessionOrder], ["a", "b", "c"]);
+  assert.deepEqual(f.moved, []);
+  assert.equal(f.renders.length, 2);
+  assert.equal(f.saves(), 2);
+});
+
+test("a session dropped in another group joins it at that place", async () => {
+  const f = dropFixture([session("a", "01"), session("g1", "04", { group: "acme" }), session("g2", "05", { group: "acme" })]);
+  f.state.sessionOrder = ["a", "deleted"];
+  // acme is drawn g2, g1.
+  await f.context.dropSidebarSession("a", { session: "g1", after: false });
+  assert.deepEqual(f.moved, [["a", "acme"]]);
+  assert.deepEqual([...f.state.sessionOrder], ["g2", "a", "g1"], "a session that is gone leaves the saved order");
+  assert.deepEqual(f.moved.slice(1), []);
+});
+
+// On a group's name the session is first in that group, whatever its age; on
+// the list itself it is first among the sessions in no group.
+test("a session dropped on a group's name, or on the list, is first there", async () => {
+  // acme is drawn new, old: neither was dragged, so by age.
+  const f = dropFixture([session("loose", "01"), session("mine", "02"),
+    session("old", "03", { group: "acme" }), session("new", "09", { group: "acme" }), session("b1", "05", { group: "beta" })]);
+  await f.context.dropSidebarSession("mine", { group: "acme", into: true });
+  assert.deepEqual(f.moved, [["mine", "acme"]]);
+  assert.deepEqual([...f.state.sessionOrder], ["mine", "new", "old"]);
+  await f.context.dropSidebarSession("b1", { group: null, into: true });
+  assert.deepEqual(f.moved[1], ["b1", null]);
+  // The move here is a stub, so "mine" is still drawn in no group: after
+  // "loose", which was never dragged.
+  assert.deepEqual([...f.state.sessionOrder].slice(-3), ["b1", "loose", "mine"]);
+});
+
+test("a group dropped beside another changes place among the groups", () => {
+  const f = dropFixture([session("a1", "01", { group: "acme" }), session("b1", "02", { group: "beta" }), session("c1", "03", { group: "core" })]);
+  f.context.dropSidebarGroup("core", { group: "acme", after: false });
+  assert.deepEqual([...f.state.sessionGroupOrder], ["core", "acme", "beta"]);
+  f.context.dropSidebarGroup("core", { group: "beta", after: true });
+  assert.deepEqual([...f.state.sessionGroupOrder], ["acme", "beta", "core"]);
+  assert.equal(f.renders.length, 2);
+  assert.equal(f.saves(), 2);
+});
+
+// A fake of the two things the target reads from an element: the nearest
+// draggable item of each kind, and its box.
+function dragElement({ session = null, group = null, top = 0, height = 20 } = {}) {
+  const item = kind => ({ dataset: kind === "session" ? { dragSession: session } : { dragGroup: group },
+    getBoundingClientRect: () => ({ top, height }) });
+  return { closest: selector => (selector === "li[data-drag-session]" ? (session ? item("session") : null)
+    : selector === "li[data-drag-group]" ? (group ? item("group") : null) : null) };
+}
+
+test("where a drag may land depends on what is dragged", () => {
+  const list = {};
+  const context = loadFunctions(["sidebarDropTarget"], { els: { sessionSidebarList: list }, sidebarDrag: null });
+  const at = (element, y) => {
+    const target = context.sidebarDropTarget({ target: element, clientY: y });
+    return target && { ...target, element: target.element === list ? "list" : "item" };
+  };
+  assert.equal(at(dragElement({ session: "b" }), 5), null, "nothing is dragged");
+  context.sidebarDrag = { session: "a" };
+  assert.deepEqual(at(dragElement({ session: "b", group: "acme" }), 5), { element: "item", session: "b", after: false });
+  assert.deepEqual(at(dragElement({ session: "b" }), 15), { element: "item", session: "b", after: true });
+  assert.equal(at(dragElement({ session: "a" }), 5), null, "not onto itself");
+  assert.deepEqual(at(dragElement({ group: "acme" }), 5), { element: "item", group: "acme", into: true });
+  assert.deepEqual(at(dragElement(), 5), { element: "list", group: null, into: true });
+  context.sidebarDrag = { group: "acme" };
+  assert.deepEqual(at(dragElement({ session: "b", group: "beta", height: 40 }), 30), { element: "item", group: "beta", after: true });
+  assert.equal(at(dragElement({ session: "b", group: "acme" }), 5), null);
+  assert.equal(at(dragElement({ session: "b" }), 5), null, "a group has no place among the sessions in none");
+});
+
+test("renaming a group asks the server once and carries over what was saved for the old name", async () => {
+  const requests = [], reads = [];
+  const state = { sessionGroupsCollapsed: ["acme", "beta"], sessionGroupOrder: ["beta", "acme"] };
+  const context = loadFunctions(["renameSessionGroup"], {
+    state,
+    fetch: async (url, options) => { requests.push([url, options.method, JSON.parse(options.body)]); return { ok: true }; },
+    requireOkResponse: async () => {},
+    loadSessions: async options => { reads.push({ ...options }); },
+    scheduleUiSettingsSave() {},
+  });
+  await context.renameSessionGroup("acme", "lab");
+  assert.deepEqual(requests, [["/api/session-groups/rename", "POST", { from: "acme", to: "lab" }]]);
+  assert.deepEqual([...state.sessionGroupsCollapsed], ["lab", "beta"]);
+  assert.deepEqual([...state.sessionGroupOrder], ["beta", "lab"]);
+  // With no new name the group ends.
+  await context.renameSessionGroup("lab", null);
+  assert.deepEqual(requests[1][2], { from: "lab", to: null });
+  assert.deepEqual([...state.sessionGroupsCollapsed], ["beta"]);
+  assert.deepEqual(reads, [{ preserveWorkspaceOwner: true }, { preserveWorkspaceOwner: true }]);
 });
 

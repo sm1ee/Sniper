@@ -1295,6 +1295,26 @@ summary {
   list-style: none;
 }
 
+/* A drag in the list: the row or group that is carried, and where it lands.
+   A line above or below is a place beside; a tint is into a group, or out of
+   every group when it is the list. */
+.session-sidebar-list .dragging {
+  opacity: 0.4;
+}
+
+.session-sidebar-list .drop-before {
+  box-shadow: inset 0 2px 0 var(--point);
+}
+
+.session-sidebar-list .drop-after {
+  box-shadow: inset 0 -2px 0 var(--point);
+}
+
+.session-sidebar-list .drop-into > .session-sidebar-group-toggle,
+.session-sidebar-list.drop-into {
+  background: var(--point-soft);
+}
+
 /* The port that feeds a session, at the row's trailing edge. */
 .session-sidebar-port {
   flex: none;

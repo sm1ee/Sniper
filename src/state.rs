@@ -937,6 +937,15 @@ impl AppState {
             .ok_or_else(|| anyhow::anyhow!("session {} was not found", metadata.id))
     }
 
+    /// Renames a group, or ends it with no name, and returns how many
+    /// sessions it had.
+    pub async fn rename_session_group(&self, from: String, to: Option<String>) -> Result<usize> {
+        let sessions = self.sessions.clone();
+        tokio::task::spawn_blocking(move || sessions.rename_session_group(&from, to.as_deref()))
+            .await
+            .context("session group writer panicked")?
+    }
+
     /// Puts the session in a group, or takes it out, and returns the group it
     /// is in now. Only the registry keeps a group, so no session is loaded.
     pub async fn set_session_group(

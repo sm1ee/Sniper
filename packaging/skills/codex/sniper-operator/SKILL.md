@@ -182,6 +182,7 @@ Use these when v1 does not cover the task or the installed Sniper lacks it. They
 
 - `session create --name "Review"` creates a session and makes it active. `session rename --id <session-uuid> --name "Archive"` changes only the display name.
 - To work beside the user or another agent, do not take the active session. Create your own with `session create --name "<task>" --no-activate`, then `session port open --id <session-uuid>` and send your traffic through the `proxy_addr` it prints. That traffic is recorded into your session whichever session is active. Pass `--session-id <session-uuid>` on every other command. For a browser of your own, `capture browser open --session-id <session-uuid> --agent` opens one through your session's port, opening the port if it is closed, on a profile no other session shares; Aside is refused for it, so name another browser. `session port list` shows each session's port. A session keeps its port number until it is deleted; no port is open after a restart, so open it again. Close it with `session port close --id <session-uuid>` when you finish: a session with an open port is not switched to or deleted. Those two answer 409 and the CLI reports only the status, so on a 409 check `session port list` first.
+- The UI's session list shows who made each session and gathers sessions into groups. A session you make carries your name with no option. When you make several for one target, put them in one group: `session create --name "<task>" --no-activate --group "<target>"`, or `session group set --id <session-uuid> --name "<target>"` afterwards. `session group list` shows each session's group and maker, `session group clear --id <session-uuid>` takes a session out, and `session group rename --from "<old>" --to "<new>"` renames a group for all its sessions. A group is a name on its sessions and changes nothing of what they record.
 - `session switch --id <session-uuid>` moves the proxy listener. It respects busy-session checks for the session it leaves; work started over the API in the session it moves to goes on. `session delete --id <session-uuid>` deletes the session's saved data and refuses the active session; switch away first. Do not bypass live-capture, proxy-work or pending-persistence safeguards.
 - Session writes are sent once, without following redirects. A lost or invalid response, or one naming a different UUID, leaves the outcome uncertain: check `session list` before another write.
 - Delete records by ID with `capture http delete --session-id <session-uuid> --id <record-uuid>`. Repeat `--id` or comma-separate UUIDs; in `call` JSON, use the `ids` array. One missing ID, including one from another session, rejects the whole request.
@@ -198,6 +199,8 @@ sniper-cli session create --name "Agent task" --no-activate --yes
 sniper-cli session port open --id <session-uuid> --yes
 sniper-cli capture browser open --session-id <session-uuid> --agent --yes
 sniper-cli --output compact session port list
+sniper-cli session group set --id <session-uuid> --name "example.com" --yes
+sniper-cli --output compact session group list
 sniper-cli session port close --id <session-uuid> --yes
 sniper-cli session rename --id <session-uuid> --name "Archive" --dry-run
 sniper-cli session rename --id <session-uuid> --name "Archive" --yes

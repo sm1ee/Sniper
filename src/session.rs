@@ -2215,10 +2215,42 @@ impl SessionRegistry {
             .ok_or_else(|| anyhow!("session {id} was not found"))?;
         metadata.group = group;
         let changed = metadata.clone();
+        self.replace_registry(&mut registry, next)?;
+        Ok(changed)
+    }
+
+    /// Gives every session of a group another name, or none, in one write:
+    /// the group is renamed, joins one there is, or ends. Returns how many
+    /// sessions it had.
+    pub fn rename_session_group(&self, from: &str, to: Option<&str>) -> Result<usize> {
+        let to = session_group_name(to)?;
+        let mut registry = self.inner.write().expect("session registry lock poisoned");
+        let mut next = registry.clone();
+        let mut moved = 0;
+        for session in &mut next.sessions {
+            if session.group.as_deref() == Some(from) {
+                session.group.clone_from(&to);
+                moved += 1;
+            }
+        }
+        if moved == 0 {
+            bail!("session group {from} was not found");
+        }
+        self.replace_registry(&mut registry, next)?;
+        Ok(moved)
+    }
+
+    /// Writes `next` and makes it the registry. One that reached the disk
+    /// without its write being confirmed is the registry all the same.
+    fn replace_registry(
+        &self,
+        registry: &mut SessionRegistrySnapshot,
+        next: SessionRegistrySnapshot,
+    ) -> Result<()> {
         match self.write_registry_metadata(&next, SessionMetadataWrite::Update) {
             Ok(()) => {
                 *registry = next;
-                Ok(changed)
+                Ok(())
             }
             Err(failure) => {
                 if failure.committed {
@@ -7319,6 +7351,23 @@ mod tests {
         assert_eq!(agent.created_by.as_deref(), Some("Claude"));
         assert_eq!(agent.group.as_deref(), Some("acme"));
         assert_eq!(listed(&registry, plain.id).group.as_deref(), Some("acme"));
+
+        // A group is renamed for all its sessions at once, and ends with no name.
+        assert_eq!(
+            registry.rename_session_group("acme", Some("beta")).unwrap(),
+            2
+        );
+        assert_eq!(listed(&registry, plain.id).group.as_deref(), Some("beta"));
+        assert!(registry
+            .rename_session_group("acme", Some("beta"))
+            .unwrap_err()
+            .to_string()
+            .contains("was not found"));
+        assert!(registry.rename_session_group("beta", Some("a\nb")).is_err());
+        assert_eq!(
+            registry.rename_session_group("beta", Some("acme")).unwrap(),
+            2
+        );
 
         // A blank name takes the session out of its group.
         registry.set_session_group(plain.id, Some("  ")).unwrap();

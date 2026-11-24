@@ -82,11 +82,24 @@ sniper-cli session port close --id <session-uuid> --yes
   Code, Codex, or `SNIPER_ACTOR`), and the UI's session list shows that before
   the session's name: a glyph for Claude and for Codex, the name for any
   other. A session made with no agent shows nothing.
-- The session list gathers sessions into groups from a session's menu ("Move
-  to …", "New group…"). A group is the sessions that carry its name. The API
-  sets one with `POST /api/sessions/<session-uuid>/group` and
-  `{"group": "name"}`, or `{"group": null}` to take the session out, and
-  `POST /api/sessions` takes `group`. The CLI has no command for groups yet.
+- The session list gathers sessions into groups: from a session's menu ("Move
+  to …", "New group…"), or by dragging a session onto a group. A group is the
+  sessions that carry its name, so the last one out ends it. Dragging also
+  changes the order of sessions and of groups, which is kept for the UI and
+  is nothing the CLI reads.
+
+```bash
+sniper-cli session create --name 'agent-a' --no-activate --group 'example.com' --yes
+sniper-cli session group set --id <session-uuid> --name 'example.com' --yes
+sniper-cli session group clear --id <session-uuid> --yes
+sniper-cli session group rename --from 'example.com' --to 'example.com prod' --yes
+sniper-cli --output compact session group list
+```
+
+- `session group list` prints each session's `group` and `created_by`.
+  `session list` keeps the fields it had.
+- `session group rename` moves every session of the group in one write. A
+  group that has the new name already takes them in.
 
 ## Reads, writes and the manifest
 

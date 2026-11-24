@@ -706,8 +706,19 @@ listener of Sniper's gets 508, for any client.
 - **Both belong to the registry**, as a session's name does. A save of the
   session carries its own copy of the record, and `update_metadata` keeps the
   registry's.
-- **Not built**: a CLI command for groups, renaming a group in one step, and
-  dragging a session onto a group.
+- **A group is renamed in one write** (`POST /api/session-groups/rename`):
+  every session of it takes the new name, or none, which ends the group.
+- **The order is the UI's.** A person drags a session beside another, onto a
+  group's name or onto the list, and a group beside another. Which group a
+  session is in goes to the registry; the order of sessions and of groups is
+  kept in the UI settings (`session_order`, `session_group_order`). A session
+  that was never dragged is ahead of the dragged ones, newest first, so a new
+  session shows at the top.
+- **sniper-cli** has `session group set|clear|rename|list` and
+  `session create --group`. `session list` keeps its fields, which are fixed.
+- **Not built**: a group change made by another client shows on the next read
+  of the list, not at once. Dragging has no keyboard form; a session's menu
+  moves it between groups from the keyboard.
 
 ## Constraints
 
