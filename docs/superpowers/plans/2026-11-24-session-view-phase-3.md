@@ -1,6 +1,6 @@
 # Session ports, phase 3: the UI views a session without activating it
 
-> Steps use checkbox (`- [ ]`) syntax for tracking. One commit for each task.
+> Steps use checkbox (`- [x]`) syntax for tracking. One commit for each task.
 
 **Goal:** A click on a session shows that session and moves nothing. The window
 says how traffic reaches the session on screen, and offers the two actions that
@@ -57,33 +57,33 @@ the activity rows.
 
 **Files:** `src/api.rs`.
 
-- [ ] Test `writes_to_a_session_that_is_busy_away_from_the_proxy_are_stored`:
+- [x] Test `writes_to_a_session_that_is_busy_away_from_the_proxy_are_stored`:
   a session that is not the default and has no port, with a Replay registered
   as in flight. A workspace save, its keepalive variant, an annotation, a
   runtime change and a second Replay all succeed. The context each used is the
   one `session_context_for_id` returns. A fresh `AppState` on the same
   directory reads back each Replay body as it was sent.
-- [ ] Test `a_workspace_save_for_a_deleted_session_is_not_answered_with_another_workspace`:
+- [x] Test `a_workspace_save_for_a_deleted_session_is_not_answered_with_another_workspace`:
   404 with no snapshot, for both handlers.
-- [ ] Remove `busy_away_from_the_proxy` and its eight uses, and
+- [x] Remove `busy_away_from_the_proxy` and its eight uses, and
   `session_proxy_work_conflict_response` if nothing else uses it. A workspace
   write whose session does not exist answers 404.
-- [ ] Update the tests that pinned the refusal.
+- [x] Update the tests that pinned the refusal.
 
 ### V2: Activation leaves the work of the session it moves to
 
 **Files:** `src/state.rs`.
 
-- [ ] Test `the_main_listener_moves_to_a_session_the_api_works_in`: API work
+- [x] Test `the_main_listener_moves_to_a_session_the_api_works_in`: API work
   registered in the target; `activate_session` succeeds without `force`, the
   work's guard is still held afterwards, and the active context is the one the
   work used (`Arc::ptr_eq`).
-- [ ] Test `a_forced_move_does_not_cut_work_in_the_session_it_moves_to`: a
+- [x] Test `a_forced_switch_cuts_nothing_in_the_session_it_moves_to`: a
   tracked task of the target survives `force`.
-- [ ] In `activate_session_inner` wait for, cut and count only `current_id`.
+- [x] In `activate_session_inner` wait for, cut and count only `current_id`.
   A target with work and no loaded context is refused, so a second context is
   never loaded beside it.
-- [ ] Update the tests that pinned the refusal for the target.
+- [x] Update the tests that pinned the refusal for the target.
 
 ### V3: Settings for a session; an event stream outlives a move
 
@@ -96,13 +96,13 @@ the activity rows.
 - `AppState::runtime_info_for(&self, session: &Arc<SessionContext>) -> RuntimeInfo`.
 - `SessionActivity.active: bool`.
 
-- [ ] Tests: settings for a session that is not the default return its runtime
+- [x] Tests: settings for a session that is not the default return its runtime
   and summary and leave it loaded writable; unknown is 404; no session is the
   default session as before. Activity rows carry `active`.
-- [ ] Test `an_event_stream_for_a_session_outlives_a_move_of_the_main_listener`:
+- [x] Test `an_event_stream_for_a_session_outlives_a_move_of_the_main_listener`:
   `should_reconnect_event_stream` is false for a named session in every case,
   and true for an unnamed stream once the default differs.
-- [ ] Implement.
+- [x] Implement.
 
 ### V4: The window shows a session without activating it
 
@@ -116,37 +116,37 @@ the activity rows.
 - `recordMainListenerInto(id, { force })`: the activate call; the view stays.
 - `expectedActiveSessionIdForWrite()` returns `null`.
 
-- [ ] Tests: a row click sends no activate call and loads the clicked session;
+- [x] Tests: a row click sends no activate call and loads the clicked session;
   `loadSessions` keeps the viewed session when another one is the default;
   settings and the workspace are read with `session_id`; a write carries no
   `expected_active_session_id`.
-- [ ] Implement. `loadSessions`, `loadSettings` and `loadWorkspaceState` name
+- [x] Implement. `loadSessions`, `loadSettings` and `loadWorkspaceState` name
   the viewed session. "New session" still creates, activates and views.
 
 ### V5: A deleted or replaced session
 
 **Files:** `web/app.js`, `tests/*.test.cjs`.
 
-- [ ] Tests: `session_deleted` on the stream, and a session list without the
+- [x] Tests: `session_deleted` on the stream, and a session list without the
   session on screen, both show the default session without a draft flush;
   deleting the session on screen from its menu does the same.
-- [ ] Implement `showDefaultSessionAfterDelete(deletedId)`.
+- [x] Implement `showDefaultSessionAfterDelete(deletedId)`.
 
 ### V6: Where the traffic comes from
 
 **Files:** `web/app.js`, `web/index.html`, `web/styles.css`, `tests/*.test.cjs`.
 
-- [ ] The session list runs the full height; the top strip and the status bar
+- [x] The session list runs the full height; the top strip and the status bar
   sit beside it.
-- [ ] `sessionFeed(id) -> { kind: "main" | "port" | "none", port }` from the
+- [x] `sessionFeed(id) -> { kind: "main" | "port" | "none", port }` from the
   session list, the activity rows and the settings.
-- [ ] The proxy indicator: "Proxy :8080", "Proxy :18081", "Not receiving",
+- [x] The proxy indicator: "Proxy :8080", "Proxy :18081", "Not receiving",
   and "Offline" as today. "Not receiving" opens the two actions.
-- [ ] The row of a fed session shows its port; the Session tab shows it beside
+- [x] The row of a fed session shows its port; the Session tab shows it beside
   the name, its "Open" views, and "Delete" is not offered for a fed session.
-- [ ] The row menu: "Record :8080 here", "Open a port" or "Close port :N",
+- [x] The row menu: "Record :8080 here", "Open a port" or "Close port :N",
   "Copy proxy address". An action the server refuses is not offered.
-- [ ] Capture: the pill reads "Not receiving"; the empty history names the
+- [x] Capture: the pill reads "Not receiving"; the empty history names the
   session the proxy records into and offers the two actions.
 
 ### V7: What stays with the default session; the browser button
@@ -154,17 +154,17 @@ the activity rows.
 **Files:** `web/app.js`, `web/tcp-capture.js`, `web/service-map.js`,
 `tests/*.test.cjs`.
 
-- [ ] The browser button sends `session_id` for the session on screen.
-- [ ] The TCP relay controls, OAST, Service Map bodies and the socket-peer
+- [x] The browser button sends `session_id` for the session on screen.
+- [x] The TCP relay controls, OAST, Service Map bodies and the socket-peer
   setting say in one line that they run in the session the proxy records into.
 
 ### V8: Runtime proof, documents, deploy, review
 
-- [ ] Isolated instance: view three sessions in turn while the main listener
+- [x] Isolated instance: view three sessions in turn while the main listener
   and a session port both carry traffic; nothing is cut and each request is in
   its own session. Replay, a workspace save and an annotation on a session with
   no feed, then a restart: every body is the one sent.
-- [ ] The same in the desktop app's webview.
-- [ ] `docs/guides/`, `docs/architecture.md`, `AGENTS.md`, the operator skill,
+- [ ] The same in the desktop app's webview. Not done: the screen was locked.
+- [x] `docs/guides/`, `docs/architecture.md`, `AGENTS.md`, the operator skill,
   the design's "As built".
 - [ ] Deploy. One reviewer.

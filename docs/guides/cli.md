@@ -70,6 +70,14 @@ sniper-cli session port close --id <session-uuid> --yes
   session shares. Aside is not opened that way, because its command cannot be
   pointed at one window.
 - Name the session on every command with `--session-id <session-uuid>`.
+- A session is written while work runs in it. A Replay in flight no longer
+  makes a note, a workspace save or a second Replay in the same session answer
+  409, whether or not the session is active.
+- `session switch` moves the proxy listener and nothing else. It waits for, and
+  with `--force` cuts, the work of the session it leaves. Work started over the
+  API in the session it moves to goes on.
+- The UI shows a session without switching to it. Its "Record :8080 here" is
+  `session switch`, and its "Open a port" is `session port open`.
 
 ## Reads, writes and the manifest
 

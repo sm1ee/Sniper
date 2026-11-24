@@ -110,7 +110,14 @@ Changes that must land in more than one place:
   API write to that session resolves to the same `Arc`
   (`AppState::session_port_context`). Do not load a context for a session
   another way: a second one on the same directory shows another request's body
-  with no error.
+  with no error. This is also what lets a session be written while work runs
+  in it; no check refuses such a write.
+- **A window shows a session; it does not follow the active one.** In
+  `web/app.js`, `state.activeSession` is the session on screen and
+  `state.viewedSessionId` the one the next load shows. Read and write by
+  `session_id`, and do not send `expected_active_session_id`. `sessionFeed(id)`
+  says how traffic reaches a session; ask it, not `session.active`, before
+  offering an action the server refuses for a fed session.
 - **A new workspace section** must also be adopted in `adoptExternalWorkspace`
   (`web/app.js`). The app saves the whole workspace at the revision it last
   adopted, so a section it does not adopt puts back what another writer, such

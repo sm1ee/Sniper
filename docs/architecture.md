@@ -92,7 +92,9 @@ works.
 - `src/bin/sniper-cli.rs`: the JSON-first CLI.
 - `src/platform.rs`: the data directory shared by desktop, server and CLI, plus
   Windows file locks, process identity and persistence operations.
-- `web/`: the frontend SPA.
+- `web/`: the frontend SPA. A window shows one session, which need not be the
+  one the proxy listener records into: it reads and writes by session id, and
+  a click on a session changes what the window shows and nothing else.
 - `packaging/macos/`, `packaging/skills/`: the `.app` and `.dmg` packaging
   scripts, and the Claude and Codex skill templates.
 

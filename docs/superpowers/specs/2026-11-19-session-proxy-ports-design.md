@@ -3,8 +3,9 @@
 Status: design, written after the step 2 spike (`spike/session-ports`,
 `f1df80d`, local only) and revised after a builder check, a second review by
 the author and an adversarial review. The guard of decision 5 is fixed
-(`74c9114`), and phases 1 (`9e6c130` to `fa41681`) and 2 (`35ff9d4`,
-`28ff659`) are built; see "As built" at the end. Phases 3 and 4 are not built.
+(`74c9114`), and phases 1 (`9e6c130` to `fa41681`), 2 (`35ff9d4`, `28ff659`)
+and 3 (`5fa0395` to `6b9b1a5`) are built; see "As built" at the end. Phase 4 is
+not built.
 
 ## Problem
 
@@ -598,7 +599,14 @@ What the builder settled, and where the build went past the design.
   opens. `LaunchContext::for_session` carries the session and the main
   listener's address into `launch_at`.
 - **A launch that fails closes the port it opened**, so a refused browser
-  leaves nothing changed. A port that was open already stays open.
+  leaves nothing changed. A port that was open already stays open. After the
+  review: only the call that opened the port closes it, and only while nobody
+  else asked for the port since. What a launch refuses for what it asks (Aside
+  for a session, a driver port while the proxy is exposed, a URL that is not
+  http, a browser that is not installed) is refused before the port opens, so
+  the session is given no number for it.
+- **A browser that ends at once** is answered 200 with a warning, because a
+  hand-off to a running browser looks the same. The port it opened stays open.
 - **Aside** is refused by what its driver is (`shared_instance_hint`), not by
   its name, so a later driver of the same kind is refused too. With no browser
   named the saved default or the first installed one is still chosen, and a
@@ -609,6 +617,17 @@ What the builder settled, and where the build went past the design.
 - **Not tested with a real browser.** A script stands in for Chromium, in the
   unit tests and on the isolated instance.
 
+### Review of phase 2
+
+- **A browser that relaunched itself** is named by no record once the process
+  Sniper started has ended. Its profile's lock is asked too, so deleting the
+  session does not remove the profile under it.
+- **The main listener's address** counts as Sniper's own only while that
+  listener is bound. While it is down another program has the port, and that
+  can be the application under test, reached through a session port.
+- **A tunnel that could not be recorded** is relayed, and now ends when it is
+  closed. A stop waited for it, which held a session switch and a quit.
+
 ### Merged with the remote
 
 `origin/release/0.3.6` fixed the remote-client guard on its own
@@ -616,6 +635,35 @@ What the builder settled, and where the build went past the design.
 listeners, and takes the remote's refusal of a CONNECT to the proxy's own
 listener, which now covers a session's port too: a tunnel to any proxy
 listener of Sniper's gets 508, for any client.
+
+### Phase 3
+
+- **The proof for decision 8** is a unit test and a runtime test. A Replay
+  stays in flight in a session that is not the default while a second Replay,
+  a note, a workspace save and a settings change are made in it. After a
+  restart every stored body is the one that was sent.
+- **Activation** asks only the session the main listener leaves. A session
+  with work in flight and no loaded context is refused: loading one there
+  would be a second writable context.
+- **No new endpoint.** `GET /api/settings?session_id=` is the window's first
+  read of a session and loads its writable context. A click sends it before
+  the window lets go of the session it shows, so a session that does not load
+  leaves the window as it is.
+- **The window's session** is `state.activeSession` in `web/app.js`, which
+  keeps its name. `state.viewedSessionId` is the session the next load shows.
+  A reload reads the settings and the workspace by that id, because its own
+  list read can lose to a newer rows-only read.
+- **Where the listener records** reaches the window through the activity rows
+  (`SessionActivity.active`), read every few seconds.
+- **The Capture pill** still toggles recording. It reads "Not receiving" when
+  recording is on and nothing arrives; the two actions are on the indicator
+  and in the empty history.
+- **What stays with the default session** says so: the TCP relay answers a
+  change for another session with its own message, and OAST, Service Map
+  bodies and socket peers were reworded.
+- **Not checked**: the desktop app's own webview. The screen was locked, and
+  the webview does not draw then. The browser panel showed the layout, the
+  indicator, the menus and each action.
 
 ## Constraints
 
