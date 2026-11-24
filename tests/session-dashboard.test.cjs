@@ -13,6 +13,8 @@ function fixture() {
   const context = loadFunctions(["loadSessions", "jsonArray"], {
     state, currentSessionId: () => state.activeSession?.id,
     sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0, resetFindingsUiState() {},
+    // No workspace is loaded, as at start-up, unless a test says otherwise.
+    workspaceLoaded: false,
     fetch: async () => response([]),
     requireOkResponse: async res => { if (!res.ok) throw new Error("Failed to load sessions."); },
     renderDashboard: () => rendered.push([...state.sessions]),
@@ -265,24 +267,71 @@ test("an obsolete list cannot resurrect rows after a newer empty list", async ()
   assert.equal(f.rendered.length, 1);
 });
 
-test("a superseded read cannot announce a stale active-session change", async () => {
-  const f = raceFixture(), changes = [];
-  f.context.handleExternalSessionChanged = async id => changes.push(id);
-  const older = f.context.loadSessions({ reloadOnActiveChange: true });
-  const newer = f.context.loadSessions({ reloadOnActiveChange: true });
+// A list without the session on screen means it was deleted, and the window
+// then shows another session.
+test("a superseded read cannot announce that the session on screen is gone", async () => {
+  const f = raceFixture(), left = [];
+  f.context.workspaceLoaded = true;
+  f.state.viewedSessionId = "fixture-active";
+  f.context.showDefaultSessionAfterDelete = async id => { left.push(id); };
+  const older = f.context.loadSessions();
+  const newer = f.context.loadSessions();
   const latest = [session("fixture-active", true), session("fixture-latest")];
   f.requests[1].resolve(response(latest));
   await newer;
   f.requests[0].resolve(response([session("fixture-obsolete", true)]));
   await older;
-  assert.deepEqual(changes, []);
+  assert.deepEqual(left, []);
   assert.equal(f.state.sessions, latest);
 });
 
-test("errors from a current external-session handler are not swallowed by a newer list", async () => {
+test("a list without the session on screen leaves it, also on a rows-only refresh", async () => {
+  for (const options of [undefined, { preserveWorkspaceOwner: true }]) {
+    const f = raceFixture(), left = [];
+    f.context.workspaceLoaded = true;
+    f.context.workspaceStateGeneration = 0;
+    f.state.viewedSessionId = "fixture-active";
+    f.context.showDefaultSessionAfterDelete = async id => { left.push(id); };
+    const reading = f.context.loadSessions(options);
+    const latest = [session("fixture-other", true)];
+    f.requests[0].resolve(response(latest));
+    await reading;
+    assert.deepEqual(left, ["fixture-active"]);
+    assert.equal(f.state.sessions, latest);
+    assert.equal(f.state.activeSession.id, "fixture-active", "the reload that follows relabels, not the list");
+  }
+});
+
+test("the proxy listener moving elsewhere leaves the window on its session", async () => {
+  const f = raceFixture();
+  f.context.workspaceLoaded = true;
+  f.state.activeSession = session("fixture-stored");
+  f.state.viewedSessionId = "fixture-stored";
+  const reading = f.context.loadSessions();
+  const moved = [session("fixture-active"), session("fixture-stored"), session("fixture-new", true)];
+  f.requests[0].resolve(response(moved));
+  await reading;
+  assert.equal(f.state.activeSession, moved[1]);
+  assert.equal(f.state.viewedSessionId, "fixture-stored");
+});
+
+test("a click on a session is the one the next list read shows", async () => {
+  const f = raceFixture();
+  f.context.workspaceLoaded = false;
+  f.state.viewedSessionId = "fixture-stored";
+  const reading = f.context.loadSessions();
+  const listed = [session("fixture-active", true), session("fixture-stored")];
+  f.requests[0].resolve(response(listed));
+  await reading;
+  assert.equal(f.state.activeSession, listed[1]);
+});
+
+test("errors from leaving a deleted session are not swallowed by a newer list", async () => {
   const f = raceFixture(), change = deferred();
-  f.context.handleExternalSessionChanged = () => change.promise;
-  const first = f.context.loadSessions({ reloadOnActiveChange: true });
+  f.context.workspaceLoaded = true;
+  f.state.viewedSessionId = "fixture-active";
+  f.context.showDefaultSessionAfterDelete = () => change.promise;
+  const first = f.context.loadSessions();
   f.requests[0].resolve(response([session("fixture-new-active", true)]));
   await nextTurn();
   const newer = f.context.loadSessions();

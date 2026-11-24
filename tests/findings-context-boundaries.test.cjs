@@ -157,10 +157,16 @@ function settings(id) {
 
 async function adoptSession(f, source, id, options = {}) {
   if (source === "settings") return f.c._applySettings(response(settings(id)));
+  // A click on another session asks for it, and the list is read again. The
+  // session on screen stays listed: the proxy listener records into the other.
+  const shown = f.c.currentSessionId();
+  if (id && !options.preserveWorkspaceOwner) f.state.viewedSessionId = id;
   const pending = f.c.loadSessions(options);
   const read = f.reads.at(-1);
   assert.equal(read.url, "/api/sessions");
-  read.resolve(response(id ? [{ id, name: id, active: true }] : []));
+  const rows = id ? [{ id, name: id, active: true }] : [];
+  if (id && shown && shown !== id) rows.push({ id: shown, name: shown, active: false });
+  read.resolve(response(rows));
   return pending;
 }
 
@@ -366,6 +372,17 @@ for (const kind of ["replay", "fuzzer"]) {
 for (const source of ["settings", "sessions"]) {
   test(`${source} removal of the active session also clears existing Findings`, async () => {
     const f = fixture(), before = drafts(f);
+    if (source === "sessions") {
+      // A list without the session on screen means it was deleted. The window
+      // then reloads on another session, which clears everything.
+      const left = [];
+      f.state.viewedSessionId = "session-a";
+      f.c.showDefaultSessionAfterDelete = async id => { left.push(id); };
+      await adoptSession(f, source, null);
+      assert.deepEqual(left, ["session-a"]);
+      assertDraftsRetained(f, before);
+      return;
+    }
     await adoptSession(f, source, null);
     assert.equal(f.c.currentSessionId(), null);
     assertCleared(f);

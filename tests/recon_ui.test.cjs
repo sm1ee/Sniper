@@ -831,7 +831,9 @@ for (const hasController of [false, true]) {
     const state = { activeSession: { id: "old" } };
     const sessions = [{ id: "new", name: "Fixture session", active: true }];
     const calls = [];
-    const context = loadAppFunctions(["loadSessions"], { state, sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0,
+    // No workspace is loaded yet, as at start-up: the window takes the
+    // session the proxy listener records into.
+    const context = loadAppFunctions(["loadSessions"], { state, sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0, workspaceLoaded: false,
       currentSessionId: () => state.activeSession?.id, fetch: async () => ({ json: async () => sessions }), requireOkResponse: async () => {},
       renderDashboard: () => calls.push(`dashboard:${state.activeSession.id}`),
       ...(hasController ? { reconController: { syncSession: () => calls.push(`recon:${state.activeSession.id}`) } } : {}),
@@ -1074,7 +1076,7 @@ for (const phase of ["fetch", "json", "error body"]) {
       const reachedLegacyReset = new Error("Unrelated reset cleanup boundary");
       const historyFailure = new Error("Synthetic history read failure");
       const forbidden = label => () => assert.fail(`Unexpected ${label}`);
-      const app = loadAppFunctions(["retireFindingActionProgress", "applyWorkspaceState", "readFuzzerWorkspace", "applyFuzzerWorkspace", "snapshotFuzzerWorkspace", "workspaceSnapshotValueChanged", "reloadSessionWorkspace", "resetSessionScopedUiState", "loadSessions", "loadWorkspaceState"], {
+      const app = loadAppFunctions(["retireFindingActionProgress", "applyWorkspaceState", "readFuzzerWorkspace", "applyFuzzerWorkspace", "snapshotFuzzerWorkspace", "workspaceSnapshotValueChanged", "reloadSessionWorkspace", "resetSessionScopedUiState", "loadSessions", "loadWorkspaceState", "sessionQueryPath"], {
         state: { activeSession: { id: "a" }, replayTabs: [], activeTool: "recon" },
         workspaceLoaded: true, sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0,
         reconController: f.controller, currentSessionId: () => f.session,
@@ -1082,7 +1084,7 @@ for (const phase of ["fetch", "json", "error body"]) {
         // hooks, before unrelated replay cleanup or state-saving machinery.
         clearReplaySendInFlight() { throw reachedLegacyReset; },
         fetch: async path => {
-          assert.ok(["/api/sessions", "/api/workspace-state"].includes(path));
+          assert.ok(["/api/sessions", "/api/workspace-state?session_id=a"].includes(path));
           return { ok: true, json: async () => path === "/api/sessions"
             ? [{ id: "a", name: "Synthetic session", active: true }]
             : { session_id: "a", replay: { tabs: [] }, fuzzer: {} } };

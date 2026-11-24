@@ -156,7 +156,7 @@ test("reopening Clear after a canceled stale confirmation captures the new activ
   const currentModal = f.open(), pending = f.confirm(currentModal);
   assert.match(currentModal.innerHTML, /Active session-b/);
   assert.equal(f.requests.length, 1);
-  assert.equal(f.requests[0].path, "/api/transactions?session_id=session-b&expected_active_session_id=session-b");
+  assert.equal(f.requests[0].path, "/api/transactions?session_id=session-b");
   f.requests[0].resolve(response({ removed: 0 })); await pending;
   assert.equal(f.toasts.at(-1)[0], "Cleared 0 captured requests."); assertIdle(f);
 });
@@ -196,7 +196,7 @@ test("current failure without a message preserves fallback feedback and cleanup"
 for (const removed of [1, 2]) test(`current confirmation targets A once, reports ${removed} removed, and releases progress`, async () => {
   const f = fixture(), modal = f.open(), pending = f.confirm(modal);
   assert.equal(f.requests.length, 1);
-  assert.equal(f.requests[0].path, "/api/transactions?session_id=session-a&expected_active_session_id=session-a");
+  assert.equal(f.requests[0].path, "/api/transactions?session_id=session-a");
   assert.equal(modal.isConnected, false); assert.equal(f.button.disabled, true);
   [...f.timers.values()][0](); assert.equal(f.button.classes.has("is-working-shown"), true);
   await f.confirm(f.open()); assert.equal(f.requests.length, 1, "progress still blocks duplicate confirmation");

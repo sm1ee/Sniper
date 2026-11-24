@@ -44,7 +44,7 @@ function fixture() {
   const c = loadFunctions(['renderDashboard', 'sessionFindingCount', 'formatSize', 'escapeHtml'], {
     state, document, els, getSortedSessions: () => state.sessions, formatCappedCount: String,
     retainedEntriesCap() {}, formatTimestamp: () => '-', onClickWithProgress: (btn, fn) => btn.addEventListener('click', fn),
-    withButtonProgress: (btn, fn) => Promise.resolve(fn()), activateSessionById: id => activated.push(id), handleWorkspaceActionError: assert.fail,
+    withButtonProgress: (btn, fn) => Promise.resolve(fn()), viewSessionById: id => activated.push(id), handleWorkspaceActionError: assert.fail,
   });
   c.renderDashboard();
   return { state, document, c, body, activated, rows: () => rows, renders: () => renders };

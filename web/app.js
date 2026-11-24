@@ -492,7 +492,11 @@ const state = {
   historyDirty: false,
   historyResetScrollOnNextLoad: false,
   sessions: [],
+  // The session this window shows. The name is from when a window always
+  // showed the session the proxy listener records into; it shows any now.
   activeSession: null,
+  // The session the next load shows; null is the one the listener records into.
+  viewedSessionId: null,
   selectedSessionId: null,
   sessionRename: null,
   sessionSidebarHidden: false,
@@ -1442,7 +1446,7 @@ function bindEvents() {
       setActiveTool(tab.dataset.tool === "templates" ? state.scanTool || "templates" : tab.dataset.tool);
       renderToolPanels();
       if (state.activeTool === "dashboard") {
-        loadSessions({ reloadOnActiveChange: true }).catch(handleWorkspaceActionError);
+        loadSessions().catch(handleWorkspaceActionError);
       }
       if (state.activeTool === "map") targetServiceMapController?.refresh({ force: true });
       if (state.activeTool === "target") loadTargetSiteMap(true).catch((error) => console.error(error));
@@ -2003,7 +2007,7 @@ function bindEvents() {
     }
   });
   onClickWithProgress(els.dashboardReloadSessionsButton, () =>
-    loadSessions({ reloadOnActiveChange: true }).catch(handleWorkspaceActionError));
+    loadSessions().catch(handleWorkspaceActionError));
   onClickWithProgress(els.dashboardCreateSessionButton, () =>
     createSession()
       .then(() => { if (!els.dashboardCreateSessionName.value) closeSessionCreateForm(); })
@@ -2025,7 +2029,7 @@ function bindEvents() {
     const row = event.target.closest?.(".session-sidebar-row");
     const id = row?.dataset.id;
     if (!id || id === currentSessionId()) return;
-    withButtonProgress(row, () => activateSessionById(id)).catch(handleWorkspaceActionError);
+    withButtonProgress(row, () => viewSessionById(id)).catch(handleWorkspaceActionError);
   });
   els.sessionSidebarList.addEventListener("contextmenu", (event) => {
     const id = event.target.closest?.(".session-sidebar-row")?.dataset.id;
@@ -3322,14 +3326,19 @@ function bindEvents() {
 }
 
 async function loadSettings(retries = 5, { isCurrent = () => true } = {}) {
+  // Read by name: the proxy listener may record into another session than
+  // the one on screen. The read also loads the session for writing.
+  // The session a click asked for comes first: the reload's own list read
+  // can lose to a newer rows-only read and leave the old one on screen.
+  const sessionId = state.viewedSessionId || currentSessionId();
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (!isCurrent()) return false;
     try {
-      const response = await fetch("/api/settings");
+      const response = await fetch(sessionQueryPath("/api/settings", sessionId));
       if (!response.ok) {
         throw new Error(`loadSettings failed: ${response.status}`);
       }
-      return await _applySettings(response, { isCurrent });
+      return await _applySettings(response, { isCurrent, sessionId });
     } catch (err) {
       if (!isCurrent()) return false;
       if (attempt < retries) {
@@ -3341,9 +3350,10 @@ async function loadSettings(retries = 5, { isCurrent = () => true } = {}) {
   }
 }
 
-async function _applySettings(response, { isCurrent = () => true } = {}) {
+async function _applySettings(response, { isCurrent = () => true, sessionId = null } = {}) {
   const settings = await response.json();
-  if (!isCurrent()) return false;
+  // The window may show another session by the time the answer is here.
+  if (!isCurrent() || (sessionId && sessionId !== (state.viewedSessionId || currentSessionId()))) return false;
   state.settings = settings;
   if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, state.settings.runtime);
   state.runtime = state.settings.runtime;
@@ -3614,7 +3624,7 @@ let sessionActivationIntent = null;
 let sessionsLoadGeneration = 0;
 let sessionsAppliedLoadGeneration = 0;
 
-async function loadSessions({ reloadOnActiveChange = false, preserveWorkspaceOwner = false, isCurrent = () => true } = {}) {
+async function loadSessions({ preserveWorkspaceOwner = false, isCurrent = () => true } = {}) {
   const generation = ++sessionsLoadGeneration;
   const workspaceGeneration = preserveWorkspaceOwner ? workspaceStateGeneration : null;
   const workspaceSessionId = preserveWorkspaceOwner ? currentSessionId() : null;
@@ -3641,26 +3651,29 @@ async function loadSessions({ reloadOnActiveChange = false, preserveWorkspaceOwn
   if (preserveWorkspaceOwner && (workspaceGeneration !== workspaceStateGeneration
     || workspaceSessionId !== currentSessionId())) return;
   sessionsAppliedLoadGeneration = generation;
+  const previousActiveSessionId = currentSessionId();
+  // The session this window shows, or the one a click just asked for.
+  // Another client moving the proxy listener changes neither.
+  const wanted = state.viewedSessionId;
+  const shown = sessions.find((session) => session.id === wanted);
+  if (!shown && wanted && wanted === previousActiveSessionId && workspaceLoaded) {
+    // The session on screen was deleted, here, by sniper-cli or by an agent.
+    state.sessions = sessions;
+    renderDashboard();
+    await showDefaultSessionAfterDelete(wanted);
+    return;
+  }
   if (preserveWorkspaceOwner) {
     state.sessions = sessions;
     renderDashboard();
     return;
   }
-  const previousActiveSessionId = currentSessionId();
-  const nextActiveSession = sessions.find((session) => session.active) || sessions[0] || null;
-  if (
-    reloadOnActiveChange
-    && previousActiveSessionId
-    && nextActiveSession?.id
-    && nextActiveSession.id !== previousActiveSessionId
-  ) {
-    state.sessions = sessions;
-    renderDashboard();
-    await handleExternalSessionChanged(previousActiveSessionId);
-    return;
-  }
+  // A window that shows no session yet, or whose session is gone, takes the
+  // one the proxy listener records into.
+  const nextActiveSession = shown || sessions.find((session) => session.active) || sessions[0] || null;
   state.sessions = sessions;
   state.activeSession = nextActiveSession;
+  state.viewedSessionId = nextActiveSession?.id || null;
   if (previousActiveSessionId !== currentSessionId()) resetFindingsUiState();
   if (typeof reconController !== "undefined") reconController?.syncSession();
   if (typeof templatesController !== "undefined") templatesController?.syncSession();
@@ -3679,14 +3692,10 @@ async function reconcileSessionsAfterActionError(sessionId, workspaceGeneration)
     console.warn("Failed to refresh sessions after a session action:", error);
   }
   if (sessionId !== currentSessionId() || workspaceGeneration !== workspaceStateGeneration) return;
-  const listedActiveSession = state.sessions.find((session) => session.active);
-  const activeSessionChanged = listedActiveSession && listedActiveSession.id !== currentSessionId();
   showToast(
     readFailed
       ? "The session action may have completed, but the session list could not be refreshed. Keep a copy of unsaved edits, then use Reload sessions before trying again."
-      : activeSessionChanged
-        ? "The active session changed. Your existing workspace is still open. Keep a copy of unsaved edits, then use Reload sessions to reconcile."
-        : "The session action may have completed. Check the session list before trying again.",
+      : "The session action may have completed. Check the session list before trying again.",
     "error",
     7000,
   );
@@ -3703,14 +3712,10 @@ async function reconcileSessionsAfterCompletedAction() {
     console.warn("Failed to refresh sessions after a completed session action:", error);
   }
   if (sessionId !== currentSessionId() || workspaceGeneration !== workspaceStateGeneration) return;
-  const listedActiveSession = state.sessions.find((session) => session.active);
-  const activeSessionChanged = listedActiveSession && listedActiveSession.id !== sessionId;
   showToast(
     readFailed
       ? "The session action completed, but the session list could not be refreshed. Your current workspace is still open. Keep a copy of unsaved edits, then use Reload sessions to reconcile."
-      : activeSessionChanged
-        ? "The session action completed and the active session changed. Your current workspace is still open. Keep a copy of unsaved edits, then use Reload sessions to reconcile."
-        : "The session action completed. Your current workspace is still open. Check the session list before continuing.",
+      : "The session action completed. Your current workspace is still open. Check the session list before continuing.",
     "error",
     7000,
   );
@@ -3733,7 +3738,7 @@ async function loadWorkspaceState({ isCurrent = () => true, onAdopt = () => {} }
   if (!workspaceLoaded) renderFuzzer();
   let snapshot;
   try {
-    const response = await fetch("/api/workspace-state");
+    const response = await fetch(sessionQueryPath("/api/workspace-state", state.viewedSessionId || currentSessionId()));
     if (!isCurrent()) return false;
     // Callers may toast this error; never surface captured data from a response body.
     if (!response.ok) throw new Error("Could not load session workspace.");
@@ -6128,6 +6133,7 @@ async function createSession(nameInput = els.dashboardCreateSessionName) {
   const actionScopeDraftVersion = state.targetScopeDraftVersion || 0;
   const actionMatchReplaceDraftVersion = state.matchReplaceDraftVersion || 0;
   const actionSequenceDraftVersion = state.sequenceDraftVersion || 0;
+  let createdSessionId = null;
   try {
     const response = await fetch("/api/sessions", {
       method: "POST",
@@ -6139,6 +6145,7 @@ async function createSession(nameInput = els.dashboardCreateSessionName) {
     if (!response.ok) {
       throw new Error(await response.text());
     }
+    createdSessionId = (await response.json().catch(() => null))?.id || null;
   } catch (error) {
     await reconcileSessionsAfterActionError(actionSessionId, actionWorkspaceGeneration);
     throw error;
@@ -6151,14 +6158,16 @@ async function createSession(nameInput = els.dashboardCreateSessionName) {
     return;
   }
   if (nameInput.value === submittedName) nameInput.value = "";
+  // The new session is the one the proxy listener records into, and the one
+  // this window shows next.
+  state.viewedSessionId = createdSessionId;
   await reloadSessionWorkspace({ cleanupBeforeReset: false });
 }
 
-async function activateSessionById(id, { force = false } = {}) {
+// Shows another session in this window. Nothing else changes: the proxy
+// listener keeps recording where it records, and no session's work is cut.
+async function viewSessionById(id) {
   if (!preserveActiveHttpReplayDraftBeforeSessionChange("switching sessions")) return;
-  // Busy confirmation follows the latest requested destination, not reply order.
-  // Ordinary completion still reconciles every request that reached the server.
-  const activationIntent = sessionActivationIntent = {};
   const entrySessionId = currentSessionId();
   const entryWorkspaceGeneration = workspaceStateGeneration;
   const canContinuePreflight = () => {
@@ -6197,42 +6206,20 @@ async function activateSessionById(id, { force = false } = {}) {
   const actionScopeDraftVersion = state.targetScopeDraftVersion || 0;
   const actionMatchReplaceDraftVersion = state.matchReplaceDraftVersion || 0;
   const actionSequenceDraftVersion = state.sequenceDraftVersion || 0;
-  const ownsActionWorkspace = () => actionSessionId === currentSessionId()
-    && actionWorkspaceGeneration === workspaceStateGeneration;
   try {
-    const response = await fetch(`/api/sessions/${id}/activate${force ? "?force=true" : ""}`, {
-      method: "POST",
-    });
+    // The server loads the session before this window lets go of the one it
+    // shows. A session that does not load leaves the window as it is, and
+    // loading a large one takes seconds, in which editing here goes on.
+    const response = await fetch(sessionQueryPath("/api/settings", id));
     if (!response.ok) {
-      const message = await response.text();
-      // The server already waited for work that was about to finish. What is left is
-      // a stream that does not end on its own — a server-sent event stream, a long
-      // poll — so offer to cut it rather than leaving the user stuck.
-      if (response.status === 409 && !force && message.includes("proxy activity is still running")) {
-        // Consent to cut activity belongs to this workspace, not just the fixed
-        // destination. Neither a late reply nor an open dialog may transfer it.
-        if (!ownsActionWorkspace() || activationIntent !== sessionActivationIntent) return;
-        showConfirmDialog(
-          `${message}.\n\nSwitch anyway? Anything still in flight is cut and will not be recorded.`,
-          () => {
-            if (!ownsActionWorkspace()) {
-              showToast("Switch canceled because the active workspace changed. Reopen the session to try again.", "error");
-              return;
-            }
-            if (activationIntent !== sessionActivationIntent) {
-              showToast("Switch canceled because a newer session action was started. Reopen the session to try again.", "error");
-              return;
-            }
-            activateSessionById(id, { force: true }).catch(handleWorkspaceActionError);
-          },
-          { title: "Proxy is busy", confirmLabel: "Switch anyway" },
-        );
-        return;
-      }
-      throw new Error(message);
+      throw new Error((await response.text()) || "Failed to open the session.");
     }
   } catch (error) {
-    await reconcileSessionsAfterActionError(actionSessionId, actionWorkspaceGeneration);
+    // Nothing changed. The list is read again in case the session is gone,
+    // unless the window has moved on to another workspace meanwhile.
+    if (actionSessionId === currentSessionId() && actionWorkspaceGeneration === workspaceStateGeneration) {
+      await loadSessions({ preserveWorkspaceOwner: true }).catch(() => {});
+    }
     throw error;
   }
   if (!canReloadWorkspaceAfterSessionAction(
@@ -6242,7 +6229,63 @@ async function activateSessionById(id, { force = false } = {}) {
     await reconcileSessionsAfterCompletedAction();
     return;
   }
+  state.viewedSessionId = id;
   state.selectedSessionId = id;
+  await reloadSessionWorkspace({ cleanupBeforeReset: false });
+}
+
+// Moves the proxy listener: it records into this session from its next
+// connection on. The window keeps showing the session it shows.
+async function recordMainListenerInto(id, { force = false } = {}) {
+  // Busy confirmation follows the latest requested destination, not reply order.
+  const activationIntent = sessionActivationIntent = {};
+  const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/activate${force ? "?force=true" : ""}`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    // The server already waited for work that was about to finish. What is left is
+    // a stream that does not end on its own — a server-sent event stream, a long
+    // poll — so offer to cut it rather than leaving the user stuck.
+    if (response.status === 409 && !force && message.includes("proxy activity is still running")) {
+      if (activationIntent !== sessionActivationIntent) return;
+      showConfirmDialog(
+        `${message}.\n\nMove the proxy anyway? Anything still in flight is cut and will not be recorded.`,
+        () => {
+          if (activationIntent !== sessionActivationIntent) {
+            showToast("Canceled because a newer session action was started. Try again from the session's menu.", "error");
+            return;
+          }
+          recordMainListenerInto(id, { force: true }).catch(handleWorkspaceActionError);
+        },
+        { title: "Proxy is busy", confirmLabel: "Move anyway" },
+      );
+      return;
+    }
+    throw new Error(message || "Failed to move the proxy.");
+  }
+  await refreshSessionFeeds();
+}
+
+// What a change to a session's feed leaves stale in a window that keeps its
+// view: where each session's traffic comes from, and what Intercept holds,
+// which the session the proxy listener leaves drops.
+async function refreshSessionFeeds() {
+  await Promise.all([
+    loadSessions({ preserveWorkspaceOwner: true }),
+    loadSessionActivity(),
+    loadIntercepts(false),
+    loadResponseIntercepts(false),
+  ]);
+}
+
+// The session on screen was deleted, here, by sniper-cli or by an agent.
+// Nothing of it is left to save into, so no draft is flushed, and the window
+// shows the session the proxy listener records into.
+async function showDefaultSessionAfterDelete(deletedId) {
+  if (deletedId !== currentSessionId()) return;
+  state.viewedSessionId = null;
+  showToast("The session on screen was deleted. Showing the session the proxy records into.", "info", 6000);
   await reloadSessionWorkspace({ cleanupBeforeReset: false });
 }
 
@@ -6300,11 +6343,12 @@ function sessionQueryPath(path, sessionId = currentSessionId()) {
   return `${path}${separator}session_id=${encodeURIComponent(sessionId)}`;
 }
 
-function expectedActiveSessionIdForWrite(sessionId = currentSessionId(), options = {}) {
-  if (options.bypassExpectedActiveSessionGuard) {
-    return null;
-  }
-  return sessionId && sessionId === currentSessionId() ? sessionId : null;
+// The server refuses a write that carries this when the proxy listener
+// records into another session. The window used to send it with every write,
+// because it showed that session and nothing else. It shows any session now
+// and writes to the one it names, so it sends none; other clients still can.
+function expectedActiveSessionIdForWrite() {
+  return null;
 }
 
 function sessionWritePath(path, sessionId = currentSessionId(), options = {}) {
@@ -9044,8 +9088,14 @@ function connectEvents() {
     }
   });
 
+  // The session's context was replaced on the server: read it again.
   eventSource.addEventListener("session_changed", () => {
     handleExternalSessionChanged(eventSessionId).catch((error) => console.error(error));
+  });
+
+  eventSource.addEventListener("session_deleted", () => {
+    if (eventSource !== eventStreamOwner) return;
+    showDefaultSessionAfterDelete(eventSessionId).catch(handleWorkspaceActionError);
   });
 
   eventSource.addEventListener("workspace_state", (event) => {
@@ -10382,7 +10432,7 @@ function renderDashboard() {
       if (!row) return;
       const { id } = row.dataset;
       if (!id) return;
-      withButtonProgress(btn, () => activateSessionById(id)).catch(handleWorkspaceActionError);
+      withButtonProgress(btn, () => viewSessionById(id)).catch(handleWorkspaceActionError);
     });
   });
 
@@ -10790,6 +10840,12 @@ async function deleteSessionById(id) {
       await reconcileSessionsAfterActionError(actionSessionId, actionWorkspaceGeneration);
       console.error("Failed to delete session:", error);
       showToast(error?.message || "Failed to delete session.", "error");
+      return;
+    }
+    // Outside the delete's own error handling: the session is gone whatever
+    // happens to the reload that follows.
+    if (id === currentSessionId()) {
+      await showDefaultSessionAfterDelete(id).catch(handleWorkspaceActionError);
     }
   });
 }

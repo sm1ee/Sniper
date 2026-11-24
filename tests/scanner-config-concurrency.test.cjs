@@ -125,7 +125,7 @@ test("modal posts its opening token and master enabled without a fresh GET or me
   const saving = f.context.saveScannerSettingsFromModal();
   assert.equal(f.requests.length, 3);
   assert.equal(f.requests[2].options.method, "POST");
-  assert.equal(f.requests[2].url, "/api/scanner-config?session_id=session-a&expected_active_session_id=session-a");
+  assert.equal(f.requests[2].url, "/api/scanner-config?session_id=session-a");
   assert.deepEqual(Object.keys(f.payload(2)).sort(), ["custom_rules", "enabled", "expected_config_token", "rules"]);
   assert.equal(f.payload(2).expected_config_token, "a".repeat(64));
   assert.equal(f.payload(2).enabled, false);
@@ -415,7 +415,7 @@ for (const phase of ["read", "write", "write JSON", "write error"]) {
     assert.equal(f.els.scannerQuickToggle.checked, true);
     assert.equal(f.toasts.length, 0);
     f.succeed(newIndex, snapshot({ session_id: "session-b", enabled: false })); await nextTurn();
-    assert.match(f.requests[newIndex + 1].url, /expected_active_session_id=session-b/);
+    assert.match(f.requests[newIndex + 1].url, /session_id=session-b$/);
     f.ack(newIndex + 1); await current;
     assert.equal(f.els.scannerQuickToggle.disabled, false);
     assert.equal(f.els.scannerQuickToggle.checked, true);

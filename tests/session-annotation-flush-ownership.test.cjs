@@ -96,18 +96,18 @@ test('old drain cannot reuse its bypass for an actual newer failed note retry', 
   const draining = f.context.flushAllPendingAnnotations(externalOptions); await tick();
   f.replace(false); await f.context.updateAnnotations('note-b', { user_note: 'Synthetic B note' });
   const next = f.state._pendingAnnotations.get('note-b');
-  assert.equal(f.url(1).searchParams.get('expected_active_session_id'), 'session-b');
+  assert.equal(f.url(1).searchParams.has('expected_active_session_id'), false);
   f.fail(1); await tick(); f.succeed(0, 'note-a'); await tick();
   await f.nextTimer(); assert.equal(f.requests.length, 2); await draining;
   assert.equal(f.state._pendingAnnotations.get('note-b'), next);
   const retry = f.context.flushPendingAnnotations('note-b');
   assert.equal(f.url(2).searchParams.get('session_id'), 'session-b');
-  assert.equal(f.url(2).searchParams.get('expected_active_session_id'), 'session-b');
+  assert.equal(f.url(2).searchParams.has('expected_active_session_id'), false);
   assert.equal(JSON.parse(f.requests[2].options.body).user_note, 'Synthetic B note');
   f.succeed(2, 'note-b'); assert.equal(await retry, true); assert.equal(f.state._pendingAnnotations.size, 0);
 });
 for (const sameId of [false, true]) for (const outcome of ['success', 'failure']) {
-  test(`same transaction replacement survives old ${outcome} across ${sameId ? 'generation' : 'owner'} with an ordinary guarded retry`, async () => {
+  test(`same transaction replacement survives old ${outcome} across ${sameId ? 'generation' : 'owner'} with an ordinary retry`, async () => {
     const f = fixture(); f.entry('same-note');
     const draining = f.context.flushAllPendingAnnotations(externalOptions).then(() => null, error => error);
     f.replace(sameId); await f.context.updateAnnotations('same-note', { user_note: 'Synthetic new note' });
@@ -117,7 +117,7 @@ for (const sameId of [false, true]) for (const outcome of ['success', 'failure']
     assert.equal(await draining, null); assert.equal(f.requests.length, 2);
     assert.equal(f.state._pendingAnnotations.get('same-note'), next);
     assert.equal(f.url(1).searchParams.get('session_id'), f.state.activeSession.id);
-    assert.equal(f.url(1).searchParams.get('expected_active_session_id'), f.state.activeSession.id);
+    assert.equal(f.url(1).searchParams.has('expected_active_session_id'), false);
     assert.equal(JSON.parse(f.requests[1].options.body).user_note, 'Synthetic new note');
     f.succeed(1, 'same-note'); await tick(); assert.equal(f.state._pendingAnnotations.size, 0);
   });

@@ -319,7 +319,7 @@ test("an already-obsolete Rescan response does not decode its error body", async
 test("same-owner structured Rescan error retains its server feedback and precise session write guard", async () => {
   const f = fixture(); f.state.activeSession = { id: "session a/b" };
   const before = f.snapshot(), pending = f.click(), request = f.requests[0];
-  assert.equal(request.url, "/api/findings/rescan?session_id=session+a%2Fb&expected_active_session_id=session+a%2Fb");
+  assert.equal(request.url, "/api/findings/rescan?session_id=session+a%2Fb");
   request.resolve({ ok: false, headers: { get: () => "application/json" },
     clone: () => ({ json: async () => ({ error: "Synthetic conflicting owner", owner_session_id: "session-b" }) }),
     text: async () => { assert.fail("structured errors must not consume the plain-text body"); },

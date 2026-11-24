@@ -247,7 +247,7 @@ for (const phase of ['sessions', 'settings']) test(`late decoded B ${phase} cann
     vm.runInContext(source('_applySettings'), f.context);
   }
   const { pending } = await f.begin();
-  assert.equal(f.requests[0].url, phase === 'sessions' ? '/api/sessions' : '/api/settings');
+  assert.match(f.requests[0].url, phase === 'sessions' ? /^\/api\/sessions$/ : /^\/api\/settings\?session_id=/);
   let decode;
   f.requests[0].resolve({ ok: true, json: () => new Promise(resolve => { decode = resolve; }) });
   await tick(); assert.equal(typeof decode, 'function');

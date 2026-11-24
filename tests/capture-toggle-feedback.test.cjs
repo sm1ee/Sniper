@@ -49,7 +49,7 @@ function fixture(capturing) {
         reads.push(read);
         return read.promise;
       }
-      assert.equal(path, "/api/runtime?session_id=session-a&expected_active_session_id=session-a");
+      assert.equal(path, "/api/runtime?session_id=session-a");
       assert.equal(options.method, "POST");
       assert.deepEqual({ ...options.headers }, { "content-type": "application/json" });
       assert.deepEqual(JSON.parse(options.body), { http_capture_enabled: !capturing });

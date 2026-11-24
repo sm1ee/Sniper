@@ -270,7 +270,7 @@ for (const sameId of [false, true]) {
     const entry = f.state._pendingAnnotations.get("synthetic-note");
     const url = new URL(f.annotationRequests()[0].url, "http://example.com");
     assert.equal(url.searchParams.get("session_id"), f.state.activeSession.id);
-    assert.equal(url.searchParams.get("expected_active_session_id"), f.state.activeSession.id);
+    assert.equal(url.searchParams.has("expected_active_session_id"), false);
     f.completeSettings(); await closing;
     assert.match(f.messages[0], /^sniper:native-close-flush-error:42:/);
     assert.equal(f.state._pendingAnnotations.get("synthetic-note"), entry);
