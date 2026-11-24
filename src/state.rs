@@ -902,22 +902,54 @@ impl AppState {
     }
 
     pub async fn create_session(&self, name: Option<String>) -> Result<SessionSummary> {
-        let metadata = self.sessions.create_session(name)?;
-        self.activate_session_inner(metadata.id, false, true).await
+        self.create_session_as(name, None, None, true).await
     }
 
     /// Creates a session and leaves the main listener where it is. An agent
     /// that makes a session of its own must not move everyone else's capture.
     pub async fn create_inactive_session(&self, name: Option<String>) -> Result<SessionSummary> {
+        self.create_session_as(name, None, None, false).await
+    }
+
+    /// Creates a session as the API is asked to: who makes it, the group it
+    /// starts in, and whether the main listener moves to it.
+    pub async fn create_session_as(
+        &self,
+        name: Option<String>,
+        created_by: Option<String>,
+        group: Option<String>,
+        activate: bool,
+    ) -> Result<SessionSummary> {
+        if activate {
+            let metadata = self.sessions.create_session_as(name, created_by, group)?;
+            return self.activate_session_inner(metadata.id, false, true).await;
+        }
         let sessions = self.sessions.clone();
-        let metadata = tokio::task::spawn_blocking(move || sessions.create_session(name))
-            .await
-            .context("session create writer panicked")??;
+        let metadata = tokio::task::spawn_blocking(move || {
+            sessions.create_session_as(name, created_by, group)
+        })
+        .await
+        .context("session create writer panicked")??;
         self.sessions
             .summaries()
             .into_iter()
             .find(|session| session.id == metadata.id)
             .ok_or_else(|| anyhow::anyhow!("session {} was not found", metadata.id))
+    }
+
+    /// Puts the session in a group, or takes it out, and returns the group it
+    /// is in now. Only the registry keeps a group, so no session is loaded.
+    pub async fn set_session_group(
+        &self,
+        id: uuid::Uuid,
+        group: Option<String>,
+    ) -> Result<Option<String>> {
+        let sessions = self.sessions.clone();
+        let metadata =
+            tokio::task::spawn_blocking(move || sessions.set_session_group(id, group.as_deref()))
+                .await
+                .context("session group writer panicked")??;
+        Ok(metadata.group)
     }
 
     /// The session's port as the API reports it: the number it holds, and

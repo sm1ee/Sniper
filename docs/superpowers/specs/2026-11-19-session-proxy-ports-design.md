@@ -692,6 +692,23 @@ listener of Sniper's gets 508, for any client.
   caller went away before the launch ended, stays open with no browser. It
   shows as open and closes from the session's menu.
 
+### After phase 3: groups, and who made a session
+
+- **A group is a name on the session** (`SessionMetadata.group`), not a record
+  of its own: the sessions that carry a name are the group, and the last one
+  out ends it. The session list shows sessions in no group first, then each
+  group under its name, which folds (`session_groups_collapsed` in the UI
+  settings).
+- **Who made a session** is the name sniper-cli sends on every request
+  (`x-sniper-actor`), kept as `created_by`. The UI sends none. The list draws
+  it with the glyph a Replay tab draws for the same name: one definition of
+  each, on `[data-actor]`.
+- **Both belong to the registry**, as a session's name does. A save of the
+  session carries its own copy of the record, and `update_metadata` keeps the
+  registry's.
+- **Not built**: a CLI command for groups, renaming a group in one step, and
+  dragging a session onto a group.
+
 ## Constraints
 
 - The persistence invariants in `AGENTS.md` §5: every write atomic, no fsync on

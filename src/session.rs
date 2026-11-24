@@ -92,6 +92,14 @@ pub struct SessionMetadata {
     pub rule_count: usize,
     #[serde(default)]
     pub overview: SessionOverview,
+    /// Who made the session, when its maker said so: an agent that drives
+    /// sniper-cli. A person in the UI says nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    /// The group the session list shows it under. A group is the sessions
+    /// that carry its name; nothing else is saved for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -124,6 +132,12 @@ pub struct SessionListing {
     /// Retained TCP records, or unknown if their storage cannot be summarized.
     #[serde(default)]
     pub tcp_connection_count: Option<usize>,
+    /// As on `SessionMetadata`. Here and not on the summary, whose fields
+    /// are fixed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// What a session is doing now, for the session list beside the workspace.
@@ -2109,6 +2123,8 @@ impl SessionRegistry {
                 overview: metadata.overview.clone(),
                 storage_bytes: 0,
                 tcp_connection_count: None,
+                created_by: metadata.created_by.clone(),
+                group: metadata.group.clone(),
             })
             .collect::<Vec<_>>();
         sessions.sort_by_key(|session| std::cmp::Reverse(session.summary.last_opened_at));
@@ -2123,6 +2139,17 @@ impl SessionRegistry {
     }
 
     pub fn create_session(&self, name: Option<String>) -> Result<SessionMetadata> {
+        self.create_session_as(name, None, None)
+    }
+
+    /// `create_session`, with who makes the session and the group it starts
+    /// in.
+    pub fn create_session_as(
+        &self,
+        name: Option<String>,
+        created_by: Option<String>,
+        group: Option<String>,
+    ) -> Result<SessionMetadata> {
         let now = Utc::now();
         let metadata = SessionMetadata {
             id: Uuid::new_v4(),
@@ -2136,6 +2163,8 @@ impl SessionRegistry {
             fuzzer_count: 0,
             rule_count: 0,
             overview: SessionOverview::default(),
+            created_by,
+            group: session_group_name(group.as_deref())?,
         };
 
         persist_session_snapshot(&self.root_dir, &metadata, &StoredSessionSnapshot::default())?;
@@ -2171,6 +2200,33 @@ impl SessionRegistry {
 
     pub fn activate_session(&self, id: Uuid) -> Result<SessionMetadata> {
         self.touch_active_session(id)
+    }
+
+    /// Puts the session in a group, or takes it out when the name is blank
+    /// or missing.
+    pub fn set_session_group(&self, id: Uuid, group: Option<&str>) -> Result<SessionMetadata> {
+        let group = session_group_name(group)?;
+        let mut registry = self.inner.write().expect("session registry lock poisoned");
+        let mut next = registry.clone();
+        let metadata = next
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == id)
+            .ok_or_else(|| anyhow!("session {id} was not found"))?;
+        metadata.group = group;
+        let changed = metadata.clone();
+        match self.write_registry_metadata(&next, SessionMetadataWrite::Update) {
+            Ok(()) => {
+                *registry = next;
+                Ok(changed)
+            }
+            Err(failure) => {
+                if failure.committed {
+                    *registry = next;
+                }
+                Err(failure.error)
+            }
+        }
     }
 
     pub fn rename_session(&self, id: Uuid, name: &str) -> Result<SessionMetadata> {
@@ -2265,6 +2321,8 @@ impl SessionRegistry {
         // A snapshot writer can finish after a rename or activation. These
         // fields belong to the registry, not to the writer's earlier snapshot.
         metadata.name.clone_from(&existing.name);
+        metadata.created_by.clone_from(&existing.created_by);
+        metadata.group.clone_from(&existing.group);
         metadata.created_at = existing.created_at;
         metadata.last_opened_at = existing.last_opened_at;
         metadata.updated_at = metadata.updated_at.max(existing.updated_at);
@@ -3242,6 +3300,8 @@ fn recovered_session_metadata(
         fuzzer_count: 0,
         rule_count: 0,
         overview: SessionOverview::default(),
+        created_by: None,
+        group: None,
     };
     update_metadata_counts_from_snapshot(
         &mut metadata,
@@ -3266,7 +3326,24 @@ fn default_session_metadata(name: &str) -> SessionMetadata {
         fuzzer_count: 0,
         rule_count: 0,
         overview: SessionOverview::default(),
+        created_by: None,
+        group: None,
     }
+}
+
+/// A group's name as it is kept, held to a session name's rules. None takes
+/// the session out of its group.
+fn session_group_name(group: Option<&str>) -> Result<Option<String>> {
+    let Some(group) = group.map(str::trim).filter(|group| !group.is_empty()) else {
+        return Ok(None);
+    };
+    if group.len() > MAX_SESSION_NAME_BYTES {
+        bail!("session group name cannot exceed {MAX_SESSION_NAME_BYTES} bytes");
+    }
+    if group.chars().any(char::is_control) {
+        bail!("session group name cannot contain control characters");
+    }
+    Ok(Some(group.to_owned()))
 }
 
 /// Validate creation names without changing the caller's raw value or choosing a timestamp.
@@ -7196,6 +7273,78 @@ mod tests {
             .rename_session(Uuid::new_v4(), "Missing")
             .unwrap_err();
         assert!(error.to_string().contains("was not found"));
+        drop(active);
+        drop(registry);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // Who made a session and the group it is in belong to the registry, as
+    // its name does. A save of the session carries its own copy of the
+    // record, taken before either was set, and must not put that back.
+    #[tokio::test]
+    async fn a_session_keeps_who_made_it_and_its_group() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-session-group-{}", Uuid::new_v4()));
+        let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+        let made = registry
+            .create_session_as(
+                Some("agent".into()),
+                Some("Claude".into()),
+                Some(" acme ".into()),
+            )
+            .unwrap();
+        assert_eq!(made.created_by.as_deref(), Some("Claude"));
+        assert_eq!(made.group.as_deref(), Some("acme"));
+        let plain = registry.create_session(Some("mine".into())).unwrap();
+        assert_eq!(
+            (plain.created_by.clone(), plain.group.clone()),
+            (None, None)
+        );
+
+        registry.set_session_group(plain.id, Some("acme")).unwrap();
+        let mut stale = made.clone();
+        stale.group = None;
+        stale.created_by = None;
+        stale.request_count = 7;
+        registry.update_metadata(stale).unwrap();
+        let listed = |registry: &SessionRegistry, id: Uuid| {
+            registry
+                .listings()
+                .into_iter()
+                .find(|listing| listing.summary.id == id)
+                .unwrap()
+        };
+        let agent = listed(&registry, made.id);
+        assert_eq!(agent.summary.request_count, 7);
+        assert_eq!(agent.created_by.as_deref(), Some("Claude"));
+        assert_eq!(agent.group.as_deref(), Some("acme"));
+        assert_eq!(listed(&registry, plain.id).group.as_deref(), Some("acme"));
+
+        // A blank name takes the session out of its group.
+        registry.set_session_group(plain.id, Some("  ")).unwrap();
+        assert_eq!(listed(&registry, plain.id).group, None);
+        assert!(registry.set_session_group(made.id, Some("a\nb")).is_err());
+        assert!(registry
+            .set_session_group(
+                made.id,
+                Some(&"g".repeat(super::MAX_SESSION_NAME_BYTES + 1))
+            )
+            .is_err());
+        assert!(registry
+            .set_session_group(Uuid::new_v4(), Some("acme"))
+            .unwrap_err()
+            .to_string()
+            .contains("was not found"));
+        drop(active);
+        drop(registry);
+
+        let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+        let agent = listed(&registry, made.id);
+        assert_eq!(agent.created_by.as_deref(), Some("Claude"));
+        assert_eq!(agent.group.as_deref(), Some("acme"));
+        // A session with neither says neither, where a client reads the list.
+        let plain = serde_json::to_value(listed(&registry, plain.id)).unwrap();
+        assert!(plain.get("group").is_none() && plain.get("created_by").is_none());
         drop(active);
         drop(registry);
         let _ = std::fs::remove_dir_all(data_dir);

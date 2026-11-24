@@ -400,6 +400,8 @@ pub struct AppUiSettingsSnapshot {
     pub replay_tabs_wrap: bool,
     /// The session list beside the workspace is put away.
     pub session_sidebar_hidden: bool,
+    /// The groups of the session list that are folded shut, by name.
+    pub session_groups_collapsed: Vec<String>,
     pub websocket_stack_height: Option<u16>,
     pub ws_replay_left_width: Option<u16>,
     pub ws_replay_frame_detail_height: Option<u16>,
@@ -441,6 +443,7 @@ impl Default for AppUiSettingsSnapshot {
             websocket_live_only: false,
             replay_tabs_wrap: false,
             session_sidebar_hidden: false,
+            session_groups_collapsed: Vec::new(),
             websocket_stack_height: None,
             ws_replay_left_width: None,
             ws_replay_frame_detail_height: None,
@@ -516,6 +519,7 @@ impl AppUiSettingsSnapshot {
         sanitized.websocket_live_only = self.websocket_live_only;
         sanitized.replay_tabs_wrap = self.replay_tabs_wrap;
         sanitized.session_sidebar_hidden = self.session_sidebar_hidden;
+        sanitized.session_groups_collapsed = sanitize_group_names(self.session_groups_collapsed);
         sanitized.websocket_stack_height = self
             .websocket_stack_height
             .filter(|height| *height > 0)
@@ -777,6 +781,19 @@ fn sanitize_map_entries(entries: Vec<String>) -> Vec<String> {
         })
         .filter(|entry| seen.insert(entry.clone(), ()).is_none())
         .take(SERVICE_MAP_ENTRY_MAX_COUNT)
+        .collect()
+}
+
+/// Folded session groups: trimmed, unique and bounded, as a group's name is
+/// when a session is put in it.
+fn sanitize_group_names(names: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeMap::new();
+    names
+        .into_iter()
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty() && name.len() <= 256 && !name.chars().any(char::is_control))
+        .filter(|name| seen.insert(name.clone(), ()).is_none())
+        .take(200)
         .collect()
 }
 
@@ -1649,6 +1666,7 @@ mod tests {
         snapshot.websocket_live_only = true;
         snapshot.replay_tabs_wrap = true;
         snapshot.session_sidebar_hidden = true;
+        snapshot.session_groups_collapsed = vec![" acme ".into(), "acme".into(), "a\nb".into()];
         snapshot.websocket_stack_height = Some(345);
         snapshot.ws_replay_left_width = Some(555);
         snapshot.ws_replay_frame_detail_height = Some(222);
@@ -1698,6 +1716,7 @@ mod tests {
         assert!(persisted.websocket_live_only);
         assert!(persisted.replay_tabs_wrap);
         assert!(persisted.session_sidebar_hidden);
+        assert_eq!(persisted.session_groups_collapsed, ["acme"]);
         assert_eq!(persisted.websocket_stack_height, Some(345));
         assert_eq!(persisted.ws_replay_left_width, Some(555));
         assert_eq!(persisted.ws_replay_frame_detail_height, Some(222));

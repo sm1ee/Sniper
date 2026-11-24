@@ -25,7 +25,7 @@ const session = (id, created, extra = {}) => ({
   id, name: `Session ${id}`, created_at: `2026-11-${created}T09:00:00Z`, active: false, ...extra,
 });
 
-function fixture({ sessions, activeId, hidden = false }) {
+function fixture({ sessions, activeId, hidden = false, names = [], globals = {} }) {
   const state = {
     sessions,
     activeSession: sessions.find(entry => entry.id === activeId) || null,
@@ -36,7 +36,7 @@ function fixture({ sessions, activeId, hidden = false }) {
   };
   const els = { sessionSidebar: element(), sessionSidebarToggle: element(), sessionSidebarList: element() };
   const reloads = [];
-  const context = loadFunctions(["renderSessionSidebar", "sessionSidebarRow", "sessionIdentity", "applySessionActivity"], {
+  const context = loadFunctions(["renderSessionSidebar", "sessionSidebarRow", "sessionIdentity", "applySessionActivity", ...names], {
     state, els,
     document: { activeElement: null },
     sessionRenameInput: null, sessionSidebarMarkup: "", sessionListRefresh: null, sidebarRenameEdit: null,
@@ -45,6 +45,7 @@ function fixture({ sessions, activeId, hidden = false }) {
     wireSessionRenameInput() {},
     renderSessionFeed() {},
     loadSessions: options => { reloads.push(options); return new Promise(() => {}); },
+    ...globals,
   });
   return { state, els, context, reloads };
 }
@@ -207,3 +208,105 @@ test("a read asked for after a change follows the one in flight", async () => {
   await afterChange;
   assert.deepEqual(applied, ["before the change", "after the change"]);
 });
+
+// Sessions a person gathered under a name are listed under it, after the ones
+// in no group. A folded group shows its name and how many it holds.
+const groupHeaders = html => [...html.matchAll(
+  /class="session-sidebar-group-toggle" type="button" data-group="([^"]+)" aria-expanded="(true|false)">.*?<span class="session-sidebar-group-count">(\d+)<\/span>/g,
+)].map(match => match.slice(1));
+
+test("grouped sessions are listed under their group, after the ones in none", () => {
+  const f = fixture({
+    sessions: [session("loose", "01"), session("a1", "05", { group: "acme" }),
+      session("b1", "07", { group: "beta" }), session("a2", "09", { group: "acme" })],
+    activeId: "loose",
+  });
+  f.state.sessionGroupsCollapsed = ["beta"];
+  f.context.renderSessionSidebar();
+  const html = f.els.sessionSidebarList.innerHTML;
+  assert.deepEqual(rows(html), ["loose", "a2", "a1"], "a folded group's sessions are not drawn");
+  assert.deepEqual(groupHeaders(html), [["acme", "true", "2"], ["beta", "false", "1"]]);
+  assert.ok(html.indexOf('data-id="loose"') < html.indexOf('data-group="acme"'));
+});
+
+test("a group folds and unfolds, and the choice is saved", () => {
+  let saves = 0;
+  const f = fixture({
+    sessions: [session("a1", "05", { group: "acme" })], activeId: null,
+    names: ["toggleSessionGroup"], globals: { scheduleUiSettingsSave: () => { saves += 1; } },
+  });
+  f.state.sessionGroupsCollapsed = [];
+  f.context.toggleSessionGroup("acme");
+  assert.deepEqual([...f.state.sessionGroupsCollapsed], ["acme"]);
+  assert.deepEqual(rows(f.els.sessionSidebarList.innerHTML), []);
+  f.context.toggleSessionGroup("acme");
+  assert.deepEqual([...f.state.sessionGroupsCollapsed], []);
+  assert.deepEqual(rows(f.els.sessionSidebarList.innerHTML), ["a1"]);
+  assert.equal(saves, 2);
+});
+
+// The same name a Replay tab carries for who opened it, so the same glyph.
+test("a row names who made the session, and one the person made names nobody", () => {
+  const f = fixture({ sessions: [session("a", "01", { created_by: "Claude" }), session("b", "02")], activeId: "a" });
+  f.context.renderSessionSidebar();
+  const [b, a] = f.els.sessionSidebarList.innerHTML.split("</li>");
+  assert.match(a, /<span class="session-sidebar-name"><span class="session-actor" data-actor="Claude" title="Made by Claude"><\/span>Session a<\/span>/);
+  assert.match(a, /aria-label="Session a, made by Claude"/);
+  assert.doesNotMatch(b, /session-actor|made by/);
+});
+
+test("a session's menu offers each other group, a new one, and the way out", () => {
+  const state = { sessions: [session("a", "01", { group: "acme" }), session("b", "02", { group: "beta" }), session("c", "03")] };
+  const context = loadFunctions(["sessionGroupMenuItems"], { state, escapeHtml: value => String(value) });
+  const items = html => [...html.matchAll(/data-action="([^"]+)"(?: data-group="([^"]+)")?>([^<]+)</g)].map(match => match.slice(1));
+  assert.deepEqual(items(context.sessionGroupMenuItems(state.sessions[0])),
+    [["group", "beta", "Move to beta"], ["new-group", undefined, "New group…"], ["ungroup", undefined, "Remove from group"]]);
+  assert.deepEqual(items(context.sessionGroupMenuItems(state.sessions[2])),
+    [["group", "acme", "Move to acme"], ["group", "beta", "Move to beta"], ["new-group", undefined, "New group…"]]);
+});
+
+test("moving a session asks the server, shows its group open, and reads the list again", async () => {
+  const requests = [], reads = [];
+  const state = { sessionGroupsCollapsed: ["acme", "beta"] };
+  const context = loadFunctions(["moveSessionToGroup"], {
+    state, encodeURIComponent,
+    fetch: async (url, options) => { requests.push([url, options.method, JSON.parse(options.body)]); return { ok: true }; },
+    requireOkResponse: async () => {},
+    loadSessions: async options => { reads.push({ ...options }); },
+    scheduleUiSettingsSave() {},
+  });
+  await context.moveSessionToGroup("s 1", "acme");
+  await context.moveSessionToGroup("s 1", null);
+  assert.deepEqual(requests, [["/api/sessions/s%201/group", "POST", { group: "acme" }], ["/api/sessions/s%201/group", "POST", { group: null }]]);
+  assert.deepEqual([...state.sessionGroupsCollapsed], ["beta"]);
+  assert.deepEqual(reads, [{ preserveWorkspaceOwner: true }, { preserveWorkspaceOwner: true }]);
+});
+
+for (const failing of [false, true]) test(`a new group's name ${failing ? "stays in its field when the server refuses it" : "moves the session and closes its field"}`, async () => {
+  const moved = [];
+  let closed = 0;
+  const els = { sessionSidebarGroup: element(), sessionSidebarGroupName: { value: "", focus() {} } };
+  const context = loadFunctions(["openSidebarGroupName", "closeSidebarGroupName", "submitSidebarGroupName"], {
+    els, sidebarGroupSession: null,
+    closeSidebarSessionCreate: () => { closed += 1; },
+    moveSessionToGroup: async (id, group) => { moved.push([id, group]); if (failing) throw new Error("refused"); },
+  });
+  els.sessionSidebarGroup.classList.add("hidden");
+  context.openSidebarGroupName("s1");
+  assert.equal(els.sessionSidebarGroup.classList.contains("hidden"), false);
+  assert.equal(closed, 1, "the new-session field gives way: the two look alike");
+  els.sessionSidebarGroupName.value = "  acme  ";
+  const outcome = await context.submitSidebarGroupName().then(() => "moved", error => error.message);
+  assert.deepEqual(moved, [["s1", "acme"]]);
+  assert.equal(outcome, failing ? "refused" : "moved");
+  assert.equal(els.sessionSidebarGroup.classList.contains("hidden"), !failing);
+  assert.equal(els.sessionSidebarGroupName.value, failing ? "  acme  " : "");
+  // An empty name moves nothing.
+  if (!failing) {
+    context.openSidebarGroupName("s1");
+    await context.submitSidebarGroupName();
+    assert.equal(moved.length, 1);
+    assert.equal(els.sessionSidebarGroup.classList.contains("hidden"), true);
+  }
+});
+

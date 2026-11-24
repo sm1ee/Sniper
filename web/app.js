@@ -500,6 +500,8 @@ const state = {
   selectedSessionId: null,
   sessionRename: null,
   sessionSidebarHidden: false,
+  // The groups of the session list that are folded shut, by name.
+  sessionGroupsCollapsed: [],
   // What each session is doing, from /api/sessions/activity.
   sessionActivity: new Map(),
   // Sessions whose jobs ended while another session was open: id → job kinds.
@@ -722,6 +724,8 @@ const els = {
   sessionSidebarNewButton: document.getElementById("sessionSidebarNewButton"),
   sessionSidebarCreate: document.getElementById("sessionSidebarCreate"),
   sessionSidebarCreateName: document.getElementById("sessionSidebarCreateName"),
+  sessionSidebarGroup: document.getElementById("sessionSidebarGroup"),
+  sessionSidebarGroupName: document.getElementById("sessionSidebarGroupName"),
   proxyStatusIndicator: document.getElementById("proxyStatusIndicator"),
   proxyStatusLabel: document.getElementById("proxyStatusLabel"),
   remoteUiIndicator: document.getElementById("remoteUiIndicator"),
@@ -2024,8 +2028,21 @@ function bindEvents() {
   els.sessionSidebarCreateName.addEventListener("blur", () => {
     if (!sidebarSessionCreating && !els.sessionSidebarCreateName.value.trim()) closeSidebarSessionCreate();
   });
+  els.sessionSidebarGroupName.addEventListener("keydown", (event) => {
+    if (event.isComposing) return;
+    if (event.key === "Enter") submitSidebarGroupName().catch(handleWorkspaceActionError);
+    else if (event.key === "Escape") closeSidebarGroupName();
+  });
+  els.sessionSidebarGroupName.addEventListener("blur", () => {
+    if (!els.sessionSidebarGroupName.value.trim()) closeSidebarGroupName();
+  });
   // On the list, which outlives the rows each render replaces.
   els.sessionSidebarList.addEventListener("click", (event) => {
+    const group = event.target.closest?.(".session-sidebar-group-toggle")?.dataset.group;
+    if (group) {
+      toggleSessionGroup(group);
+      return;
+    }
     const row = event.target.closest?.(".session-sidebar-row");
     const id = row?.dataset.id;
     if (!id || id === currentSessionId()) return;
@@ -10417,7 +10434,7 @@ function renderDashboard() {
           <tr class="${["history-row", session.id === state.selectedSessionId && "selected", shown && "session-active"].filter(Boolean).join(" ")}" data-id="${session.id}">
             <td>${renamingHere && state.sessionRename.id === session.id
               ? `<input class="session-name-input" type="text" value="${escapeHtml(state.sessionRename.draft)}" aria-label="Rename session ${escapeHtml(session.name)}" spellcheck="false" autocomplete="off" />`
-              : `<button class="session-name session-select-button" type="button" title="${escapeHtml(session.name)}" aria-pressed="${session.id === state.selectedSessionId}" aria-label="Select session ${escapeHtml(session.name)}">${escapeHtml(session.name)}</button>`}${port ? `<span class="session-sidebar-port in-table" title="${portTitle}">${escapeHtml(port)}</span>` : ""}${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
+              : `<button class="session-name session-select-button" type="button" title="${escapeHtml(session.name)}" aria-pressed="${session.id === state.selectedSessionId}" aria-label="Select session ${escapeHtml(session.name)}">${sessionMakerMark(session)}${escapeHtml(session.name)}</button>`}${port ? `<span class="session-sidebar-port in-table" title="${portTitle}">${escapeHtml(port)}</span>` : ""}${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
             <td><div class="session-size"><span class="session-size-bar"><span style="width:${Math.max(2, Math.round((Number(session.storage_bytes) || 0) / largest * 100))}%"></span></span>${formatSize(session.storage_bytes)}</div></td>
             <td>${formatCappedCount(session.request_count)}</td>
             <td>${formatCappedCount(session.websocket_count, retainedEntriesCap())}</td>
@@ -10512,6 +10529,8 @@ let sessionListRefresh = null;
 // The activity read in flight, if one is.
 let sessionActivityReading = null;
 let sidebarSessionCreating = false;
+// The session a new group is being named for.
+let sidebarGroupSession = null;
 
 function renderSessionSidebar() {
   const list = els.sessionSidebarList;
@@ -10530,13 +10549,29 @@ function renderSessionSidebar() {
   // A name being typed keeps its field: a new one would lose IME composition
   // and undo. The rows catch up when the rename ends.
   if (editing && editing === sidebarRenameEdit && sessionRenameInput?.isConnected) return;
-  const markup = [...state.sessions]
-    .sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0))
-    .map((session) => sessionSidebarRow(session, session.id === activeId, editing))
-    .join("");
+  const newestFirst = [...state.sessions]
+    .sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));
+  const rows = (sessions) => sessions
+    .map((session) => sessionSidebarRow(session, session.id === activeId, editing)).join("");
+  // Sessions in no group first, as the list was before there were groups;
+  // then each group under its name, which folds.
+  const groups = new Map();
+  for (const session of newestFirst) {
+    if (session.group) groups.set(session.group, [...(groups.get(session.group) || []), session]);
+  }
+  const folded = new Set(state.sessionGroupsCollapsed);
+  const markup = rows(newestFirst.filter((session) => !session.group))
+    + [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([name, sessions]) => {
+      const open = !folded.has(name);
+      return `<li class="session-sidebar-group"><button class="session-sidebar-group-toggle" type="button" data-group="${escapeHtml(name)}" aria-expanded="${open}">`
+        + `<span class="session-sidebar-group-name">${escapeHtml(name)}</span>`
+        + `<span class="session-sidebar-group-count">${sessions.length}</span></button>`
+        + `${open ? `<ul class="session-sidebar-group-list">${rows(sessions)}</ul>` : ""}</li>`;
+    }).join("");
   if (markup === sessionSidebarMarkup) return;
   const focused = document.activeElement;
   const focusedId = focused?.classList?.contains("session-sidebar-row") ? focused.dataset.id : null;
+  const focusedGroup = focused?.classList?.contains("session-sidebar-group-toggle") ? focused.dataset.group : null;
   const selection = focused?.classList?.contains("session-sidebar-rename")
     ? [focused.selectionStart, focused.selectionEnd] : null;
   // The field being replaced is no longer the editor: its blur must not save.
@@ -10547,6 +10582,11 @@ function renderSessionSidebar() {
   if (focusedId) {
     Array.from(list.querySelectorAll(".session-sidebar-row"))
       .find((row) => row.dataset.id === focusedId)?.focus({ preventScroll: true });
+  }
+  // A group folded from the keyboard keeps the focus on its name.
+  if (focusedGroup) {
+    Array.from(list.querySelectorAll(".session-sidebar-group-toggle"))
+      .find((toggle) => toggle.dataset.group === focusedGroup)?.focus({ preventScroll: true });
   }
   // After the row: a rename just started takes the focus from it.
   if (editing) wireSessionRenameInput(selection, list);
@@ -10572,16 +10612,83 @@ function sessionSidebarRow(session, active, editing) {
   const port = feed.kind !== "none" && feed.port ? `:${feed.port}` : "";
   const portTitle = feed.kind === "main" ? "The proxy listener records into this session"
     : "This session records from its own port";
-  const label = [session.name, port && `proxy ${port}`, heldLabel, running, finished].filter(Boolean).join(", ");
+  const label = [session.name, session.created_by && `made by ${session.created_by}`, port && `proxy ${port}`,
+    heldLabel, running, finished].filter(Boolean).join(", ");
   return `<li><button class="session-sidebar-row${active ? " active" : ""}" type="button" data-id="${escapeHtml(session.id)}"`
     + `${active ? ' aria-current="true"' : ""} tabindex="${active ? 0 : -1}" aria-label="${escapeHtml(label)}">`
-    + `<span class="session-sidebar-text"><span class="session-sidebar-name">${name}</span>`
+    + `<span class="session-sidebar-text"><span class="session-sidebar-name">${sessionMakerMark(session)}${name}</span>`
     + `${identity ? `<span class="session-sidebar-identity">${escapeHtml(identity)}</span>` : ""}</span>`
     + `${port ? `<span class="session-sidebar-port" title="${portTitle}">${escapeHtml(port)}</span>` : ""}`
     + `${held ? `<span class="findings-badge session-sidebar-held" title="${heldLabel}">${held.toLocaleString()}</span>` : ""}`
     + `${running ? `<span class="session-sidebar-running" title="${escapeHtml(running)}"></span>` : ""}`
     + `${finished ? `<span class="session-sidebar-finished" title="${escapeHtml(finished)}"></span>` : ""}`
     + "</button></li>";
+}
+
+// Who made the session, before its name: the name sniper-cli gave, which a
+// Replay tab carries too, so the styles draw both with one glyph. A session
+// the person made in this window names nobody.
+function sessionMakerMark(session) {
+  const maker = session.created_by;
+  return maker ? `<span class="session-actor" data-actor="${escapeHtml(maker)}" title="Made by ${escapeHtml(maker)}"></span>` : "";
+}
+
+function toggleSessionGroup(name) {
+  const folded = new Set(state.sessionGroupsCollapsed);
+  if (!folded.delete(name)) folded.add(name);
+  state.sessionGroupsCollapsed = [...folded];
+  renderSessionSidebar();
+  scheduleUiSettingsSave();
+}
+
+// Where a session can go, as menu items: each group it is not in, a new one,
+// and out of the one it is in.
+function sessionGroupMenuItems(session) {
+  const item = (action, label, group) => `<button class="context-menu-item" data-action="${action}"`
+    + `${group ? ` data-group="${escapeHtml(group)}"` : ""}>${escapeHtml(label)}</button>`;
+  const groups = [...new Set(state.sessions.map((entry) => entry.group).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b));
+  return groups.filter((group) => group !== session.group).map((group) => item("group", `Move to ${group}`, group)).join("")
+    + item("new-group", "New group…")
+    + (session.group ? item("ungroup", "Remove from group") : "");
+}
+
+// Puts a session in a group, or takes it out when there is no name. A group
+// is the sessions that carry its name, so the first one in makes it.
+async function moveSessionToGroup(sessionId, group) {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/group`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ group: group || null }),
+  });
+  await requireOkResponse(response, "Failed to move the session.");
+  // The group the session went to is shown open.
+  if (group && state.sessionGroupsCollapsed.includes(group)) {
+    state.sessionGroupsCollapsed = state.sessionGroupsCollapsed.filter((name) => name !== group);
+    scheduleUiSettingsSave();
+  }
+  await loadSessions({ preserveWorkspaceOwner: true });
+}
+
+function openSidebarGroupName(sessionId) {
+  // One field at a time under the title: the two look alike.
+  closeSidebarSessionCreate();
+  sidebarGroupSession = sessionId;
+  els.sessionSidebarGroup.classList.remove("hidden");
+  els.sessionSidebarGroupName.focus();
+}
+
+function closeSidebarGroupName() {
+  sidebarGroupSession = null;
+  els.sessionSidebarGroupName.value = "";
+  els.sessionSidebarGroup.classList.add("hidden");
+}
+
+// A name the server refuses stays in the field, to be put right.
+async function submitSidebarGroupName() {
+  const name = els.sessionSidebarGroupName.value.trim();
+  if (name && sidebarGroupSession) await moveSessionToGroup(sidebarGroupSession, name);
+  closeSidebarGroupName();
 }
 
 async function loadSessionActivity({ fresh = false } = {}) {
@@ -10661,6 +10768,7 @@ function toggleSessionSidebar() {
 }
 
 function openSidebarSessionCreate() {
+  closeSidebarGroupName();
   els.sessionSidebarCreate.classList.remove("hidden");
   els.sessionSidebarCreateName.focus();
 }
@@ -10798,6 +10906,7 @@ function showSessionContextMenu(event, sessionId, place = "dashboard") {
     <div class="context-menu-divider"></div>
     <button class="context-menu-item" data-action="rename">Rename session</button>
     <button class="context-menu-item" data-action="folder">Open session folder</button>
+    ${place === "sidebar" ? `<div class="context-menu-divider"></div>${sessionGroupMenuItems(session)}${fed ? "" : '<div class="context-menu-divider"></div>'}` : ""}
     ${fed ? "" : `<button class="context-menu-item danger" data-action="delete">Delete session</button>`}
   `;
   document.body.appendChild(menu);
@@ -10824,6 +10933,10 @@ function showSessionContextMenu(event, sessionId, place = "dashboard") {
       });
     } else if (action === "delete") {
       deleteSessionById(sessionId);
+    } else if (action === "group" || action === "ungroup") {
+      moveSessionToGroup(sessionId, btn.dataset.group || null).catch(handleWorkspaceActionError);
+    } else if (action === "new-group") {
+      openSidebarGroupName(sessionId);
     } else {
       runSessionFeedAction(action, sessionId).catch(handleWorkspaceActionError);
     }
@@ -26455,6 +26568,8 @@ function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
   state.websocketLiveOnly = Boolean(snapshot?.websocket_live_only);
   state.replayTabsWrap = snapshot?.replay_tabs_wrap === true;
   state.sessionSidebarHidden = snapshot?.session_sidebar_hidden === true;
+  state.sessionGroupsCollapsed = Array.isArray(snapshot?.session_groups_collapsed)
+    ? snapshot.session_groups_collapsed.filter((name) => typeof name === "string") : [];
   els.replayTabStrip?.classList?.toggle("wrap", state.replayTabsWrap);
   if (els.replayTabsWrapInput) els.replayTabsWrapInput.checked = state.replayTabsWrap;
   state.websocketStackHeight = sanitizeWebsocketStackHeight(snapshot?.websocket_stack_height);
@@ -26546,6 +26661,7 @@ function snapshotUiSettings() {
     websocket_live_only: Boolean(state.websocketLiveOnly),
     replay_tabs_wrap: state.replayTabsWrap === true,
     session_sidebar_hidden: state.sessionSidebarHidden === true,
+    session_groups_collapsed: state.sessionGroupsCollapsed,
     websocket_stack_height: state.websocketStackHeight > 0 ? state.websocketStackHeight : null,
     ws_replay_left_width: state.wsReplayLeftWidth > 0 ? state.wsReplayLeftWidth : null,
     ws_replay_frame_detail_height: state.wsReplayFrameDetailHeight > 0 ? state.wsReplayFrameDetailHeight : null,

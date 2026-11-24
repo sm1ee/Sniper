@@ -1207,6 +1207,94 @@ summary {
   font-size: var(--font-sm);
 }
 
+/* Who made the session, before its name: the glyph a Replay tab shows for the
+   same name, in the name's colour. A name with no glyph stays text. */
+.session-actor {
+  margin-right: 6px;
+}
+
+.session-actor::before {
+  content: attr(data-actor);
+  color: var(--text-dim);
+  font-size: var(--font-2xs);
+}
+
+.session-actor:is([data-actor="Claude" i], [data-actor="Codex" i]) {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.125em;
+  background: currentColor;
+  -webkit-mask: var(--actor-glyph) center / contain no-repeat;
+  mask: var(--actor-glyph) center / contain no-repeat;
+}
+
+.session-actor:is([data-actor="Claude" i], [data-actor="Codex" i])::before {
+  content: none;
+}
+
+/* A group of sessions. Its name folds the sessions under it. */
+.session-sidebar-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  margin-top: 4px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-xs);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-sidebar-group-toggle::before {
+  content: "";
+  flex: none;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+}
+
+.session-sidebar-group-toggle[aria-expanded="true"]::before {
+  transform: rotate(90deg);
+}
+
+.session-sidebar-group-toggle:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.session-sidebar-group-toggle:focus-visible {
+  outline: 1px solid var(--point-border);
+  outline-offset: -1px;
+}
+
+.session-sidebar-group-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-sidebar-group-count {
+  flex: none;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.session-sidebar-group-list {
+  margin: 0;
+  padding: 0 0 0 12px;
+  list-style: none;
+}
+
 /* The port that feeds a session, at the row's trailing edge. */
 .session-sidebar-port {
   flex: none;
@@ -5258,14 +5346,22 @@ body.pane-resizing-y {
   mask: var(--actor-glyph) center / contain no-repeat;
 }
 
-.replay-tab-button[data-actor="Claude" i]::before {
+/* One drawing of each glyph, on whatever names the actor: a Replay tab
+   here, a session in the session list. */
+[data-actor="Claude" i] {
   --actor-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.5v13M1.5 8h13M3.4 3.4l9.2 9.2M12.6 3.4l-9.2 9.2' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+
+[data-actor="Codex" i] {
+  --actor-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2.5 4l4 4-4 4M8 12h5.5' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.replay-tab-button[data-actor="Claude" i]::before {
   content: "";
   content: "" / "Opened by Claude";
 }
 
 .replay-tab-button[data-actor="Codex" i]::before {
-  --actor-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2.5 4l4 4-4 4M8 12h5.5' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   content: "";
   content: "" / "Opened by Codex";
 }

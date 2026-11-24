@@ -489,6 +489,7 @@ fn router_with_access_control(state: Arc<AppState>, access_control: UiAccessCont
             delete(delete_session).patch(rename_session),
         )
         .route("/api/sessions/:id/reveal", post(reveal_session_folder))
+        .route("/api/sessions/:id/group", post(set_session_group))
         .route(
             "/api/runtime",
             get(get_runtime_settings).post(update_runtime_settings),
@@ -3083,6 +3084,15 @@ struct CreateSessionPayload {
     name: Option<String>,
     /// False creates the session and leaves the main listener where it is.
     activate: Option<bool>,
+    /// The group the session list shows the session under.
+    #[serde(default)]
+    group: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionGroupPayload {
+    /// None or a blank name takes the session out of its group.
+    group: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3215,15 +3225,35 @@ async fn get_session_activity(
 
 async fn create_session(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<CreateSessionPayload>,
 ) -> Response {
-    let created = if payload.activate.unwrap_or(true) {
-        state.create_session(payload.name).await
-    } else {
-        state.create_inactive_session(payload.name).await
-    };
+    // The UI sends no name: a session with none was made by the person.
+    let created = state
+        .create_session_as(
+            payload.name,
+            named_actor(&headers),
+            payload.group,
+            payload.activate.unwrap_or(true),
+        )
+        .await;
     match created {
         Ok(summary) => Json(summary).into_response(),
+        Err(error) => session_operation_error_response(error),
+    }
+}
+
+/// Puts the session in a group, or takes it out.
+async fn set_session_group(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(payload): Json<SessionGroupPayload>,
+) -> Response {
+    let Ok(id) = Uuid::parse_str(&id) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match state.set_session_group(id, payload.group).await {
+        Ok(group) => Json(serde_json::json!({ "id": id, "group": group })).into_response(),
         Err(error) => session_operation_error_response(error),
     }
 }
@@ -3478,17 +3508,21 @@ async fn duplicate_saved_http_tab(
     mutate_saved_replay_tab(state, payload, SavedReplayTabOperation::Duplicate, actor).await
 }
 
-/// Who sniper-cli says drives it, for Replay to name on the tabs it opens or
-/// changes. Any local client can send the header, so it is a short label at
-/// most; without one the tab says the CLI did it.
-fn replay_actor(headers: &HeaderMap) -> String {
+/// Who sniper-cli says drives it. Any local client can send the header, so it
+/// is a short label at most.
+fn named_actor(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-sniper-actor")
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|name| !name.is_empty() && name.len() <= 32)
-        .unwrap_or("CLI")
-        .to_string()
+        .map(str::to_string)
+}
+
+/// `named_actor`, for Replay to name on the tabs it opens or changes. Only
+/// sniper-cli asks for those, so without a name the tab says the CLI did it.
+fn replay_actor(headers: &HeaderMap) -> String {
+    named_actor(headers).unwrap_or_else(|| "CLI".to_string())
 }
 
 async fn mutate_saved_replay_tab(
@@ -10643,6 +10677,93 @@ mod tests {
         assert_eq!(created["active"], true);
         assert_eq!(state.session().await.id().to_string(), created["id"]);
 
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // sniper-cli names the agent that drives it on every request. A session
+    // it makes keeps that name, and the list shows it with the group.
+    #[tokio::test]
+    async fn a_session_says_who_made_it_and_moves_between_groups() {
+        let (state, data_dir) = test_state("session-maker-and-group");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-sniper-actor", " Claude ".parse().unwrap());
+        let made = super::create_session(
+            State(state.clone()),
+            headers,
+            Json(super::CreateSessionPayload {
+                name: Some("agent".into()),
+                activate: Some(false),
+                group: Some("acme".into()),
+            }),
+        )
+        .await;
+        assert_eq!(made.status(), StatusCode::OK);
+        let (status, body) = api_route_json(
+            state.clone(),
+            reqwest::Method::POST,
+            "/api/sessions",
+            serde_json::json!({ "name": "mine", "activate": false }),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        let mine: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let listed = |name: &'static str| {
+            let state = state.clone();
+            async move {
+                let (_, body) =
+                    api_route_response(state, reqwest::Method::GET, "/api/sessions", None).await;
+                let sessions: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+                sessions.into_iter().find(|s| s["name"] == name).unwrap()
+            }
+        };
+        let agent = listed("agent").await;
+        assert_eq!(agent["created_by"], "Claude");
+        assert_eq!(agent["group"], "acme");
+        // The person's own session says nothing of either.
+        let own = listed("mine").await;
+        assert!(own.get("created_by").is_none() && own.get("group").is_none());
+
+        let group_path = format!("/api/sessions/{}/group", mine["id"].as_str().unwrap());
+        for (sent, kept) in [
+            (
+                serde_json::json!({ "group": "acme" }),
+                serde_json::json!("acme"),
+            ),
+            (
+                serde_json::json!({ "group": null }),
+                serde_json::Value::Null,
+            ),
+        ] {
+            let (status, body) =
+                api_route_json(state.clone(), reqwest::Method::POST, &group_path, sent).await;
+            assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+            let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(answer["group"], kept);
+            assert_eq!(
+                listed("mine")
+                    .await
+                    .get("group")
+                    .cloned()
+                    .unwrap_or_default(),
+                kept
+            );
+        }
+        let (status, _) = api_route_json(
+            state.clone(),
+            reqwest::Method::POST,
+            &format!("/api/sessions/{}/group", Uuid::new_v4()),
+            serde_json::json!({ "group": "acme" }),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+        let (status, _) = api_route_json(
+            state.clone(),
+            reqwest::Method::POST,
+            &group_path,
+            serde_json::json!({ "group": "a\nb" }),
+        )
+        .await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

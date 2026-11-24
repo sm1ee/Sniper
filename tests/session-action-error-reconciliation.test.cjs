@@ -34,7 +34,7 @@ function setup() {
     console: { error() {}, warn: (...args) => f.warnings.push(args) },
   });
   for (const name of ['createSession', 'viewSessionById', 'deleteSessionById', 'loadSessions',
-    'reconcileSessionsAfterActionError', 'renderDashboard', 'sessionIdentity', 'sessionFeed', 'mainProxyPort', 'sessionFindingCount', 'formatSize', 'toggleReplayTabPin', 'expectedActiveSessionIdForWrite']) {
+    'reconcileSessionsAfterActionError', 'renderDashboard', 'sessionIdentity', 'sessionFeed', 'mainProxyPort', 'sessionMakerMark', 'sessionFindingCount', 'formatSize', 'toggleReplayTabPin', 'expectedActiveSessionIdForWrite']) {
     const source = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, 'm'));
     // Keep the fixture behavioral: baseline handlers do not yet use this helper.
     if (!source && name === 'reconcileSessionsAfterActionError') continue;

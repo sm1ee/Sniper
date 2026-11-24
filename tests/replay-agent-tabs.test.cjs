@@ -65,8 +65,12 @@ test("only the selected tab and a pinned one hold a pin button", () => {
 test("Claude and Codex show as a glyph that keeps their name", () => {
   const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8");
   for (const actor of ["Claude", "Codex"]) {
-    assert.match(css, new RegExp(`\\.replay-tab-button\\[data-actor="${actor}" i\\]::before \\{\\s*--actor-glyph: url\\("data:image/svg\\+xml,[^}]*content: "" / "Opened by ${actor}";`));
+    // Drawn once, for whatever names the actor: a tab here, a session elsewhere.
+    assert.equal(css.split(`\n[data-actor="${actor}" i] {\n  --actor-glyph: url("data:image/svg+xml,`).length, 2);
+    assert.match(css, new RegExp(`\\.replay-tab-button\\[data-actor="${actor}" i\\]::before \\{[^}]*content: "" / "Opened by ${actor}";`));
   }
+  const mark = css.match(/\.session-actor:is\(\[data-actor="Claude" i\], \[data-actor="Codex" i\]\) \{([^}]*)\}/)[1];
+  assert.match(mark, /background: currentColor;[^}]*\n  mask: var\(--actor-glyph\)/, "a session's mark is the tab's glyph");
   const glyph = css.match(/\.replay-tab-button:is\(\[data-actor="Claude" i\], \[data-actor="Codex" i\]\)::before \{([^}]*)\}/)[1];
   assert.match(glyph, /color: inherit;[^}]*background: currentColor;/, "the name's colour, not the badge's");
   assert.match(glyph, /\n  mask: var\(--actor-glyph\)/);

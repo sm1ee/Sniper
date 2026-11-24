@@ -78,6 +78,15 @@ sniper-cli session port close --id <session-uuid> --yes
   API in the session it moves to goes on.
 - The UI shows a session without switching to it. Its "Record :8080 here" is
   `session switch`, and its "Open a port" is `session port open`.
+- A session says who made it. The CLI names the agent that runs it (Claude
+  Code, Codex, or `SNIPER_ACTOR`), and the UI's session list shows that before
+  the session's name: a glyph for Claude and for Codex, the name for any
+  other. A session made with no agent shows nothing.
+- The session list gathers sessions into groups from a session's menu ("Move
+  to …", "New group…"). A group is the sessions that carry its name. The API
+  sets one with `POST /api/sessions/<session-uuid>/group` and
+  `{"group": "name"}`, or `{"group": null}` to take the session out, and
+  `POST /api/sessions` takes `group`. The CLI has no command for groups yet.
 
 ## Reads, writes and the manifest
 

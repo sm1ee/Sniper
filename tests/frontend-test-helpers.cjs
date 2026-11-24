@@ -44,7 +44,7 @@ function loadFunctions(names, globals = {}) {
   if (names.includes("renderHistory") && !("emptySessionActions" in globals)) names = [...new Set([...names, "emptySessionActions"])];
   if (names.some(name => feedCallers.includes(name))) {
     const feed = ["sessionFeed", "mainProxyPort", "mainListenerSession", "sessionProxyAddress", "recordHereLabel",
-      "sessionFeedMenuItems"];
+      "sessionFeedMenuItems", "sessionMakerMark", "sessionGroupMenuItems"];
     names = [...new Set([...names, ...feed.filter(name => !(name in globals))])];
   }
   // Intercept shows a held binary body as bytes through the raw build and parse.
