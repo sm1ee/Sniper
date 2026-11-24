@@ -15,7 +15,7 @@
     capture_preview_truncated: "Capture preview is truncated", scan_prefix_truncated: "Scan prefix limit reached",
     candidate_limit: "URL candidate limit reached", candidate_bytes: "An oversized URL candidate was skipped",
     origin_limit: "Origin output limit reached", offset_limit: "Offset output limit reached",
-    inactive_session: "Only the active session can be inspected", invalid_evidence_id: "Evidence token is invalid",
+    inactive_session: "Bodies are read only in the session the proxy records into", invalid_evidence_id: "Evidence token is invalid",
     session_mismatch: "The source session changed", stale_generation: "Retained history changed",
     record_missing: "The source row is no longer retained", record_changed: "The source row changed",
     body_identity_unverifiable: "The retained body identity could not be verified",
@@ -709,7 +709,7 @@
   const PEER_MATCH_LIMITS = Object.freeze({ max_records: 10000, origin_groups: 100, samples_per_origin: 3, projection_bytes: 262144, host_bytes: 512, scheme_bytes: 8, scope_pattern_entries: 500, scope_pattern_bytes: 512, scope_work_units: 8388608 });
   const PEER_MATCH_REASONS = Object.freeze({
     invalid_evidence_id: "The exact evidence token is invalid", session_mismatch: "The source session changed", stale_generation: "Retained history changed",
-    record_missing: "The source row is no longer retained", record_changed: "The source row changed", inactive_session: "Only the active session can be inspected",
+    record_missing: "The source row is no longer retained", record_changed: "The source row changed", inactive_session: "Bodies are read only in the session the proxy records into",
     session_source_changed: "The active source changed", unsupported_source_context: "This source is not an ordinary captured HTTP row",
     observation_not_recorded: "No peer was recorded for this source", observation_unavailable: "The recorded source address is unavailable",
     non_direct_observation: "Proxy and unknown routes are diagnostics only", invalid_observation: "The recorded source address is not eligible for matching",
@@ -2789,7 +2789,7 @@
       renderApiDocs(opening);
       try {
         const response = await request(`/api/target/service-map/openapi?${new URLSearchParams({ session_id: sessionId, origin: originId })}`);
-        if (!response.ok) throw new Error(response.status === 409 ? "API docs are read from the active session only." : "API docs unavailable.");
+        if (!response.ok) throw new Error(response.status === 409 ? "API docs are read only in the session the proxy records into." : "API docs unavailable.");
         const document = await response.json();
         if (requestId !== state.apiDocsRequestId || sessionId !== getSessionId()) return;
         if (document?.openapi !== "3.1.0" || document.servers?.[0]?.url !== originId || typeof document.paths !== "object" || !document.paths) throw new Error("API docs unavailable.");
@@ -2925,7 +2925,7 @@
           items: array(result.parameters).filter((item) => typeof item?.name === "string" && ["query", "form", "json", "multipart"].includes(item.location))
             .map((item) => ({ name: item.name, location: item.location, rows: count(item.rows), examples: array(item.examples).filter((value) => typeof value === "string") })),
         } : null;
-        state.parametersError = result.available === true ? "" : array(result.reasons).includes("inactive_session") ? "Parameters are read from the active session only." : "Parameters unavailable.";
+        state.parametersError = result.available === true ? "" : array(result.reasons).includes("inactive_session") ? "Parameters are read only in the session the proxy records into." : "Parameters unavailable.";
       } catch {
         if (!current()) return;
         state.parametersError = "Parameters unavailable.";

@@ -199,6 +199,13 @@ fn apply_live_session_counts(summary: &mut SessionSummary, counts: LiveSessionCo
     summary.rule_count = counts.rule_count;
 }
 
+/// The answer to a TCP relay change that names a session the main listener
+/// does not record into. The relay's listeners have ports the user fixed, and
+/// two sessions can have saved the same one, so the relay and its intercept
+/// run in that one session. A window that shows another session prints this.
+pub(crate) const TCP_RELAY_SESSION: &str =
+    "The TCP relay runs in the session the proxy listener records into.";
+
 async fn session_summary_with_live_counts(
     session: &Arc<SessionContext>,
     active: bool,
@@ -376,10 +383,13 @@ impl AppState {
         let _guard = self.session_activation_lock.lock().await;
         let session = self.session().await;
         anyhow::ensure!(
-            session_id.map(|id| id == session.id()).unwrap_or(true)
-                && expected_active_session_id
-                    .map(|id| id == session.id())
-                    .unwrap_or(true),
+            session_id.map(|id| id == session.id()).unwrap_or(true),
+            TCP_RELAY_SESSION
+        );
+        anyhow::ensure!(
+            expected_active_session_id
+                .map(|id| id == session.id())
+                .unwrap_or(true),
             "active session changed; reload TCP settings"
         );
         anyhow::ensure!(
@@ -410,10 +420,13 @@ impl AppState {
         let _guard = self.session_activation_lock.lock().await;
         let session = self.session().await;
         anyhow::ensure!(
-            session_id.map(|id| id == session.id()).unwrap_or(true)
-                && expected_active_session_id
-                    .map(|id| id == session.id())
-                    .unwrap_or(true),
+            session_id.map(|id| id == session.id()).unwrap_or(true),
+            TCP_RELAY_SESSION
+        );
+        anyhow::ensure!(
+            expected_active_session_id
+                .map(|id| id == session.id())
+                .unwrap_or(true),
             "active session changed; reload TCP settings"
         );
         let operation_lock = self.session_operation_lock(session.id()).await;
@@ -527,9 +540,12 @@ impl AppState {
         expected_active_session_id: Option<uuid::Uuid>,
     ) -> std::result::Result<Arc<SessionContext>, crate::tcp_capture::InterceptError> {
         let session = self.session().await;
-        if session_id.is_some_and(|id| id != session.id())
-            || expected_active_session_id.is_some_and(|id| id != session.id())
-        {
+        if session_id.is_some_and(|id| id != session.id()) {
+            return Err(crate::tcp_capture::InterceptError::Conflict(
+                TCP_RELAY_SESSION.into(),
+            ));
+        }
+        if expected_active_session_id.is_some_and(|id| id != session.id()) {
             return Err(crate::tcp_capture::InterceptError::Conflict(
                 "active session changed; reload TCP settings".into(),
             ));
@@ -5437,6 +5453,48 @@ mod tests {
             .cloned()
             .expect("the loaded context stays cached");
         assert!(!cached.runtime.own_listeners().all().is_empty());
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A window can show a session the main listener does not record into,
+    // and its TCP controls then name that session. The answer says where the
+    // relay runs, and is not the one for a caller whose guard is stale.
+    #[tokio::test]
+    async fn a_tcp_relay_change_for_another_session_says_where_the_relay_runs() {
+        let (data_dir, state) = activation_commit_test_state();
+        let active = state.session().await.id();
+        let other = state
+            .create_inactive_session(Some("other".into()))
+            .await
+            .unwrap()
+            .id;
+        let stop = || crate::tcp_capture::ListenerChange::StopAll;
+
+        let error = state
+            .change_tcp_listeners(stop(), Some(other), None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), super::TCP_RELAY_SESSION);
+        let error = state
+            .clear_tcp_history(Some(other), None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), super::TCP_RELAY_SESSION);
+        let error = state
+            .close_tcp_connection(uuid::Uuid::new_v4(), Some(other), None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), super::TCP_RELAY_SESSION);
+
+        let error = state
+            .change_tcp_listeners(stop(), Some(active), Some(other))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().starts_with("active session changed"));
+        assert!(state
+            .change_tcp_listeners(stop(), Some(active), None)
+            .await
+            .is_ok());
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

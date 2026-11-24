@@ -239,6 +239,10 @@ test("configuration errors reveal only recognized actionable messages", async ()
   for (const body of ["<script>alert(1)</script>","secret upstream traffic",conflict+"\n", "x".repeat(10000)]) assert.match(await tcp.requestError({status:400,text:async()=>body}),/TCP request failed/);
   assert.match(await tcp.requestError({status:400,text:async()=>{throw Error()}}),/400/);
   assert.match(await tcp.requestError({status:409,text:async()=>conflict}),/409/);
+  // A relay change from a window that shows another session says where the relay runs.
+  const relay = "The TCP relay runs in the session the proxy listener records into.";
+  assert.equal(await tcp.requestError({status:409,text:async()=>relay}),relay);
+  assert.match(await tcp.requestError({status:409,text:async()=>relay+" "}),/409/);
 });
 
 test("a new listener's bind conflict is shown and nothing is retried",async()=>{

@@ -69,9 +69,29 @@ for (const browser of ["aside", "ego"]) {
   });
 }
 
+// The browser is for the session on screen: the server opens that session's
+// own port when the proxy listener records into another one.
+test("a launch names the session on screen, and shows the port it may have opened", async () => {
+  for (const feed of ["main", "none"]) {
+    const bodies = [];
+    let refreshed = 0;
+    const context = loadFunctions(["openSniperBrowser"], {
+      fetch: async (url, options) => { bodies.push(JSON.parse(options.body)); return { json: async () => ({}) }; },
+      requireOkResponse: async () => {}, showToast() {}, console: { error() {} },
+      currentSessionId: () => "session-b", sessionFeed: () => ({ kind: feed }),
+      refreshSessionFeeds: async () => { refreshed += 1; },
+    });
+    await context.openSniperBrowser({ browser: "chrome" });
+    assert.deepEqual(bodies, [{ browser: "chrome", session_id: "session-b" }]);
+    assert.equal(refreshed, feed === "main" ? 0 : 1);
+  }
+});
+
 test("button and named launches never request a throwaway profile implicitly", async () => {
   const bodies = [];
   const context = loadFunctions(["openSniperBrowser"], {
+    // No session is on screen yet, so none is named.
+    currentSessionId: () => null,
     fetch: async (url, options) => {
       assert.equal(url, "/api/browser/launch");
       bodies.push(JSON.parse(options.body));

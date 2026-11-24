@@ -5176,8 +5176,11 @@ fn upstream_peer_settings_error(status: StatusCode, code: &str, error: &str) -> 
 }
 
 fn upstream_peer_settings_session_conflict() -> Response {
-    upstream_peer_settings_error(StatusCode::CONFLICT, "UPSTREAM_PEER_SESSION_CHANGED",
-        "Observed socket peer settings require the current active session; reload before continuing.")
+    upstream_peer_settings_error(
+        StatusCode::CONFLICT,
+        "UPSTREAM_PEER_SESSION_CHANGED",
+        "Observed socket peers are recorded for the session the proxy listener records into.",
+    )
 }
 
 async fn pin_upstream_peer_settings_session(
@@ -6389,7 +6392,7 @@ async fn get_target_service_map_openapi(
     if session.id() != query.session_id {
         return (
             StatusCode::CONFLICT,
-            "Only the active session's rows can be read; open that session first",
+            "Rows are read here only for the session the proxy listener records into",
         )
             .into_response();
     }
@@ -28608,7 +28611,9 @@ fn tcp_configuration_error(error: anyhow::Error) -> (StatusCode, String) {
         StatusCode::INTERNAL_SERVER_ERROR
     } else if message == "TCP capture cannot start while Sniper is shutting down" {
         StatusCode::SERVICE_UNAVAILABLE
-    } else if message.starts_with("active session changed") {
+    } else if message.starts_with("active session changed")
+        || message == crate::state::TCP_RELAY_SESSION
+    {
         StatusCode::CONFLICT
     } else if message == crate::tcp_capture::UNKNOWN_LISTENER {
         StatusCode::NOT_FOUND
@@ -29045,6 +29050,14 @@ mod tcp_intercept_api_tests {
             .0,
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    #[test]
+    fn a_relay_change_for_another_session_is_a_conflict() {
+        let error = anyhow::anyhow!(crate::state::TCP_RELAY_SESSION);
+        let (status, message) = super::tcp_configuration_error(error);
+        assert_eq!(status.as_u16(), 409);
+        assert_eq!(message, crate::state::TCP_RELAY_SESSION);
     }
 
     #[test]

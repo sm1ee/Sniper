@@ -40,14 +40,18 @@
     }
     return { local_port: Number(localPort), target_host: host, target_port: Number(targetPort) };
   }
+  // The server's answer to a relay change made from a window that shows a
+  // session the proxy listener does not record into.
+  const RELAY_SESSION = "The TCP relay runs in the session the proxy listener records into.";
   async function requestError(response) {
     const fallback = "TCP request failed (" + response.status + "). Refresh and try again.";
     // Only display known, bounded configuration messages, never arbitrary server
     // output (which could be HTML or contain captured traffic).
-    if (![400, 404, 500, 503].includes(response.status) || typeof response.text !== "function") return fallback;
+    if (![400, 404, 409, 500, 503].includes(response.status) || typeof response.text !== "function") return fallback;
     try {
       const message = await response.text();
       if (message.length > 240) return fallback;
+      if (response.status === 409) return message === RELAY_SESSION ? message : fallback;
       if (response.status === 500 && message === "Some TCP records could not be deleted. History requires recovery.") return message;
       if (response.status === 500 && /^TCP capture stopped, but [0-9]{1,8} connection record\(s\) are not saved\. Keep Sniper open, restore storage, then retry saving\.$/.test(message)) return message;
       if (response.status === 503 && message === "TCP capture cannot start while Sniper is shutting down") return message;
@@ -883,7 +887,12 @@
     }
     async function json(path, options) {
       const response = await request(path, options);
-      if (!response.ok) throw Object.assign(new Error(response.status === 409 ? "The bytes changed. Review them, then try again." : "TCP request failed (" + response.status + ")."), { status: response.status });
+      if (!response.ok) {
+        // A 409 is the bytes having changed, unless it is the relay running elsewhere.
+        const relay = response.status === 409 && typeof response.text === "function"
+          && (await response.text().catch(() => "")) === RELAY_SESSION;
+        throw Object.assign(new Error(relay ? RELAY_SESSION : response.status === 409 ? "The bytes changed. Review them, then try again." : "TCP request failed (" + response.status + ")."), { status: response.status });
+      }
       return response.status === 204 ? null : response.json();
     }
     function render() {

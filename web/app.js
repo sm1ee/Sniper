@@ -12635,6 +12635,10 @@ async function loadOastCallbacks() {
 // custom server it polls. Provider names are the Settings select's.
 function oastStatusLine(status, runtime) {
   if (!runtime?.oast_enabled) return { text: "Off", registered: false };
+  // Callbacks are polled for one session only.
+  if (sessionFeed(currentSessionId()).kind !== "main") {
+    return { text: "Polled only in the session the proxy records into", registered: false };
+  }
   const provider = { interactsh: "Interactsh", boast: "BOAST", custom: "Custom" }[status?.provider] || "Custom";
   if (status.registered) {
     return { text: `${provider} · Registered (${status.payload_domain || status.correlation_id || ""})`, registered: true };
@@ -21694,6 +21698,10 @@ async function openSniperBrowser({ browser, agent, fresh } = {}) {
   if (browser) body.browser = browser;
   if (agent) body.agent = true;
   if (fresh) body.fresh = true;
+  // For the session on screen. The server opens that session's own port when
+  // the proxy listener records into another one, and gives it its own profile.
+  const sessionId = currentSessionId();
+  if (sessionId) body.session_id = sessionId;
   try {
     const response = await fetch("/api/browser/launch", {
       method: "POST",
@@ -21702,6 +21710,11 @@ async function openSniperBrowser({ browser, agent, fresh } = {}) {
     });
     await requireOkResponse(response, "Could not open a browser.");
     const launched = await response.json();
+    // The launch may have opened the session's port: the rows and the
+    // indicator say so without waiting for the next read.
+    if (sessionId && sessionFeed(sessionId).kind !== "main") {
+      refreshSessionFeeds().catch((error) => console.error(error));
+    }
     // A 200 is not proof a window appeared: a browser that ends at once still
     // comes back as success with a warning saying why, and that warning is the
     // only place the reason is.
