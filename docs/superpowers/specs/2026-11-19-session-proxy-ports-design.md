@@ -750,18 +750,23 @@ else. The registry and sniper-cli know none of it.
 
 - **A fixed top** holds what is made in the list, each a row with its name:
   New session and New group. A row gives its place to the name field. Below
-  it, at the list's trailing edge, are the sort and the gear, quiet until
-  the pointer is on one. The list has no title: every session is under a
-  name already.
-- **Every session is under a name that folds**: Pinned, when anything is
-  pinned; Default, the sessions in no group, which is always there and
-  first; then the groups. Pinned and Default are the list's own sections
-  (`session_sections_collapsed` says which are folded): no group has their
-  name, they are not dragged, and "Default" typed as a group's name means no
-  group. A session's menu says "Move to Default" for the way out of a group,
-  and the table of all sessions names Default too.
+  it is the list's name, "List", with the sort and the gear at the trailing
+  edge, quiet until the pointer is on one.
+- **The list has two sections**, each under a name that folds. Pinned
+  Sessions is there when anything is pinned. Sessions holds all the others
+  in folders: Default, the sessions in no group, which is always there and
+  first, then a folder for each group, open or shut. The two sections and
+  Default are the list's own (`session_sections_collapsed` says which are
+  folded): no group has their name, they are not dragged, and "Default"
+  typed as a group's name means no group. A session's menu says "Move to
+  Default" for the way out of a group, and the table of all sessions names
+  Default too.
+- **A pin shows beside a row under the pointer**, in the place of its mark.
+  A click pins the session, or lets a pinned one go. It is beside the row,
+  not in it, so the click does not show the session. The row's menu does
+  the same for the keyboard.
 - **A row begins with one mark** for what its session is doing, in the
-  column of a group's caret: a ring while a job runs, a dot for a job that
+  column of a folder's icon: a ring while a job runs, a dot for a job that
   ended unseen, and the proxy indicator's green while traffic reaches it,
   through the main listener or a port of its own. What needs a look comes
   first. A session doing nothing has no mark, and the place stays, so a name

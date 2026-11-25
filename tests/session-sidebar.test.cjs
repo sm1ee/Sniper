@@ -66,7 +66,7 @@ test("the sidebar lists sessions newest first and marks the open one", () => {
   assert.match(html, /data-id="mid" aria-current="true"/);
   assert.equal((html.match(/aria-current/g) || []).length, 1);
   // Tab enters the list at the open session; arrows move between the rest.
-  assert.deepEqual([...html.matchAll(/tabindex="(-?\d)"/g)].map(match => match[1]), ["-1", "0", "-1"]);
+  assert.deepEqual([...html.matchAll(/<button class="session-sidebar-row[^>]* tabindex="(-?\d)"/g)].map(match => match[1]), ["-1", "0", "-1"]);
   assert.match(html, /\*\.example\.com/, "a row names what the session is about");
   assert.equal(f.els.sessionSidebar.classList.contains("hidden"), false);
   assert.equal(f.els.sessionSidebarToggle.getAttribute("aria-expanded"), "true");
@@ -544,7 +544,7 @@ test("pinned sessions are drawn first, in the order pinned, and nowhere else", (
   f.state.sessionPinned = ["b", "gone", "a"];
   f.context.renderSessionSidebar();
   const html = f.els.sessionSidebarList.innerHTML;
-  assert.match(html, /^<li class="session-sidebar-group session-sidebar-pinned" data-drop-pinned><div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" data-section="pinned" aria-expanded="true"><span class="session-sidebar-group-name">Pinned<\/span><span class="session-sidebar-group-count">2<\/span><\/button><\/div><ul class="session-sidebar-group-list">/);
+  assert.match(html, /^<li class="session-sidebar-group session-sidebar-section session-sidebar-pinned" data-drop-pinned><div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" data-section="pinned" aria-expanded="true"><span class="session-sidebar-group-name">Pinned Sessions<\/span><span class="session-sidebar-group-count">2<\/span><\/button><\/div><ul class="session-sidebar-group-list">/);
   assert.deepEqual(rows(html), ["b", "a", "c", "d"]);
   assert.deepEqual(rows(html.slice(0, html.indexOf("</ul></li>"))), ["b", "a"]);
   assert.deepEqual(groupHeaders(html), [["acme", "true", "1"]], "a pinned session is not counted where it is not drawn");
@@ -793,6 +793,7 @@ test("a click on a group's + asks for a session in that group, and on its name f
     els: { sessionSidebarList: { addEventListener: (type, handler) => { click = handler; } } },
     toggleSessionGroup: name => calls.push(["fold", name]),
     toggleSessionSection: name => calls.push(["fold section", name]),
+    toggleSessionPin: id => calls.push(["pin", id]),
     openSidebarSessionCreate: group => calls.push(["new in", group]),
     currentSessionId: () => "shown", withButtonProgress: () => assert.fail("no session is opened"),
   });
@@ -803,7 +804,9 @@ test("a click on a group's + asks for a session in that group, and on its name f
   // Default and Pinned are the list's own sections: no group has their name.
   click(on(".session-sidebar-group-add", { addToGroup: "" }));
   click(on(".session-sidebar-group-toggle", { section: "default" }));
-  assert.deepEqual(calls, [["new in", "acme"], ["fold", "acme"], ["new in", null], ["fold section", "default"]]);
+  // A row's pin is beside the row, not in it: the session is not opened.
+  click(on(".session-sidebar-pin", { pin: "b" }));
+  assert.deepEqual(calls, [["new in", "acme"], ["fold", "acme"], ["new in", null], ["fold section", "default"], ["pin", "b"]]);
 });
 
 test("what is pinned and how the list is sorted are read from the settings and written back", () => {
@@ -835,32 +838,34 @@ test("the list has a fixed top where a session and a group are made, each a row 
   // The top, then the list's two tools, then the list, which is what scrolls.
   const order = ['class="session-sidebar-top"', 'class="session-sidebar-header"', 'id="sessionSidebarList"'].map(mark => sidebar.indexOf(mark));
   assert.ok(order[0] !== -1 && order[0] < order[1] && order[1] < order[2], String(order));
-  // The list has no title of its own: every session is under a name already.
+  // "List" names what is under it. "Sessions" is a section of it now, so the
+  // title is not that word.
   const header = sidebar.match(/<header class="session-sidebar-header">([^]*?)<\/header>/)[1];
-  assert.match(header, /^\s*<span class="session-sidebar-actions">[^]*<\/span>\s*$/, "the sort and the gear, and nothing else");
-  assert.doesNotMatch(sidebar, /session-sidebar-title|>Sessions</);
+  assert.match(header, /^\s*<span class="session-sidebar-title">List<\/span>\s*<span class="session-sidebar-actions">[^]*<\/span>\s*$/);
   const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
-  assert.match(css, /^\.session-sidebar-header \{[^}]*justify-content: flex-end;/m);
-  assert.doesNotMatch(css, /\.session-sidebar-title/);
+  assert.match(css, /^\.session-sidebar-header \{[^}]*justify-content: space-between;/m);
+  assert.match(css, /^\.session-sidebar-title \{/m);
   assert.match(appSource, /els\.sessionSidebarNewGroupButton\.addEventListener\("click", \(\) => openSidebarGroupName\(\{ create: true \}\)\);/);
 });
 
-test("sessions in no group are listed under Default, which is always there and first", () => {
+test("sessions in no group are listed under Default, which is always there and the first folder of Sessions", () => {
   const f = fixture({ sessions: [session("loose", "01"), session("a1", "05", { group: "acme" })], activeId: "loose" });
   f.context.renderSessionSidebar();
   let html = f.els.sessionSidebarList.innerHTML;
-  assert.match(html, /^<li class="session-sidebar-group session-sidebar-default" data-drop-default><div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" data-section="default" aria-expanded="true"><span class="session-sidebar-group-name">Default<\/span><span class="session-sidebar-group-count">1<\/span><\/button><button class="session-sidebar-group-add" type="button" data-add-to-group="" aria-label="New session in Default" title="New session in Default">\+<\/button><\/div><ul class="session-sidebar-group-list"><li draggable="true" data-drag-session="loose">/);
+  // Sessions is the section every folder is in, with how many sessions that is.
+  assert.match(html, /^<li class="session-sidebar-group session-sidebar-section"><div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" data-section="sessions" aria-expanded="true"><span class="session-sidebar-group-name">Sessions<\/span><span class="session-sidebar-group-count">2<\/span><\/button><\/div><ul class="session-sidebar-folders"><li class="session-sidebar-group session-sidebar-default" data-drop-default><div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" data-section="default" aria-expanded="true"><span class="session-sidebar-group-name">Default<\/span><span class="session-sidebar-group-count">1<\/span><\/button><button class="session-sidebar-group-add" type="button" data-add-to-group="" aria-label="New session in Default" title="New session in Default">\+<\/button><\/div><ul class="session-sidebar-group-list"><li draggable="true" data-drag-session="loose">/);
   assert.deepEqual(rows(html), ["loose", "a1"]);
   assert.doesNotMatch(html, /session-sidebar-default" draggable/, "Default keeps its place: it is not dragged");
   // With every session in a group, Default is still where a new one goes.
   f.state.sessions = [session("a1", "05", { group: "acme" })];
   f.context.renderSessionSidebar();
   html = f.els.sessionSidebarList.innerHTML;
-  assert.deepEqual(sectionHeaders(html), [["default", "true", "Default", "0"]]);
+  assert.deepEqual(sectionHeaders(html), [["sessions", "true", "Sessions", "1"], ["default", "true", "Default", "0"]]);
   assert.ok(html.indexOf('data-section="default"') < html.indexOf('data-group="acme"'));
+  assert.match(html, /<\/ul><\/li><\/ul><\/li>$/, "the folders close inside Sessions");
 });
 
-test("Pinned and Default fold as a group does, and the choice is saved", () => {
+test("Pinned Sessions, Sessions and Default fold as a group does, and the choice is saved", () => {
   let saves = 0;
   const f = fixture({
     sessions: [session("a", "01"), session("b", "02"), session("g", "03", { group: "acme" })], activeId: null,
@@ -869,16 +874,24 @@ test("Pinned and Default fold as a group does, and the choice is saved", () => {
   f.state.sessionPinned = ["b"];
   f.state.sessionSectionsCollapsed = [];
   f.context.renderSessionSidebar();
-  assert.deepEqual(sectionHeaders(f.els.sessionSidebarList.innerHTML), [["pinned", "true", "Pinned", "1"], ["default", "true", "Default", "1"]]);
+  assert.deepEqual(sectionHeaders(f.els.sessionSidebarList.innerHTML),
+    [["pinned", "true", "Pinned Sessions", "1"], ["sessions", "true", "Sessions", "2"], ["default", "true", "Default", "1"]]);
   f.context.toggleSessionSection("default");
   assert.deepEqual([...f.state.sessionSectionsCollapsed], ["default"]);
   assert.deepEqual(rows(f.els.sessionSidebarList.innerHTML), ["b", "g"], "a folded section draws its name and count only");
-  assert.deepEqual(sectionHeaders(f.els.sessionSidebarList.innerHTML), [["pinned", "true", "Pinned", "1"], ["default", "false", "Default", "1"]]);
+  assert.deepEqual(sectionHeaders(f.els.sessionSidebarList.innerHTML).at(-1), ["default", "false", "Default", "1"]);
   f.context.toggleSessionSection("pinned");
   assert.deepEqual(rows(f.els.sessionSidebarList.innerHTML), ["g"]);
   f.context.toggleSessionSection("default");
   assert.deepEqual([...f.state.sessionSectionsCollapsed], ["pinned"]);
-  assert.equal(saves, 3);
+  // Sessions folded leaves the pinned ones: no folder of it is drawn.
+  f.context.toggleSessionSection("pinned");
+  f.context.toggleSessionSection("sessions");
+  assert.deepEqual(rows(f.els.sessionSidebarList.innerHTML), ["b"]);
+  assert.deepEqual(sectionHeaders(f.els.sessionSidebarList.innerHTML),
+    [["pinned", "true", "Pinned Sessions", "1"], ["sessions", "false", "Sessions", "2"]]);
+  assert.doesNotMatch(f.els.sessionSidebarList.innerHTML, /session-sidebar-folders|data-group="acme"/);
+  assert.equal(saves, 5);
 });
 
 test("Default as a group's name means no group", async () => {
@@ -911,7 +924,7 @@ test("the top rows and the section names are styled as the list's own", () => {
   const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
   assert.match(css, /^\.session-sidebar-top \{[^}]*border-bottom: 1px solid var\(--line\);/m);
   assert.match(css, /^\.session-sidebar-action \{[^}]*display: flex;[^}]*width: 100%;/m);
-  assert.doesNotMatch(css, /session-sidebar-pinned-list|\.session-sidebar-section \{/, "one look for every section");
+  assert.doesNotMatch(css, /session-sidebar-pinned-list/, "one list under every name");
 });
 
 // ── what a session is doing, at the front of its row ──
@@ -949,17 +962,22 @@ test("a row begins with what the session is doing: a job running, one that ended
 
 test("the mark is in the column of a group's caret, and the rows run the list's width", () => {
   const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
-  const rule = selector => css.match(new RegExp(`^${selector.replace(/[.:]/g, "\\$&")} \\{[^}]*\\}`, "m"))?.[0] || "";
+  const rule = selector => css.match(new RegExp(`^${selector.replace(/[.:[\]="]/g, "\\$&")} \\{[^}]*\\}`, "m"))?.[0] || "";
   assert.match(rule(".session-sidebar-group-list"), /padding: 0;/, "no indent: the mark's place is the indent");
-  assert.match(rule(".session-sidebar-status"), /flex: none;[^}]*width: 8px;[^}]*height: 8px;/);
+  // The place is as wide as a folder's icon, which is in the same column.
+  assert.match(rule(".session-sidebar-status"), /flex: none;[^}]*width: 14px;[^}]*height: 14px;/);
   // The green of the proxy indicator, which says the same of the session on screen.
-  assert.match(rule(".session-sidebar-status.receiving"), /background: #50c878;/);
-  assert.match(rule(".session-sidebar-status.finished"), /background: var\(--point\);/);
+  assert.match(rule(".session-sidebar-status.receiving::before"), /background: #50c878;/);
+  assert.match(rule(".session-sidebar-status.finished::before"), /background: var\(--point\);/);
   // A dot is smaller than its place and in the middle of it: a quiet signal,
   // and the names stay where they are.
-  assert.match(css, /^\.session-sidebar-status\.receiving,\n\.session-sidebar-status\.finished \{\s*width: 6px;\s*height: 6px;\s*margin: 0 1px;\s*\}/m);
-  assert.match(rule(".session-sidebar-status.running"), /animation: button-spinner/);
-  assert.match(rule(".session-sidebar-group-toggle::before"), /margin: 0 1\.5px;/, "a caret as wide as the mark under it");
+  assert.match(css, /^\.session-sidebar-status\.receiving::before,\n\.session-sidebar-status\.finished::before \{\s*width: 6px;\s*height: 6px;/m);
+  assert.match(rule(".session-sidebar-status.running::before"), /animation: button-spinner/);
+  // A group is a folder: open while its sessions are drawn, shut when folded.
+  assert.match(rule(".session-sidebar-group-toggle::before"), /width: 14px;[^}]*height: 14px;[^}]*mask: var\(--folder-shut\)/);
+  assert.match(rule('.session-sidebar-group-toggle[aria-expanded="true"]::before'), /mask: var\(--folder-open\)/);
+  // A section is a name with a chevron after it, and no folder.
+  assert.match(css, /^\.session-sidebar-section > \.session-sidebar-group-head > \.session-sidebar-group-toggle::before \{\s*content: none;/m);
   assert.doesNotMatch(css, /\.session-sidebar-running|\.session-sidebar-finished/);
 });
 
@@ -986,4 +1004,24 @@ test("a row shows that a browser Sniper opened is sending to the session, before
   assert.doesNotMatch(rowsNow().a, /session-sidebar-browser/);
   const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
   assert.match(css, /^\.session-sidebar-browser \{[^}]*mask: url\("data:image\/svg\+xml,[^}]*background: var\(--text-dim\);/m);
+});
+
+// ── a pin under the pointer ──
+test("a row has a pin beside it that shows under the pointer, and says whether the session is pinned", () => {
+  const f = fixture({ sessions: [session("a", "01"), session("b", "02")], activeId: "a" });
+  f.state.sessionPinned = ["b"];
+  f.context.renderSessionSidebar();
+  const html = f.els.sessionSidebarList.innerHTML;
+  // After the row, in the same item: a button in a button is no markup.
+  assert.match(html, /<\/button><button class="session-sidebar-pin" type="button" data-pin="a" tabindex="-1" aria-pressed="false" aria-label="Pin Session a" title="Pin"><\/button><\/li>/);
+  assert.match(html, /<button class="session-sidebar-pin" type="button" data-pin="b" tabindex="-1" aria-pressed="true" aria-label="Unpin Session b" title="Unpin"><\/button><\/li>/);
+  // A name being edited has no pin.
+  f.state.sessionRename = { id: "a", draft: "x", place: "sidebar" };
+  f.context.renderSessionSidebar();
+  assert.equal(f.els.sessionSidebarList.innerHTML.match(/class="session-sidebar-pin"/g).length, 1);
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  assert.match(css, /^\.session-sidebar-pin \{[^}]*position: absolute;[^}]*opacity: 0;/m);
+  assert.match(css, /^\.session-sidebar-list li:hover > \.session-sidebar-pin,\n\.session-sidebar-pin:focus-visible \{\s*opacity: 1;/m);
+  // Under the pointer the pin takes the place of the mark.
+  assert.match(css, /^\.session-sidebar-list li:hover > \.session-sidebar-row > \.session-sidebar-status \{\s*visibility: hidden;/m);
 });

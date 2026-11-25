@@ -404,8 +404,9 @@ pub struct AppUiSettingsSnapshot {
     pub session_sidebar_hidden: bool,
     /// The groups of the session list that are folded shut, by name.
     pub session_groups_collapsed: Vec<String>,
-    /// The list's own sections that are folded shut: "pinned", and "default"
-    /// for the sessions in no group. No group has either name.
+    /// The list's own sections that are folded shut: "pinned", "sessions"
+    /// for all the others, and "default" for the sessions in no group. They
+    /// are not groups, so a group of the same name folds on its own.
     pub session_sections_collapsed: Vec<String>,
     /// The order a person dragged sessions into, by id. A session not listed
     /// comes before the listed ones of its group, newest first.
@@ -545,7 +546,7 @@ impl AppUiSettingsSnapshot {
         sanitized.replay_tabs_wrap = self.replay_tabs_wrap;
         sanitized.session_sidebar_hidden = self.session_sidebar_hidden;
         sanitized.session_groups_collapsed = sanitize_group_names(self.session_groups_collapsed);
-        sanitized.session_sections_collapsed = ["pinned", "default"]
+        sanitized.session_sections_collapsed = ["pinned", "sessions", "default"]
             .into_iter()
             .filter(|section| {
                 self.session_sections_collapsed
@@ -1731,6 +1732,7 @@ mod tests {
             "acme".into(),
             "pinned".into(),
             "default".into(),
+            "sessions".into(),
         ];
         snapshot.websocket_stack_height = Some(345);
         snapshot.ws_replay_left_width = Some(555);
@@ -1787,8 +1789,11 @@ mod tests {
         assert_eq!(persisted.session_sidebar_width, Some(480));
         assert_eq!(persisted.session_pinned, [pinned]);
         assert_eq!(persisted.session_sort, "agent");
-        // Only the list's own two sections, each once: a group folds by name.
-        assert_eq!(persisted.session_sections_collapsed, ["pinned", "default"]);
+        // Only the list's own sections, each once: a group folds by name.
+        assert_eq!(
+            persisted.session_sections_collapsed,
+            ["pinned", "sessions", "default"]
+        );
         // An order this build does not know is the dragged one.
         let mut unknown = AppUiSettingsSnapshot::default();
         assert_eq!(unknown.session_sort, "manual");

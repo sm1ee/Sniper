@@ -1186,15 +1186,21 @@ summary {
   outline-offset: -1px;
 }
 
-/* The list's two tools, at its trailing edge: how it is sorted, and the page
-   of all sessions. It has no title: every session is under a name already. */
+/* The list's name, with its two tools at the trailing edge: how it is
+   sorted, and the page of all sessions. */
 .session-sidebar-header {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   min-height: 30px;
   /* The gear over the + of the names below it. */
-  padding: 2px 4px 0;
+  padding: 2px 4px 0 12px;
+}
+
+.session-sidebar-title {
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+  font-weight: 600;
 }
 
 .session-sidebar-actions {
@@ -1329,9 +1335,15 @@ summary {
   content: none;
 }
 
-/* Every session is under a name: Pinned, Default for the sessions in no
-   group, or a group. The name folds the sessions under it, and the + beside
-   it makes a session there. */
+/* The list has two sections, Pinned Sessions and Sessions, and Sessions
+   holds a folder for each group and one, Default, for the sessions in none.
+   A name folds what is under it, and the + beside a folder makes a session
+   in it. */
+.session-sidebar-list {
+  --folder-shut: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1.8 4.4a1.3 1.3 0 0 1 1.3-1.3h3.1l1.5 1.6h5.2a1.3 1.3 0 0 1 1.3 1.3v5.6a1.3 1.3 0 0 1-1.3 1.3H3.1a1.3 1.3 0 0 1-1.3-1.3z' fill='none' stroke='black' stroke-width='1.3' stroke-linejoin='round'/%3E%3C/svg%3E");
+  --folder-open: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1.8 11.6V4.4a1.3 1.3 0 0 1 1.3-1.3h3.1l1.5 1.6h4.6a1.3 1.3 0 0 1 1.3 1.3v1M1.8 11.6l1.7-3.8a1.3 1.3 0 0 1 1.2-.8h9.5l-2 4.9a1.3 1.3 0 0 1-1.2.8H3.1a1.3 1.3 0 0 1-1.3-1.1z' fill='none' stroke='black' stroke-width='1.3' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
 .session-sidebar-group-head {
   display: flex;
   align-items: center;
@@ -1343,10 +1355,39 @@ summary {
   margin-top: 0;
 }
 
-/* Nothing is made among the pinned, so there is no +: its width stays, and
-   the counts line up down the list. */
-.session-sidebar-pinned .session-sidebar-group-toggle {
+.session-sidebar-folders {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* A section is a name with a chevron after it, and no folder. Nothing is
+   made in a section, so there is no +: its width stays, and the counts line
+   up down the list. */
+.session-sidebar-section > .session-sidebar-group-head > .session-sidebar-group-toggle {
   margin-right: 24px;
+}
+
+.session-sidebar-section > .session-sidebar-group-head > .session-sidebar-group-toggle::before {
+  content: none;
+}
+
+.session-sidebar-section > .session-sidebar-group-head .session-sidebar-group-name::after {
+  content: "";
+  display: inline-block;
+  margin-left: 6px;
+  border: 4px solid transparent;
+  border-top-color: currentColor;
+  border-bottom-width: 0;
+  vertical-align: middle;
+}
+
+.session-sidebar-section > .session-sidebar-group-head > [aria-expanded="false"] .session-sidebar-group-name::after {
+  transform: rotate(-90deg);
+}
+
+.session-sidebar-section + .session-sidebar-section {
+  margin-top: 6px;
 }
 
 .session-sidebar-group-add {
@@ -1393,18 +1434,21 @@ summary {
   cursor: pointer;
 }
 
+/* A group is a folder: open while its sessions are drawn, shut when it is
+   folded. It is as wide as the mark of the rows under it, in one column. */
 .session-sidebar-group-toggle::before {
   content: "";
   flex: none;
-  /* As wide as the mark of the rows under it, which is in this column. */
-  margin: 0 1.5px;
-  border-top: 4px solid transparent;
-  border-bottom: 4px solid transparent;
-  border-left: 5px solid currentColor;
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  -webkit-mask: var(--folder-shut) center / contain no-repeat;
+  mask: var(--folder-shut) center / contain no-repeat;
 }
 
 .session-sidebar-group-toggle[aria-expanded="true"]::before {
-  transform: rotate(90deg);
+  -webkit-mask: var(--folder-open) center / contain no-repeat;
+  mask: var(--folder-open) center / contain no-repeat;
 }
 
 .session-sidebar-group-toggle:hover {
@@ -1497,45 +1541,106 @@ summary {
   margin-left: 0;
 }
 
-/* What a session is doing, before its name. Nothing is drawn for a session
+/* What a session is doing, before its name. The place is as wide as a
+   folder's icon, which is in the same column. Nothing is drawn for a session
    that does nothing, and the place stays. */
 .session-sidebar-status {
+  display: grid;
+  place-items: center;
   flex: none;
+  width: 14px;
+  height: 14px;
+}
+
+.session-sidebar-status::before {
   box-sizing: border-box;
-  width: 8px;
-  height: 8px;
   border-radius: 50%;
 }
 
 /* Traffic reaches it: the green of the proxy indicator, which says the same
    of the session on screen. */
-.session-sidebar-status.receiving {
+.session-sidebar-status.receiving::before {
   background: #50c878;
 }
 
 /* A job that ended while another session was open. */
-.session-sidebar-status.finished {
+.session-sidebar-status.finished::before {
   background: var(--point);
 }
 
 /* A dot is smaller than its place, and in the middle of it: the signal is
    quiet, and the names stay where they are. */
-.session-sidebar-status.receiving,
-.session-sidebar-status.finished {
+.session-sidebar-status.receiving::before,
+.session-sidebar-status.finished::before {
   width: 6px;
   height: 6px;
-  margin: 0 1px;
+  content: "";
 }
 
-/* A job running: the ring the buttons turn while they wait. A little over
-   its place, to be read as a ring. */
-.session-sidebar-status.running {
+/* A job running: the ring the buttons turn while they wait. */
+.session-sidebar-status.running::before {
   width: 10px;
   height: 10px;
-  margin: 0 -1px;
   border: 2px solid var(--point-border);
   border-top-color: var(--point);
+  content: "";
   animation: button-spinner 0.8s linear infinite;
+}
+
+/* A pin beside the row, in the place of its mark. It shows under the
+   pointer: a click pins the session, or lets a pinned one go. */
+.session-sidebar-list li[data-drag-session] {
+  position: relative;
+}
+
+.session-sidebar-pin {
+  position: absolute;
+  top: 50%;
+  left: 5px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  opacity: 0;
+  transform: translateY(-50%);
+  cursor: pointer;
+}
+
+.session-sidebar-pin::before {
+  content: "";
+  display: block;
+  width: 14px;
+  height: 14px;
+  margin: 3px;
+  background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M5.2 2.2h5.6M6.2 2.2v4.3L4.2 9.4h7.6l-2-2.9V2.2M8 9.4v4.4' fill='none' stroke='black' stroke-width='1.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M5.2 2.2h5.6M6.2 2.2v4.3L4.2 9.4h7.6l-2-2.9V2.2M8 9.4v4.4' fill='none' stroke='black' stroke-width='1.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+.session-sidebar-list li:hover > .session-sidebar-pin,
+.session-sidebar-pin:focus-visible {
+  opacity: 1;
+}
+
+.session-sidebar-pin:hover {
+  color: var(--text);
+}
+
+.session-sidebar-pin[aria-pressed="true"] {
+  color: var(--point);
+}
+
+.session-sidebar-pin:focus-visible {
+  outline: 1px solid var(--point-border);
+  outline-offset: -1px;
+}
+
+/* Under the pointer the pin takes the place of the mark. */
+.session-sidebar-list li:hover > .session-sidebar-row > .session-sidebar-status {
+  visibility: hidden;
 }
 
 /* Switching keeps the name readable; the ring sits at the row's trailing edge. */
@@ -1549,7 +1654,7 @@ summary {
 
 /* Still a ring, not the filled dot of a finished job. */
 @media (prefers-reduced-motion: reduce) {
-  .session-sidebar-status.running {
+  .session-sidebar-status.running::before {
     animation: none;
   }
 }

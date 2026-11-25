@@ -2077,7 +2077,13 @@ function bindEvents() {
   });
   // On the list, which outlives the rows each render replaces.
   els.sessionSidebarList.addEventListener("click", (event) => {
-    // A group folds by its name; Pinned and Default by which section they are.
+    // A row's pin is beside the row, not in it: the session is not opened.
+    const pin = event.target.closest?.(".session-sidebar-pin");
+    if (pin) {
+      toggleSessionPin(pin.dataset.pin);
+      return;
+    }
+    // A group folds by its name; the list's own sections by which they are.
     const toggle = event.target.closest?.(".session-sidebar-group-toggle");
     if (toggle) {
       if (toggle.dataset.section) toggleSessionSection(toggle.dataset.section);
@@ -10704,29 +10710,38 @@ function renderSessionSidebar() {
   if (sidebarDrag) return;
   const rows = (sessions) => sessions
     .map((session) => sessionSidebarRow(session, session.id === activeId, editing)).join("");
-  // Every session is under a name that folds: the pinned ones, when there
-  // are any; Default, the sessions in no group, which is always there; then
-  // each group. A + beside a name makes a session there, and nothing is made
-  // among the pinned. Pinned and Default are the list's own sections: no
-  // group has their name, and they keep their place.
+  // The list has two sections, each under a name that folds. Pinned
+  // Sessions is there when anything is pinned. Sessions holds all the others
+  // in folders: Default, the sessions in no group, which is always there and
+  // first, then each group. A + beside a folder makes a session in it. The
+  // sections and Default are the list's own: no group has their name, and
+  // they keep their place.
   const layout = sessionSidebarLayout();
   const foldedGroups = new Set(state.sessionGroupsCollapsed);
   const foldedSections = new Set(state.sessionSectionsCollapsed);
-  // `key` is the attribute that says which name this is, and `group` the
-  // group a + makes a session in: "" is none, null is no + at all.
-  const block = (attributes, key, label, sessions, open, group) => `<li class="session-sidebar-group${attributes}>`
+  // One shape for everything that folds. `key` is the attribute that says
+  // which name this is, and `group` the group a + makes a session in: "" is
+  // none, null is no + at all.
+  const block = (attributes, key, label, count, open, group, body) => `<li class="session-sidebar-group${attributes}>`
     + `<div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" ${key} aria-expanded="${open}">`
     + `<span class="session-sidebar-group-name">${label}</span>`
-    + `<span class="session-sidebar-group-count">${sessions.length}</span></button>`
+    + `<span class="session-sidebar-group-count">${count}</span></button>`
     + `${group === null ? "" : `<button class="session-sidebar-group-add" type="button" data-add-to-group="${group}" aria-label="New session in ${label}" title="New session in ${label}">+</button>`}</div>`
-    + `${open ? `<ul class="session-sidebar-group-list">${rows(sessions)}</ul>` : ""}</li>`;
-  const markup = (layout.pinned.length
-    ? block(' session-sidebar-pinned" data-drop-pinned', 'data-section="pinned"', "Pinned", layout.pinned, !foldedSections.has("pinned"), null) : "")
-    + block(' session-sidebar-default" data-drop-default', 'data-section="default"', "Default", layout.loose, !foldedSections.has("default"), "")
+    + `${open ? body : ""}</li>`;
+  const listed = (sessions) => `<ul class="session-sidebar-group-list">${rows(sessions)}</ul>`;
+  const folders = block(' session-sidebar-default" data-drop-default', 'data-section="default"', "Default",
+    layout.loose.length, !foldedSections.has("default"), "", listed(layout.loose))
     + layout.groups.map(([name, sessions]) => {
       const group = escapeHtml(name);
-      return block(`" draggable="true" data-drag-group="${group}"`, `data-group="${group}"`, group, sessions, !foldedGroups.has(name), group);
+      return block(`" draggable="true" data-drag-group="${group}"`, `data-group="${group}"`, group,
+        sessions.length, !foldedGroups.has(name), group, listed(sessions));
     }).join("");
+  const unpinned = layout.loose.length + layout.groups.reduce((sum, [, sessions]) => sum + sessions.length, 0);
+  const markup = (layout.pinned.length
+    ? block(' session-sidebar-section session-sidebar-pinned" data-drop-pinned', 'data-section="pinned"', "Pinned Sessions",
+      layout.pinned.length, !foldedSections.has("pinned"), null, listed(layout.pinned)) : "")
+    + block(' session-sidebar-section"', 'data-section="sessions"', "Sessions", unpinned, !foldedSections.has("sessions"), null,
+      `<ul class="session-sidebar-folders">${folders}</ul>`);
   if (markup === sessionSidebarMarkup) return;
   const focused = document.activeElement;
   const focusedId = focused?.classList?.contains("session-sidebar-row") ? focused.dataset.id : null;
@@ -10776,6 +10791,7 @@ function sessionSidebarRow(session, active, editing) {
   const browser = activity?.browser ? "A browser opened from Sniper sends its traffic here" : "";
   const label = [session.name, session.created_by && `made by ${session.created_by}`, port && `proxy ${port}`,
     browser && "browser open", heldLabel, running, finished].filter(Boolean).join(", ");
+  const pinned = (state.sessionPinned || []).includes(session.id);
   // One mark before the name says what the session is doing. What needs a
   // look comes first: a job running, then one that ended unseen, then traffic
   // arriving. A session doing nothing keeps the place, so the names line up.
@@ -10789,7 +10805,12 @@ function sessionSidebarRow(session, active, editing) {
     + `${browser ? `<span class="session-sidebar-browser" title="${browser}"></span>` : ""}`
     + `${port ? `<span class="session-sidebar-port" title="${portTitle}">${escapeHtml(port)}</span>` : ""}`
     + `${held ? `<span class="findings-badge session-sidebar-held" title="${heldLabel}">${held.toLocaleString()}</span>` : ""}`
-    + "</button></li>";
+    + "</button>"
+    // Beside the row, where the mark is: it shows under the pointer, and a
+    // click pins the session or lets it go. The row's menu does the same for
+    // the keyboard.
+    + `<button class="session-sidebar-pin" type="button" data-pin="${escapeHtml(session.id)}" tabindex="-1" aria-pressed="${pinned}"`
+    + ` aria-label="${pinned ? "Unpin" : "Pin"} ${name}" title="${pinned ? "Unpin" : "Pin"}"></button></li>`;
 }
 
 // The order a sort gives two sessions, by the name saved for it, or null
@@ -11027,7 +11048,8 @@ function showSessionSortMenu(anchor) {
   });
 }
 
-// Folds or unfolds one of the list's own sections: "pinned" or "default".
+// Folds or unfolds one of the list's own sections: "pinned", "sessions" or
+// "default".
 function toggleSessionSection(name) {
   const folded = new Set(state.sessionSectionsCollapsed);
   if (!folded.delete(name)) folded.add(name);
