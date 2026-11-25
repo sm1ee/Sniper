@@ -1317,6 +1317,12 @@ pub(crate) fn validate_editable_request(
     validate_editable_request_with(request, false)
 }
 
+pub(crate) fn validate_editable_request_draft(
+    request: &EditableRequest,
+) -> std::result::Result<(), String> {
+    validate_editable_request_with(request, true)
+}
+
 /// `stored_draft` means "this is being persisted, not sent". A draft is allowed
 /// to disagree with itself — the operator is mid-edit — and the strict checks run
 /// again at send time, where being wrong actually costs something.
@@ -1325,18 +1331,22 @@ fn validate_editable_request_with(
     stored_draft: bool,
 ) -> std::result::Result<(), String> {
     validate_http_scheme_field(&request.scheme, "request scheme")?;
-    validate_editable_request_host(&request.host)?;
+    validate_editable_request_host_with(&request.host, stored_draft)?;
     validate_editable_request_path_with(&request.path, stored_draft)?;
     validate_http_method(&request.method)?;
     for header in &request.headers {
         validate_editable_header(header)?;
     }
     validate_unique_host_header(&request.headers)?;
-    // Still parsed: a body that will not decode cannot be loaded back, which is a
-    // storage problem rather than an editing one.
-    let body = request
-        .try_body_bytes()
-        .map_err(|_| "request body is not valid base64".to_string())?;
+    // Still parsed unless a draft contains a template placeholder like {{var}}
+    // in a Base64 body that will only decode after variable substitution.
+    let body = match request.try_body_bytes() {
+        Ok(body) => body,
+        Err(_) if stored_draft && request.body.contains("{{") && request.body.contains("}}") => {
+            return Ok(());
+        }
+        Err(_) => return Err("request body is not valid base64".to_string()),
+    };
     if stored_draft {
         // Content-Length disagreeing with the body is the normal state of a draft:
         // seeding a tab from a gzipped capture stores the decoded body beside the
@@ -1369,7 +1379,10 @@ fn validate_http_scheme_field(scheme: &str, label: &str) -> std::result::Result<
     Ok(())
 }
 
-fn validate_editable_request_host(host: &str) -> std::result::Result<(), String> {
+fn validate_editable_request_host_with(
+    host: &str,
+    lenient: bool,
+) -> std::result::Result<(), String> {
     let trimmed = host.trim();
     if trimmed != host {
         return Err("request host must not include surrounding whitespace".to_string());
@@ -1385,6 +1398,9 @@ fn validate_editable_request_host(host: &str) -> std::result::Result<(), String>
         || trimmed.contains('#')
     {
         return Err(format!("invalid request host: {host}"));
+    }
+    if lenient && trimmed.contains("{{") && trimmed.contains("}}") {
+        return Ok(());
     }
     if trimmed.starts_with('[') {
         let Some(end) = trimmed.find(']') else {
@@ -2649,7 +2665,7 @@ pub(crate) fn validate_sequence_definition(
             ));
         }
         if !has_request_parse_error {
-            validate_editable_request(&step.request).map_err(|error| {
+            validate_editable_request_draft(&step.request).map_err(|error| {
                 format!("invalid request in sequence step {}: {error}", step.label)
             })?;
         }

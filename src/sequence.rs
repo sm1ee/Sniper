@@ -809,9 +809,15 @@ fn ensure_sequence_requests_are_runnable(definition: &SequenceDefinition) -> Res
                 step.label
             ));
         }
-        if let Err(error) = crate::api::validate_runnable_editable_request(&step.request) {
+        if let Err(error) = crate::api::validate_editable_request_draft(&step.request) {
             return Err(anyhow!(
                 "Sequence step {} has an unsafe request draft: {error}",
+                step.label
+            ));
+        }
+        if step.request.preview_truncated {
+            return Err(anyhow!(
+                "Sequence step {} has an unsafe request draft: request body preview is truncated and cannot be replayed safely",
                 step.label
             ));
         }
@@ -1665,5 +1671,39 @@ mod tests {
         assert!(store.remove_run_and_restore(new.id, evicted).await);
         assert_eq!(store.get_run(old.id).await.map(|run| run.id), Some(old.id));
         assert!(store.get_run(new.id).await.is_none());
+    }
+
+    #[test]
+    fn runnable_sequence_allows_template_content_length_and_host_placeholders() {
+        let definition = SequenceDefinition {
+            id: Uuid::new_v4(),
+            name: "Templated sequence".to_string(),
+            steps: vec![SequenceStep {
+                id: Uuid::new_v4(),
+                label: "submit".to_string(),
+                request: EditableRequest {
+                    scheme: "https".to_string(),
+                    host: "app.example.com:{{port}}".to_string(),
+                    method: "POST".to_string(),
+                    path: "/submit/{{id}}".to_string(),
+                    headers: vec![HeaderRecord {
+                        name: "Content-Length".to_string(),
+                        value: "99".to_string(),
+                    }],
+                    body: "{\"csrf\":\"{{csrf}}\"}".to_string(),
+                    body_encoding: BodyEncoding::Utf8,
+                    preview_truncated: false,
+                },
+                request_text: None,
+                request_parse_error: None,
+                source_transaction_id: None,
+                http_version: None,
+                target: None,
+                extractions: Vec::new(),
+            }],
+        };
+
+        assert!(crate::api::validate_sequence_definition(&definition).is_ok());
+        assert!(ensure_sequence_requests_are_runnable(&definition).is_ok());
     }
 }

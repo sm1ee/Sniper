@@ -313,10 +313,38 @@ struct RunningAttack {
     task: JoinHandle<()>,
 }
 
+enum RunningSlot {
+    Starting(Uuid),
+    Active(RunningAttack),
+}
+
+impl RunningSlot {
+    fn id(&self) -> Uuid {
+        match self {
+            Self::Starting(id) => *id,
+            Self::Active(attack) => attack.id,
+        }
+    }
+}
+
+struct StartingSlotGuard<'a> {
+    store: &'a FuzzerStore,
+    id: Uuid,
+    armed: bool,
+}
+
+impl Drop for StartingSlotGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.store.clear_running(self.id);
+        }
+    }
+}
+
 pub struct FuzzerStore {
     max_entries: usize,
     attacks: RwLock<VecDeque<FuzzerAttackRecord>>,
-    running: StdMutex<Option<RunningAttack>>,
+    running: StdMutex<Option<RunningSlot>>,
 }
 
 impl FuzzerStore {
@@ -435,7 +463,7 @@ impl FuzzerStore {
 
     fn clear_running(&self, id: Uuid) {
         let mut running = self.running.lock().unwrap();
-        if running.as_ref().is_some_and(|attack| attack.id == id) {
+        if running.as_ref().is_some_and(|slot| slot.id() == id) {
             *running = None;
         }
     }
@@ -446,14 +474,28 @@ impl FuzzerStore {
     /// Not under the session's mutation guard: storing an exchange persists
     /// the session, which takes it.
     pub async fn stop(&self, id: Option<Uuid>) -> bool {
-        let running = {
+        let slot = {
             let mut guard = self.running.lock().unwrap();
-            if id.is_some_and(|id| guard.as_ref().is_none_or(|attack| attack.id != id)) {
+            if id.is_some_and(|id| guard.as_ref().is_none_or(|slot| slot.id() != id)) {
                 return false;
             }
             guard.take()
         };
-        let Some(mut running) = running else {
+        let Some(slot) = slot else {
+            return false;
+        };
+        let Some(mut running) = (match slot {
+            RunningSlot::Starting(starting_id) => {
+                self.update(starting_id, |record| {
+                    if record.running {
+                        end_record(record, true);
+                    }
+                })
+                .await;
+                return true;
+            }
+            RunningSlot::Active(running) => Some(running),
+        }) else {
             return false;
         };
         let _ = running.cancel.send(true);
@@ -586,13 +628,23 @@ pub async fn start_attack(
     }
     let plan = plan_attack(&template, payloads, &options)
         .map_err(|error| FuzzerStartError::Invalid(error.to_string()))?;
-    if session.fuzzer.is_running() {
-        return Err(FuzzerStartError::Busy);
+    let attack_id = Uuid::new_v4();
+    {
+        let mut slot = session.fuzzer.running.lock().unwrap();
+        if slot.is_some() {
+            return Err(FuzzerStartError::Busy);
+        }
+        *slot = Some(RunningSlot::Starting(attack_id));
     }
+    let mut starting_guard = StartingSlotGuard {
+        store: &session.fuzzer,
+        id: attack_id,
+        armed: true,
+    };
 
     let started_at = Utc::now();
-    let record = FuzzerAttackRecord {
-        id: Uuid::new_v4(),
+    let mut record = FuzzerAttackRecord {
+        id: attack_id,
         started_at,
         completed_at: started_at,
         status: FuzzerAttackStatus::Completed,
@@ -639,12 +691,35 @@ pub async fn start_attack(
         stop_matcher,
         stop: cancel.clone(),
     });
-    let task = tokio::spawn(run.execute(plan.requests, options.concurrency, cancelled));
-    *session.fuzzer.running.lock().unwrap() = Some(RunningAttack {
-        id: record.id,
-        cancel,
-        task,
-    });
+    let spawned = {
+        // Hold the slot mutex across spawn + store so a fast-finishing worker
+        // cannot call clear_running() before RunningSlot::Active is recorded.
+        let mut slot = session.fuzzer.running.lock().unwrap();
+        if matches!(&*slot, Some(RunningSlot::Starting(id)) if *id == record.id) {
+            let task = tokio::spawn(run.execute(plan.requests, options.concurrency, cancelled));
+            *slot = Some(RunningSlot::Active(RunningAttack {
+                id: record.id,
+                cancel,
+                task,
+            }));
+            starting_guard.armed = false;
+            true
+        } else {
+            starting_guard.armed = false;
+            false
+        }
+    };
+    if !spawned {
+        session
+            .fuzzer
+            .update(record.id, |stored| {
+                if stored.running {
+                    end_record(stored, true);
+                }
+            })
+            .await;
+        end_record(&mut record, true);
+    }
     session.schedule_state_persist();
     Ok(record)
 }
@@ -1710,7 +1785,10 @@ mod tests {
         assert!(session.fuzzer.get(started.id).await.unwrap().running);
 
         // No graceful stop/final save: model a worker lost after its checkpoint.
-        let running = session.fuzzer.running.lock().unwrap().take().unwrap();
+        let RunningSlot::Active(running) = session.fuzzer.running.lock().unwrap().take().unwrap()
+        else {
+            panic!("expected an active fuzzer attack");
+        };
         running.task.abort();
         let _ = running.task.await;
         upstream.abort();
