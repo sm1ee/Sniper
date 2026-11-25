@@ -16110,7 +16110,7 @@ function renderReplay(options = {}) {
   if (tab.baseRequest && tab.baseRequest.body_encoding !== "base64") {
     const raw = tab.requestBytes ? new TextDecoder().decode(tab.requestBytes) : String(tab.requestText || "");
     const split = splitRawHttpMessage(raw);
-    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/im;
+    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/im;
     const baseHeaders = (tab.baseRequest.headers || []).map(h => `${h.name}: ${h.value}`).join("\n");
     const boundary = /\r?\n\r?\n/.exec(raw);
     if (boundary && (binaryMime.test(split.head) || binaryMime.test(baseHeaders))) {
@@ -17372,7 +17372,7 @@ function renderFuzzer() {
   if (base && base.body_encoding !== "base64") {
     const raw = String(state.fuzzerRequestText || "");
     const boundary = /\r?\n\r?\n/.exec(raw);
-    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/im;
+    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/im;
     const originalHeaders = (base.headers || []).map(h => `${h.name}: ${h.value}`).join("\n");
     if (boundary && (binaryMime.test(raw.slice(0, boundary.index)) || binaryMime.test(originalHeaders))) {
       const body = raw.slice(boundary.index + boundary[0].length);
@@ -18710,7 +18710,7 @@ function fuzzerRequestTextForAction() {
 
 function parseFuzzerRequestTemplate(text, fallback = state.fuzzerBaseRequest || createDefaultEditableRequest()) {
   const raw = String(text || "");
-  const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/im;
+  const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/im;
   const split = splitRawHttpMessage(raw);
   const originalHeaders = (fallback?.headers || []).map(h => `${h.name}: ${h.value}`).join("\n");
   if (fallback?.body_encoding !== "base64" && /§|\$payload\$/.test(split.body)
@@ -20727,7 +20727,7 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
       // Body template substitution operates on text: do not silently encode it.
       delete step.binary_body_blocked;
       if (step.request?.body_encoding !== "base64" && (Array.isArray(step.request?.headers) ? step.request.headers : []).some(h =>
-        String(h?.name || "").toLowerCase() === "content-type" && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()))) {
+        String(h?.name || "").toLowerCase() === "content-type" && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()))) {
         try {
           const raw = step.request_text ?? buildEditableRawRequest(step.request);
           const originalBody = splitRawHttpMessage(raw).body;
@@ -21619,7 +21619,7 @@ function buildEditableRawResponse(resp, { bytes = false } = {}) {
   }
   text += "\r\n";
   const binaryMime = normalizedHeaders(source.headers).some(h =>
-    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
   let body = source.body || "";
   if (source.body_encoding !== "base64" && binaryMime) {
     // Encode UTF-8 bytes, not Latin-1 code units, before the editor normalizes lines.
@@ -21657,7 +21657,7 @@ function parseEditableRawResponse(text, original, requestMethod = "", { bytes = 
   }
 
   const originalBinaryMime = normalizedHeaders(original?.headers).some(h =>
-    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
   const isText = (!original || original.body_encoding === "utf8") && !originalBinaryMime;
   const bodyEncoding = isText ? "utf8" : "base64";
   const bodyText = bytes && bodyEncoding === "base64" ? binaryBodyBase64(body) : body;
@@ -27127,7 +27127,7 @@ function prettyFormat(text, message, { jsonLines = true } = {}) {
 
   const head = text.slice(0, boundary);
   const body = text.slice(boundary + divider.length);
-  const contentType = (message.content_type || "").toLowerCase();
+  const contentType = (message.content_type || "").split(";", 1)[0].trim().toLowerCase();
   // HTML and XML are laid out by tag, as Burp's Pretty does; minified pages
   // were one line. The editable request passes no type, so its body stays
   // as captured.
@@ -27193,13 +27193,21 @@ function compactFormat(text) {
 
 function editableRequestFromRecord(record) {
   const request = record.request || {};
+  let headers = normalizedHeaders(request.headers);
+  // MessageRecord stores the decompressed body when content_decoded is true
+  // while keeping wire Content-Encoding / Content-Length headers. Strip them
+  // so Replay, Fuzzer and Sequence do not send decoded bytes claiming to be
+  // compressed (matching recordToFormat and EditableRequest::from_message_record).
+  if (request.content_decoded) {
+    headers = headers.filter((header) => !headerNameEquals(header, "content-encoding") && !headerNameEquals(header, "content-length"));
+  }
   return {
     scheme: record.scheme,
     host: record.host,
     method: record.method,
     path: record.path || "/",
     http_version: record.http_version,
-    headers: normalizedHeaders(request.headers),
+    headers,
     body: request.body_preview || "",
     body_encoding: request.body_encoding,
     preview_truncated: request.preview_truncated,
@@ -27220,7 +27228,7 @@ function buildEditableRawRequest(request, binarySafe = false, { bytes = false } 
   let body = source.body || "";
   let base64 = source.body_encoding === "base64";
   if (binarySafe && source.body_encoding !== "base64" && headers.some(h =>
-    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()))) {
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()))) {
     let binary = "";
     for (const byte of new TextEncoder().encode(body)) binary += String.fromCharCode(byte);
     body = btoa(binary);
@@ -27310,7 +27318,7 @@ function parseEditableRawRequest(text, fallback, binarySafe = false, { bytes = f
   }
 
   const legacyBinary = binarySafe && normalizedHeaders(fallback?.headers).some(h =>
-    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
   const bodyEncoding = fallback?.body_encoding === "base64" || legacyBinary ? "base64" : "utf8";
   if (bytes && bodyEncoding === "base64") body = binaryBodyBase64(body);
   const bodyLength = editableRequestBodyLength(body, bodyEncoding);
@@ -27383,6 +27391,9 @@ function validateRawHttpBodyFraming(headers, bodyLength, acceptedBodyLengths = [
   if (headers.some((header) => headerNameEquals(header, "transfer-encoding")
     && String(header.value || "").split(",").some((value) => value.trim().toLowerCase() === "chunked"))) {
     throw new Error("Raw HTTP input with Transfer-Encoding: chunked is not supported");
+  }
+  if (headers.some((header) => headerNameEquals(header, "transfer-encoding"))) {
+    throw new Error("Raw HTTP input with Transfer-Encoding is not supported");
   }
 
   let contentLength = null;
@@ -28993,7 +29004,7 @@ function highlightBodyLine(line, mode = "plain") {
     return escapeHtml(line) || "&nbsp;";
   }
 
-  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+  if (trimmed === "[preview truncated]" || (mode === "plain" && /^\[[a-z][a-z0-9\s.:-]*\]$/i.test(trimmed))) {
     return `<span class="token-meta">${escapeHtml(line)}</span>`;
   }
 
@@ -29045,7 +29056,7 @@ function looksLikeFormEncoded(line) {
 }
 
 function highlightJsonLine(line) {
-  const regex = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?/g;
+  const regex = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
   let cursor = 0;
   let html = "";
   let match;
@@ -29403,18 +29414,20 @@ function renderProtocolStrip(protocolState) {
 function inferMimeType(item) {
   if (item._mime) return item._mime;
   if (item.is_websocket) return (item._mime = "websocket");
-  const contentType = (item.content_type || "").toLowerCase();
-  if (contentType.includes("html")) return (item._mime = "html");
-  if (contentType.includes("javascript") || contentType.includes("ecmascript")) return (item._mime = "script");
-  if (contentType.includes("css")) return (item._mime = "css");
-  if (contentType.includes("json")) return (item._mime = "json");
-  if (contentType.includes("image")) return (item._mime = "image");
-  const extension = extractSummaryPathExtension(item.path || "");
-  if (extension === "js") return (item._mime = "script");
-  if (extension === "css") return (item._mime = "css");
-  if (extension === "json") return (item._mime = "json");
-  if (extension === "html") return (item._mime = "html");
-  if (["png", "jpg", "jpeg", "gif", "svg", "ico"].includes(extension)) return (item._mime = "image");
+  const essence = (item.content_type || "").split(";", 1)[0].trim().toLowerCase();
+  if (essence.includes("html")) return (item._mime = "html");
+  if (essence.includes("javascript") || essence.includes("ecmascript")) return (item._mime = "script");
+  if (essence.includes("css")) return (item._mime = "css");
+  if (essence.includes("json")) return (item._mime = "json");
+  if (essence.startsWith("image/")) return (item._mime = "image");
+  if (!essence || essence === "application/octet-stream") {
+    const extension = extractSummaryPathExtension(item.path || "");
+    if (["js", "mjs", "cjs"].includes(extension)) return (item._mime = "script");
+    if (extension === "css") return (item._mime = "css");
+    if (extension === "json") return (item._mime = "json");
+    if (["html", "htm"].includes(extension)) return (item._mime = "html");
+    if (["png", "jpg", "jpeg", "gif", "svg", "ico", "webp", "avif", "bmp"].includes(extension)) return (item._mime = "image");
+  }
   return (item._mime = "other");
 }
 

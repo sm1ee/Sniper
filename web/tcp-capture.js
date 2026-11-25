@@ -93,11 +93,13 @@
   // is still incomplete: after a delimiter, or after a length-prefixed body.
   function boundary(bytes, start, split) {
     if (split.kind === "delimiter") {
-      const delimiter = split.delimiter;
-      for (let i = start; i + delimiter.length <= bytes.length; i++) {
+      const delimiter = split.delimiter, len = delimiter.length;
+      if (!len) return 0;
+      const first = delimiter[0], limit = bytes.length - len;
+      for (let i = bytes.indexOf(first, start); i !== -1 && i <= limit; i = bytes.indexOf(first, i + 1)) {
         let match = true;
-        for (let j = 0; j < delimiter.length && match; j++) match = bytes[i + j] === delimiter[j];
-        if (match) return i + delimiter.length - start;
+        for (let j = 1; j < len && match; j++) match = bytes[i + j] === delimiter[j];
+        if (match) return i + len - start;
       }
       return 0;
     }
@@ -145,8 +147,9 @@
     for (const part of parts) { bytes.set(part.bytes, offset); offset += part.bytes.length; }
     return bytes;
   }
-  const MAX_CACHED_CHUNKS = 1024, MAX_CACHED_BASE64 = Math.ceil(MAX_DISPLAY_BYTES / 3) * 4;
+  const MAX_CACHED_CHUNKS = 1024, MAX_CACHED_BASE64 = Math.ceil(MAX_DISPLAY_BYTES / 3) * 4, MAX_RENDERED_PARTS = 2000;
   const appendQuery = (url, params) => url + (url.includes("?") ? "&" : "?") + params;
+  const LOSSY_UTF8 = typeof TextDecoder === "function" ? new TextDecoder("utf-8") : null;
   function sameChunks(a, b) {
     return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((chunk, i) => chunk.sequence === b[i]?.sequence
       && chunk.direction === b[i]?.direction && chunk.offset === b[i]?.offset && chunk.data_base64 === b[i]?.data_base64);
@@ -161,7 +164,8 @@
   }
   function formatText(bytes) {
     // A projection only: replacement glyphs and escaped controls are never writable.
-    return new TextDecoder("utf-8").decode(bytes).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, c => "\\x" + c.charCodeAt(0).toString(16).padStart(2, "0"));
+    const text = LOSSY_UTF8 ? LOSSY_UTF8.decode(bytes) : new TextDecoder("utf-8").decode(bytes);
+    return text.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, c => "\\x" + c.charCodeAt(0).toString(16).padStart(2, "0"));
   }
   function clock(value) {
     const date = new Date(value);
@@ -227,7 +231,7 @@
     // The listener being edited: null, "new", or a listener's id.
     let editing = null, listenerSort = { key: "local_port", direction: "asc" }, shownListeners = [];
     // A content search: the ids it found, or null when no search is on.
-    let search = null, searchRequest = 0;
+    let search = null, searchRequest = 0, searchError = "", lastSearchKey = "";
     let liveOnly = false, sort = { key: "index", direction: "desc" }, shown = [], indexById = new Map();
     const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
     const text = (id, value) => { if (el(id).textContent !== value) el(id).textContent = value; };
@@ -272,10 +276,11 @@
       // Paused bytes are counted beside the Intercept switch, not here too.
       const live = records.filter(record => LIVE.has(record.status)).length;
       const unrecorded = Number(status?.unrecorded_count) || 0;
+      const matches = search ? records.filter(record => search.ids.has(record.id)).length : 0;
       text("tcpHistoryStatus", [
         records.length === 1 ? "1 connection" : records.length + " connections",
         live ? live + " live" : "", blocked, unrecorded ? unrecorded + " not recorded" : "",
-        search ? search.ids.size + (search.ids.size === 1 ? " match" : " matches") : "",
+        search ? matches + (matches === 1 ? " match" : " matches") : "",
         search?.truncated ? "search stopped early" : ""
       ].filter(Boolean).join(" · "));
       el("tcpClearHistory").disabled = unavailable || records.length === live;
@@ -418,13 +423,16 @@
       block.append(head, bytes);
       return block;
     }
-    function streamMeta(record, error) {
+    function streamMeta(record, error, partsNote = "") {
       if (error) return error;
       return [
         formatSize(record.client_bytes) + " sent", formatSize(record.server_bytes) + " received",
         record.capture_truncated ? "Partial capture" : "",
+        partsNote,
         !LIVE.has(record.status) && !record.durable ? "Not saved" : "",
-        record.source === "connect" ? "CONNECT tunnel from the HTTP proxy" : record.source === "passthrough" ? "Passthrough host, not decrypted" : "",
+        record.source === "connect" ? "CONNECT tunnel from the HTTP proxy"
+          : record.source === "passthrough" ? "Passthrough host, not decrypted"
+          : record.source === "replay" ? "Replayed TCP conversation" : "",
         record.via_proxy ? "Through the upstream proxy" : "",
         record.client_tls ? "TLS decrypted" : record.server_tls ? "TLS to the target" : "",
         record.protocol === "udp" ? "UDP, one chunk per datagram" : "",
@@ -444,13 +452,14 @@
         return;
       }
       const direction = el("tcpDirection").value, split = el("tcpSplit").value || "reads";
-      const view = { session: sessionId(), id: selectedId, direction, mode, split: split + (split === "delimiter" ? el("tcpSplitDelimiter").value : "") };
+      const delimiterInput = split === "delimiter" ? el("tcpSplitDelimiter").value.trim() : "";
+      const view = { session: sessionId(), id: selectedId, direction, mode, split: split + delimiterInput };
       const same = streamView && Object.keys(view).every(name => streamView[name] === view[name]);
       // Counters change on every poll of a live connection, and a capped capture
       // keeps relaying without new chunks: redraw only when the shown chunks did.
       const shownChunks = Array.isArray(detail.chunks) ? detail.chunks.filter(chunk => direction === "both" || chunk?.direction === direction) : null;
       if (same && streamView.chunks && sameChunks(streamView.chunks, shownChunks)) {
-        text("tcpStreamMeta", streamMeta(detail, streamView.error));
+        text("tcpStreamMeta", streamMeta(detail, streamView.error, streamView.partsNote));
         return;
       }
       // A live stream grows at its end: one that was scrolled to the end follows it.
@@ -460,17 +469,20 @@
       try {
         parts = split === "reads" ? conversation(detail, direction)
           : splitMessages(detail, direction, split === "delimiter"
-            ? { kind: "delimiter", delimiter: [...parseHex(el("tcpSplitDelimiter").value || "0a", { limitLabel: "Delimiter is limited to 16 KiB.", emptyHint: "" })] } : SPLITS[split]);
+            ? { kind: "delimiter", delimiter: [...parseHex(delimiterInput || "0a", { limitLabel: "Delimiter is limited to 16 KiB.", emptyHint: "" })] } : SPLITS[split]);
       } catch (failure) { error = failure.message; }
+      const totalParts = parts.length;
+      const renderedParts = totalParts > MAX_RENDERED_PARTS ? parts.slice(0, MAX_RENDERED_PARTS) : parts;
+      const partsNote = totalParts > MAX_RENDERED_PARTS ? "Showing first " + MAX_RENDERED_PARTS + " of " + totalParts + " messages" : "";
       surface.replaceChildren();
-      surface.textContent = !error && !parts.length ? "No bytes captured" : "";
-      for (const part of parts) surface.append(chunkBlock(part));
+      surface.textContent = !error && !renderedParts.length ? "No bytes captured" : "";
+      for (const part of renderedParts) surface.append(chunkBlock(part));
       if (same) surface.scrollTop = atEnd ? surface.scrollHeight : scrollTop;
       // Only a bounded copy is kept to compare with; a larger capture redraws.
       const cacheable = shownChunks && shownChunks.length <= MAX_CACHED_CHUNKS
         && shownChunks.reduce((sum, chunk) => sum + (typeof chunk?.data_base64 === "string" ? chunk.data_base64.length : Infinity), 0) <= MAX_CACHED_BASE64;
-      streamView = { ...view, error, chunks: cacheable ? shownChunks.map(({ sequence, direction, offset, data_base64 }) => ({ sequence, direction, offset, data_base64 })) : null };
-      text("tcpStreamMeta", streamMeta(detail, error));
+      streamView = { ...view, error, partsNote, chunks: cacheable ? shownChunks.map(({ sequence, direction, offset, data_base64 }) => ({ sequence, direction, offset, data_base64 })) : null };
+      text("tcpStreamMeta", streamMeta(detail, error, partsNote));
     }
     async function loadDetail(stamp) {
       const id = selectedId, intent = selection;
@@ -480,7 +492,7 @@
       try {
         const result = await json(readPath("/api/tcp/connections/" + encodeURIComponent(id), stamp.session));
         if (owns()) {
-          text("tcpHistoryError", "");
+          text("tcpHistoryError", searchError);
           const changed = JSON.stringify(detail) !== JSON.stringify(result);
           detail = result; if (changed) renderDetail();
         }
@@ -506,7 +518,7 @@
           if (actionError?.action === "stop" && status.persistence_error === false) actionError = null;
           if (editing !== null && editing !== "new" && !listeners().some(listener => listener.id === editing)) editing = null;
           if (selectedId && !records.some(r => r.id === selectedId)) { selectedId = null; selection++; detail = null; renderDetail(); }
-          renderStatus(); renderList(); text("tcpHistoryError", "");
+          renderStatus(); renderList(); text("tcpHistoryError", searchError);
           await loadDetail(stamp);
         } catch (error) {
           if (current(stamp)) { status = null; renderStatus(); text("tcpHistoryError", error.message); text("tcpSettingsError", error.message); }
@@ -562,7 +574,7 @@
       interceptController?.reset();
       replayController.reset();
       epoch++; selection++; reading = null; writing = false; actionError = null; selectedId = null; detail = null; records = []; status = null; listKey = ""; editing = null;
-      search = null; searchRequest++; el("tcpSearch").value = "";
+      search = null; searchRequest++; searchError = ""; lastSearchKey = ""; el("tcpSearch").value = "";
       renderStatus(); renderList(); renderDetail(); text("tcpHistoryError", "");
     }
     function sortListenersBy(key) {
@@ -608,24 +620,35 @@
     el("tcpAddListener").addEventListener("click", () => openForm("new"));
     el("tcpListenerRemote").addEventListener("change", syncRemote);
     el("tcpListenerProtocol").addEventListener("change", syncProtocol);
-    async function runSearch() {
-      const value = el("tcpSearch").value, kind = el("tcpSearchKind").value || "text", token = ++searchRequest;
-      if (!value) { search = null; listKey = ""; renderStatus(); renderList(); return; }
+    async function runSearch(force = false) {
+      const value = el("tcpSearch").value, kind = el("tcpSearchKind").value || "text";
+      const key = kind + "\0" + value;
+      if (!value) {
+        search = null; searchError = ""; lastSearchKey = ""; searchRequest++;
+        listKey = ""; text("tcpHistoryError", ""); renderStatus(); renderList(); return;
+      }
+      if (!force && key === lastSearchKey && (search || searchError)) return;
+      lastSearchKey = key;
+      const token = ++searchRequest;
       const stamp = snapshot();
       try {
         const found = await json(appendQuery(readPath("/api/tcp/search", stamp.session), "contains=" + encodeURIComponent(value) + "&kind=" + encodeURIComponent(kind)));
         if (!current(stamp) || token !== searchRequest) return;
         search = { ids: new Set(found.ids || []), truncated: Boolean(found.truncated) };
+        searchError = "";
         text("tcpHistoryError", "");
       } catch (error) {
-        if (current(stamp) && token === searchRequest) text("tcpHistoryError", error.message);
+        if (current(stamp) && token === searchRequest) {
+          searchError = error.message;
+          text("tcpHistoryError", searchError);
+        }
         return;
       }
       listKey = ""; renderStatus(); renderList();
     }
     el("tcpSearch").addEventListener("change", () => void runSearch());
     el("tcpSearch").addEventListener("search", () => void runSearch());
-    el("tcpSearchKind").addEventListener("change", () => { if (el("tcpSearch").value) void runSearch(); });
+    el("tcpSearchKind").addEventListener("change", () => { if (el("tcpSearch").value) void runSearch(true); });
     function saveRaw(direction) {
       if (!detail) return;
       download(appendQuery(readPath("/api/tcp/connections/" + encodeURIComponent(detail.id) + "/raw", sessionId()), "direction=" + direction));
