@@ -130,9 +130,13 @@ impl UpstreamProxy {
         }
         // Credentials ride in the URL, which is where `Proxy::basic_auth` put them
         // for both HTTP and SOCKS; a custom proxy has no other place for SOCKS ones.
+        // `url`'s USERINFO set does not percent-encode `%`, while hyper-util
+        // percent-decodes credentials out of the URL, so escape `%` first.
         if !self.username.is_empty() {
-            url.set_username(&self.username)
-                .and_then(|()| url.set_password(Some(&self.password)))
+            let username = self.username.replace('%', "%25");
+            let password = self.password.replace('%', "%25");
+            url.set_username(&username)
+                .and_then(|()| url.set_password(Some(&password)))
                 .map_err(|()| anyhow::anyhow!("Invalid upstream proxy address"))?;
         }
         // A client is built before its destination is known, so the list is checked
@@ -194,13 +198,20 @@ impl UpstreamProxy {
                     bail!("Upstream proxy CONNECT response is too large");
                 }
             }
-            let status = std::str::from_utf8(&header)
+            // Only parse the status line (first CRLF) as UTF-8 so non-UTF-8
+            // bytes in arbitrary proxy headers do not break a 200 CONNECT.
+            let status_line_end = header
+                .windows(2)
+                .position(|w| w == b"\r\n")
+                .unwrap_or(header.len());
+            let status = std::str::from_utf8(&header[..status_line_end])
                 .ok()
-                .and_then(|s| s.lines().next())
                 .and_then(|s| s.split_whitespace().nth(1))
                 .and_then(|s| s.parse::<u16>().ok());
-            if !status.is_some_and(|s| (200..300).contains(&s)) {
-                bail!("Upstream proxy rejected CONNECT");
+            match status {
+                Some(code) if (200..300).contains(&code) => {}
+                Some(code) => bail!("Upstream proxy rejected CONNECT ({code})"),
+                None => bail!("Upstream proxy rejected CONNECT"),
             }
         } else {
             let method = if self.username.is_empty() { 0 } else { 2 };
@@ -326,5 +337,24 @@ mod peer_route_tests {
             proxy.route_snapshot().route_for(&destination),
             ObservedSocketPeerRoute::Unknown
         );
+    }
+
+    #[test]
+    fn apply_preserves_percent_hex_sequences_in_credentials() {
+        let proxy = UpstreamProxy {
+            enabled: true,
+            url: "http://127.0.0.1:8080".into(),
+            username: "user%20name".into(),
+            password: "p@ss%25word%3A1".into(),
+            bypass_hosts: Vec::new(),
+        };
+        let mut url = proxy.parsed_url().unwrap();
+        let escaped_user = proxy.username.replace('%', "%25");
+        let escaped_pass = proxy.password.replace('%', "%25");
+        url.set_username(&escaped_user).unwrap();
+        url.set_password(Some(&escaped_pass)).unwrap();
+        assert!(url.username().contains("%2520"));
+        assert!(url.password().unwrap().contains("%2525"));
+        assert!(proxy.apply(reqwest::Client::builder()).is_ok());
     }
 }
