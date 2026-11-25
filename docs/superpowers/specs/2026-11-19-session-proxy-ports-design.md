@@ -748,13 +748,21 @@ now holds only the tools of the session on screen.
 What a person chooses about the list is kept in the UI settings and nowhere
 else. The registry and sniper-cli know none of it.
 
-- **The list's menu** is the button before the gear: the order the list is
-  in, and "New group…". The three buttons beside the title are quiet until the
-  pointer is on one.
-- **Pinned sessions** are a block at the top, in the order they were pinned
-  (`session_pinned`). A session is pinned from its menu, or by a drop among
-  the pinned; a drop anywhere else lets it go. A pinned session keeps its
-  group and is drawn only among the pinned.
+- **A fixed top** holds what is made in the list, each a row with its name:
+  New session and New group. A row gives its place to the name field. Below
+  it the list's title has the sort and the gear, quiet until the pointer is
+  on one.
+- **Every session is under a name that folds**: Pinned, when anything is
+  pinned; Default, the sessions in no group, which is always there and
+  first; then the groups. Pinned and Default are the list's own sections
+  (`session_sections_collapsed` says which are folded): no group has their
+  name, they are not dragged, and "Default" typed as a group's name means no
+  group. A session's menu says "Move to Default" for the way out of a group,
+  and the table of all sessions names Default too.
+- **Pinned sessions** are in the order they were pinned (`session_pinned`).
+  A session is pinned from its menu, or by a drop among the pinned; a drop
+  anywhere else lets it go. A pinned session keeps its group and is drawn
+  only among the pinned.
 - **A sort** (`session_sort`) orders the sessions of each group and of none:
   the dragged order, last capture, created, name, or agent, which puts a
   person's own first and each agent's together. The pinned and the groups
@@ -764,9 +772,9 @@ else. The registry and sniper-cli know none of it.
   (`session_group_order`), also while no session is in it. "Ungroup", or
   "Delete group" when it is empty, ends it. A group that only sniper-cli
   made is not kept: it lasts while a session carries its name, as before.
-- **A group's `+`** opens the name field under the title for a session in
-  that group. A new session is the one the window shows and the proxy
-  listener records into, as with the list's own `+`.
+- **A `+` beside a name** opens the name field at the top for a session
+  there: in that group, or in none for Default. A new session is the one the
+  window shows and the proxy listener records into, as with New session.
 - **The list's width** is dragged at its trailing edge, between 160 and
   480 px (`session_sidebar_width`). ←/→ move it, and a double-click puts it
   back.

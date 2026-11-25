@@ -404,6 +404,9 @@ pub struct AppUiSettingsSnapshot {
     pub session_sidebar_hidden: bool,
     /// The groups of the session list that are folded shut, by name.
     pub session_groups_collapsed: Vec<String>,
+    /// The list's own sections that are folded shut: "pinned", and "default"
+    /// for the sessions in no group. No group has either name.
+    pub session_sections_collapsed: Vec<String>,
     /// The order a person dragged sessions into, by id. A session not listed
     /// comes before the listed ones of its group, newest first.
     pub session_order: Vec<String>,
@@ -460,6 +463,7 @@ impl Default for AppUiSettingsSnapshot {
             replay_tabs_wrap: false,
             session_sidebar_hidden: false,
             session_groups_collapsed: Vec::new(),
+            session_sections_collapsed: Vec::new(),
             session_order: Vec::new(),
             session_group_order: Vec::new(),
             session_sidebar_width: None,
@@ -541,6 +545,15 @@ impl AppUiSettingsSnapshot {
         sanitized.replay_tabs_wrap = self.replay_tabs_wrap;
         sanitized.session_sidebar_hidden = self.session_sidebar_hidden;
         sanitized.session_groups_collapsed = sanitize_group_names(self.session_groups_collapsed);
+        sanitized.session_sections_collapsed = ["pinned", "default"]
+            .into_iter()
+            .filter(|section| {
+                self.session_sections_collapsed
+                    .iter()
+                    .any(|name| name == section)
+            })
+            .map(str::to_owned)
+            .collect();
         sanitized.session_group_order = sanitize_group_names(self.session_group_order);
         sanitized.session_order = sanitize_session_ids(self.session_order);
         sanitized.session_sidebar_width = self
@@ -1713,6 +1726,12 @@ mod tests {
         let pinned = uuid::Uuid::new_v4().to_string();
         snapshot.session_pinned = vec![pinned.clone(), "not an id".into(), pinned.clone()];
         snapshot.session_sort = "agent".to_string();
+        snapshot.session_sections_collapsed = vec![
+            "default".into(),
+            "acme".into(),
+            "pinned".into(),
+            "default".into(),
+        ];
         snapshot.websocket_stack_height = Some(345);
         snapshot.ws_replay_left_width = Some(555);
         snapshot.ws_replay_frame_detail_height = Some(222);
@@ -1768,6 +1787,8 @@ mod tests {
         assert_eq!(persisted.session_sidebar_width, Some(480));
         assert_eq!(persisted.session_pinned, [pinned]);
         assert_eq!(persisted.session_sort, "agent");
+        // Only the list's own two sections, each once: a group folds by name.
+        assert_eq!(persisted.session_sections_collapsed, ["pinned", "default"]);
         // An order this build does not know is the dragged one.
         let mut unknown = AppUiSettingsSnapshot::default();
         assert_eq!(unknown.session_sort, "manual");

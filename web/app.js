@@ -502,8 +502,10 @@ const state = {
   sessionSidebarHidden: false,
   // The width the session list was dragged to; null is the stylesheet's.
   sessionSidebarWidth: null,
-  // The groups of the session list that are folded shut, by name.
+  // The groups of the session list that are folded shut, by name, and the
+  // list's own sections that are: "pinned" and "default".
   sessionGroupsCollapsed: [],
+  sessionSectionsCollapsed: [],
   // The order sessions (by id) and groups (by name) were dragged into. The
   // list keeps a group named here while no session is in it.
   sessionOrder: [],
@@ -743,7 +745,8 @@ const els = {
   sessionSidebarList: document.getElementById("sessionSidebarList"),
   sessionSidebarResizer: document.getElementById("sessionSidebarResizer"),
   sessionSidebarNewButton: document.getElementById("sessionSidebarNewButton"),
-  sessionArrangeButton: document.getElementById("sessionArrangeButton"),
+  sessionSidebarNewGroupButton: document.getElementById("sessionSidebarNewGroupButton"),
+  sessionSortButton: document.getElementById("sessionSortButton"),
   sessionSidebarCreate: document.getElementById("sessionSidebarCreate"),
   sessionSidebarCreateName: document.getElementById("sessionSidebarCreateName"),
   sessionSidebarGroup: document.getElementById("sessionSidebarGroup"),
@@ -2049,10 +2052,11 @@ function bindEvents() {
   });
   els.sessionSidebarToggle.addEventListener("click", toggleSessionSidebar);
   els.sessionSidebarNewButton.addEventListener("click", openSidebarSessionCreate);
-  els.sessionArrangeButton.addEventListener("click", (event) => {
+  els.sessionSidebarNewGroupButton.addEventListener("click", () => openSidebarGroupName({ create: true }));
+  els.sessionSortButton.addEventListener("click", (event) => {
     // The document closes this menu on any click that reaches it.
     event.stopPropagation();
-    showSessionArrangeMenu(els.sessionArrangeButton);
+    showSessionSortMenu(els.sessionSortButton);
   });
   els.sessionSidebarCreateName.addEventListener("keydown", (event) => {
     // Enter during IME composition picks a candidate; it does not create.
@@ -2073,14 +2077,17 @@ function bindEvents() {
   });
   // On the list, which outlives the rows each render replaces.
   els.sessionSidebarList.addEventListener("click", (event) => {
-    const group = event.target.closest?.(".session-sidebar-group-toggle")?.dataset.group;
-    if (group) {
-      toggleSessionGroup(group);
+    // A group folds by its name; Pinned and Default by which section they are.
+    const toggle = event.target.closest?.(".session-sidebar-group-toggle");
+    if (toggle) {
+      if (toggle.dataset.section) toggleSessionSection(toggle.dataset.section);
+      else toggleSessionGroup(toggle.dataset.group);
       return;
     }
-    const addTo = event.target.closest?.(".session-sidebar-group-add")?.dataset.addToGroup;
-    if (addTo) {
-      openSidebarSessionCreate(addTo);
+    const add = event.target.closest?.(".session-sidebar-group-add");
+    if (add) {
+      // Default's + names no group.
+      openSidebarSessionCreate(add.dataset.addToGroup || null);
       return;
     }
     const row = event.target.closest?.(".session-sidebar-row");
@@ -10570,7 +10577,7 @@ function renderDashboard() {
             <td>${renamingHere && state.sessionRename.id === session.id
               ? `<input class="session-name-input" type="text" value="${escapeHtml(state.sessionRename.draft)}" aria-label="Rename session ${escapeHtml(session.name)}" spellcheck="false" autocomplete="off" />`
               : `<button class="session-name session-select-button" type="button" title="${escapeHtml(session.name)}" aria-pressed="${session.id === state.selectedSessionId}" aria-label="Select session ${escapeHtml(session.name)}">${sessionMakerMark(session)}${escapeHtml(session.name)}</button>`}${port ? `<span class="session-sidebar-port in-table" title="${portTitle}">${escapeHtml(port)}</span>` : ""}${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
-            <td class="session-group-cell"${session.group ? ` title="${escapeHtml(session.group)}"` : ""}>${session.group ? escapeHtml(session.group) : '<span class="dashboard-dim">-</span>'}</td>
+            <td class="session-group-cell"${session.group ? ` title="${escapeHtml(session.group)}"` : ""}>${session.group ? escapeHtml(session.group) : '<span class="dashboard-dim">Default</span>'}</td>
             <td><div class="session-size"><span class="session-size-bar"><span style="width:${Math.max(2, Math.round((Number(session.storage_bytes) || 0) / largest * 100))}%"></span></span>${formatSize(session.storage_bytes)}</div></td>
             <td>${formatCappedCount(session.request_count)}</td>
             <td>${formatCappedCount(session.websocket_count, retainedEntriesCap())}</td>
@@ -10683,7 +10690,7 @@ function renderSessionSidebar() {
   els.sessionSidebarToggle.setAttribute("aria-label", label);
   els.sessionSidebarToggle.title = label;
   // While a sort is on the dragged order waits, and the list's menu says so.
-  els.sessionArrangeButton?.classList.toggle("is-sorted", Boolean(sessionSortOrder()));
+  els.sessionSortButton?.classList.toggle("is-sorted", Boolean(sessionSortOrder()));
   const activeId = currentSessionId();
   // Opening a session is seeing what finished in it, with the list shown or not.
   state.sessionsFinished.delete(activeId);
@@ -10697,24 +10704,28 @@ function renderSessionSidebar() {
   if (sidebarDrag) return;
   const rows = (sessions) => sessions
     .map((session) => sessionSidebarRow(session, session.id === activeId, editing)).join("");
-  // The pinned sessions first. Then the sessions in no group, as the list
-  // was before there were groups, and each group under its name, which folds
-  // and has a + that makes a session in it.
+  // Every session is under a name that folds: the pinned ones, when there
+  // are any; Default, the sessions in no group, which is always there; then
+  // each group. A + beside a name makes a session there, and nothing is made
+  // among the pinned. Pinned and Default are the list's own sections: no
+  // group has their name, and they keep their place.
   const layout = sessionSidebarLayout();
-  const folded = new Set(state.sessionGroupsCollapsed);
+  const foldedGroups = new Set(state.sessionGroupsCollapsed);
+  const foldedSections = new Set(state.sessionSectionsCollapsed);
+  // `key` is the attribute that says which name this is, and `group` the
+  // group a + makes a session in: "" is none, null is no + at all.
+  const block = (attributes, key, label, sessions, open, group) => `<li class="session-sidebar-group${attributes}>`
+    + `<div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" ${key} aria-expanded="${open}">`
+    + `<span class="session-sidebar-group-name">${label}</span>`
+    + `<span class="session-sidebar-group-count">${sessions.length}</span></button>`
+    + `${group === null ? "" : `<button class="session-sidebar-group-add" type="button" data-add-to-group="${group}" aria-label="New session in ${label}" title="New session in ${label}">+</button>`}</div>`
+    + `${open ? `<ul class="session-sidebar-group-list">${rows(sessions)}</ul>` : ""}</li>`;
   const markup = (layout.pinned.length
-    ? '<li class="session-sidebar-pinned" data-drop-pinned><span class="session-sidebar-section">Pinned</span>'
-      + `<ul class="session-sidebar-pinned-list">${rows(layout.pinned)}</ul></li>` : "")
-    + rows(layout.loose)
+    ? block(' session-sidebar-pinned" data-drop-pinned', 'data-section="pinned"', "Pinned", layout.pinned, !foldedSections.has("pinned"), null) : "")
+    + block(' session-sidebar-default" data-drop-default', 'data-section="default"', "Default", layout.loose, !foldedSections.has("default"), "")
     + layout.groups.map(([name, sessions]) => {
-      const open = !folded.has(name);
       const group = escapeHtml(name);
-      return `<li class="session-sidebar-group" draggable="true" data-drag-group="${group}">`
-        + `<div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" data-group="${group}" aria-expanded="${open}">`
-        + `<span class="session-sidebar-group-name">${group}</span>`
-        + `<span class="session-sidebar-group-count">${sessions.length}</span></button>`
-        + `<button class="session-sidebar-group-add" type="button" data-add-to-group="${group}" aria-label="New session in ${group}" title="New session in ${group}">+</button></div>`
-        + `${open ? `<ul class="session-sidebar-group-list">${rows(sessions)}</ul>` : ""}</li>`;
+      return block(`" draggable="true" data-drag-group="${group}"`, `data-group="${group}"`, group, sessions, !foldedGroups.has(name), group);
     }).join("");
   if (markup === sessionSidebarMarkup) return;
   const focused = document.activeElement;
@@ -10854,7 +10865,10 @@ function sidebarDropTarget(event) {
   // A sorted list has no place beside a session: the drop is into its group.
   if (row && !sessionSortOrder()) return { element: row, session: row.dataset.dragSession, after: lowerHalf(row) };
   if (groupItem) return { element: groupItem, group: groupItem.dataset.dragGroup, into: true };
-  return { element: els.sessionSidebarList, group: null, into: true };
+  // On Default, or on the space under everything, which is Default too.
+  const defaultItem = event.target.closest?.("li[data-drop-default]")
+    || els.sessionSidebarList.querySelector?.("li[data-drop-default]");
+  return { element: defaultItem || els.sessionSidebarList, group: null, into: true };
 }
 
 function markSidebarDrop(target) {
@@ -10981,8 +10995,8 @@ function setSessionSort(sort) {
   scheduleUiSettingsSave();
 }
 
-// The list's own menu, under its title: the order it is in, and a new group.
-function showSessionArrangeMenu(anchor) {
+// The order the list is in, under the button beside its title.
+function showSessionSortMenu(anchor) {
   closeSessionContextMenu();
   const sorts = [["manual", "Manual order"], ["recent", "Last capture"], ["created", "Created"], ["name", "Name"], ["agent", "Agent"]];
   const current = sorts.some(([key]) => key === state.sessionSort) ? state.sessionSort : "manual";
@@ -10991,8 +11005,7 @@ function showSessionArrangeMenu(anchor) {
   menu.setAttribute("role", "menu");
   menu.innerHTML = '<div class="context-menu-section"><span class="context-menu-label">Sort by</span></div>'
     + sorts.map(([key, label]) => `<button class="context-menu-item" role="menuitemradio" aria-checked="${key === current}" data-sort="${key}">${label}`
-      + `${key === current ? '<span class="context-menu-shortcut" aria-hidden="true">✓</span>' : ""}</button>`).join("")
-    + '<div class="context-menu-divider"></div><button class="context-menu-item" data-action="new-group">New group…</button>';
+      + `${key === current ? '<span class="context-menu-shortcut" aria-hidden="true">✓</span>' : ""}</button>`).join("");
   document.body.appendChild(menu);
   const at = anchor.getBoundingClientRect();
   const size = menu.getBoundingClientRect();
@@ -11000,11 +11013,19 @@ function showSessionArrangeMenu(anchor) {
   menu.style.top = `${at.bottom + 4}px`;
   sessionContextMenuEl = menu;
   menu.addEventListener("click", (event) => {
-    const chosen = event.target.closest("[data-sort], [data-action]")?.dataset;
-    if (chosen?.sort) setSessionSort(chosen.sort);
-    else if (chosen?.action === "new-group") openSidebarGroupName({ create: true });
+    const sort = event.target.closest("[data-sort]")?.dataset.sort;
+    if (sort) setSessionSort(sort);
     closeSessionContextMenu();
   });
+}
+
+// Folds or unfolds one of the list's own sections: "pinned" or "default".
+function toggleSessionSection(name) {
+  const folded = new Set(state.sessionSectionsCollapsed);
+  if (!folded.delete(name)) folded.add(name);
+  state.sessionSectionsCollapsed = [...folded];
+  renderSessionSidebar();
+  scheduleUiSettingsSave();
 }
 
 function toggleSessionGroup(name) {
@@ -11015,17 +11036,17 @@ function toggleSessionGroup(name) {
   scheduleUiSettingsSave();
 }
 
-// Where a session can go, as menu items: each group it is not in, a new one,
-// and out of the one it is in.
+// Where a session can go, as menu items: Default when it is in a group, each
+// group it is not in, and a new one.
 function sessionGroupMenuItems(session) {
   const item = (action, label, group) => `<button class="context-menu-item" data-action="${action}"`
     + `${group ? ` data-group="${escapeHtml(group)}"` : ""}>${escapeHtml(label)}</button>`;
   // The groups sessions are in, and the ones the list keeps for later.
   const groups = [...new Set([...(state.sessionGroupOrder || []), ...state.sessions.map((entry) => entry.group).filter(Boolean)])]
     .sort((a, b) => a.localeCompare(b));
-  return groups.filter((group) => group !== session.group).map((group) => item("group", `Move to ${group}`, group)).join("")
-    + item("new-group", "New group…")
-    + (session.group ? item("ungroup", "Remove from group") : "");
+  return (session.group ? item("ungroup", "Move to Default") : "")
+    + groups.filter((group) => group !== session.group).map((group) => item("group", `Move to ${group}`, group)).join("")
+    + item("new-group", "New group…");
 }
 
 // Puts a session in a group, or takes it out when there is no name. A group
@@ -11063,10 +11084,12 @@ function keepSessionGroup(name) {
 function openSidebarGroupName(edit) {
   // The field is in the list, which a menu elsewhere can ask for while hidden.
   if (state.sessionSidebarHidden) toggleSessionSidebar();
-  // One field at a time under the title: the two look alike.
+  // One field at a time at the top: the two look alike.
   closeSidebarSessionCreate();
   sidebarGroupEdit = edit;
   els.sessionSidebarGroupName.value = edit.group || "";
+  // The field takes the place of the New group row.
+  els.sessionSidebarNewGroupButton.classList.add("hidden");
   els.sessionSidebarGroup.classList.remove("hidden");
   els.sessionSidebarGroupName.focus();
   els.sessionSidebarGroupName.select();
@@ -11076,16 +11099,19 @@ function closeSidebarGroupName() {
   sidebarGroupEdit = null;
   els.sessionSidebarGroupName.value = "";
   els.sessionSidebarGroup.classList.add("hidden");
+  els.sessionSidebarNewGroupButton.classList.remove("hidden");
 }
 
 // A name the server refuses stays in the field, to be put right.
 async function submitSidebarGroupName() {
-  const name = els.sessionSidebarGroupName.value.trim();
+  const typed = els.sessionSidebarGroupName.value.trim();
+  // Default is the list's name for no group: a second one is not made.
+  const name = typed.toLowerCase() === "default" ? null : typed;
   const edit = sidebarGroupEdit;
-  if (name && edit?.session) {
+  if (typed && edit?.session) {
     await moveSessionToGroup(edit.session, name);
-    keepSessionGroup(name);
-  } else if (name && edit?.group && name !== edit.group) await renameSessionGroup(edit.group, name);
+    if (name) keepSessionGroup(name);
+  } else if (typed && edit?.group && name !== edit.group) await renameSessionGroup(edit.group, name);
   else if (name && edit?.create) keepSessionGroup(name);
   closeSidebarGroupName();
 }
@@ -11166,12 +11192,14 @@ function toggleSessionSidebar() {
   scheduleUiSettingsSave();
 }
 
-// The name field under the list's title. A group's + names the group the
-// session is made in; the list's own + is handed its click, and names none.
+// The name field at the top, in the place of the New session row. A group's
+// + names the group the session is made in; the row is handed its click, and
+// Default's + null: both name none.
 function openSidebarSessionCreate(group) {
   closeSidebarGroupName();
   sidebarCreateGroup = typeof group === "string" ? group : null;
   els.sessionSidebarCreateName.placeholder = sidebarCreateGroup ? `New session in ${sidebarCreateGroup}` : "Session name";
+  els.sessionSidebarNewButton.classList.add("hidden");
   els.sessionSidebarCreate.classList.remove("hidden");
   els.sessionSidebarCreateName.focus();
 }
@@ -11181,6 +11209,7 @@ function closeSidebarSessionCreate() {
   if (!sidebarSessionCreating) els.sessionSidebarCreateName.value = "";
   sidebarCreateGroup = null;
   els.sessionSidebarCreate.classList.add("hidden");
+  els.sessionSidebarNewButton.classList.remove("hidden");
 }
 
 async function createSidebarSession() {
@@ -26989,6 +27018,7 @@ function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
   applySessionSidebarWidth();
   const strings = (value) => (Array.isArray(value) ? value.filter((entry) => typeof entry === "string") : []);
   state.sessionGroupsCollapsed = strings(snapshot?.session_groups_collapsed);
+  state.sessionSectionsCollapsed = strings(snapshot?.session_sections_collapsed);
   state.sessionOrder = strings(snapshot?.session_order);
   state.sessionGroupOrder = strings(snapshot?.session_group_order);
   state.sessionPinned = strings(snapshot?.session_pinned);
@@ -27086,6 +27116,7 @@ function snapshotUiSettings() {
     session_sidebar_hidden: state.sessionSidebarHidden === true,
     session_sidebar_width: state.sessionSidebarWidth > 0 ? state.sessionSidebarWidth : null,
     session_groups_collapsed: state.sessionGroupsCollapsed,
+    session_sections_collapsed: state.sessionSectionsCollapsed,
     session_order: state.sessionOrder,
     session_group_order: state.sessionGroupOrder,
     session_pinned: state.sessionPinned,

@@ -37,11 +37,12 @@ test("the top strip has no Session tab, and a gear beside the list's title opens
   assert.doesNotMatch(tabs, /data-tool="dashboard"/);
   const header = html.match(/<header class="session-sidebar-header">([^]*?)<\/header>/)[1];
   assert.match(header, /<button class="utility-button icon-button" id="sessionPageButton" type="button" aria-label="Manage sessions" title="Manage sessions" aria-pressed="false" aria-controls="dashboardShell">/);
-  assert.ok(header.indexOf('id="sessionPageButton"') < header.indexOf('id="sessionSidebarNewButton"'), "the gear, then New session");
-  // The list's own menu: how it is ordered, and a new group.
-  assert.match(header, /<button class="utility-button icon-button" id="sessionArrangeButton" type="button" aria-label="Sort and group" title="Sort and group" aria-haspopup="menu">/);
-  assert.ok(header.indexOf('id="sessionArrangeButton"') < header.indexOf('id="sessionPageButton"'));
-  // Three buttons beside a title stay quiet until the pointer is on one.
+  // Beside the title: how the list is sorted, then the gear. Making a session
+  // or a group is a row of its own above.
+  assert.match(header, /<button class="utility-button icon-button" id="sessionSortButton" type="button" aria-label="Sort sessions" title="Sort sessions" aria-haspopup="menu">/);
+  assert.ok(header.indexOf('id="sessionSortButton"') < header.indexOf('id="sessionPageButton"'));
+  assert.doesNotMatch(header, /sessionSidebarNewButton|>\+</);
+  // Buttons beside a title stay quiet until the pointer is on one.
   assert.match(css, /\.session-sidebar-actions \.icon-button:not\(:hover\):not\(\[aria-pressed="true"\]\)\s*\{[^}]*border-color: transparent;[^}]*background: none;/);
 });
 
@@ -192,7 +193,8 @@ test("the table names each session's group", () => {
   f.context.renderDashboard();
   const cells = [...f.els.dashboardSessionsBody.innerHTML.matchAll(/<td class="session-group-cell"([^>]*)>([^]*?)<\/td>/g)].map(match => match.slice(1, 3));
   // A long name is cut short in its cell and whole in its title.
-  assert.deepEqual(cells, [[' title="Shop &lt;b"', "Shop &lt;b"], ["", '<span class="dashboard-dim">-</span>']]);
+  // A session in no group is in Default, as the list says.
+  assert.deepEqual(cells, [[' title="Shop &lt;b"', "Shop &lt;b"], ["", '<span class="dashboard-dim">Default</span>']]);
   // The empty row spans the header, which has one column more.
   assert.match(f.context.renderDashboard.toString(), /<td colspan="10">No sessions are available yet\.<\/td>/);
 });
@@ -255,7 +257,7 @@ for (const place of ["dashboard", "sidebar", "overview"]) {
     const labels = [...f.menu.innerHTML.matchAll(/<button class="context-menu-item[^"]*" data-action="([^"]+)"[^>]*>([^<]*)<\/button>/g)].map(match => match[2]);
     // A pinned session offers the way back, as here in the list.
     assert.deepEqual(labels, ["Record the proxy here", "Open a port", "Rename session", "Open session folder",
-      place === "sidebar" ? "Unpin" : "Pin", "Move to beta", "New group…", "Remove from group", "Delete session"]);
+      place === "sidebar" ? "Unpin" : "Pin", "Move to Default", "Move to beta", "New group…", "Delete session"]);
     f.choose("rename");
     f.choose("group", "beta");
     f.choose("new-group");

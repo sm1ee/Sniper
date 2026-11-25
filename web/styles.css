@@ -1146,13 +1146,53 @@ summary {
   outline: none;
 }
 
+/* What is made in the list, above it and always in reach: each a row with
+   its name. A name field takes the place of its row. */
+.session-sidebar-top {
+  display: grid;
+  gap: 1px;
+  padding: 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.session-sidebar-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  font-size: var(--font-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-sidebar-action svg {
+  flex: none;
+}
+
+.session-sidebar-action:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.session-sidebar-action:focus-visible {
+  outline: 1px solid var(--point-border);
+  outline-offset: -1px;
+}
+
+/* The list's title, with how it is sorted and the page of all sessions. */
 .session-sidebar-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  /* As tall as the top strip beside it, so the two read as one line. */
-  min-height: 39px;
-  padding: 0 8px 0 12px;
+  min-height: 34px;
+  padding: 2px 6px 0 12px;
 }
 
 .session-sidebar-title {
@@ -1167,7 +1207,7 @@ summary {
   gap: 2px;
 }
 
-/* Three buttons beside a title: quiet until the pointer is on one. */
+/* Buttons beside a title: quiet until the pointer is on one. */
 .session-sidebar-actions .icon-button:not(:hover):not([aria-pressed="true"]) {
   border-color: transparent;
   background: none;
@@ -1187,15 +1227,12 @@ summary {
   color: var(--point);
 }
 
-.session-sidebar-create {
-  padding: 0 8px 4px;
-}
-
 .session-sidebar-create input,
 .session-sidebar .session-name-input {
   display: block;
   width: 100%;
-  min-height: 32px;
+  /* As tall as the row it takes the place of. */
+  min-height: 30px;
   padding: 4px 8px;
   border: 1px solid var(--point-border);
   border-radius: 6px;
@@ -1296,35 +1333,24 @@ summary {
   content: none;
 }
 
-/* The sessions kept at the top, above a line that parts them from the rest. */
-.session-sidebar-pinned {
-  margin-bottom: 6px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--line);
-  border-radius: 6px 6px 0 0;
-}
-
-.session-sidebar-section {
-  display: block;
-  padding: 6px 8px 2px;
-  color: var(--text-dim);
-  font-size: var(--font-xs);
-  font-weight: 600;
-}
-
-.session-sidebar-pinned-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-/* A group of sessions. Its name folds the sessions under it, and the + beside
-   the name makes a session in it. */
+/* Every session is under a name: Pinned, Default for the sessions in no
+   group, or a group. The name folds the sessions under it, and the + beside
+   it makes a session there. */
 .session-sidebar-group-head {
   display: flex;
   align-items: center;
   margin-top: 4px;
   border-radius: 6px;
+}
+
+.session-sidebar-group:first-child > .session-sidebar-group-head {
+  margin-top: 0;
+}
+
+/* Nothing is made among the pinned, so there is no +: its width stays, and
+   the counts line up down the list. */
+.session-sidebar-pinned .session-sidebar-group-toggle {
+  margin-right: 24px;
 }
 
 .session-sidebar-group-add {
@@ -1429,7 +1455,6 @@ summary {
 }
 
 .session-sidebar-list .drop-into > .session-sidebar-group-head,
-.session-sidebar-list .session-sidebar-pinned.drop-into,
 .session-sidebar-list.drop-into {
   background: var(--point-soft);
 }
