@@ -1186,19 +1186,15 @@ summary {
   outline-offset: -1px;
 }
 
-/* The list's title, with how it is sorted and the page of all sessions. */
+/* The list's two tools, at its trailing edge: how it is sorted, and the page
+   of all sessions. It has no title: every session is under a name already. */
 .session-sidebar-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  min-height: 34px;
-  padding: 2px 6px 0 12px;
-}
-
-.session-sidebar-title {
-  color: var(--text-dim);
-  font-size: var(--font-xs);
-  font-weight: 600;
+  justify-content: flex-end;
+  min-height: 30px;
+  /* The gear over the + of the names below it. */
+  padding: 2px 4px 0;
 }
 
 .session-sidebar-actions {
@@ -1207,7 +1203,7 @@ summary {
   gap: 2px;
 }
 
-/* Buttons beside a title: quiet until the pointer is on one. */
+/* The two buttons above the list: quiet until the pointer is on one. */
 .session-sidebar-actions .icon-button:not(:hover):not([aria-pressed="true"]) {
   border-color: transparent;
   background: none;

@@ -726,7 +726,7 @@ The session list made the Session tab say most things twice: the sessions, how
 to make one, and a session's menu. The tab is gone from the top strip, which
 now holds only the tools of the session on screen.
 
-- **A gear beside the list's title opens the page** over the tool in use and
+- **A gear above the session list opens the page** over the tool in use and
   gives that tool back, as a click on the tool's tab does. A tab in the top
   strip closes it too. `active_tool` keeps `dashboard`, so the page is open
   again after a restart.
@@ -750,8 +750,9 @@ else. The registry and sniper-cli know none of it.
 
 - **A fixed top** holds what is made in the list, each a row with its name:
   New session and New group. A row gives its place to the name field. Below
-  it the list's title has the sort and the gear, quiet until the pointer is
-  on one.
+  it, at the list's trailing edge, are the sort and the gear, quiet until
+  the pointer is on one. The list has no title: every session is under a
+  name already.
 - **Every session is under a name that folds**: Pinned, when anything is
   pinned; Default, the sessions in no group, which is always there and
   first; then the groups. Pinned and Default are the list's own sections

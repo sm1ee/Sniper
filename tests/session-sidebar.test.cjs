@@ -832,9 +832,16 @@ const sectionHeaders = html => [...html.matchAll(
 test("the list has a fixed top where a session and a group are made, each a row with its name", () => {
   const sidebar = indexHtml.slice(indexHtml.indexOf('id="sessionSidebar"'), indexHtml.indexOf('<main class="workspace">'));
   assert.match(sidebar, /<div class="session-sidebar-top">\s*<button class="session-sidebar-action" id="sessionSidebarNewButton" type="button">\s*<svg[^]*?<\/svg>\s*<span>New session<\/span>\s*<\/button>\s*<div class="session-sidebar-create hidden" id="sessionSidebarCreate">[^]*?<\/div>\s*<button class="session-sidebar-action" id="sessionSidebarNewGroupButton" type="button">\s*<svg[^]*?<\/svg>\s*<span>New group<\/span>\s*<\/button>\s*<div class="session-sidebar-create hidden" id="sessionSidebarGroup">[^]*?<\/div>\s*<\/div>/);
-  // The top, then the list's title, then the list, which is what scrolls.
+  // The top, then the list's two tools, then the list, which is what scrolls.
   const order = ['class="session-sidebar-top"', 'class="session-sidebar-header"', 'id="sessionSidebarList"'].map(mark => sidebar.indexOf(mark));
   assert.ok(order[0] !== -1 && order[0] < order[1] && order[1] < order[2], String(order));
+  // The list has no title of its own: every session is under a name already.
+  const header = sidebar.match(/<header class="session-sidebar-header">([^]*?)<\/header>/)[1];
+  assert.match(header, /^\s*<span class="session-sidebar-actions">[^]*<\/span>\s*$/, "the sort and the gear, and nothing else");
+  assert.doesNotMatch(sidebar, /session-sidebar-title|>Sessions</);
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  assert.match(css, /^\.session-sidebar-header \{[^}]*justify-content: flex-end;/m);
+  assert.doesNotMatch(css, /\.session-sidebar-title/);
   assert.match(appSource, /els\.sessionSidebarNewGroupButton\.addEventListener\("click", \(\) => openSidebarGroupName\(\{ create: true \}\)\);/);
 });
 

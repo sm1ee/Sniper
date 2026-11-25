@@ -32,17 +32,17 @@ const session = (id, extra = {}) => ({
   created_at: "2026-11-01T00:00:00Z", overview: {}, ...extra,
 });
 
-test("the top strip has no Session tab, and a gear beside the list's title opens the page", () => {
+test("the top strip has no Session tab, and a gear above the session list opens the page", () => {
   const tabs = html.slice(html.indexOf('<nav class="main-tabs"'), html.indexOf("</nav>", html.indexOf('<nav class="main-tabs"')));
   assert.doesNotMatch(tabs, /data-tool="dashboard"/);
   const header = html.match(/<header class="session-sidebar-header">([^]*?)<\/header>/)[1];
   assert.match(header, /<button class="utility-button icon-button" id="sessionPageButton" type="button" aria-label="Manage sessions" title="Manage sessions" aria-pressed="false" aria-controls="dashboardShell">/);
-  // Beside the title: how the list is sorted, then the gear. Making a session
+  // Above the list: how it is sorted, then the gear. Making a session
   // or a group is a row of its own above.
   assert.match(header, /<button class="utility-button icon-button" id="sessionSortButton" type="button" aria-label="Sort sessions" title="Sort sessions" aria-haspopup="menu">/);
   assert.ok(header.indexOf('id="sessionSortButton"') < header.indexOf('id="sessionPageButton"'));
   assert.doesNotMatch(header, /sessionSidebarNewButton|>\+</);
-  // Buttons beside a title stay quiet until the pointer is on one.
+  // The two stay quiet until the pointer is on one.
   assert.match(css, /\.session-sidebar-actions \.icon-button:not\(:hover\):not\(\[aria-pressed="true"\]\)\s*\{[^}]*border-color: transparent;[^}]*background: none;/);
 });
 

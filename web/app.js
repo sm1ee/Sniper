@@ -10995,7 +10995,7 @@ function setSessionSort(sort) {
   scheduleUiSettingsSave();
 }
 
-// The order the list is in, under the button beside its title.
+// The order the list is in, under the sort button above it.
 function showSessionSortMenu(anchor) {
   closeSessionContextMenu();
   const sorts = [["manual", "Manual order"], ["recent", "Last capture"], ["created", "Created"], ["name", "Name"], ["agent", "Agent"]];
