@@ -3420,9 +3420,9 @@ body.pane-resizing-y {
 }
 
 .sequence-step-card {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-m);
+  background: var(--panel-elevated);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
   padding: 10px;
 }
 .sequence-step-card .step-header {
@@ -3439,9 +3439,9 @@ body.pane-resizing-y {
 .sequence-step-card .step-header input {
   flex: 1;
   min-width: 0;
-  background: var(--input-bg);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-s);
+  background: var(--panel-code);
+  border: 1px solid var(--line);
+  border-radius: 4px;
   color: inherit;
   font-size: 0.8rem;
   padding: 3px 6px;
@@ -3449,7 +3449,7 @@ body.pane-resizing-y {
 .sequence-step-card .step-header button {
   background: none;
   border: none;
-  color: var(--text-muted);
+  color: var(--text-dim);
   cursor: pointer;
   font-size: 1rem;
 }
@@ -3466,14 +3466,14 @@ body.pane-resizing-y {
 .sequence-step-card .step-move:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: var(--radius-s);
+  border-radius: 4px;
 }
 .sequence-step-card textarea {
   width: 100%;
   min-height: 80px;
-  background: var(--input-bg);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-s);
+  background: var(--panel-code);
+  border: 1px solid var(--line);
+  border-radius: 4px;
   color: inherit;
   font-family: var(--mono);
   font-size: 0.75rem;
@@ -3659,7 +3659,7 @@ body.pane-resizing-y {
   left: 0; right: 0; top: 50%;
   height: 1px;
   transform: translateY(-50%);
-  background: var(--border);
+  background: var(--line);
   transition: background 160ms ease, height 160ms ease;
 }
 .fuzzer-detail-resizer:hover::after,
@@ -3685,7 +3685,7 @@ body.pane-resizing-y {
 
 .fuzzer-detail-panel .split-pane-horizontal {
   gap: 1px;
-  background: var(--border);
+  background: var(--line);
 }
 
 .fuzzer-detail-panel .message-pane {
@@ -3702,7 +3702,7 @@ body.pane-resizing-y {
   gap: 8px;
   padding: 4px 12px;
   font-size: var(--font-xs);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--line);
 }
 
 .fuzzer-detail-panel .view-tabs {
@@ -5269,7 +5269,7 @@ button.utility-button.replay-tab-add {
   padding: 3px 0;
   margin: -3px 0;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: 4px;
   background: transparent;
   color: inherit;
   font: inherit;
@@ -5285,7 +5285,7 @@ button.utility-button.replay-tab-add {
   padding: 2px 6px;
   margin: -3px 0;
   border: 1px solid var(--point-border);
-  border-radius: var(--radius-sm);
+  border-radius: 4px;
   background: var(--panel-code);
   color: var(--text);
   font: inherit;
@@ -5389,7 +5389,7 @@ button.utility-button.replay-tab-add {
 .session-path-open-btn {
   padding: 2px 8px;
   margin-left: 6px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 4px;
   background: transparent;
   color: var(--text-dim);
@@ -5452,8 +5452,8 @@ button.utility-button.replay-tab-add {
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: var(--bg-raised);
-  color: var(--text-primary);
+  background: var(--panel-code);
+  color: var(--text);
   font-size: var(--font-xs);
   font-family: inherit;
   outline: none;
@@ -5470,8 +5470,8 @@ button.utility-button.replay-tab-add {
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: var(--bg-raised);
-  color: var(--text-primary);
+  background: var(--panel-code);
+  color: var(--text);
   font-size: var(--font-xs);
   font-family: inherit;
   outline: none;
@@ -5539,7 +5539,7 @@ button.utility-button.replay-tab-add {
 .scanner-rules-section h4 {
   margin: 0 0 8px;
   font-size: var(--font-sm);
-  color: var(--text-secondary);
+  color: var(--text-soft);
   font-weight: 600;
 }
 
@@ -5598,8 +5598,8 @@ button.utility-button.replay-tab-add {
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: var(--bg-raised);
-  color: var(--text-primary);
+  background: var(--panel-code);
+  color: var(--text);
   font-size: var(--font-xs);
   font-family: inherit;
   outline: none;
@@ -5621,8 +5621,8 @@ button.utility-button.replay-tab-add {
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  background: var(--bg-raised);
-  color: var(--text-primary);
+  background: var(--panel-code);
+  color: var(--text);
   font-size: var(--font-xs);
   font-family: inherit;
   outline: none;
@@ -5658,7 +5658,7 @@ button.utility-button.replay-tab-add {
 
 .findings-sortable:hover,
 .table-sortable:hover {
-  color: var(--text-primary);
+  color: var(--text);
 }
 
 .findings-sortable.active,
@@ -5782,6 +5782,8 @@ button.utility-button.replay-tab-add {
 
 .severity-badge {
   display: inline-block;
+  flex-shrink: 0;
+  white-space: nowrap;
   padding: 1px 6px;
   border-radius: 3px;
   font-size: var(--font-2xs);
@@ -5876,7 +5878,7 @@ button.utility-button.replay-tab-add {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-muted);
+  color: var(--text-dim);
   font-size: var(--font-sm);
 }
 
@@ -5892,6 +5894,7 @@ button.utility-button.replay-tab-add {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
@@ -5929,7 +5932,7 @@ button.utility-button.replay-tab-add {
 .findings-detail-desc {
   padding: 6px 12px;
   font-size: var(--font-xs);
-  color: var(--text-secondary);
+  color: var(--text-soft);
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
   display: flex;
@@ -6063,9 +6066,9 @@ button.utility-button.replay-tab-add {
   z-index: 9999;
   min-width: 180px;
   padding: 4px 0;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line-strong);
   border-radius: 8px;
-  background: var(--bg-card);
+  background: var(--panel-elevated);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 }
 
@@ -6841,7 +6844,7 @@ button.utility-button.replay-tab-add {
 
 .intercept-queue-tabs {
   display: flex;
-  border-bottom: 1px solid var(--border-default);
+  border-bottom: 1px solid var(--line);
   flex: 0 0 auto;
 }
 .intercept-queue-tab {
@@ -6850,14 +6853,14 @@ button.utility-button.replay-tab-add {
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
-  color: var(--fg-muted);
+  color: var(--text-dim);
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
   transition: color 0.15s, border-color 0.15s;
 }
 .intercept-queue-tab:hover {
-  color: var(--fg-default);
+  color: var(--text);
 }
 .intercept-queue-tab.active {
   color: var(--accent);
@@ -6899,7 +6902,7 @@ button.utility-button.replay-tab-add {
 .iq-col-time { width: 120px; max-width: 120px; }
 
 .intercept-rules-header {
-  border-top: 1px solid var(--border-default);
+  border-top: 1px solid var(--line);
   flex: 0 0 auto;
 }
 
@@ -6920,7 +6923,7 @@ button.utility-button.replay-tab-add {
 }
 
 .intercept-rules-empty {
-  color: var(--text-muted);
+  color: var(--text-dim);
   font-size: 0.75rem;
   padding: 8px 4px;
 }
@@ -6931,11 +6934,11 @@ button.utility-button.replay-tab-add {
   gap: 6px;
   padding: 3px 4px;
   font-size: 0.75rem;
-  border-radius: var(--radius-s);
+  border-radius: 4px;
 }
 
 .intercept-rule-row:hover {
-  background: var(--bg-elevated);
+  background: var(--panel-elevated);
 }
 
 .intercept-rule-row.disabled > .intercept-rule-scope,
@@ -6978,7 +6981,7 @@ button.utility-button.replay-tab-add {
 .intercept-rule-delete {
   background: none;
   border: none;
-  color: var(--text-muted);
+  color: var(--text-dim);
   cursor: pointer;
   font-size: 0.85rem;
   padding: 0 4px;
@@ -7002,10 +7005,10 @@ button.utility-button.replay-tab-add {
 .intercept-rule-input {
   flex: 1;
   min-width: 0;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-s);
-  color: var(--text-primary);
+  background: var(--panel-elevated);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
   font-size: 0.72rem;
   padding: 2px 6px;
 }
@@ -7032,10 +7035,10 @@ button.utility-button.replay-tab-add {
   width: 100%;
   min-height: 180px;
   resize: vertical;
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-s);
+  background: var(--panel-elevated);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 4px;
   padding: 10px 12px;
   font-family: var(--mono);
   font-size: 0.8rem;
@@ -7043,7 +7046,7 @@ button.utility-button.replay-tab-add {
 }
 
 .curl-import-textarea::placeholder {
-  color: var(--text-muted);
+  color: var(--text-dim);
 }
 
 .modal-footer {
@@ -7102,8 +7105,7 @@ button.utility-button.replay-tab-add {
      flex-direction did nothing for them either. Fuzzer has its own narrower
      stacking breakpoint so laptop windows retain two usable inputs. */
   .dual-code-panel,
-  .modal-grid,
-  .display-settings-grid {
+  .modal-grid {
     flex-direction: column;
     height: auto !important;
     min-height: 0;
@@ -7128,13 +7130,8 @@ button.utility-button.replay-tab-add {
 }
 
 @media (max-width: 760px) {
-  .ws-replay-panel {
+  .display-settings-grid {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(260px, 1fr) minmax(260px, 1fr);
-  }
-
-  #wsReplayPaneResizer {
-    display: none;
   }
 }
 
@@ -7807,7 +7804,7 @@ button.utility-button.replay-tab-add {
   display: inline-block;
   width: auto;
   padding: 3px 10px;
-  border-radius: var(--radius-sm);
+  border-radius: 4px;
   background: var(--panel);
   border: 1px solid var(--line);
   font-size: var(--font-xs);
@@ -7816,13 +7813,13 @@ button.utility-button.replay-tab-add {
 }
 
 .context-menu-methods .method-btn:hover {
-  background: var(--point-muted);
-  color: var(--point-text);
+  background: var(--point-soft);
+  color: var(--point);
 }
 
 .context-menu-methods .method-btn.active-method {
-  background: var(--point-muted);
-  color: var(--point-text);
+  background: var(--point-soft);
+  color: var(--point);
   border-color: var(--point-border);
 }
 
@@ -7834,6 +7831,17 @@ button.utility-button.replay-tab-add {
   overflow: hidden;
   /* Span both the toolbar and workbench rows in the replay-shell grid */
   grid-row: 2 / -1;
+}
+
+@media (max-width: 760px) {
+  .ws-replay-panel {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(260px, 1fr) minmax(260px, 1fr);
+  }
+
+  #wsReplayPaneResizer {
+    display: none;
+  }
 }
 
 
@@ -8042,7 +8050,7 @@ button.utility-button.replay-tab-add {
 
 .ws-setup-notice {
   padding: 4px 6px;
-  color: var(--text-muted);
+  color: var(--text-dim);
   font-size: var(--font-xs);
   line-height: 1.35;
 }
@@ -8071,7 +8079,7 @@ button.utility-button.replay-tab-add {
 }
 
 .ws-setup-index {
-  color: var(--text-muted);
+  color: var(--text-dim);
   width: 24px;
   flex-shrink: 0;
 }
@@ -8090,7 +8098,7 @@ button.utility-button.replay-tab-add {
   border: 1px solid var(--line);
   border-radius: 4px;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--text-dim);
   font-size: 10px;
   cursor: pointer;
   line-height: 1;
@@ -8102,7 +8110,7 @@ button.utility-button.replay-tab-add {
 }
 
 .ws-setup-sent-badge {
-  color: var(--green);
+  color: var(--toggle-run);
   font-size: 11px;
   flex-shrink: 0;
 }
@@ -8857,7 +8865,7 @@ button.utility-button.replay-tab-add {
 .service-map-products > .service-map-exposure { flex: 0 1 auto; min-width: 44px; color: var(--danger); border-color: var(--danger); }
 .service-map-products > .service-map-auth { flex: 0 1 auto; min-width: 44px; color: var(--token-url-color); }
 .service-map-advisories, .service-map-kev { margin-left: 5px; padding: 0 4px; border: 1px solid var(--line-strong); border-radius: 4px; font-size: var(--font-xs); white-space: nowrap; }
-.service-map-advisories { color: var(--text-secondary); }
+.service-map-advisories { color: var(--text-soft); }
 .service-map-kev { margin-left: 3px; color: var(--danger); border-color: var(--danger); }
 /* In a crowded row the name gives way, never the count or KEV; a short line
    keeps their borders inside the row's fixed height. When auth/exposure and +N
@@ -9111,7 +9119,7 @@ button.utility-button.replay-tab-add {
 .service-map-references { padding-left: 16px; color: var(--text-soft); font-size: var(--font-xs); line-height: 1.7; overflow-wrap: anywhere; }
 .service-map-references span { display: block; color: var(--text-dim); }
 /* A badge sits on its product's line, not on a dim line of its own. */
-.service-map-references .service-map-advisories, .service-map-references .service-map-kev { display: inline-block; color: var(--text-secondary); }
+.service-map-references .service-map-advisories, .service-map-references .service-map-kev { display: inline-block; color: var(--text-soft); }
 .service-map-references .service-map-kev { color: var(--danger); }
 .service-map-api-catalog { overflow: auto; padding: 18px; }
 .service-map-catalog-header { display: flex; align-items: flex-start; gap: 18px; justify-content: space-between; margin-bottom: 18px; }
@@ -9282,7 +9290,7 @@ button.utility-button.replay-tab-add {
 .recon-warning { margin: 3px 0; overflow-wrap: anywhere; }
 .recon-inventory { display: flex; flex-direction: column; overflow: hidden; }
 .recon-inventory-toolbar { flex-wrap: wrap; align-items: center; gap: 10px; }
-.recon-search-controls { display: flex; gap: 8px; flex: 1 1 320px; }
+.recon-search-controls { display: flex; flex-wrap: wrap; gap: 8px; flex: 1 1 320px; min-width: 0; }
 .recon-search-controls input { flex: 1 1 160px; }
 .recon-search-controls select { flex: 0 0 auto; width: auto; min-width: 130px; }
 /* The divider between list and detail sets --list-detail-width. */
@@ -9428,8 +9436,8 @@ button.utility-button.replay-tab-add {
 .templates-scan .recon-job { padding: 10px 16px; border-top: 1px solid var(--line); border-bottom: 0; }
 .templates-scan .recon-job-header { gap: 6px; margin-bottom: 2px; }
 .templates-scan .recon-job-target { font-size: var(--font-xs); }
-.templates-detail-badges { display: flex; align-items: center; gap: 8px; margin: -4px 0 10px; }
-.templates-detail-id { font-family: var(--mono); color: var(--text-dim); font-size: var(--font-xs); }
+.templates-detail-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; margin: -4px 0 10px; }
+.templates-detail-id { min-width: 0; overflow-wrap: anywhere; font-family: var(--mono); color: var(--text-dim); font-size: var(--font-xs); }
 .templates-description { margin: 0 0 12px; color: var(--text-soft); line-height: 1.5; }
 /* Label beside value, the way a property sheet reads. */
 .templates-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; }
@@ -9839,7 +9847,8 @@ button.utility-button.replay-tab-add {
 .stack-panel > .tcp-stream { flex: 1 1 0; min-height: 180px; display: flex; flex-direction: column; min-width: 0; }
 .tcp-history .history-table-shell { flex: 1; min-height: 0; overflow: auto; }
 /* The shared bar has History's four columns; TCP has a summary and its controls. */
-.tcp-history .filter-bar { grid-template-columns: minmax(0, 1fr) auto; }
+.tcp-history .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.tcp-history .filter-actions { flex-wrap: wrap; min-width: 0; margin-left: auto; }
 #tcpHistoryStatus { white-space: normal; overflow-wrap: anywhere; cursor: default; }
 .tcp-history .history-table-shell:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .tcp-table { table-layout: fixed; min-width: 856px; }
@@ -9871,7 +9880,8 @@ button.utility-button.replay-tab-add {
 #tcpSearch { width: 160px; height: var(--control-h); }
 #tcpStreamMore[hidden] { display: none; }
 #tcpInterceptMatch[hidden], #tcpInterceptMatchKind[hidden] { display: none; }
-.tcp-stream .pane-header { gap: 12px; }
+.tcp-stream .pane-header { flex-wrap: wrap; gap: 4px 10px; padding-block: 4px; }
+.tcp-stream .pane-header .view-tabs { flex-wrap: wrap; min-width: 0; }
 .tcp-stream-title { flex: 1; min-width: 0; overflow: hidden; color: var(--text-dim); font-size: var(--font-sm); text-overflow: ellipsis; white-space: nowrap; }
 .tcp-stream .tcp-close { min-height: var(--control-h); padding: 0 10px; border-radius: 6px; font-size: var(--font-sm); }
 .tcp-stream .tcp-close:disabled { display: none; }
