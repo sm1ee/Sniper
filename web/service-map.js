@@ -4214,7 +4214,8 @@
       const inactive = activeInspectionsBlocked() ? `<p class="service-map-muted" role="status">${escape(INACTIVE_SESSION_NOTICE)}</p>` : "";
       // The picker and panes are one block sized to the inspector; inspections
       // and peers follow it, so opening one never shrinks the panes.
-      return `<div class="packet-block"><div class="packet-source">${picker}${!row && endpoint ? `<span>${escape(endpoint.method)} <strong>${escape(endpoint.path)}</strong></span>` : ""}${row ? `<span>${escape(row.method)} ${escape(row.path)} · ${escape(row.status ?? "No response")} · ${escape(row.started_at)}</span>` : ""}${variants}${info}</div>${inactive}${items.length > 30 ? `<p class="service-map-muted">30 of ${items.length} samples</p>` : ""}
+      const rowLabel = row ? `${row.method} ${row.path} · ${row.status ?? "No response"} · ${row.started_at}` : "";
+      return `<div class="packet-block"><div class="packet-source">${picker}${!row && endpoint ? `<span>${escape(endpoint.method)} <strong>${escape(endpoint.path)}</strong></span>` : ""}${row ? `<span title="${escape(rowLabel)}">${escape(rowLabel)}</span>` : ""}${variants}${info}</div>${inactive}${items.length > 30 ? `<p class="service-map-muted">30 of ${items.length} samples</p>` : ""}
         ${message ? `<p role="status">${escape(message)}</p>${!state.evidenceLoading && !state.packetLoading ? '<button type="button" class="secondary-action" data-service-packet-retry="true">Retry</button>' : ""}` : ""}
         ${state.packet && packetViewerMarkup ? `<div data-service-packet>${packetViewerMarkup(packetInspectOptions())}</div>` : !message && !row ? '<p class="empty-copy">Select a captured sample.</p>' : ""}</div>
         ${selectedInspectionMarkup()}${peerOriginMarkup(origin)}`;

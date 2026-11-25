@@ -9597,13 +9597,14 @@ button.utility-button.replay-tab-add {
    scroll the picker away. They stack, as the inspector is narrow, and sit side
    by side only when each would still be wide. */
 .service-map-detail-body { container-type: inline-size; }
-.service-map-detail-body.packet-details { display: flex; flex-direction: column; flex: 1 1 0; }
+.service-map-detail-body.packet-details { display: flex; flex-direction: column; flex: 1 1 0; padding: 8px 10px 10px; }
 /* The picker and panes keep the inspector's visible height, never less than
    560px; inspections and peers follow below and the body scrolls to them. */
 .packet-block { display: flex; flex-direction: column; flex: none; height: 100%; min-height: 560px; }
+.packet-block > p { margin: 0 0 6px; }
 .packet-block > [data-service-packet] { display: flex; flex: 1 1 0; min-height: 0; }
-.packet-source { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-.packet-source > span:not(.mr-toggle) { min-width: 0; overflow-wrap: anywhere; font-size: var(--font-xs); color: var(--text-dim); }
+.packet-source { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; margin-bottom: 6px; }
+.packet-source > span:not(.mr-toggle) { flex: 1 1 140px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-xs); color: var(--text-dim); }
 .packet-source select,
 .packet-inspect select {
   max-width: 100%;
@@ -9616,25 +9617,36 @@ button.utility-button.replay-tab-add {
   font: inherit;
   font-size: var(--font-xs);
 }
-.packet-viewer.lower-workbench { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; min-height: 0; }
+.packet-viewer.lower-workbench { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; min-height: 0; }
 .packet-viewer .message-column { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .packet-viewer .editor-shell { flex: 1 1 0; min-height: 0; overflow: hidden; }
 .packet-viewer .cm-container { height: 100%; }
-.packet-viewer .pane-header { flex-wrap: wrap; gap: 4px; }
+.packet-viewer .pane-header { flex-wrap: wrap; gap: 4px 6px; min-height: 30px; padding: 3px 8px; }
+.packet-viewer .pane-header strong { font-size: var(--font-xs); }
 /* Tabs at the right in both panes; Response's Inspect follows its tabs. */
-.packet-viewer .pane-header .view-tabs { margin-left: auto; }
-.packet-viewer .pane-header .packet-inspect { margin: 0 0 0 8px; }
-.packet-viewer .pane-footer { flex-wrap: wrap; }
+.packet-viewer .pane-header .view-tabs { margin-left: auto; gap: 1px; }
+.packet-viewer .pane-header .view-tab { padding: 3px 5px; font-size: var(--font-xs); }
+.packet-viewer .pane-header .packet-inspect { margin: 0 0 0 8px; flex: 0 0 auto; }
+.packet-viewer .pane-header .packet-inspect select { width: 74px; min-height: 22px; padding: 2px 18px 2px 6px; text-overflow: ellipsis; }
+.packet-viewer .pane-footer { flex-wrap: nowrap; gap: 8px; min-height: 34px; padding: 4px 10px; }
+.packet-viewer .pane-search { flex: 1 1 100px; min-width: 0; max-width: none; }
+.packet-viewer .pane-search input { min-height: 24px; padding: 3px 8px; font-size: var(--font-xs); }
+.packet-viewer .pane-footer > span:last-child { flex: 0 0 auto; white-space: nowrap; text-align: right; }
 .packet-viewer .render-view { flex: 1 1 0; min-height: 0; }
 .packet-notice { margin: 4px 8px; font-size: var(--font-xs); color: var(--text-dim); }
-.packet-capture-info { margin-left: auto; font-size: var(--font-xs); }
-.packet-capture-info dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; }
+.packet-capture-info { margin-left: auto; flex: 0 0 auto; font-size: var(--font-xs); }
+.packet-capture-info > summary { cursor: pointer; color: var(--text-soft); white-space: nowrap; }
+.packet-capture-info[open] { flex-basis: 100%; margin-left: 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-code); }
+.packet-capture-info dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; margin: 6px 0 0; }
 .packet-capture-info dd { margin: 0; overflow-wrap: anywhere; }
 .packet-inspect { display: flex; justify-content: flex-end; margin-top: 8px; }
 .packet-inspection { margin-top: 12px; font-size: var(--font-xs); }
 .packet-inspection header { display: flex; align-items: center; gap: 8px; }
 .packet-inspection ul { padding-left: 20px; overflow-wrap: anywhere; }
 .packet-inspection details { margin-top: 8px; color: var(--text-dim); }
+@container (max-width: 295px) {
+  .packet-viewer .pane-header .packet-inspect { margin-left: auto; }
+}
 @container (min-width: 1100px) {
   .packet-viewer.lower-workbench { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
 }
