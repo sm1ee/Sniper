@@ -1783,7 +1783,7 @@ summary {
   padding: 2px 6px;
   margin: -3px 0 -3px -7px;
   border: 1px solid var(--point-border);
-  border-radius: var(--radius-sm);
+  border-radius: 4px;
   background: var(--panel-code);
   color: var(--text);
   font: inherit;
