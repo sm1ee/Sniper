@@ -10722,25 +10722,23 @@ function renderSessionSidebar() {
   // One shape for everything that folds. `key` is the attribute that says
   // which name this is, and `group` the group a + makes a session in: "" is
   // none, null is no + at all.
-  const block = (attributes, key, label, count, open, group, body) => `<li class="session-sidebar-group${attributes}>`
+  const block = (attributes, key, label, open, group, body) => `<li class="session-sidebar-group${attributes}>`
     + `<div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" ${key} aria-expanded="${open}">`
-    + `<span class="session-sidebar-group-name">${label}</span>`
-    + `<span class="session-sidebar-group-count">${count}</span></button>`
+    + `<span class="session-sidebar-group-name">${label}</span></button>`
     + `${group === null ? "" : `<button class="session-sidebar-group-add" type="button" data-add-to-group="${group}" aria-label="New session in ${label}" title="New session in ${label}">+</button>`}</div>`
     + `${open ? body : ""}</li>`;
   const listed = (sessions) => `<ul class="session-sidebar-group-list">${rows(sessions)}</ul>`;
   const folders = block(' session-sidebar-default" data-drop-default', 'data-section="default"', "Default",
-    layout.loose.length, !foldedSections.has("default"), "", listed(layout.loose))
+    !foldedSections.has("default"), "", listed(layout.loose))
     + layout.groups.map(([name, sessions]) => {
       const group = escapeHtml(name);
       return block(`" draggable="true" data-drag-group="${group}"`, `data-group="${group}"`, group,
-        sessions.length, !foldedGroups.has(name), group, listed(sessions));
+        !foldedGroups.has(name), group, listed(sessions));
     }).join("");
-  const unpinned = layout.loose.length + layout.groups.reduce((sum, [, sessions]) => sum + sessions.length, 0);
   const markup = (layout.pinned.length
     ? block(' session-sidebar-section session-sidebar-pinned" data-drop-pinned', 'data-section="pinned"', "Pinned Sessions",
-      layout.pinned.length, !foldedSections.has("pinned"), null, listed(layout.pinned)) : "")
-    + block(' session-sidebar-section"', 'data-section="sessions"', "Sessions", unpinned, !foldedSections.has("sessions"), null,
+      !foldedSections.has("pinned"), null, listed(layout.pinned)) : "")
+    + block(' session-sidebar-section"', 'data-section="sessions"', "Sessions", !foldedSections.has("sessions"), null,
       `<ul class="session-sidebar-folders">${folders}</ul>`);
   if (markup === sessionSidebarMarkup) return;
   const focused = document.activeElement;

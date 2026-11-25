@@ -1361,13 +1361,7 @@ summary {
   list-style: none;
 }
 
-/* A section is a name with a chevron after it, and no folder. Nothing is
-   made in a section, so there is no +: its width stays, and the counts line
-   up down the list. */
-.session-sidebar-section > .session-sidebar-group-head > .session-sidebar-group-toggle {
-  margin-right: 24px;
-}
-
+/* A section is a name with a chevron after it, and no folder. */
 .session-sidebar-section > .session-sidebar-group-head > .session-sidebar-group-toggle::before {
   content: none;
 }
@@ -1467,12 +1461,6 @@ summary {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.session-sidebar-group-count {
-  flex: none;
-  font-weight: 400;
-  font-variant-numeric: tabular-nums;
 }
 
 /* The rows run the list's width. The mark each begins with is their indent,
