@@ -8822,24 +8822,54 @@ button.utility-button.replay-tab-add {
 .service-map-product-filter-controls label { display: grid; gap: 5px; min-width: 0; color: var(--text-soft); font-size: var(--font-xs); }
 .service-map-product-filter-controls select { width: 100%; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
 .service-map-product-filter-panel p { margin: 8px 0 0; overflow-wrap: anywhere; }
+.service-map-clues.service-map-products { gap: 3px; }
 .service-map-products > span { min-width: 0; flex: 0 1 auto; }
 .service-map-products > .service-map-products-more { flex: 0 0 auto; }
 /* What +N stands for, what ⚠ and the lock name, and a badge's advisories open
    on hover (+N on keyboard focus too): the desktop app's web view shows no
    title tooltip. createMorePopup in service-map.js places it on the page,
    outside the map's clipping layer. */
-.service-map-more { position: fixed; z-index: 30; min-width: 120px; max-width: 260px; padding: 6px 9px; white-space: pre-line; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--panel-elevated); color: var(--text); font-size: var(--font-xs); line-height: 1.6; text-align: left; box-shadow: 0 4px 18px rgba(0,0,0,.25); pointer-events: none; }
+.service-map-more { position: fixed; z-index: 30; box-sizing: border-box; min-width: 168px; max-width: min(320px, calc(100vw - 16px)); max-height: min(360px, calc(100vh - 16px)); overflow: hidden; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--panel-elevated); color: var(--text); font-size: var(--font-xs); line-height: 1.4; text-align: left; overflow-wrap: anywhere; box-shadow: 0 10px 28px rgba(0,0,0,.42), 0 1px 0 rgba(255,255,255,.04) inset; pointer-events: none; }
 .service-map-more[hidden] { display: none; }
-.service-map-products > .service-map-exposure { flex: 0 0 auto; color: var(--danger); border-color: var(--danger); }
-.service-map-products > .service-map-auth { flex: 0 0 auto; color: var(--token-url-color); }
+.service-map-more-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px solid var(--line); }
+.service-map-more-title { font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim); }
+.service-map-more-title.is-danger { color: var(--danger); }
+.service-map-more-count { flex: none; padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg-glow); color: var(--text-soft); font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.5; }
+.service-map-more-count.is-danger { color: var(--danger); border-color: var(--danger); }
+.service-map-more-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; min-width: 0; }
+.service-map-more-row { display: grid; gap: 3px; min-width: 0; }
+.service-map-more-row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-width: 0; }
+.service-map-more-label { min-width: 0; color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
+.service-map-more-subcount { flex: none; color: var(--text-dim); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.service-map-more-tokens { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.service-map-more-code { display: inline-block; max-width: 100%; box-sizing: border-box; padding: 1px 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-code); color: var(--text-soft); font-family: var(--mono); font-size: 10.5px; line-height: 1.35; overflow-wrap: anywhere; word-break: break-all; }
+.service-map-more-overflow { align-self: center; color: var(--text-dim); font-size: 10px; }
+.service-map-more-tags { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.service-map-more-tag { display: inline-flex; align-items: baseline; gap: 4px; max-width: 100%; box-sizing: border-box; padding: 2px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-code); color: var(--text); font-size: var(--font-xs); line-height: 1.35; overflow-wrap: anywhere; }
+.service-map-more-tag-name { font-weight: 500; overflow-wrap: anywhere; }
+.service-map-more-tag-ver { color: var(--text-dim); font-family: var(--mono); font-size: 10.5px; overflow-wrap: anywhere; }
+.service-map-more-exposure-item { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.service-map-more-dot { flex: none; font-size: 10px; line-height: 1; }
+.service-map-more-dot.is-danger { color: var(--danger); }
+.service-map-more-meta { color: var(--text-dim); font-size: 10.5px; }
+.service-map-more-meta.is-danger { color: var(--danger); font-weight: 500; }
+.service-map-more-note { margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--line); color: var(--text-dim); font-size: 10.5px; line-height: 1.4; }
+.service-map-products > .service-map-exposure { flex: 0 1 auto; min-width: 44px; color: var(--danger); border-color: var(--danger); }
+.service-map-products > .service-map-auth { flex: 0 1 auto; min-width: 44px; color: var(--token-url-color); }
 .service-map-advisories, .service-map-kev { margin-left: 5px; padding: 0 4px; border: 1px solid var(--line-strong); border-radius: 4px; font-size: var(--font-xs); white-space: nowrap; }
 .service-map-advisories { color: var(--text-secondary); }
 .service-map-kev { margin-left: 3px; color: var(--danger); border-color: var(--danger); }
 /* In a crowded row the name gives way, never the count or KEV; a short line
-   keeps their borders inside the row's fixed height. */
-.service-map-products > .service-map-known { display: inline-flex; align-items: center; }
-.service-map-known-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.service-map-known > .service-map-advisories, .service-map-known > .service-map-kev { flex: none; line-height: 1.2; }
+   keeps their borders inside the row's fixed height. When auth/exposure and +N
+   both share the row, hide the squeezed product name so the count and KEV pill
+   stay intact instead of clipping mid-badge. */
+.service-map-products > .service-map-known { display: inline-flex; align-items: center; gap: 2px; padding: 0 3px; flex: 0 100 auto; min-width: 24px; }
+.service-map-products > .service-map-known:has(.service-map-kev) { min-width: 48px; }
+.service-map-products:has(> .service-map-auth, > .service-map-exposure):has(> .service-map-products-more) > .service-map-known > .service-map-known-name { display: none; }
+.service-map-known-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.service-map-known > .service-map-advisories, .service-map-known > .service-map-kev { flex: none; margin-left: 0; line-height: 1.2; }
+.service-map-known > .service-map-advisories { border: 0; padding: 0 2px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); }
+.service-map-known > .service-map-kev { padding: 0 3px; font-weight: 600; }
 .service-map-api-auth { flex: 0 0 auto; margin-left: 6px; color: var(--token-url-color); font-size: var(--font-xs); white-space: nowrap; }
 .service-map-product-icon { width: 1em; height: 1em; margin-right: 2px; vertical-align: -0.12em; }
 .service-map-mark svg { width: 15px; height: 15px; }

@@ -401,29 +401,237 @@
       : Math.max(0, Math.min(anchor.bottom + gap, view.height - size.height));
     return { left: Math.max(0, Math.min(anchor.left, view.width - size.width)), top };
   }
+  function morePopupKind(anchor) {
+    const explicit = anchor?.getAttribute?.("data-more-kind");
+    if (explicit) return explicit;
+    const classes = typeof anchor?.className === "string" ? anchor.className.split(/\s+/) : [];
+    if (classes.includes("service-map-auth")) return "auth";
+    if (classes.includes("service-map-exposure")) return "exposure";
+    if (classes.includes("service-map-products-more")) return "products";
+    if (classes.includes("service-map-advisories") || classes.includes("service-map-kev")) return "advisories";
+    return "list";
+  }
+  const MORE_POPUP_LIMITS = Object.freeze({ authGroups: 10, authTokensPerGroup: 6, products: 16, exposures: 12, lines: 16 });
+  const MORE_ADVISORY_LINE = /^(\d+) known advisor(?:y|ies) for (.+), (\d+) exploited \(CISA KEV\)\.(?:\s*(.*))?$/;
+  // Auth detail names from the server never contain whitespace; keeping the
+  // parenthesised group non-whitespace preserves "Negotiate (Kerberos or NTLM)".
+  const MORE_AUTH_DETAIL = /^(.+?)\s+\(([^\s()]+)\)$/;
+  const MORE_PRODUCT_VERSION = /^(.+?)\s+(\d[\w.+-]*)$/;
+  function populateMorePopup(doc, popup, kind, text) {
+    // Only DOM nodes with textContent enter the popup — never innerHTML — so
+    // captured names, headers, or cookie identifiers cannot inject markup.
+    if (typeof popup.appendChild !== "function") {
+      popup.textContent = text;
+      return;
+    }
+    if (typeof popup.replaceChildren === "function") popup.replaceChildren();
+    else popup.textContent = "";
+    const el = (tag, className, content) => {
+      const node = doc.createElement(tag);
+      if (className) node.className = className;
+      if (content !== undefined) node.textContent = content;
+      return node;
+    };
+    const addHead = (title, count, danger = false) => {
+      const head = el("div", "service-map-more-head");
+      head.appendChild(el("span", `service-map-more-title${danger ? " is-danger" : ""}`, title));
+      if (count !== null && count !== undefined) {
+        head.appendChild(el("span", `service-map-more-count${danger ? " is-danger" : ""}`, String(count)));
+      }
+      popup.appendChild(head);
+    };
+    const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+    popup.setAttribute?.("data-more-kind", kind);
+
+    if (kind === "auth") {
+      addHead("Authentication", lines.length);
+      const groups = [];
+      const byLabel = new Map();
+      for (const line of lines) {
+        const match = MORE_AUTH_DETAIL.exec(line);
+        const label = match ? match[1] : line;
+        const detail = match ? match[2] : "";
+        let group = byLabel.get(label);
+        if (!group) {
+          group = { label, count: 0, details: [] };
+          byLabel.set(label, group);
+          groups.push(group);
+        }
+        group.count += 1;
+        if (detail && !group.details.includes(detail)) group.details.push(detail);
+      }
+      const list = el("ul", "service-map-more-list");
+      const visible = groups.slice(0, MORE_POPUP_LIMITS.authGroups);
+      for (const group of visible) {
+        const row = el("li", "service-map-more-row");
+        if (group.details.length === 1 && group.details[0].length <= 20) {
+          const line = el("div", "service-map-more-row-head");
+          line.appendChild(el("span", "service-map-more-label", group.label));
+          line.appendChild(el("code", "service-map-more-code", group.details[0]));
+          row.appendChild(line);
+        } else {
+          const line = el("div", "service-map-more-row-head");
+          line.appendChild(el("span", "service-map-more-label", group.label));
+          if (group.details.length > 1 || group.count > 1) {
+            line.appendChild(el("span", "service-map-more-subcount", String(group.details.length || group.count)));
+          }
+          row.appendChild(line);
+          if (group.details.length) {
+            const tokens = el("div", "service-map-more-tokens");
+            for (const detail of group.details.slice(0, MORE_POPUP_LIMITS.authTokensPerGroup)) {
+              tokens.appendChild(el("code", "service-map-more-code", detail));
+            }
+            const hiddenDetails = group.details.length - MORE_POPUP_LIMITS.authTokensPerGroup;
+            if (hiddenDetails > 0) {
+              tokens.appendChild(el("span", "service-map-more-overflow", `+${hiddenDetails} more`));
+            }
+            row.appendChild(tokens);
+          }
+        }
+        list.appendChild(row);
+      }
+      popup.appendChild(list);
+      const hiddenGroups = groups.length - visible.length;
+      if (hiddenGroups > 0) popup.appendChild(el("div", "service-map-more-note", `+${hiddenGroups} more in inspector`));
+      return;
+    }
+
+    if (kind === "products") {
+      addHead("More technologies", lines.length);
+      const tags = el("div", "service-map-more-tags");
+      const visible = lines.slice(0, MORE_POPUP_LIMITS.products);
+      for (const line of visible) {
+        let name = line;
+        let version = "";
+        const multiIndex = line.indexOf(" · ");
+        if (multiIndex > 0) {
+          name = line.slice(0, multiIndex);
+          version = line.slice(multiIndex + 3);
+        } else {
+          const match = MORE_PRODUCT_VERSION.exec(line);
+          if (match) {
+            name = match[1];
+            version = match[2];
+          }
+        }
+        const tag = el("span", "service-map-more-tag");
+        tag.appendChild(el("span", "service-map-more-tag-name", name));
+        if (version) tag.appendChild(el("span", "service-map-more-tag-ver", version));
+        tags.appendChild(tag);
+      }
+      popup.appendChild(tags);
+      const hidden = lines.length - visible.length;
+      if (hidden > 0) popup.appendChild(el("div", "service-map-more-note", `+${hidden} more in inspector`));
+      return;
+    }
+
+    if (kind === "exposure") {
+      addHead("Exposures", lines.length, true);
+      const list = el("ul", "service-map-more-list");
+      const visible = lines.slice(0, MORE_POPUP_LIMITS.exposures);
+      for (const line of visible) {
+        const row = el("li", "service-map-more-exposure-item");
+        row.appendChild(el("span", "service-map-more-dot is-danger", "⚠"));
+        row.appendChild(el("span", "service-map-more-label", line));
+        list.appendChild(row);
+      }
+      popup.appendChild(list);
+      const hidden = lines.length - visible.length;
+      if (hidden > 0) popup.appendChild(el("div", "service-map-more-note", `+${hidden} more in inspector`));
+      return;
+    }
+
+    if (kind === "advisories") {
+      const parsed = lines.map((line) => {
+        const match = MORE_ADVISORY_LINE.exec(line);
+        return match
+          ? { count: Number(match[1]), target: match[2], kev: Number(match[3]), note: match[4] || "" }
+          : { raw: line };
+      });
+      const totalKev = parsed.reduce((sum, item) => sum + (item.kev || 0), 0);
+      addHead("Known advisories", totalKev > 0 ? "KEV" : parsed.reduce((sum, item) => sum + (item.count || 0), 0) || null, totalKev > 0);
+      const list = el("ul", "service-map-more-list");
+      let note = "";
+      for (const item of parsed) {
+        const row = el("li", "service-map-more-row");
+        if (item.raw) {
+          row.appendChild(el("span", "service-map-more-label", item.raw));
+        } else {
+          const head = el("div", "service-map-more-row-head");
+          head.appendChild(el("span", "service-map-more-label", item.target));
+          head.appendChild(el("span", "service-map-more-subcount", `${item.count} advisor${item.count === 1 ? "y" : "ies"}`));
+          row.appendChild(head);
+          const meta = el("span", `service-map-more-meta${item.kev > 0 ? " is-danger" : ""}`,
+            item.kev > 0 ? `${item.kev} exploited (CISA KEV)` : "No known CISA KEV");
+          row.appendChild(meta);
+          if (!note && item.note) note = item.note;
+        }
+        list.appendChild(row);
+      }
+      popup.appendChild(list);
+      if (note) popup.appendChild(el("div", "service-map-more-note", note));
+      return;
+    }
+
+    const list = el("ul", "service-map-more-list");
+    const visible = lines.slice(0, MORE_POPUP_LIMITS.lines);
+    for (const line of visible) {
+      list.appendChild(el("li", "service-map-more-label", line));
+    }
+    popup.appendChild(list);
+    const hidden = lines.length - visible.length;
+    if (hidden > 0) popup.appendChild(el("div", "service-map-more-note", `+${hidden} more`));
+  }
   function createMorePopup(doc) {
     let popup = null;
+    let openTimer = null;
+    const cancelTimer = () => {
+      if (openTimer !== null && typeof clearTimeout === "function") clearTimeout(openTimer);
+      openTimer = null;
+    };
+    const showNow = (anchor) => {
+      cancelTimer();
+      const text = anchor?.getAttribute?.("data-more");
+      if (!text || !doc?.body) return;
+      if (!popup) {
+        popup = doc.createElement("div");
+        popup.className = "service-map-more";
+        popup.setAttribute("role", "tooltip");
+        doc.body.appendChild(popup);
+      }
+      populateMorePopup(doc, popup, morePopupKind(anchor), text);
+      // Reset coordinates before measuring so a previous right-edge placement
+      // cannot squeeze the new content's intrinsic width and inflate its height.
+      popup.style.left = "0px";
+      popup.style.top = "0px";
+      popup.hidden = false;
+      const view = { width: doc.documentElement?.clientWidth || 0, height: doc.documentElement?.clientHeight || 0 };
+      const place = morePopupPlacement(anchor.getBoundingClientRect(), { width: popup.offsetWidth, height: popup.offsetHeight }, view);
+      popup.style.left = `${place.left}px`;
+      popup.style.top = `${place.top}px`;
+    };
     return {
-      show(anchor) {
-        const text = anchor?.getAttribute?.("data-more");
-        if (!text || !doc?.body) return;
-        if (!popup) {
-          popup = doc.createElement("div");
-          popup.className = "service-map-more";
-          popup.setAttribute("role", "tooltip");
-          doc.body.appendChild(popup);
+      show: showNow,
+      schedule(anchor, delayMs = 160) {
+        cancelTimer();
+        if (!anchor) return;
+        // Once a popup is already open, sliding across sibling chips updates
+        // immediately instead of flickering through another hover delay.
+        if ((popup && !popup.hidden) || delayMs <= 0 || typeof setTimeout !== "function") {
+          showNow(anchor);
+          return;
         }
-        popup.textContent = text;
-        popup.hidden = false;
-        const view = { width: doc.documentElement?.clientWidth || 0, height: doc.documentElement?.clientHeight || 0 };
-        const place = morePopupPlacement(anchor.getBoundingClientRect(), { width: popup.offsetWidth, height: popup.offsetHeight }, view);
-        popup.style.left = `${place.left}px`;
-        popup.style.top = `${place.top}px`;
+        openTimer = setTimeout(() => {
+          openTimer = null;
+          if (anchor.isConnected !== false) showNow(anchor);
+        }, delayMs);
       },
       hide() {
+        cancelTimer();
         if (popup) popup.hidden = true;
       },
       remove() {
+        cancelTimer();
         popup?.remove();
         popup = null;
       },
@@ -4321,12 +4529,13 @@
     const moreAnchor = (target) => target?.closest?.("[data-more]") || null;
     listen(els.viewport, "pointerover", (event) => {
       const anchor = moreAnchor(event.target);
-      if (anchor) morePopup.show(anchor);
+      if (anchor) morePopup.schedule(anchor);
     });
     listen(els.viewport, "pointerout", (event) => {
       const anchor = moreAnchor(event.target);
       if (anchor && !anchor.contains(event.relatedTarget)) morePopup.hide();
     });
+    listen(els.viewport, "pointerdown", () => morePopup.hide());
     // +N's list also opens when its card has keyboard focus.
     listen(els.viewport, "focusin", (event) => {
       const more = event.target?.matches?.(".service-map-card:focus-visible")
