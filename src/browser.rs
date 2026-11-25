@@ -1994,6 +1994,76 @@ fn live_profiles() -> &'static Mutex<HashMap<PathBuf, Owner>> {
     LIVE.get_or_init(Default::default)
 }
 
+/// Every browser profile Sniper keeps: the shared ones, and each session's,
+/// which are one level down in the session's own directory.
+fn profile_dirs(data_dir: &Path) -> Vec<PathBuf> {
+    let Ok(profiles) = fs::read_dir(data_dir.join("browser-profiles")) else {
+        return Vec::new();
+    };
+    profiles
+        .flatten()
+        .flat_map(|entry| {
+            let path = entry.path();
+            if entry.file_name().to_string_lossy().starts_with("session-") {
+                fs::read_dir(&path)
+                    .map(|inner| inner.flatten().map(|entry| entry.path()).collect())
+                    .unwrap_or_default()
+            } else {
+                vec![path]
+            }
+        })
+        .collect()
+}
+
+/// The proxy ports that the browsers Sniper opened send to, for the browsers
+/// that still run: started by this Sniper or by an earlier one. A browser is
+/// wired to one proxy for its life, so the port says whose traffic it is: the
+/// main listener's, or a session's own. The profile's place does not, because
+/// a throwaway profile is at the top level whichever proxy it was opened for.
+pub fn live_browser_proxy_ports(data_dir: &Path) -> Vec<u16> {
+    let live = live_profiles()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    profile_dirs(data_dir)
+        .into_iter()
+        .filter_map(|profile| {
+            let proxy = match live.get(&profile) {
+                Some(owner) => owner.proxy.clone(),
+                None => {
+                    let owner = read_owner(&profile)?;
+                    // The record names the process Sniper started, which a
+                    // browser that relaunched itself has left behind; its
+                    // lock names the one that carries on.
+                    (process_runs_as(owner.pid, &owner.exe)
+                        || lock_holder(&profile, &owner.exe).is_some())
+                    .then_some(owner.proxy)?
+                }
+            };
+            proxy.rsplit(':').next()?.parse().ok()
+        })
+        .collect()
+}
+
+/// Writes the record of a browser on a shared profile that sends to `proxy`,
+/// with the test process standing in for the browser.
+#[cfg(test)]
+pub(crate) fn stand_in_for_a_running_browser(data_dir: &Path, proxy: &str) {
+    let profile = data_dir.join("browser-profiles").join("example");
+    fs::create_dir_all(&profile).unwrap();
+    write_owner(
+        &profile,
+        &Owner {
+            pid: std::process::id(),
+            exe: std::env::current_exe().unwrap(),
+            proxy: proxy.to_string(),
+            devtools_port: false,
+            started: None,
+        },
+    )
+    .unwrap();
+}
+
 /// The loopback ports a browser Sniper opened is driven through, by profile: its
 /// DevTools or MCP port, and the daemon its driver calls. Each hands over the
 /// browser's logged-in sessions, so while the browser runs the proxy refuses them
@@ -2045,21 +2115,7 @@ fn bypassed_own_port(args: &str) -> Option<u16> {
 // ponytail: an entry found here stays until Sniper stops, even after that browser
 // quits; nothing watches a process this Sniper did not start.
 pub fn recover_driver_ports(data_dir: &Path) {
-    let Ok(profiles) = fs::read_dir(data_dir.join("browser-profiles")) else {
-        return;
-    };
-    // A session's profiles are one level down, in its own directory.
-    let profiles = profiles.flatten().flat_map(|entry| {
-        let path = entry.path();
-        if entry.file_name().to_string_lossy().starts_with("session-") {
-            fs::read_dir(&path)
-                .map(|inner| inner.flatten().map(|entry| entry.path()).collect())
-                .unwrap_or_default()
-        } else {
-            vec![path]
-        }
-    });
-    for profile in profiles {
+    for profile in profile_dirs(data_dir) {
         let Some(owner) = read_owner(&profile) else {
             continue;
         };
@@ -2147,6 +2203,61 @@ mod tests {
         assert!(!ports.contains(&45132));
         assert!(!ports.contains(&45133));
         forget_driver_ports(&running);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    // The session list marks the sessions a browser sends to. A browser is wired
+    // to one proxy for its life, so the port of its proxy says which session.
+    #[test]
+    fn the_proxy_ports_of_the_browsers_that_still_run_are_listed() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-live-browsers-{}", Uuid::new_v4()));
+        let root = data_dir.join("browser-profiles");
+        let shared = root.join("example");
+        let of_session = session_profiles_dir(&root, Uuid::new_v4()).join("example");
+        // A throwaway profile is at the top level whichever proxy it was opened for.
+        let throwaway = root.join(format!("fresh-{}", Uuid::new_v4()));
+        let gone = root.join("gone");
+        let started_here = root.join("started-here");
+        for profile in [&shared, &of_session, &throwaway, &gone, &started_here] {
+            fs::create_dir_all(profile).unwrap();
+        }
+        // This test process stands in for a browser that is still running.
+        let me = Owner {
+            pid: std::process::id(),
+            exe: std::env::current_exe().unwrap(),
+            proxy: "127.0.0.1:8080".to_string(),
+            devtools_port: false,
+            started: None,
+        };
+        let with_proxy = |proxy: &str| Owner {
+            proxy: proxy.to_string(),
+            ..me.clone()
+        };
+        write_owner(&shared, &me).unwrap();
+        write_owner(&of_session, &with_proxy("127.0.0.1:18081")).unwrap();
+        write_owner(&throwaway, &with_proxy("[::1]:18082")).unwrap();
+        // A record whose process has gone is no browser.
+        write_owner(
+            &gone,
+            &Owner {
+                pid: 0,
+                ..with_proxy("127.0.0.1:18083")
+            },
+        )
+        .unwrap();
+        // One this Sniper started is known before its record is read.
+        live_profiles()
+            .lock()
+            .unwrap()
+            .insert(started_here.clone(), with_proxy("127.0.0.1:18084"));
+
+        let mut ports = live_browser_proxy_ports(&data_dir);
+        ports.sort_unstable();
+        live_profiles().lock().unwrap().remove(&started_here);
+
+        assert_eq!(ports, [8080, 18081, 18082, 18084]);
+        assert!(live_browser_proxy_ports(&data_dir.join("nothing-here")).is_empty());
         let _ = fs::remove_dir_all(data_dir);
     }
 

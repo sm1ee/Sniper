@@ -10771,8 +10771,11 @@ function sessionSidebarRow(session, active, editing) {
   const port = feed.kind !== "none" && feed.port ? `:${feed.port}` : "";
   const portTitle = feed.kind === "main" ? "The proxy listener records into this session"
     : "This session records from its own port";
+  // A browser Sniper opened is sending to the session. One a person pointed
+  // at the proxy by hand is not known, so nothing is said of it.
+  const browser = activity?.browser ? "A browser opened from Sniper sends its traffic here" : "";
   const label = [session.name, session.created_by && `made by ${session.created_by}`, port && `proxy ${port}`,
-    heldLabel, running, finished].filter(Boolean).join(", ");
+    browser && "browser open", heldLabel, running, finished].filter(Boolean).join(", ");
   // One mark before the name says what the session is doing. What needs a
   // look comes first: a job running, then one that ended unseen, then traffic
   // arriving. A session doing nothing keeps the place, so the names line up.
@@ -10783,6 +10786,7 @@ function sessionSidebarRow(session, active, editing) {
     + `<span class="session-sidebar-status${status ? ` ${status}` : ""}"${status ? ` title="${escapeHtml(statusTitle)}"` : ""}></span>`
     + `<span class="session-sidebar-text"><span class="session-sidebar-name">${sessionMakerMark(session)}${name}</span>`
     + `${identity ? `<span class="session-sidebar-identity">${escapeHtml(identity)}</span>` : ""}</span>`
+    + `${browser ? `<span class="session-sidebar-browser" title="${browser}"></span>` : ""}`
     + `${port ? `<span class="session-sidebar-port" title="${portTitle}">${escapeHtml(port)}</span>` : ""}`
     + `${held ? `<span class="findings-badge session-sidebar-held" title="${heldLabel}">${held.toLocaleString()}</span>` : ""}`
     + "</button></li>";
@@ -11160,6 +11164,8 @@ function applySessionActivity(entries) {
       active: entry.active === true,
       port: Number.isSafeInteger(entry.proxy_port) ? entry.proxy_port : null,
       portOpen: entry.proxy_port_open === true,
+      // A browser Sniper opened sends to the session and still runs.
+      browser: entry.browser === true,
     });
   }
   for (const [id, before] of state.sessionActivity) {

@@ -69,6 +69,11 @@ sniper-cli session port close --id <session-uuid> --yes
   its port, which it opens if it is closed, and on a browser profile no other
   session shares. Aside is not opened that way, because its command cannot be
   pointed at one window.
+- `session port list` says for each session whether a browser Sniper opened
+  is sending to it and still runs (`browser`). That is a browser wired to the
+  port the session receives from: the proxy listener's for the active session,
+  or the session's own. The UI's session list shows it as a globe before the
+  port. A browser a person pointed at the proxy by hand is not known.
 - Name the session on every command with `--session-id <session-uuid>`.
 - A session is written while work runs in it. A Replay in flight no longer
   makes a note, a workspace save or a second Replay in the same session answer

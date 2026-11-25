@@ -959,3 +959,28 @@ test("the mark is in the column of a group's caret, and the rows run the list's 
   assert.match(rule(".session-sidebar-group-toggle::before"), /margin: 0 1\.5px;/, "a caret as wide as the mark under it");
   assert.doesNotMatch(css, /\.session-sidebar-running|\.session-sidebar-finished/);
 });
+
+// ── a browser Sniper opened that sends to the session ──
+test("a row shows that a browser Sniper opened is sending to the session, before the port it sends to", () => {
+  const f = fixture({ sessions: [session("a", "01"), session("b", "02")], activeId: "a" });
+  f.state.settings = { proxy_addr: "127.0.0.1:8080" };
+  const rowsNow = () => Object.fromEntries(f.els.sessionSidebarList.innerHTML.split("</li>").filter(part => part.includes("data-id="))
+    .map(part => [part.match(/data-id="([^"]+)"/)[1], part]));
+  f.context.applySessionActivity([
+    { id: "a", name: "Session a", running: [], held: 0, active: true, browser: true },
+    { id: "b", name: "Session b", running: [], held: 0, active: false },
+  ]);
+  assert.equal(f.state.sessionActivity.get("a").browser, true);
+  assert.equal(f.state.sessionActivity.get("b").browser, false, "nothing said is no browser");
+  assert.match(rowsNow().a, /<span class="session-sidebar-browser" title="A browser opened from Sniper sends its traffic here"><\/span><span class="session-sidebar-port"[^>]*>:8080<\/span>/);
+  assert.match(rowsNow().a, /aria-label="Session a, proxy :8080, browser open"/);
+  assert.doesNotMatch(rowsNow().b, /session-sidebar-browser|browser open/);
+  // The browser quits: the next read takes the mark away.
+  f.context.applySessionActivity([
+    { id: "a", name: "Session a", running: [], held: 0, active: true, browser: false },
+    { id: "b", name: "Session b", running: [], held: 0, active: false },
+  ]);
+  assert.doesNotMatch(rowsNow().a, /session-sidebar-browser/);
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  assert.match(css, /^\.session-sidebar-browser \{[^}]*mask: url\("data:image\/svg\+xml,[^}]*background: var\(--text-dim\);/m);
+});

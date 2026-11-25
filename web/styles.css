@@ -1459,6 +1459,22 @@ summary {
   background: var(--point-soft);
 }
 
+/* A browser Sniper opened is sending to the session: a globe before the
+   port it sends to, in one colour as the marks for who made a session are. */
+.session-sidebar-browser {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cg fill='none' stroke='black' stroke-width='1.4'%3E%3Ccircle cx='8' cy='8' r='6.2'/%3E%3Cpath d='M1.8 8h12.4M8 1.8c-3.2 3.4-3.2 9 0 12.4M8 1.8c3.2 3.4 3.2 9 0 12.4'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cg fill='none' stroke='black' stroke-width='1.4'%3E%3Ccircle cx='8' cy='8' r='6.2'/%3E%3Cpath d='M1.8 8h12.4M8 1.8c-3.2 3.4-3.2 9 0 12.4M8 1.8c3.2 3.4 3.2 9 0 12.4'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
+  background: var(--text-dim);
+}
+
+/* The globe and the port read as one thing. */
+.session-sidebar-browser + .session-sidebar-port {
+  margin-left: -4px;
+}
+
 /* The port that feeds a session, at the row's trailing edge. */
 .session-sidebar-port {
   flex: none;

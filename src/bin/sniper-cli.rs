@@ -4913,7 +4913,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "session.port.list",
             "session port list",
-            "List each session's own proxy port and whether it is open. No port is open after Sniper restarts.",
+            "List each session's own proxy port, whether it is open, and whether a browser Sniper opened is sending to the session. No port is open after Sniper restarts.",
             Read,
             false,
             &[],
@@ -12836,6 +12836,9 @@ struct SessionPortEntry {
     proxy_port: Option<u16>,
     #[serde(default)]
     proxy_port_open: bool,
+    /// Whether a browser Sniper opened sends to the session and still runs.
+    #[serde(default)]
+    browser: bool,
 }
 
 fn validate_session_metadata_response_id(
@@ -24286,6 +24289,24 @@ mod tests {
         assert!(Cli::try_parse_from(["sniper-cli", "session", "port", "open"]).is_err());
         assert!(command_from_operation_input("session.port.close", &json!({})).is_err());
         assert!(command_from_operation_input("session.port.list", &json!({ "id": id })).is_err());
+    }
+
+    // Before it opens a browser for a session, an agent can see that one
+    // Sniper opened is sending there already.
+    #[test]
+    fn session_port_list_says_whether_a_browser_sends_to_each_session() {
+        let rows: Vec<super::SessionPortEntry> = serde_json::from_value(json!([
+            {"id": "00000000-0000-0000-0000-000000000001", "name": "a", "active": true,
+             "running": [], "held": 0, "proxy_port": null, "proxy_port_open": false, "browser": true},
+            // A Sniper from before the field says nothing of browsers.
+            {"id": "00000000-0000-0000-0000-000000000002", "name": "b",
+             "proxy_port": 18081, "proxy_port_open": true},
+        ]))
+        .unwrap();
+        let printed = serde_json::to_value(&rows).unwrap();
+        assert_eq!(printed[0]["browser"], true);
+        assert_eq!(printed[1]["browser"], false);
+        assert_eq!(printed[1]["proxy_port"], 18081);
     }
 
     // An agent puts the sessions of one target in a group, and finds the

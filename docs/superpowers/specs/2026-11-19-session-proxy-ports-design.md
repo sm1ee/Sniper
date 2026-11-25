@@ -766,6 +766,12 @@ else. The registry and sniper-cli know none of it.
   through the main listener or a port of its own. What needs a look comes
   first. A session doing nothing has no mark, and the place stays, so a name
   is under the name of its group. The port is still at the row's other end.
+- **A globe before the port** says a browser Sniper opened is sending to the
+  session and still runs. A browser is wired to one proxy port for its life,
+  so the server reads each profile's record, checks its process, and matches
+  the port to the session that receives from it
+  (`live_browser_proxy_ports`, `browser` in `/api/sessions/activity`, and in
+  `session port list`). A browser pointed at the proxy by hand is not known.
 - **Pinned sessions** are in the order they were pinned (`session_pinned`).
   A session is pinned from its menu, or by a drop among the pinned; a drop
   anywhere else lets it go. A pinned session keeps its group and is drawn

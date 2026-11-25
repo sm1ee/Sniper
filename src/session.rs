@@ -156,6 +156,10 @@ pub struct SessionActivity {
     pub proxy_port: Option<u16>,
     /// Whether that port is open now. Nothing is open after a restart.
     pub proxy_port_open: bool,
+    /// Whether a browser Sniper opened sends to the session and still runs:
+    /// one wired to the port the session receives from. A browser a person
+    /// pointed at the proxy by hand is not known here.
+    pub browser: bool,
 }
 
 /// Findings counted by severity.

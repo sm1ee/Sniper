@@ -215,6 +215,23 @@ async fn session_summary_with_live_counts(
     summary
 }
 
+/// Whether one of the browsers Sniper opened sends to a session. A browser
+/// is wired to one proxy port: the main listener's reaches the session that
+/// listener records into, and a session's own reaches it while it is open.
+fn browser_sends_to(
+    records_main: bool,
+    port: &crate::session_ports::SessionPortStatus,
+    main_port: u16,
+    browser_ports: &[u16],
+) -> bool {
+    let receives_from = if records_main {
+        Some(main_port)
+    } else {
+        port.proxy_port.filter(|_| port.open)
+    };
+    receives_from.is_some_and(|port| browser_ports.contains(&port))
+}
+
 impl AppState {
     pub fn new(config: AppConfig) -> Result<Self> {
         // Before any listener answers: a browser an earlier run opened may still
@@ -848,6 +865,15 @@ impl AppState {
     /// can ask every few seconds, unlike `list_session_listings`.
     pub async fn session_activity(&self) -> Vec<crate::session::SessionActivity> {
         let loaded = self.loaded_listed_sessions().await;
+        // Reads each profile's record and asks whether its process runs: off
+        // the runtime, as the list asks every few seconds.
+        let browser_ports = {
+            let data_dir = self.config.data_dir.clone();
+            tokio::task::spawn_blocking(move || crate::browser::live_browser_proxy_ports(&data_dir))
+                .await
+                .unwrap_or_default()
+        };
+        let main_port = self.get_active_proxy_addr().await.port();
         let mut activity = Vec::new();
         for summary in self.sessions.summaries() {
             let (running, held) = match loaded.get(&summary.id) {
@@ -861,6 +887,7 @@ impl AppState {
                 active: summary.active,
                 running,
                 held,
+                browser: browser_sends_to(summary.active, &port, main_port, &browser_ports),
                 proxy_port: port.proxy_port,
                 proxy_port_open: port.open,
             });
@@ -3727,8 +3754,9 @@ fn proxy_url_targets_loopback(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_release_is_newer, find_update_app_bundle, find_update_app_bundle_in_mounts,
-        native_release_asset_arch, open_self_update_installer_log, parse_codesign_team_identifier,
+        browser_sends_to, ensure_release_is_newer, find_update_app_bundle,
+        find_update_app_bundle_in_mounts, native_release_asset_arch,
+        open_self_update_installer_log, parse_codesign_team_identifier,
         parse_hdiutil_attach_output, proxy_url_targets_loopback,
         release_asset_archs_match_binary_archs, release_asset_matches_arch,
         release_proxy_env_targets_loopback, release_query_failure, release_update_available,
@@ -4605,6 +4633,74 @@ mod tests {
         active.intercepts.drop_all().await;
         held.await.unwrap();
         drop((first, active));
+        drop(state);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    // A browser is wired to the port a session receives from: the main
+    // listener's for the session it records into, or the session's own while
+    // that port is open.
+    #[test]
+    fn a_browser_is_a_sessions_when_it_sends_to_the_port_the_session_receives_from() {
+        let port = |proxy_port, open| crate::session_ports::SessionPortStatus {
+            session_id: uuid::Uuid::nil(),
+            proxy_port,
+            open,
+            proxy_addr: None,
+        };
+        let browsers = [8080, 18081];
+        // The session the main listener records into.
+        assert!(browser_sends_to(true, &port(None, false), 8080, &browsers));
+        assert!(!browser_sends_to(true, &port(None, false), 9090, &browsers));
+        // A session with its own port open.
+        assert!(browser_sends_to(
+            false,
+            &port(Some(18081), true),
+            8080,
+            &browsers
+        ));
+        assert!(!browser_sends_to(
+            false,
+            &port(Some(18082), true),
+            8080,
+            &browsers
+        ));
+        // A port that is kept but closed receives nothing, whatever sends to it.
+        assert!(!browser_sends_to(
+            false,
+            &port(Some(18081), false),
+            8080,
+            &browsers
+        ));
+        assert!(!browser_sends_to(
+            false,
+            &port(None, false),
+            8080,
+            &browsers
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_activity_says_which_session_a_browser_sniper_opened_sends_to() {
+        let (data_dir, state) = rename_session_test_state();
+        let recording = state.session().await.id();
+        let other = state.sessions.create_session(Some("Other".into())).unwrap();
+        let browser = |activity: &[crate::session::SessionActivity], id| {
+            activity
+                .iter()
+                .find(|entry| entry.id == id)
+                .unwrap()
+                .browser
+        };
+        let before = state.session_activity().await;
+        assert!(!browser(&before, recording) && !browser(&before, other.id));
+
+        let main = state.get_active_proxy_addr().await;
+        crate::browser::stand_in_for_a_running_browser(&data_dir, &main.to_string());
+        let after = state.session_activity().await;
+        assert!(browser(&after, recording));
+        assert!(!browser(&after, other.id));
+
         drop(state);
         std::fs::remove_dir_all(data_dir).unwrap();
     }
