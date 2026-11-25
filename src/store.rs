@@ -5015,34 +5015,44 @@ fn infer_summary_mime(summary: &TransactionSummary) -> &'static str {
     if summary.is_websocket {
         return "websocket";
     }
-    let content_type = summary
+    let essence = summary
         .content_type
         .as_deref()
         .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
         .to_ascii_lowercase();
-    if content_type.contains("html") {
+    if essence.contains("html") {
         return "html";
     }
-    if content_type.contains("javascript") || content_type.contains("ecmascript") {
+    if essence.contains("javascript") || essence.contains("ecmascript") {
         return "script";
     }
-    if content_type.contains("css") {
+    if essence.contains("css") {
         return "css";
     }
-    if content_type.contains("json") {
+    if essence.contains("json") {
         return "json";
     }
-    if content_type.contains("image") {
+    if essence.starts_with("image/") {
         return "image";
     }
-    if let Some(extension) = extract_path_extension(&summary.path) {
-        match extension.as_str() {
-            "js" => return "script",
-            "css" => return "css",
-            "json" => return "json",
-            "html" => return "html",
-            "png" | "jpg" | "jpeg" | "gif" | "svg" | "ico" => return "image",
-            _ => {}
+    // Only infer from the path extension when the response carried no specific
+    // MIME type (or the generic octet-stream fallback).
+    if essence.is_empty() || essence == "application/octet-stream" {
+        if let Some(extension) = extract_path_extension(&summary.path) {
+            match extension.as_str() {
+                "js" | "mjs" | "cjs" => return "script",
+                "css" => return "css",
+                "json" => return "json",
+                "html" | "htm" => return "html",
+                "png" | "jpg" | "jpeg" | "gif" | "svg" | "ico" | "webp" | "avif" | "bmp" => {
+                    return "image"
+                }
+                _ => {}
+            }
         }
     }
     "other"

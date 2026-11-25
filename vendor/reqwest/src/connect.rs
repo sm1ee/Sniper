@@ -548,7 +548,11 @@ impl ConnectorService {
             #[cfg(feature = "default-tls")]
             Inner::DefaultTls(http, tls) => {
                 if dst.scheme() == Some(&Scheme::HTTPS) {
-                    let host = dst.host().ok_or("no host in url")?.to_string();
+                    let host = dst
+                        .host()
+                        .ok_or("no host in url")?
+                        .trim_matches(['[', ']'])
+                        .to_string();
                     let conn = socks::connect(proxy, dst, dns, &self.resolver, http).await?;
                     let conn = TokioIo::new(conn);
                     let conn = TokioIo::new(conn);
@@ -569,7 +573,11 @@ impl ConnectorService {
                     use tokio_rustls::TlsConnector as RustlsConnector;
 
                     let tls = tls.clone();
-                    let host = dst.host().ok_or("no host in url")?.to_string();
+                    let host = dst
+                        .host()
+                        .ok_or("no host in url")?
+                        .trim_matches(['[', ']'])
+                        .to_string();
                     let conn = socks::connect(proxy, dst, dns, &self.resolver, http).await?;
                     let conn = TokioIo::new(conn);
                     let conn = TokioIo::new(conn);
@@ -868,7 +876,11 @@ impl ConnectorService {
                     // We don't wrap this again in an HttpsConnector since that uses Maybe,
                     // and we know this is definitely HTTPS.
                     let tunneled = tunnel.call(dst.clone()).await?;
-                    let host = dst.host().ok_or("no host in url")?.to_string();
+                    let host = dst
+                        .host()
+                        .ok_or("no host in url")?
+                        .trim_matches(['[', ']'])
+                        .to_string();
                     let server_name = ServerName::try_from(host.as_str().to_owned())
                         .map_err(|_| "Invalid Server Name")?;
                     let io = RustlsConnector::from(tls.clone())

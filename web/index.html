@@ -260,7 +260,7 @@
                 <label class="pane-search" aria-label="Search request">
                   <input id="requestSearchInput" type="search" placeholder="Search request" />
                 </label>
-                <span id="requestSearchMeta">No highlights</span>
+                <span id="requestSearchMeta"></span>
               </footer>
             </section>
 
@@ -290,7 +290,7 @@
                 <label class="pane-search" aria-label="Search response">
                   <input id="responseSearchInput" type="search" placeholder="Search response" />
                 </label>
-                <span id="responseSearchMeta">No highlights</span>
+                <span id="responseSearchMeta"></span>
               </footer>
             </section>
 
@@ -333,7 +333,7 @@
                     </section>
                     <div class="notes-panel" id="notesPanel">
                       <h3>Notes</h3>
-                      <div id="notesCard"><p>No anomalies were recorded for this transaction.</p></div>
+                      <div id="notesCard"><p>No notes.</p></div>
                     </div>
                   </div>
                 </div>
@@ -422,7 +422,7 @@
                   <label class="pane-search" aria-label="Search intercepted message">
                     <input id="interceptSearchInput" type="search" placeholder="Search" />
                   </label>
-                  <span id="interceptSearchMeta">No highlights</span>
+                  <span id="interceptSearchMeta"></span>
                   <span id="interceptMeta"></span>
                 </footer>
               </section>
@@ -539,7 +539,7 @@
               <section class="panel-card panel-card-top ws-sessions-card">
                 <div class="filter-bar websocket-filter-bar">
                   <div class="filter-summary websocket-filter-summary" id="websocketMeta" aria-live="polite">
-                    Loading captured WebSocket sessions.
+                    Loading…
                   </div>
                   <label class="search-box" for="websocketSearchInput">
                     <input id="websocketSearchInput" type="search" placeholder="Host, path, status" autocomplete="off" aria-label="Search captured WebSocket sessions" />
@@ -584,7 +584,7 @@
                     <label class="pane-search" aria-label="Search handshake">
                       <input id="wsHandshakeSearchInput" type="search" placeholder="Search handshake" />
                     </label>
-                    <span id="wsHandshakeSearchMeta">No highlights</span>
+                    <span id="wsHandshakeSearchMeta"></span>
                   </footer>
                 </section>
                 <div class="pane-resizer" id="websocketSplitResizer" aria-hidden="true"></div>
@@ -664,7 +664,7 @@
                     <button class="primary-action" id="saveMatchReplaceRuleButton" type="button" disabled>Save</button>
                   </div>
                 </header>
-                <p class="panel-empty" id="matchReplaceEmpty">Add a rule to replace or annotate traffic.</p>
+                <p class="panel-empty" id="matchReplaceEmpty">No rules yet.</p>
                 <div class="settings-form hidden" id="matchReplaceForm">
                   <label class="settings-field">
                     <span>Scope</span>
@@ -788,7 +788,7 @@
             <div class="findings-detail-resizer" id="findingsDetailResizer"></div>
             <div class="findings-detail-panel" id="findingsDetailPanel">
               <div class="findings-detail-placeholder" id="findingsDetailPlaceholder">
-                <span class="text-muted">Select a finding to view details</span>
+                <span class="text-muted">Select a finding</span>
               </div>
               <div class="findings-detail-content hidden" id="findingsDetailContent">
                 <div class="findings-detail-header">
@@ -815,7 +815,7 @@
                     <label class="pane-search" aria-label="Search request">
                       <input id="findingsReqSearchInput" type="search" placeholder="Search request" />
                     </label>
-                    <span id="findingsReqSearchMeta">No highlights</span>
+                    <span id="findingsReqSearchMeta"></span>
                   </footer>
                 </section>
                 <section class="findings-pane">
@@ -827,7 +827,7 @@
                     <label class="pane-search" aria-label="Search response">
                       <input id="findingsResSearchInput" type="search" placeholder="Search response" />
                     </label>
-                    <span id="findingsResSearchMeta">No highlights</span>
+                    <span id="findingsResSearchMeta"></span>
                   </footer>
                 </section>
               </div>
@@ -1214,7 +1214,7 @@
                 <label class="pane-search">
                   <input id="replayRequestSearchInput" type="search" aria-label="Search Replay request" placeholder="Search request" />
                 </label>
-                <span id="replayRequestSearchMeta">No highlights · 1 lines · Pretty view</span>
+                <span id="replayRequestSearchMeta"></span>
               </footer>
             </section>
 
@@ -1245,7 +1245,7 @@
                 <label class="pane-search">
                   <input id="replayResponseSearchInput" type="search" aria-label="Search Replay response" placeholder="Search response" />
                 </label>
-                <span id="replayResponseSearchMeta">No highlights · 1 lines · Pretty view</span>
+                <span id="replayResponseSearchMeta"></span>
               </footer>
             </section>
           </section>
@@ -1310,7 +1310,7 @@
                   <span id="wsFrameCount" class="search-hit-count">0 frames</span>
                 </div>
                 <div class="ws-frame-list" id="wsFrameList">
-                  <div class="empty-copy">Connect to start a WebSocket conversation.</div>
+                  <div class="empty-copy">Not connected.</div>
                 </div>
               </div>
               <div class="ws-replay-frame-resizer" id="wsReplayFrameResizer"></div>
@@ -1325,7 +1325,7 @@
           </div>
 
           <div class="replay-empty hidden" id="replayEmptyState">
-            <p>Send a request here from HTTP history with <kbd data-shortcut="mod+r"></kbd>, or start one.</p>
+            <p>Press <kbd data-shortcut="mod+r"></kbd> from HTTP, or open a new tab.</p>
             <div class="replay-empty-actions">
               <button class="secondary-action" id="replayEmptyNewTabButton" type="button">New tab</button>
               <button class="secondary-action" id="replayEmptyImportCurlButton" type="button">Import cURL</button>
@@ -1340,7 +1340,7 @@
                 <div class="panel-toolbar">
                   <div>
                     <h2>Tools</h2>
-                    <p class="settings-inline-status error hidden" id="toolsLoadError" role="status" aria-live="polite" aria-atomic="true">Tools could not finish loading. Preserve any unsaved work, then reload the app to try again.</p>
+                    <p class="settings-inline-status error hidden" id="toolsLoadError" role="status" aria-live="polite" aria-atomic="true">Tools failed to load. Save unsaved work, then reload.</p>
                   </div>
                 </div>
                 <div class="tools-tool-strip">
@@ -1370,7 +1370,7 @@
                     class="request-editor tools-input-editor"
                     data-autosize="decoder"
                     spellcheck="false"
-                    placeholder="Paste text, tokens, payloads, JSON, JWT, hashes, or network values here."
+                    placeholder="Paste text, JSON, JWT, or encoded data…"
                   ></textarea>
                 </label>
 
@@ -1402,7 +1402,7 @@
               <header class="panel-toolbar tools-output-toolbar">
                 <div>
                   <h2 id="toolsActiveToolTitle">Encode output</h2>
-                  <p class="inline-copy" id="toolsOutputHint">Results appear here as you type.</p>
+                  <p class="inline-copy" id="toolsOutputHint">Enter input to decode.</p>
                 </div>
               </header>
               <div id="output" class="tools-output-list"></div>
@@ -1684,12 +1684,12 @@
         <section class="sequence-shell hidden" id="sequenceShell">
           <section class="sequence-empty hidden" id="sequenceEmpty">
             <h2>No sequences yet</h2>
-            <p>A sequence sends requests in order and passes values between them. Write <code>{{variable}}</code> in a later step to use a value an earlier step extracted.</p>
+            <p>Chain requests in order and pass extracted values with <code>{{variable}}</code>.</p>
             <button class="primary-action" id="sequenceEmptyNewButton" type="button">New sequence</button>
           </section>
           <header class="panel-toolbar replay-header" id="sequenceHeader">
             <div>
-              <p class="inline-copy">Chain requests with variable extraction. Use <code>{{variable}}</code> in subsequent steps.</p>
+              <p class="inline-copy">Pass extracted values between steps with <code>{{variable}}</code>.</p>
             </div>
             <div class="toolbar-actions">
               <button class="secondary-action" id="newSequenceButton" type="button">New sequence</button>
@@ -1785,12 +1785,12 @@
                 <label class="settings-field target-scope-field">
                   <span>In-scope hosts</span>
                   <textarea id="targetScopeEditor" rows="4" placeholder="*.example.com&#10;api.example.com"></textarea>
-                  <small>Leave empty to include every host.</small>
+                  <small>Empty matches all hosts.</small>
                 </label>
                 <label class="settings-field target-scope-field">
                   <span>Excluded hosts</span>
                   <textarea id="targetScopeExcludeEditor" rows="4" placeholder="log-*.example.com&#10;static.example.com"></textarea>
-                  <small>Taken back out of scope, with or without an in-scope list. These patterns are shared with intercept and filter settings.</small>
+                  <small>Always excluded. Shared across Intercept and Filters.</small>
                 </label>
               </div>
             </section>
@@ -1807,7 +1807,7 @@
               <button class="sub-tab target-tab active" id="targetServiceMapTab" type="button" data-target-view="service-map" role="tab" aria-selected="true" aria-controls="targetServiceMapPanel">Service Map</button>
               <button class="sub-tab target-tab" id="targetApisTab" type="button" data-target-view="apis" role="tab" aria-selected="false" aria-controls="targetServiceMapPanel">APIs</button>
             </div>
-            <span class="target-passive-label">Retained history · read only</span>
+            <span class="target-passive-label">Read-only</span>
           </header>
           <section class="service-map-workspace" id="targetServiceMapPanel" role="tabpanel" aria-labelledby="targetServiceMapTab">
             <div class="service-map-toolbar">
@@ -1832,7 +1832,7 @@
               <section class="service-map-graph" aria-label="Captured service origins">
                 <div class="service-map-body-overlay hidden" id="serviceMapBodyOverlay" aria-label="Shown retained inspections" aria-live="polite"></div>
                 <div class="service-map-viewport" id="serviceMapViewport" tabindex="0" aria-label="Service map. Plus or minus to zoom, zero to reset, F to fit."><div class="service-map-canvas" id="serviceMapCanvas"></div></div>
-                <div class="service-map-legend"><span class="service-map-legend-lines"><span class="service-map-line" aria-hidden="true"></span>Redirect <span class="service-map-line dashed" aria-hidden="true"></span>Origin / Referer <span class="service-map-line dotted" aria-hidden="true"></span>Body URL <span class="service-map-line link-declaration" aria-hidden="true"></span>Link header <span class="service-map-line preconnect-hint" aria-hidden="true"></span>Preconnect <span class="service-map-line peer-observation" aria-hidden="true"></span>Same address <span class="service-map-line client-request" aria-hidden="true"></span>Direct request</span><span class="service-map-legend-flow"><span class="service-map-line flow-api" aria-hidden="true"></span>API call <span class="service-map-line flow-page" aria-hidden="true"></span>Page <span class="service-map-line flow-static" aria-hidden="true"></span>Script or static file <span class="service-map-line flow-redirect" aria-hidden="true"></span>Redirect back</span><span id="serviceMapLinkKinds" class="service-map-kinds" role="group" aria-label="Origin and Referer links by request kind"></span><span id="serviceMapSiteControls" class="service-map-kinds" role="group" aria-label="Site grouping and origins hidden from the map"></span><details class="service-map-bounds-details hidden" id="serviceMapBoundsDetails"><summary id="serviceMapDetailsSummary">Details</summary><p class="service-map-status" id="serviceMapStatus"></p><p id="serviceMapGraphBounds"></p><p id="serviceMapGraphDiagnostics"></p></details><span class="service-map-view-actions"><button class="service-map-mode" id="serviceMapDirectRelations" type="button" aria-pressed="false" title="Pin the selected origin and show only its direct retained relations">Direct relations</button><button class="secondary-action hidden" id="serviceMapFocusSelection" type="button">Focus selection</button><button class="secondary-action hidden" id="serviceMapFlowMermaid" type="button" title="Copy this flow as a Mermaid sequence diagram">Copy Mermaid</button></span></div>
+                <div class="service-map-legend"><span class="service-map-legend-lines"><span class="service-map-legend-item"><span class="service-map-line" aria-hidden="true"></span>Redirect</span><span class="service-map-legend-item"><span class="service-map-line dashed" aria-hidden="true"></span>Origin / Referer</span><span class="service-map-legend-item"><span class="service-map-line dotted" aria-hidden="true"></span>Body URL</span><span class="service-map-legend-item"><span class="service-map-line link-declaration" aria-hidden="true"></span>Link</span><span class="service-map-legend-item"><span class="service-map-line preconnect-hint" aria-hidden="true"></span>Preconnect</span><span class="service-map-legend-item"><span class="service-map-line peer-observation" aria-hidden="true"></span>Same IP</span><span class="service-map-legend-item"><span class="service-map-line client-request" aria-hidden="true"></span>Direct</span></span><span class="service-map-legend-flow"><span class="service-map-legend-item"><span class="service-map-line flow-api" aria-hidden="true"></span>API</span><span class="service-map-legend-item"><span class="service-map-line flow-page" aria-hidden="true"></span>Page</span><span class="service-map-legend-item"><span class="service-map-line flow-static" aria-hidden="true"></span>Static</span><span class="service-map-legend-item"><span class="service-map-line flow-redirect" aria-hidden="true"></span>Redirect</span></span><span id="serviceMapLinkKinds" class="service-map-kinds" role="group" aria-label="Origin and Referer links by request kind"></span><span id="serviceMapSiteControls" class="service-map-kinds" role="group" aria-label="Site grouping and origins hidden from the map"></span><details class="service-map-bounds-details hidden" id="serviceMapBoundsDetails"><summary id="serviceMapDetailsSummary">Details</summary><p class="service-map-status" id="serviceMapStatus"></p><p id="serviceMapGraphBounds"></p><p id="serviceMapGraphDiagnostics"></p></details><span class="service-map-view-actions"><button class="service-map-mode" id="serviceMapDirectRelations" type="button" aria-pressed="false" title="Pin the selected origin and show only its direct retained relations">Direct relations</button><button class="secondary-action hidden" id="serviceMapFocusSelection" type="button">Focus selection</button><button class="secondary-action hidden" id="serviceMapFlowMermaid" type="button" title="Copy this flow as a Mermaid sequence diagram">Copy Mermaid</button></span></div>
               </section>
               <div class="pane-resizer service-map-resizer" id="serviceMapResizer" role="separator" aria-orientation="vertical" aria-label="Resize the map and the inspector" tabindex="0" title="Drag to resize; double-click to reset"></div>
               <aside class="service-map-detail" id="serviceMapDetail" aria-label="Selected origin details"></aside>
@@ -2226,14 +2226,14 @@
 <section class="filter-group">
               <h3>Command line</h3>
               <p class="modal-copy" id="cliPathDescription">
-                Make this app's bundled sniper-cli available in a terminal. PATH setup is optional.
+                Add bundled sniper-cli to your shell PATH.
               </p>
               <p class="modal-copy cli-path-directory hidden" id="cliPathDirectory"></p>
               <div class="filter-group-actions">
                 <button class="secondary-action" id="installCliPathButton" type="button" disabled>Add sniper-cli to PATH</button>
                 <button class="secondary-action" id="refreshCliPathButton" type="button">Refresh status</button>
               </div>
-              <p class="modal-copy settings-inline-status" id="installCliPathStatus" role="status" aria-live="polite" aria-atomic="true">Checking command-line availability…</p>
+              <p class="modal-copy settings-inline-status" id="installCliPathStatus" role="status" aria-live="polite" aria-atomic="true">Checking PATH…</p>
             </section>
 <section class="filter-group" aria-labelledby="vulndataTitle">
               <div class="filter-group-header">
@@ -2253,7 +2253,7 @@
                 <button class="switch" id="vulndataAutoUpdate" type="button" role="switch" aria-checked="true" aria-labelledby="vulndataUpdateLabel"></button>
               </div>
               <ul class="vulndata-sources" id="vulndataSources"></ul>
-              <p class="modal-copy hidden" id="vulndataRescanNote">Traffic captured before the data arrived needs a Findings Rescan.</p>
+              <p class="modal-copy hidden" id="vulndataRescanNote">Run Rescan in Findings to check earlier traffic.</p>
               <p class="modal-copy settings-inline-status" id="vulndataMessage" role="status" aria-live="polite"></p>
               <input class="hidden" id="vulndataImportFile" type="file" multiple accept=".json,.csv,.gz,application/json,text/csv,application/gzip" />
             </section>
@@ -2307,10 +2307,10 @@
               <label class="settings-field">
                 <span>Base text size (px)</span>
                 <input id="displaySizeInput" type="number" min="8" max="20" step="1" />
-                <small>Lower numbers make the whole workbench denser. The default is 12 px.</small>
+                <small>Default: 12 px.</small>
               </label>
 
-              <p class="modal-copy" id="displaySettingsLoadStatus" role="status" aria-live="polite">Loading saved display settings. You can edit while they load.</p>
+              <p class="modal-copy" id="displaySettingsLoadStatus" role="status" aria-live="polite">Loading settings…</p>
               <button class="secondary-action" id="retryDisplaySettingsButton" type="button" disabled>Retry</button>
 
             </section>
@@ -2347,7 +2347,7 @@
                 <input id="displayRenderResourcesInput" type="checkbox" />
                 <span>Load images, styles and fonts</span>
               </label>
-              <p class="modal-copy">Off, Render draws only what the response itself holds. On, it also fetches the images, stylesheets and fonts the page names, through Sniper and the session's proxy chain. Those requests go to the target and to any other host the page names, and are not recorded in HTTP history. Scripts never run either way.</p>
+              <p class="modal-copy">Fetches external images, styles, and fonts through Sniper (not logged in HTTP history). Scripts never run.</p>
             </section>
             <section class="filter-group">
               <h3>Findings in HTTP</h3>
@@ -2364,7 +2364,7 @@
                   <option value="none">No color</option>
                 </select>
               </label>
-              <p class="modal-copy">For requests with passive scan findings while Findings is on in HTTP. A color tag you set on a row, and a note you wrote, show instead.</p>
+              <p class="modal-copy">Highlights rows with passive findings unless manually tagged.</p>
             </section>
           </div>
           <div class="settings-panel-plain" data-settings-panel="shortcuts" role="tabpanel">

@@ -2777,6 +2777,46 @@ enum TunnelStart {
 const TUNNEL_QUIET: Duration = Duration::from_millis(500);
 /// How much of a tunnel's first line is read to tell HTTP from anything else.
 const TUNNEL_HEAD_BYTES: usize = 8 * 1024;
+const TLS_ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
+const WEBSOCKET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn is_http_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+fn looks_like_http_request_line(line: &[u8]) -> bool {
+    if line == b"PRI * HTTP/2.0" {
+        return true;
+    }
+    let mut parts = line.split(|byte| *byte == b' ');
+    let (Some(method), Some(target), Some(version), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    !method.is_empty()
+        && method.iter().all(|byte| is_http_token_byte(*byte))
+        && !target.is_empty()
+        && target.iter().all(|byte| byte.is_ascii_graphic())
+        && matches!(version, b"HTTP/1.1" | b"HTTP/1.0")
+}
 
 /// Tells what a tunnel's first bytes are, or `None` while too few have come.
 /// `complete` says no more are coming in time.
@@ -2786,14 +2826,11 @@ fn tunnel_start(head: &[u8], complete: bool) -> Option<TunnelStart> {
         [] => complete.then_some(TunnelStart::Tls),
         [0x16, 0x03, version, ..] if *version <= 0x04 => Some(TunnelStart::Tls),
         [0x16] | [0x16, 0x03] if !complete => None,
-        [first, ..] if first.is_ascii_uppercase() => {
+        [first, ..] if is_http_token_byte(*first) => {
             match head.iter().position(|byte| *byte == b'\n') {
                 Some(end) => {
                     let line = head[..end].strip_suffix(b"\r").unwrap_or(&head[..end]);
-                    let request = line.ends_with(b" HTTP/1.1")
-                        || line.ends_with(b" HTTP/1.0")
-                        || line == b"PRI * HTTP/2.0";
-                    Some(if request {
+                    Some(if looks_like_http_request_line(line) {
                         TunnelStart::Http
                     } else {
                         TunnelStart::Other
@@ -2829,18 +2866,16 @@ async fn dial_tunnel_target(
     Ok((stream, via_proxy))
 }
 
-/// Resolves once a server has sent something. A server that closes without
-/// a word is not speaking first, so then this never resolves.
-async fn speaks(server: &tokio::net::TcpStream) {
+/// Returns true once the server sends at least one byte, or false if the
+/// server closes or errors without speaking.
+async fn speaks(server: &tokio::net::TcpStream) -> bool {
     let mut byte = [0; 1];
-    if !matches!(server.peek(&mut byte).await, Ok(read) if read > 0) {
-        std::future::pending::<()>().await;
-    }
+    matches!(server.peek(&mut byte).await, Ok(read) if read > 0)
 }
 
 /// Takes the client's end of a CONNECT tunnel and tells what it speaks
 /// without consuming it. A target dialled to hear whether it speaks first
-/// comes back too.
+/// comes back only for `TunnelStart::Other`; otherwise it is closed at once.
 async fn sniff_tunnel(
     upgraded: hyper::upgrade::Upgraded,
     session: &SessionContext,
@@ -2867,10 +2902,14 @@ async fn sniff_tunnel(
     {
         upstream = dial_tunnel_target(session, authority).await.ok();
         if let Some((server, _)) = &upstream {
-            let server_first = tokio::select! {
-                _ = socket.readable() => false,
-                _ = speaks(server) => true,
-            };
+            let server_first = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    _ = socket.readable() => false,
+                    spoke = speaks(server) => spoke,
+                }
+            })
+            .await
+            .unwrap_or(false);
             if server_first {
                 return (Box::new(socket), TunnelStart::Other, upstream);
             }
@@ -2879,15 +2918,17 @@ async fn sniff_tunnel(
     let mut head = vec![0; TUNNEL_HEAD_BYTES];
     let mut seen = buffered.to_vec();
     let deadline = tokio::time::Instant::now() + TUNNEL_QUIET;
+    let mut peeked = false;
     let start = loop {
         let complete = seen.len() >= TUNNEL_HEAD_BYTES || tokio::time::Instant::now() >= deadline;
         if let Some(start) = tunnel_start(&seen, complete) {
             break start;
         }
-        if !seen.is_empty() {
+        if peeked {
             // A peek returns what is there at once; give the rest a moment.
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        peeked = true;
         match tokio::time::timeout_at(deadline, socket.peek(&mut head)).await {
             Ok(Ok(read)) if read > 0 => seen = [&buffered[..], &head[..read]].concat(),
             // Closed, failed, or quiet until the deadline: decide on what came.
@@ -2902,6 +2943,13 @@ async fn sniff_tunnel(
             std::io::Cursor::new(buffered).chain(read),
             write,
         ))
+    };
+    // Close any preconnected upstream socket immediately when the tunnel is
+    // handled as TLS or HTTP instead of raw TCP relay.
+    let upstream = if matches!(start, TunnelStart::Other) {
+        upstream
+    } else {
+        None
     };
     (client, start, upstream)
 }
@@ -3092,10 +3140,26 @@ async fn serve_special_host_tls(
             return Err(anyhow!(message));
         }
     };
-    let tls_stream = match acceptor.accept(upgraded).await {
-        Ok(tls_stream) => tls_stream,
-        Err(error) => {
+    let tls_stream = match tokio::time::timeout(TLS_ACCEPT_TIMEOUT, acceptor.accept(upgraded)).await
+    {
+        Ok(Ok(tls_stream)) => tls_stream,
+        Ok(Err(error)) => {
             let message = format!("TLS handshake failed for special host: {error}");
+            record_connect_post_ok_tunnel_failure(
+                &state,
+                &session,
+                connect_target.clone(),
+                connect_capture,
+                started_at,
+                started,
+                message.clone(),
+                request_http_version,
+            )
+            .await;
+            return Err(anyhow!(message));
+        }
+        Err(_) => {
+            let message = "TLS handshake timed out for special host".to_string();
             record_connect_post_ok_tunnel_failure(
                 &state,
                 &session,
@@ -3269,9 +3333,9 @@ async fn serve_https_mitm(
         .certificates
         .tls_acceptor_for_host(authority.host())
         .with_context(|| format!("failed to build MITM certificate for {}", authority.host()))?;
-    let tls_stream = acceptor
-        .accept(client)
+    let tls_stream = tokio::time::timeout(TLS_ACCEPT_TIMEOUT, acceptor.accept(client))
         .await
+        .map_err(|_| anyhow!("TLS handshake timed out for {}", authority.host()))?
         .with_context(|| format!("TLS handshake failed for {}", authority.host()))?;
     record_connect_tunnel(
         &state,
@@ -4901,6 +4965,15 @@ fn stream_upstream_response_body(
                     notes.push(
                         "Shutdown finalized streamed response capture before upstream EOF.".to_string(),
                     );
+                    // Signal an error downstream so hyper aborts the response
+                    // instead of writing a clean 0\r\n\r\n chunked terminator
+                    // over truncated bytes.
+                    let _ = tx
+                        .send(Err(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionAborted,
+                            "proxy shutdown aborted streamed response",
+                        )))
+                        .await;
                     break;
                 }
                 chunk = upstream.next() => {
@@ -4993,10 +5066,15 @@ async fn read_response_body_limited(response: reqwest::Response, limit: usize) -
     {
         bail!("upstream response body exceeds {limit} bytes");
     }
+    let close_delimited = response_body_is_close_delimited(response.version(), response.headers());
     let mut stream = response.bytes_stream();
     let mut body = BytesMut::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("failed to read upstream response body chunk")?;
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) if close_delimited && is_unexpected_eof(&error) => break,
+            Err(error) => return Err(error).context("failed to read upstream response body chunk"),
+        };
         if body.len().saturating_add(chunk.len()) > limit {
             bail!("upstream response body exceeds {limit} bytes");
         }
@@ -5107,19 +5185,26 @@ impl StreamedRecordContext {
         body_size: usize,
         notes: Vec<String>,
     ) -> TransactionRecord {
-        let mut response_capture = MessageRecord::from_headers_and_body(
-            &self.response_headers,
-            preview.as_ref(),
-            self.max_preview,
-        );
-        response_capture.body_size = body_size;
-        if body_size > preview.len() {
-            response_capture.preview_truncated = true;
-            if response_capture.content_decoded {
-                response_capture.decoded_body_size = None;
-                response_capture.content_decoded = false;
-            }
-        }
+        let mut response_capture = if body_size > preview.len() {
+            // Do not attempt content decompression on a truncated wire prefix:
+            // multi-member gzip/zstd prefixes could decode partially and leave
+            // decoded text marked with `content_decoded = false`.
+            MessageRecord::from_headers_and_body_truncated_wire(
+                &self.response_headers,
+                preview.as_ref(),
+                body_size,
+                self.max_preview,
+            )
+        } else {
+            let mut record = MessageRecord::from_headers_and_body(
+                &self.response_headers,
+                preview.as_ref(),
+                self.max_preview,
+            );
+            record.body_size = body_size;
+            record
+        };
+        let _ = &mut response_capture;
         with_auto_color(
             with_record_http_versions(
                 TransactionRecord::http(
@@ -5338,6 +5423,32 @@ async fn execute_http_exchange_with_rules(
     outbound_headers.remove(HOST);
     outbound_headers.remove(CONTENT_LENGTH);
 
+    let host_matches_uri_authority = |host: &HeaderValue| -> bool {
+        let Ok(raw_host) = host.to_str() else {
+            return false;
+        };
+        let Some(authority) = absolute_uri.authority() else {
+            return false;
+        };
+        let default_port = match absolute_uri.scheme_str() {
+            Some("https") => Some(443),
+            Some("http") => Some(80),
+            _ => None,
+        };
+        let normalize = |value: &str| -> String {
+            let trimmed = value.trim();
+            if let Ok(parsed) = trimmed.parse::<Authority>() {
+                let host_part = parsed.host().to_ascii_lowercase();
+                match parsed.port_u16() {
+                    Some(port) if Some(port) != default_port => format!("{host_part}:{port}"),
+                    _ => host_part,
+                }
+            } else {
+                trimmed.to_ascii_lowercase()
+            }
+        };
+        normalize(raw_host) == normalize(authority.as_str())
+    };
     let build_outbound = |client: &ProxyClient| {
         let mut request_builder = client
             .request(method.clone(), absolute_uri.to_string())
@@ -5353,7 +5464,15 @@ async fn execute_http_exchange_with_rules(
             request_builder = request_builder.version(version);
         }
         if let Some(host_override) = host_override.clone() {
-            request_builder = request_builder.header(HOST, host_override);
+            // For HTTP/2, `:authority` already carries the normalized authority;
+            // sending a redundant `Host: example.com:443` disagrees with
+            // `:authority: example.com` and triggers 400/PROTOCOL_ERROR on strict
+            // HTTP/2 servers. Preserve `Host` only when deliberately distinct.
+            let omit_redundant_h2_host = requested_http_version == Some(Version::HTTP_2)
+                && host_matches_uri_authority(&host_override);
+            if !omit_redundant_h2_host {
+                request_builder = request_builder.header(HOST, host_override);
+            }
         }
         request_builder
     };
@@ -5362,7 +5481,14 @@ async fn execute_http_exchange_with_rules(
     let mut peer_capture = peer_capture.freeze(&session).await;
     let mut send_result = build_outbound(client).send().await;
     if let Err(error) = &send_result {
-        if should_retry_over_legacy_tls(error, absolute_uri.scheme_str()) {
+        // Never retry on the generic legacy TLS client when a Replay target
+        // override is active (that client has neither resolve_to_addrs nor
+        // override bypass and would leak the request to the real host) or when
+        // HTTP/2 was explicitly requested (legacy client is http1_only).
+        if outbound_uri_authority.is_none()
+            && requested_http_version != Some(Version::HTTP_2)
+            && should_retry_over_legacy_tls(error, absolute_uri.scheme_str())
+        {
             let upstream_insecure = session.runtime.upstream_insecure().await;
             let upstream_proxy = session.runtime.upstream_proxy().await;
             if let Some(legacy_client) =
@@ -6151,16 +6277,19 @@ async fn connect_upstream_websocket(
         .connect(host, port)
         .await
         .map_err(UpstreamWebSocketConnectError::Other)?;
-    let (websocket, response) = match client_async_tls_with_config(
-        upstream_request,
-        stream,
-        None,
-        crate::ws_tls::insecure_connector(upstream_insecure),
+    let (websocket, response) = match tokio::time::timeout(
+        WEBSOCKET_HANDSHAKE_TIMEOUT,
+        client_async_tls_with_config(
+            upstream_request,
+            stream,
+            None,
+            crate::ws_tls::insecure_connector(upstream_insecure),
+        ),
     )
     .await
     {
-        Ok(response) => response,
-        Err(TungsteniteError::Http(response)) => {
+        Ok(Ok(response)) => response,
+        Ok(Err(TungsteniteError::Http(response))) => {
             let status = response.status();
             let headers = response.headers().clone();
             let body = Bytes::from(response.into_body().unwrap_or_default());
@@ -6170,10 +6299,15 @@ async fn connect_upstream_websocket(
                 body,
             });
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             return Err(UpstreamWebSocketConnectError::Other(
                 anyhow!(error).context("upstream WebSocket handshake failed"),
             ));
+        }
+        Err(_) => {
+            return Err(UpstreamWebSocketConnectError::Other(anyhow!(
+                "upstream WebSocket handshake timed out"
+            )));
         }
     };
 
@@ -6193,6 +6327,22 @@ pub(crate) fn websocket_forward_headers_from_records(records: &[HeaderRecord]) -
         .collect::<Vec<_>>();
     for name in remove {
         headers.remove(name);
+    }
+    // RFC 6455 §4.1 allows multiple Sec-WebSocket-Protocol headers, but
+    // tungstenite validates the server's chosen subprotocol against `.get()`
+    // (first header only). Join them into one comma-separated header.
+    let subprotocols: Vec<String> = headers
+        .get_all(http::header::SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if subprotocols.len() > 1 {
+        if let Ok(joined) = HeaderValue::from_str(&subprotocols.join(", ")) {
+            headers.insert(http::header::SEC_WEBSOCKET_PROTOCOL, joined);
+        }
     }
     headers
 }

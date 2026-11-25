@@ -1462,12 +1462,22 @@ fn has_csp_frame_ancestors(response: &crate::model::MessageRecord) -> bool {
     })
 }
 
+fn response_mime_essence(response: &crate::model::MessageRecord) -> String {
+    response
+        .header_value("content-type")
+        .or(response.content_type.as_deref())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
 fn is_html_page_response(response: &crate::model::MessageRecord) -> bool {
-    if let Some(content_type) = response.content_type.as_deref() {
-        let ct = content_type.trim();
-        if !ct.is_empty() {
-            return ct.to_ascii_lowercase().contains("text/html");
-        }
+    let essence = response_mime_essence(response);
+    if !essence.is_empty() {
+        return matches!(essence.as_str(), "text/html" | "application/xhtml+xml");
     }
 
     if !matches!(response.body_encoding, BodyEncoding::Utf8) {
@@ -1501,7 +1511,7 @@ fn check_cookie_flags(record: &TransactionRecord, findings: &mut Vec<ScannerFind
             continue;
         }
 
-        if set_cookie_is_deletion(&header.value) {
+        if set_cookie_is_deletion(&header.value, record.started_at) {
             continue;
         }
 
@@ -1596,7 +1606,7 @@ fn cookie_looks_auth_sensitive(name: &str, value: &str) -> bool {
     true
 }
 
-fn set_cookie_is_deletion(value: &str) -> bool {
+fn set_cookie_is_deletion(value: &str, reference_time: DateTime<Utc>) -> bool {
     if set_cookie_attribute_value(value, "max-age")
         .and_then(|max_age| max_age.trim().parse::<i64>().ok())
         .is_some_and(|max_age| max_age <= 0)
@@ -1605,8 +1615,35 @@ fn set_cookie_is_deletion(value: &str) -> bool {
     }
 
     set_cookie_attribute_value(value, "expires")
-        .and_then(|expires| DateTime::parse_from_rfc2822(expires.trim()).ok())
-        .is_some_and(|expires| expires.with_timezone(&Utc) <= Utc::now())
+        .and_then(parse_cookie_expires)
+        .is_some_and(|expires| expires <= reference_time)
+}
+
+fn parse_cookie_expires(raw: &str) -> Option<DateTime<Utc>> {
+    let trimmed = raw.trim();
+    if let Ok(dt) = DateTime::parse_from_rfc2822(trimmed) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    // Netscape / RFC 850 hyphenated GMT/UTC timestamps (e.g.
+    // "Thu, 01-Jan-1970 00:00:00 GMT" emitted by PHP, IIS, and Java servlets).
+    let without_tz = trimmed
+        .strip_suffix(" GMT")
+        .or_else(|| trimmed.strip_suffix(" UTC"))
+        .or_else(|| trimmed.strip_suffix(" gmt"))
+        .or_else(|| trimmed.strip_suffix(" utc"))?
+        .trim_end();
+    for fmt in [
+        "%a, %d-%b-%Y %H:%M:%S",
+        "%A, %d-%b-%Y %H:%M:%S",
+        "%a, %d-%b-%y %H:%M:%S",
+        "%A, %d-%b-%y %H:%M:%S",
+        "%a, %d %b %Y %H:%M:%S",
+    ] {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(without_tz, fmt) {
+            return Some(DateTime::from_naive_utc_and_offset(naive, Utc));
+        }
+    }
+    None
 }
 
 fn set_cookie_attribute_value<'a>(value: &'a str, name: &str) -> Option<&'a str> {
@@ -1637,10 +1674,8 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
         return;
     }
     let script = javascript_or_css_response(record, response);
-    let page = response
-        .header_value("content-type")
-        .or(response.content_type.as_deref())
-        .is_some_and(|value| value.to_ascii_lowercase().contains("html"));
+    let essence = response_mime_essence(response);
+    let page = matches!(essence.as_str(), "text/html" | "application/xhtml+xml");
 
     static PATTERNS: &[(&str, &str, Severity)] = &[
         // ── Cloud provider secrets ──
@@ -3592,7 +3627,7 @@ fn has_authenticated_cache_context(
     record.request.headers.iter().any(|header| {
         header.name.eq_ignore_ascii_case("authorization") && !header.value.trim().is_empty()
     }) || request_has_auth_cookie(record)
-        || response_sets_auth_cookie(response)
+        || response_sets_auth_cookie(response, record.started_at)
 }
 
 fn request_has_auth_cookie(record: &TransactionRecord) -> bool {
@@ -3607,12 +3642,15 @@ fn request_has_auth_cookie(record: &TransactionRecord) -> bool {
     })
 }
 
-fn response_sets_auth_cookie(response: &crate::model::MessageRecord) -> bool {
+fn response_sets_auth_cookie(
+    response: &crate::model::MessageRecord,
+    reference_time: DateTime<Utc>,
+) -> bool {
     response.headers.iter().any(|header| {
         if !header.name.eq_ignore_ascii_case("set-cookie") {
             return false;
         }
-        if set_cookie_is_deletion(&header.value) {
+        if set_cookie_is_deletion(&header.value, reference_time) {
             return false;
         }
         header
@@ -3820,16 +3858,22 @@ fn javascript_or_css_response(
     record: &TransactionRecord,
     response: &crate::model::MessageRecord,
 ) -> bool {
-    let content_type = response
-        .header_value("content-type")
-        .or(response.content_type.as_deref())
+    let essence = response_mime_essence(response);
+    if !essence.is_empty() {
+        return essence.contains("javascript")
+            || essence.contains("ecmascript")
+            || essence == "text/css";
+    }
+    let clean_path = record
+        .path
+        .split(['?', '#'])
+        .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-    content_type.contains("javascript")
-        || content_type.contains("ecmascript")
-        || content_type.contains("text/css")
-        || record.path.ends_with(".js")
-        || record.path.ends_with(".css")
+    clean_path.ends_with(".js")
+        || clean_path.ends_with(".mjs")
+        || clean_path.ends_with(".cjs")
+        || clean_path.ends_with(".css")
 }
 
 fn git_commit_metadata_response_detected(body: &str) -> bool {
@@ -4255,9 +4299,8 @@ fn check_auth_issues(record: &TransactionRecord, findings: &mut Vec<ScannerFindi
         if (300..=399).contains(&status) {
             if let Some(loc) = response.header_value("location") {
                 // Check if Location contains user-controlled input (common open redirect patterns)
-                let path_params: Vec<&str> = record.path.split('?').collect();
-                if path_params.len() > 1 {
-                    let query = path_params[1];
+                if let Some((_, raw_query)) = record.path.split_once('?') {
+                    let query = raw_query.split('#').next().unwrap_or(raw_query);
                     let redirect_params = [
                         "redirect",
                         "url",
@@ -4429,18 +4472,22 @@ fn percent_decode(value: &str) -> String {
 
 fn session_token_parameter_in_url(record: &TransactionRecord) -> Option<String> {
     let path = &record.path;
-    let lower = path.to_ascii_lowercase();
-    if lower.contains(";jsessionid=") || lower.contains(";phpsessid=") {
-        return path.split(';').skip(1).find_map(|segment| {
+    let path_only = path.split(['?', '#']).next().unwrap_or(path);
+    let lower_path = path_only.to_ascii_lowercase();
+    if lower_path.contains(";jsessionid=") || lower_path.contains(";phpsessid=") {
+        if let Some(key) = path_only.split(';').skip(1).find_map(|segment| {
             let (key, value) = segment.split_once('=').unwrap_or((segment, ""));
             let key = percent_decode(&key.replace('+', " ")).to_ascii_lowercase();
             (matches!(key.as_str(), "jsessionid" | "phpsessid")
                 && session_token_value_looks_sensitive(&key, value))
             .then_some(key)
-        });
+        }) {
+            return Some(key);
+        }
     }
 
-    let query = path.split_once('?')?.1;
+    let raw_query = path.split_once('?')?.1;
+    let query = raw_query.split('#').next().unwrap_or(raw_query);
     query.split('&').find_map(|pair| {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = key.replace('+', " ");
@@ -10226,5 +10273,52 @@ mod tests {
             .contains("does not establish that credentials were sent"));
         assert!(found[0].detail.contains("intentional allowlist"));
         assert!(!found[0].detail.contains("read it with credentials"));
+    }
+
+    #[test]
+    fn cookie_deletion_uses_capture_time_and_netscape_hyphenated_expires() {
+        let captured_at = DateTime::parse_from_rfc3339("2026-01-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        // Live cookie at capture time (15 minutes later), even if rescanned far in the future.
+        assert!(!set_cookie_is_deletion(
+            "session_id=abc123; Expires=Thu, 01 Jan 2026 12:15:00 GMT; Path=/",
+            captured_at,
+        ));
+        // Netscape hyphenated deletion date emitted by PHP / IIS / Java servlets.
+        assert!(set_cookie_is_deletion(
+            "PHPSESSID=deleted; expires=Thu, 01-Jan-1970 00:00:01 GMT; path=/",
+            captured_at,
+        ));
+    }
+
+    #[test]
+    fn open_redirect_and_matrix_session_token_handle_embedded_query_strings() {
+        let mut redirect = make_record(
+            vec![],
+            vec![("location", "https://evil.example/cb?foo=1")],
+            "",
+            302,
+        );
+        redirect.path = "/login?next=https://evil.example/cb?foo=1".to_string();
+        let redirect_findings = findings_for_rule(&redirect, "auth");
+        assert!(
+            redirect_findings
+                .iter()
+                .any(|f| f.title == "Possible open redirect"),
+            "open redirect with '?' in target URL should be detected"
+        );
+
+        let mut matrix_false_positive = make_record(vec![], vec![], "", 200);
+        matrix_false_positive.path = "/app;jsessionid=123?page=dashboard_overview".to_string();
+        assert_eq!(session_token_parameter_in_url(&matrix_false_positive), None);
+
+        let mut matrix_and_query_leak = make_record(vec![], vec![], "", 200);
+        matrix_and_query_leak.path =
+            "/app;jsessionid=123?access_token=liveSecretToken98765".to_string();
+        assert_eq!(
+            session_token_parameter_in_url(&matrix_and_query_leak).as_deref(),
+            Some("access_token")
+        );
     }
 }

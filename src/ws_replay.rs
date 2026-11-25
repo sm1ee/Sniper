@@ -387,15 +387,18 @@ impl WsReplayStore {
                         },
                     );
                     let stream = proxy.connect(host, port).await?;
-                    Ok::<_, anyhow::Error>(
+                    let connected = tokio::time::timeout(
+                        Duration::from_secs(15),
                         client_async_tls_with_config(
                             request,
                             stream,
                             None,
                             crate::ws_tls::insecure_connector(upstream_insecure),
-                        )
-                        .await?,
+                        ),
                     )
+                    .await
+                    .context("WebSocket handshake timed out")??;
+                    Ok::<_, anyhow::Error>(connected)
                 }
                 .await;
                 match result {
@@ -849,6 +852,27 @@ fn insert_ws_replay_header(headers: &mut HeaderMap, name: HeaderName, value: Hea
             }
         }
         headers.insert(COOKIE, value);
+    } else if name == http::header::SEC_WEBSOCKET_PROTOCOL {
+        if let (Some(existing), Ok(next)) = (
+            headers
+                .get(http::header::SEC_WEBSOCKET_PROTOCOL)
+                .and_then(|value| value.to_str().ok()),
+            value.to_str(),
+        ) {
+            let existing = existing.trim();
+            let next = next.trim();
+            let merged = match (existing.is_empty(), next.is_empty()) {
+                (true, true) => String::new(),
+                (true, false) => next.to_string(),
+                (false, true) => existing.to_string(),
+                (false, false) => format!("{existing}, {next}"),
+            };
+            if let Ok(merged) = HeaderValue::from_str(&merged) {
+                headers.insert(http::header::SEC_WEBSOCKET_PROTOCOL, merged);
+                return;
+            }
+        }
+        headers.insert(http::header::SEC_WEBSOCKET_PROTOCOL, value);
     } else if name == HOST {
         headers.insert(name, value);
     } else {

@@ -2674,6 +2674,13 @@ impl SessionRegistry {
             snapshot.transaction_locators =
                 write_transactions_file_streaming(&path, &path, &entries)?;
             write_json(&snapshot_path(&storage_dir), &snapshot)?;
+            // Keep state.json at least as fresh as snapshot.json so recovered
+            // scanner findings and closed websockets are not overwritten by a
+            // stale state.json on the next load (even with equal mtimes).
+            let mut state_only = snapshot.clone();
+            state_only.websockets.clear();
+            state_only.transaction_event_sequence = 0;
+            write_json(&state_path(&storage_dir), &state_only)?;
             snapshot.transactions = entries.into_iter().map(|(record, _)| record).collect();
         }
         let mut retention_compaction_pending = false;
@@ -4246,6 +4253,8 @@ fn load_session_snapshot_with_mode(
                 full.annotation_client_versions = record.annotation_client_versions;
                 records.push(full);
             } else {
+                let mut record = record;
+                crate::store::strip_transaction_bodies(&mut record);
                 locators.insert(record.id, locator);
                 records.push(record);
             }
@@ -5125,6 +5134,10 @@ fn replay_transaction_journal_file(
                 break;
             }
         };
+        // Advance before any early `continue` for skipped backfill/annotation
+        // entries so a trailing torn line only truncates itself, never valid
+        // complete entries before it.
+        valid_prefix_len = offset;
         *transaction_event_sequence = transaction_event_sequence.saturating_add(1);
         match entry {
             TransactionJournalEntry::Insert { record } => {

@@ -1132,6 +1132,7 @@ fn with_window_icons(builder: WindowBuilder) -> WindowBuilder {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(deprecated)]
 fn enable_window_fullscreen_support(window: &tao::window::Window) {
     use cocoa::{
         appkit::{NSWindow, NSWindowCollectionBehavior},
@@ -1160,6 +1161,7 @@ fn enable_window_fullscreen_support(_window: &tao::window::Window) {}
 /// bar sits directly under the traffic lights, and "Sniper" above it is a second
 /// label for something already named by the window itself.
 #[cfg(target_os = "macos")]
+#[allow(deprecated)]
 fn hide_window_title_text(window: &tao::window::Window) {
     use cocoa::{
         appkit::{NSWindow, NSWindowTitleVisibility},
@@ -1188,6 +1190,7 @@ fn hide_window_title_text(_window: &tao::window::Window) {}
 /// went quiet" as a release, which fires under the operator's hand whenever they
 /// pause mid-pull. The monitor returns the event untouched — it only observes.
 #[cfg(target_os = "macos")]
+#[allow(deprecated, unexpected_cfgs)]
 fn forward_scroll_gesture_phase(proxy: tao::event_loop::EventLoopProxy<DesktopUserEvent>) {
     use block::ConcreteBlock;
     use cocoa::{

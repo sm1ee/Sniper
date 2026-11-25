@@ -47,3 +47,11 @@ test("the sample and Inspect pickers use the app's dark select look", () => {
     assert.ok(select.includes(declaration), declaration);
   }
 });
+
+test("narrow packet panes keep search and line count on one row and compact the Inspect select", () => {
+  assert.match(rule(".packet-viewer .pane-footer"), /flex-wrap: nowrap;/);
+  assert.match(rule(".packet-viewer .pane-search"), /flex: 1 1 100px;/);
+  assert.match(rule(".packet-viewer .pane-footer > span:last-child"), /flex: 0 0 auto;/);
+  assert.match(rule(".packet-viewer .pane-header .packet-inspect select"), /width: 74px;/);
+  assert.match(rule(".packet-capture-info[open]"), /flex-basis: 100%;/);
+});
