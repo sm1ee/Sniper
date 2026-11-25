@@ -13669,7 +13669,7 @@ function renderDetail(record, options = {}) {
   els.requestHeadersBody.innerHTML = renderHeaderList(requestHeaders);
   els.responseHeadersBody.innerHTML = response
     ? renderHeaderList(responseHeaders)
-    : "<p class=\"empty-copy\">No response headers were captured.</p>";
+    : "<p class=\"empty-copy\">No response headers.</p>";
 
   const noteParts = [];
   if (record.user_note) {
@@ -13680,7 +13680,7 @@ function renderDetail(record, options = {}) {
   }
   els.notesCard.innerHTML = noteParts.length
     ? noteParts.join("")
-    : "<p>No anomalies were recorded for this transaction.</p>";
+    : "<p>No notes.</p>";
 
   renderViewTabs();
   renderMessagePanes();
@@ -13702,7 +13702,7 @@ function renderEmptyDetail(errorMessage = "") {
   ]);
   els.requestHeadersBody.innerHTML = `<p class="empty-copy">${escapeHtml(errorMessage || "Select a transaction from HTTP.")}</p>`;
   els.responseHeadersBody.innerHTML = `<p class="empty-copy">${escapeHtml(errorMessage || "No response selected.")}</p>`;
-  els.notesCard.innerHTML = "<p>No anomalies were recorded for this transaction.</p>";
+  els.notesCard.innerHTML = "<p>No notes.</p>";
   renderViewTabs();
   renderMessagePanes();
 }
@@ -13722,7 +13722,7 @@ function renderLoadingDetail(message = "Loading selected transaction…") {
   ]);
   els.requestHeadersBody.innerHTML = `<p class="empty-copy">${escapeHtml(message)}</p>`;
   els.responseHeadersBody.innerHTML = "<p class=\"empty-copy\">Loading response details.</p>";
-  els.notesCard.innerHTML = "<p>No anomalies were recorded for this transaction.</p>";
+  els.notesCard.innerHTML = "<p>No notes.</p>";
   renderViewTabs();
   renderMessagePanes();
 }
@@ -17281,7 +17281,7 @@ function renderTarget() {
           `;
         })
         .join("")
-    : "<p class=\"empty-copy\">No targets yet. Capture proxy traffic or run Recon to build a site map.</p>";
+    : "<p class=\"empty-copy\">No targets yet. Capture proxy traffic or run Recon.</p>";
 
   const hostButtons = Array.from(targetTree.querySelectorAll(".target-host-toggle"));
   hostButtons.forEach((button) => {
@@ -29346,7 +29346,7 @@ function scheduleWsMessageJsonHighlight(text) {
 
 function renderHeaderList(headers) {
   if (!headers.length) {
-    return "<p class=\"empty-copy\">No headers were captured.</p>";
+    return "<p class=\"empty-copy\">No headers.</p>";
   }
 
   return headers
@@ -31095,7 +31095,7 @@ function renderWsFrameList() {
     els.wsFrameList.onclick = null;
     els.wsFrameList.ondblclick = null;
     els.wsFrameList.onwheel = null;
-    els.wsFrameList.innerHTML = '<div class="empty-copy">Connect to start a WebSocket conversation.</div>';
+    els.wsFrameList.innerHTML = '<div class="empty-copy">Not connected.</div>';
     renderWsFrameDetail();
     return;
   }
