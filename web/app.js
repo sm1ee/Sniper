@@ -10710,8 +10710,8 @@ function renderSessionSidebar() {
   if (sidebarDrag) return;
   const rows = (sessions) => sessions
     .map((session) => sessionSidebarRow(session, session.id === activeId, editing)).join("");
-  // The list has two sections, each under a name that folds. Pinned
-  // Sessions is there when anything is pinned. Sessions holds all the others
+  // The list has two sections, each under a name that folds. Pinned is
+  // there when anything is pinned. Sessions holds all the others
   // in folders: Default, the sessions in no group, which is always there and
   // first, then each group. A + beside a folder makes a session in it. The
   // sections and Default are the list's own: no group has their name, and
@@ -10736,7 +10736,7 @@ function renderSessionSidebar() {
         !foldedGroups.has(name), group, listed(sessions));
     }).join("");
   const markup = (layout.pinned.length
-    ? block(' session-sidebar-section session-sidebar-pinned" data-drop-pinned', 'data-section="pinned"', "Pinned Sessions",
+    ? block(' session-sidebar-section session-sidebar-pinned" data-drop-pinned', 'data-section="pinned"', "Pinned",
       !foldedSections.has("pinned"), null, listed(layout.pinned)) : "")
     + block(' session-sidebar-section"', 'data-section="sessions"', "Sessions", !foldedSections.has("sessions"), null,
       `<ul class="session-sidebar-folders">${folders}</ul>`);

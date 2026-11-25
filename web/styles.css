@@ -1335,7 +1335,7 @@ summary {
   content: none;
 }
 
-/* The list has two sections, Pinned Sessions and Sessions, and Sessions
+/* The list has two sections, Pinned and Sessions, and Sessions
    holds a folder for each group and one, Default, for the sessions in none.
    A name folds what is under it, and the + beside a folder makes a session
    in it. */

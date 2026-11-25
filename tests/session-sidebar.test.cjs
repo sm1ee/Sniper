@@ -546,7 +546,7 @@ test("pinned sessions are drawn first, in the order pinned, and nowhere else", (
   f.state.sessionPinned = ["b", "gone", "a"];
   f.context.renderSessionSidebar();
   const html = f.els.sessionSidebarList.innerHTML;
-  assert.match(html, /^<li class="session-sidebar-group session-sidebar-section session-sidebar-pinned" data-drop-pinned><div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" data-section="pinned" aria-expanded="true"><span class="session-sidebar-group-name">Pinned Sessions<\/span><\/button><\/div><ul class="session-sidebar-group-list">/);
+  assert.match(html, /^<li class="session-sidebar-group session-sidebar-section session-sidebar-pinned" data-drop-pinned><div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" data-section="pinned" aria-expanded="true"><span class="session-sidebar-group-name">Pinned<\/span><\/button><\/div><ul class="session-sidebar-group-list">/);
   assert.deepEqual(rows(html), ["b", "a", "c", "d"]);
   assert.deepEqual(rows(html.slice(0, html.indexOf("</ul></li>"))), ["b", "a"]);
   // The folder of a pinned session is drawn without it.
@@ -868,7 +868,7 @@ test("sessions in no group are listed under Default, which is always there and t
   assert.match(html, /<\/ul><\/li><\/ul><\/li>$/, "the folders close inside Sessions");
 });
 
-test("Pinned Sessions, Sessions and Default fold as a group does, and the choice is saved", () => {
+test("Pinned, Sessions and Default fold as a group does, and the choice is saved", () => {
   let saves = 0;
   const f = fixture({
     sessions: [session("a", "01"), session("b", "02"), session("g", "03", { group: "acme" })], activeId: null,
@@ -878,7 +878,7 @@ test("Pinned Sessions, Sessions and Default fold as a group does, and the choice
   f.state.sessionSectionsCollapsed = [];
   f.context.renderSessionSidebar();
   assert.deepEqual(sectionHeaders(f.els.sessionSidebarList.innerHTML),
-    [["pinned", "true", "Pinned Sessions"], ["sessions", "true", "Sessions"], ["default", "true", "Default"]]);
+    [["pinned", "true", "Pinned"], ["sessions", "true", "Sessions"], ["default", "true", "Default"]]);
   f.context.toggleSessionSection("default");
   assert.deepEqual([...f.state.sessionSectionsCollapsed], ["default"]);
   assert.deepEqual(rows(f.els.sessionSidebarList.innerHTML), ["b", "g"], "a folded section draws its name only");
@@ -892,7 +892,7 @@ test("Pinned Sessions, Sessions and Default fold as a group does, and the choice
   f.context.toggleSessionSection("sessions");
   assert.deepEqual(rows(f.els.sessionSidebarList.innerHTML), ["b"]);
   assert.deepEqual(sectionHeaders(f.els.sessionSidebarList.innerHTML),
-    [["pinned", "true", "Pinned Sessions"], ["sessions", "false", "Sessions"]]);
+    [["pinned", "true", "Pinned"], ["sessions", "false", "Sessions"]]);
   assert.doesNotMatch(f.els.sessionSidebarList.innerHTML, /session-sidebar-folders|data-group="acme"/);
   assert.equal(saves, 5);
 });

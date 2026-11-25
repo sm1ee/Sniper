@@ -752,8 +752,8 @@ else. The registry and sniper-cli know none of it.
   New session and New group. A row gives its place to the name field. Below
   it is the list's name, "List", with the sort and the gear at the trailing
   edge, quiet until the pointer is on one.
-- **The list has two sections**, each under a name that folds. Pinned
-  Sessions is there when anything is pinned. Sessions holds all the others
+- **The list has two sections**, each under a name that folds. Pinned is
+  there when anything is pinned. Sessions holds all the others
   in folders: Default, the sessions in no group, which is always there and
   first, then a folder for each group, open or shut. The two sections and
   Default are the list's own (`session_sections_collapsed` says which are
