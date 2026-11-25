@@ -83,10 +83,13 @@ sniper-cli session port close --id <session-uuid> --yes
   the session's name: a glyph for Claude and for Codex, the name for any
   other. A session made with no agent shows nothing.
 - The session list gathers sessions into groups: from a session's menu ("Move
-  to …", "New group…"), or by dragging a session onto a group. A group is the
-  sessions that carry its name, so the last one out ends it. Dragging also
-  changes the order of sessions and of groups, which is kept for the UI and
-  is nothing the CLI reads.
+  to …", "New group…"), from the list's own menu ("New group…"), or by
+  dragging a session onto a group. A group's `+` makes a session in it. For
+  the CLI a group is the sessions that carry its name, so the last one out
+  ends it. The list also keeps a group that was made or dragged there while
+  no session is in it.
+- The order of sessions and of groups, the pinned sessions, the list's sort
+  and its width are kept for the UI and are nothing the CLI reads.
 
 ```bash
 sniper-cli session create --name 'agent-a' --no-activate --group 'example.com' --yes

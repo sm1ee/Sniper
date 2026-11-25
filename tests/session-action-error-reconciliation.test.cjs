@@ -65,6 +65,16 @@ function assertOriginalError(f, operation, result) {
   else assert.equal(result.message, originalMessage);
 }
 
+test('a session is made in the group its + named, and in none when no group is named', async () => {
+  for (const [group, body] of [['acme', { name: 'New stored session', group: 'acme' }], [null, { name: 'New stored session' }]]) {
+    const f = setup();
+    const pending = f.context.createSession(f.els.sessionSidebarCreateName, group).catch(error => error);
+    await tick();
+    assert.deepEqual(JSON.parse(f.requests[0].options.body), body);
+    f.fail(0); await tick(); f.succeed(1, [f.a, f.b]); await pending;
+  }
+});
+
 for (const operation of ['create', 'view', 'delete']) {
   test(`${operation} error reconciles committed rows without rebinding drafts or clearing conflicts`, async () => {
     const f = setup(), { result } = await start(f, operation);

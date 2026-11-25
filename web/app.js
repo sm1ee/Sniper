@@ -500,11 +500,18 @@ const state = {
   selectedSessionId: null,
   sessionRename: null,
   sessionSidebarHidden: false,
+  // The width the session list was dragged to; null is the stylesheet's.
+  sessionSidebarWidth: null,
   // The groups of the session list that are folded shut, by name.
   sessionGroupsCollapsed: [],
-  // The order sessions (by id) and groups (by name) were dragged into.
+  // The order sessions (by id) and groups (by name) were dragged into. The
+  // list keeps a group named here while no session is in it.
   sessionOrder: [],
   sessionGroupOrder: [],
+  // The sessions kept at the top of the list, by id, in the order pinned.
+  sessionPinned: [],
+  // How the list orders the sessions of a group; see `sessionSortOrder`.
+  sessionSort: "manual",
   // What each session is doing, from /api/sessions/activity.
   sessionActivity: new Map(),
   // Sessions whose jobs ended while another session was open: id → job kinds.
@@ -734,7 +741,9 @@ const els = {
   sessionSidebar: document.getElementById("sessionSidebar"),
   sessionSidebarToggle: document.getElementById("sessionSidebarToggle"),
   sessionSidebarList: document.getElementById("sessionSidebarList"),
+  sessionSidebarResizer: document.getElementById("sessionSidebarResizer"),
   sessionSidebarNewButton: document.getElementById("sessionSidebarNewButton"),
+  sessionArrangeButton: document.getElementById("sessionArrangeButton"),
   sessionSidebarCreate: document.getElementById("sessionSidebarCreate"),
   sessionSidebarCreateName: document.getElementById("sessionSidebarCreateName"),
   sessionSidebarGroup: document.getElementById("sessionSidebarGroup"),
@@ -2040,6 +2049,11 @@ function bindEvents() {
   });
   els.sessionSidebarToggle.addEventListener("click", toggleSessionSidebar);
   els.sessionSidebarNewButton.addEventListener("click", openSidebarSessionCreate);
+  els.sessionArrangeButton.addEventListener("click", (event) => {
+    // The document closes this menu on any click that reaches it.
+    event.stopPropagation();
+    showSessionArrangeMenu(els.sessionArrangeButton);
+  });
   els.sessionSidebarCreateName.addEventListener("keydown", (event) => {
     // Enter during IME composition picks a candidate; it does not create.
     if (event.isComposing) return;
@@ -2062,6 +2076,11 @@ function bindEvents() {
     const group = event.target.closest?.(".session-sidebar-group-toggle")?.dataset.group;
     if (group) {
       toggleSessionGroup(group);
+      return;
+    }
+    const addTo = event.target.closest?.(".session-sidebar-group-add")?.dataset.addToGroup;
+    if (addTo) {
+      openSidebarSessionCreate(addTo);
       return;
     }
     const row = event.target.closest?.(".session-sidebar-row");
@@ -3355,6 +3374,7 @@ function bindEvents() {
   bindWebsocketPaneResizer(els.websocketSplitResizer);
   bindWebsocketStackResizer(els.websocketStackResizer);
   bindServiceMapResizer(document.getElementById("serviceMapResizer"));
+  bindSessionSidebarResizer(els.sessionSidebarResizer);
   applyWsColumnWidths();
   bindWsColumnResizers();
 
@@ -6182,7 +6202,7 @@ async function handleExternalSessionChanged(previousSessionId = currentSessionId
   }
 }
 
-async function createSession(nameInput = els.sessionSidebarCreateName) {
+async function createSession(nameInput = els.sessionSidebarCreateName, group = null) {
   if (!preserveActiveHttpReplayDraftBeforeSessionChange("creating a session")) return;
   const entrySessionId = currentSessionId();
   const entryWorkspaceGeneration = workspaceStateGeneration;
@@ -6231,7 +6251,7 @@ async function createSession(nameInput = els.sessionSidebarCreateName) {
       headers: {
         "content-type": "application/json",
       },
-      body: JSON.stringify({ name: name || null }),
+      body: JSON.stringify({ name: name || null, ...(group ? { group } : {}) }),
     });
     if (!response.ok) {
       throw new Error(await response.text());
@@ -10644,6 +10664,8 @@ let sessionListRefresh = null;
 // The activity read in flight, if one is.
 let sessionActivityReading = null;
 let sidebarSessionCreating = false;
+// The group a new session is made in, when a group's + opened the name field.
+let sidebarCreateGroup = null;
 // What the group name field is for; see `openSidebarGroupName`.
 let sidebarGroupEdit = null;
 // What is dragged in the session list: { session: id } or { group: name }.
@@ -10660,6 +10682,8 @@ function renderSessionSidebar() {
   els.sessionSidebarToggle.setAttribute("aria-expanded", String(!hidden));
   els.sessionSidebarToggle.setAttribute("aria-label", label);
   els.sessionSidebarToggle.title = label;
+  // While a sort is on the dragged order waits, and the list's menu says so.
+  els.sessionArrangeButton?.classList.toggle("is-sorted", Boolean(sessionSortOrder()));
   const activeId = currentSessionId();
   // Opening a session is seeing what finished in it, with the list shown or not.
   state.sessionsFinished.delete(activeId);
@@ -10673,17 +10697,23 @@ function renderSessionSidebar() {
   if (sidebarDrag) return;
   const rows = (sessions) => sessions
     .map((session) => sessionSidebarRow(session, session.id === activeId, editing)).join("");
-  // Sessions in no group first, as the list was before there were groups;
-  // then each group under its name, which folds.
+  // The pinned sessions first. Then the sessions in no group, as the list
+  // was before there were groups, and each group under its name, which folds
+  // and has a + that makes a session in it.
   const layout = sessionSidebarLayout();
   const folded = new Set(state.sessionGroupsCollapsed);
-  const markup = rows(layout.loose)
+  const markup = (layout.pinned.length
+    ? '<li class="session-sidebar-pinned" data-drop-pinned><span class="session-sidebar-section">Pinned</span>'
+      + `<ul class="session-sidebar-pinned-list">${rows(layout.pinned)}</ul></li>` : "")
+    + rows(layout.loose)
     + layout.groups.map(([name, sessions]) => {
       const open = !folded.has(name);
-      return `<li class="session-sidebar-group" draggable="true" data-drag-group="${escapeHtml(name)}">`
-        + `<button class="session-sidebar-group-toggle" type="button" data-group="${escapeHtml(name)}" aria-expanded="${open}">`
-        + `<span class="session-sidebar-group-name">${escapeHtml(name)}</span>`
+      const group = escapeHtml(name);
+      return `<li class="session-sidebar-group" draggable="true" data-drag-group="${group}">`
+        + `<div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" data-group="${group}" aria-expanded="${open}">`
+        + `<span class="session-sidebar-group-name">${group}</span>`
         + `<span class="session-sidebar-group-count">${sessions.length}</span></button>`
+        + `<button class="session-sidebar-group-add" type="button" data-add-to-group="${group}" aria-label="New session in ${group}" title="New session in ${group}">+</button></div>`
         + `${open ? `<ul class="session-sidebar-group-list">${rows(sessions)}</ul>` : ""}</li>`;
     }).join("");
   if (markup === sessionSidebarMarkup) return;
@@ -10743,26 +10773,48 @@ function sessionSidebarRow(session, active, editing) {
     + "</button></li>";
 }
 
-// The session list as it is drawn: the sessions in no group, then each group,
-// in the order a person dragged them into. What was never dragged keeps the
-// order it had: a session newest first and ahead of the dragged ones, so a new
-// session shows at the top; a group by name, after the dragged ones.
+// The order a sort gives two sessions, by the name saved for it, or null
+// while the list is in the order it was dragged into.
+function sessionSortOrder() {
+  const newest = (a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0);
+  const captured = (session) => Date.parse(session.overview?.last_captured_at) || 0;
+  return {
+    // What captured last, then what never captured.
+    recent: (a, b) => (captured(b) - captured(a)) || newest(a, b),
+    created: newest,
+    name: (a, b) => (a.name || "").localeCompare(b.name || "") || newest(a, b),
+    // A person's own first, then each agent's together.
+    agent: (a, b) => (a.created_by || "").localeCompare(b.created_by || "") || newest(a, b),
+  }[state.sessionSort] || null;
+}
+
+// The session list as it is drawn: the pinned sessions, the sessions in no
+// group, then each group. The pinned are in the order they were pinned, and
+// the groups in the order they were dragged into, whatever the sort. A group
+// that was made or dragged in the list is drawn while no session is in it;
+// one that was not comes after those, by name.
+// With no sort, sessions are in the order a person dragged them into. One
+// never dragged is newest first and ahead of the dragged ones, so a new
+// session shows at the top.
 function sessionSidebarLayout() {
   const rank = new Map((state.sessionOrder || []).map((id, index) => [id, index]));
-  const sessions = [...state.sessions].sort((a, b) => {
+  const sessions = [...state.sessions].sort(sessionSortOrder() || ((a, b) => {
     const [placeA, placeB] = [rank.get(a.id), rank.get(b.id)];
     if (placeA !== undefined && placeB !== undefined) return placeA - placeB;
     if (placeA !== placeB) return placeA === undefined ? -1 : 1;
     return (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0);
-  });
-  const groups = new Map();
-  for (const session of sessions) {
+  }));
+  const pins = state.sessionPinned || [];
+  const rest = sessions.filter((session) => !pins.includes(session.id));
+  const order = state.sessionGroupOrder || [];
+  const groups = new Map(order.map((name) => [name, []]));
+  for (const session of rest) {
     if (session.group) groups.set(session.group, [...(groups.get(session.group) || []), session]);
   }
-  const order = state.sessionGroupOrder || [];
   const place = (name) => (order.includes(name) ? order.indexOf(name) : Infinity);
   return {
-    loose: sessions.filter((session) => !session.group),
+    pinned: pins.map((id) => sessions.find((session) => session.id === id)).filter(Boolean),
+    loose: rest.filter((session) => !session.group),
     // Two groups that were never dragged have no place to tell them apart.
     groups: [...groups].sort(([a], [b]) => (place(a) - place(b)) || a.localeCompare(b)),
   };
@@ -10779,11 +10831,13 @@ function reorderedIds(ids, moved, target, after) {
 
 // Where the pointer is, for what is dragged. A session lands beside another
 // session, in a group by its name, or on the list itself, which is no group.
-// A group lands beside another group. Null where a drop means nothing.
+// Among the pinned it lands beside one of them, or on their block. A group
+// lands beside another group. Null where a drop means nothing.
 function sidebarDropTarget(event) {
   if (!sidebarDrag) return null;
   const row = event.target.closest?.("li[data-drag-session]");
   const groupItem = event.target.closest?.("li[data-drag-group]");
+  const pinnedItem = event.target.closest?.("li[data-drop-pinned]");
   const lowerHalf = (element) => {
     const box = element.getBoundingClientRect();
     return event.clientY > box.top + box.height / 2;
@@ -10792,10 +10846,13 @@ function sidebarDropTarget(event) {
     if (!groupItem || groupItem.dataset.dragGroup === sidebarDrag.group) return null;
     return { element: groupItem, group: groupItem.dataset.dragGroup, after: lowerHalf(groupItem) };
   }
-  if (row) {
-    if (row.dataset.dragSession === sidebarDrag.session) return null;
-    return { element: row, session: row.dataset.dragSession, after: lowerHalf(row) };
+  if (row?.dataset.dragSession === sidebarDrag.session) return null;
+  if (pinnedItem) {
+    return row ? { element: row, session: row.dataset.dragSession, after: lowerHalf(row), pinned: true }
+      : { element: pinnedItem, pinned: true, into: true };
   }
+  // A sorted list has no place beside a session: the drop is into its group.
+  if (row && !sessionSortOrder()) return { element: row, session: row.dataset.dragSession, after: lowerHalf(row) };
   if (groupItem) return { element: groupItem, group: groupItem.dataset.dragGroup, into: true };
   return { element: els.sessionSidebarList, group: null, into: true };
 }
@@ -10821,18 +10878,31 @@ function endSidebarDrag() {
 async function dropSidebarSession(id, target) {
   const session = state.sessions.find((entry) => entry.id === id);
   if (!session) return;
+  if (target.pinned) {
+    // Pinned beside the session it was dropped on, or last. Its group and its
+    // place among the others stay.
+    state.sessionPinned = reorderedIds(state.sessionPinned || [], id, target.session, target.after);
+    scheduleUiSettingsSave();
+    renderSessionSidebar();
+    return;
+  }
+  // Dropped anywhere else, a pinned session is pinned no more.
+  state.sessionPinned = (state.sessionPinned || []).filter((entry) => entry !== id);
   const beside = target.session ? state.sessions.find((entry) => entry.id === target.session) : null;
   const group = (beside ? beside.group : target.group) || null;
-  // A session that is gone leaves the kept order here.
-  const known = new Set(state.sessions.map((entry) => entry.id));
-  const others = (state.sessionOrder || []).filter((entry) => known.has(entry) && entry !== id);
-  const layout = sessionSidebarLayout();
-  const siblings = ((group ? layout.groups.find(([name]) => name === group)?.[1] : layout.loose) || [])
-    .map((entry) => entry.id);
-  // Beside a session, or first where it was dropped.
-  const placed = beside ? reorderedIds(siblings, id, beside.id, target.after)
-    : [id, ...siblings.filter((entry) => entry !== id)];
-  state.sessionOrder = [...others.filter((entry) => !placed.includes(entry)), ...placed];
+  // A sorted list places the session itself, and the dragged order waits.
+  if (!sessionSortOrder()) {
+    // A session that is gone leaves the kept order here.
+    const known = new Set(state.sessions.map((entry) => entry.id));
+    const others = (state.sessionOrder || []).filter((entry) => known.has(entry) && entry !== id);
+    const layout = sessionSidebarLayout();
+    const siblings = ((group ? layout.groups.find(([name]) => name === group)?.[1] : layout.loose) || [])
+      .map((entry) => entry.id);
+    // Beside a session, or first where it was dropped.
+    const placed = beside ? reorderedIds(siblings, id, beside.id, target.after)
+      : [id, ...siblings.filter((entry) => entry !== id)];
+    state.sessionOrder = [...others.filter((entry) => !placed.includes(entry)), ...placed];
+  }
   scheduleUiSettingsSave();
   if ((session.group || null) !== group) await moveSessionToGroup(id, group);
   else renderSessionSidebar();
@@ -10847,12 +10917,16 @@ function dropSidebarGroup(name, target) {
 
 // Renames a group for all its sessions, or ends it when there is no new name.
 async function renameSessionGroup(from, to) {
-  const response = await fetch("/api/session-groups/rename", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ from, to: to || null }),
-  });
-  await requireOkResponse(response, to ? "Failed to rename the group." : "Failed to ungroup the sessions.");
+  // A group no session is in is the list's alone: the server knows a group
+  // by the sessions that carry its name.
+  if (state.sessions.some((session) => session.group === from)) {
+    const response = await fetch("/api/session-groups/rename", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ from, to: to || null }),
+    });
+    await requireOkResponse(response, to ? "Failed to rename the group." : "Failed to ungroup the sessions.");
+  }
   // What was saved for the old name goes to the new one.
   const renamed = (names) => [...new Set((names || []).flatMap((name) => (name !== from ? [name] : to ? [to] : [])))];
   state.sessionGroupsCollapsed = renamed(state.sessionGroupsCollapsed);
@@ -10866,8 +10940,10 @@ function showSessionGroupMenu(event, group) {
   closeSessionContextMenu();
   const menu = document.createElement("div");
   menu.className = "context-menu session-context-menu";
+  // Its sessions stay, in no group. With none there is only the group to end.
+  const ending = state.sessions.some((session) => session.group === group) ? "Ungroup" : "Delete group";
   menu.innerHTML = '<button class="context-menu-item" data-action="rename">Rename group</button>'
-    + '<button class="context-menu-item" data-action="ungroup">Ungroup</button>';
+    + `<button class="context-menu-item" data-action="ungroup">${ending}</button>`;
   document.body.appendChild(menu);
   const size = menu.getBoundingClientRect();
   menu.style.left = `${Math.max(4, Math.min(event.clientX, window.innerWidth - size.width - 4))}px`;
@@ -10889,6 +10965,48 @@ function sessionMakerMark(session) {
   return maker ? `<span class="session-actor" data-actor="${escapeHtml(maker)}" title="Made by ${escapeHtml(maker)}"></span>` : "";
 }
 
+// Keeps a session at the top of the list, or lets it go back to its place.
+function toggleSessionPin(sessionId) {
+  // A session that is gone leaves the pinned here.
+  const known = new Set(state.sessions.map((session) => session.id));
+  const pinned = (state.sessionPinned || []).filter((id) => known.has(id));
+  state.sessionPinned = pinned.includes(sessionId) ? pinned.filter((id) => id !== sessionId) : [...pinned, sessionId];
+  renderSessionSidebar();
+  scheduleUiSettingsSave();
+}
+
+function setSessionSort(sort) {
+  state.sessionSort = sort;
+  renderSessionSidebar();
+  scheduleUiSettingsSave();
+}
+
+// The list's own menu, under its title: the order it is in, and a new group.
+function showSessionArrangeMenu(anchor) {
+  closeSessionContextMenu();
+  const sorts = [["manual", "Manual order"], ["recent", "Last capture"], ["created", "Created"], ["name", "Name"], ["agent", "Agent"]];
+  const current = sorts.some(([key]) => key === state.sessionSort) ? state.sessionSort : "manual";
+  const menu = document.createElement("div");
+  menu.className = "context-menu session-context-menu";
+  menu.setAttribute("role", "menu");
+  menu.innerHTML = '<div class="context-menu-section"><span class="context-menu-label">Sort by</span></div>'
+    + sorts.map(([key, label]) => `<button class="context-menu-item" role="menuitemradio" aria-checked="${key === current}" data-sort="${key}">${label}`
+      + `${key === current ? '<span class="context-menu-shortcut" aria-hidden="true">✓</span>' : ""}</button>`).join("")
+    + '<div class="context-menu-divider"></div><button class="context-menu-item" data-action="new-group">New group…</button>';
+  document.body.appendChild(menu);
+  const at = anchor.getBoundingClientRect();
+  const size = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(at.left, window.innerWidth - size.width - 4))}px`;
+  menu.style.top = `${at.bottom + 4}px`;
+  sessionContextMenuEl = menu;
+  menu.addEventListener("click", (event) => {
+    const chosen = event.target.closest("[data-sort], [data-action]")?.dataset;
+    if (chosen?.sort) setSessionSort(chosen.sort);
+    else if (chosen?.action === "new-group") openSidebarGroupName({ create: true });
+    closeSessionContextMenu();
+  });
+}
+
 function toggleSessionGroup(name) {
   const folded = new Set(state.sessionGroupsCollapsed);
   if (!folded.delete(name)) folded.add(name);
@@ -10902,7 +11020,8 @@ function toggleSessionGroup(name) {
 function sessionGroupMenuItems(session) {
   const item = (action, label, group) => `<button class="context-menu-item" data-action="${action}"`
     + `${group ? ` data-group="${escapeHtml(group)}"` : ""}>${escapeHtml(label)}</button>`;
-  const groups = [...new Set(state.sessions.map((entry) => entry.group).filter(Boolean))]
+  // The groups sessions are in, and the ones the list keeps for later.
+  const groups = [...new Set([...(state.sessionGroupOrder || []), ...state.sessions.map((entry) => entry.group).filter(Boolean)])]
     .sort((a, b) => a.localeCompare(b));
   return groups.filter((group) => group !== session.group).map((group) => item("group", `Move to ${group}`, group)).join("")
     + item("new-group", "New group…")
@@ -10918,16 +11037,29 @@ async function moveSessionToGroup(sessionId, group) {
     body: JSON.stringify({ group: group || null }),
   });
   await requireOkResponse(response, "Failed to move the session.");
-  // The group the session went to is shown open.
-  if (group && state.sessionGroupsCollapsed.includes(group)) {
-    state.sessionGroupsCollapsed = state.sessionGroupsCollapsed.filter((name) => name !== group);
-    scheduleUiSettingsSave();
-  }
+  unfoldSessionGroup(group);
   await loadSessions({ preserveWorkspaceOwner: true });
 }
 
-// `edit` is { session: id } for a new group that session starts, or
-// { group: name } to rename that group.
+// The group a session just went to is shown open.
+function unfoldSessionGroup(group) {
+  if (!group || !state.sessionGroupsCollapsed.includes(group)) return;
+  state.sessionGroupsCollapsed = state.sessionGroupsCollapsed.filter((name) => name !== group);
+  scheduleUiSettingsSave();
+}
+
+// A group a person named is the list's to keep: it is drawn while no session
+// is in it, until it is ungrouped or deleted.
+function keepSessionGroup(name) {
+  if ((state.sessionGroupOrder || []).includes(name)) return;
+  state.sessionGroupOrder = [...(state.sessionGroupOrder || []), name];
+  renderSessionSidebar();
+  scheduleUiSettingsSave();
+}
+
+// `edit` is { session: id } for a new group that session starts,
+// { group: name } to rename that group, or { create: true } for a new group
+// with no session in it yet.
 function openSidebarGroupName(edit) {
   // The field is in the list, which a menu elsewhere can ask for while hidden.
   if (state.sessionSidebarHidden) toggleSessionSidebar();
@@ -10950,8 +11082,11 @@ function closeSidebarGroupName() {
 async function submitSidebarGroupName() {
   const name = els.sessionSidebarGroupName.value.trim();
   const edit = sidebarGroupEdit;
-  if (name && edit?.session) await moveSessionToGroup(edit.session, name);
-  else if (name && edit?.group && name !== edit.group) await renameSessionGroup(edit.group, name);
+  if (name && edit?.session) {
+    await moveSessionToGroup(edit.session, name);
+    keepSessionGroup(name);
+  } else if (name && edit?.group && name !== edit.group) await renameSessionGroup(edit.group, name);
+  else if (name && edit?.create) keepSessionGroup(name);
   closeSidebarGroupName();
 }
 
@@ -11031,8 +11166,12 @@ function toggleSessionSidebar() {
   scheduleUiSettingsSave();
 }
 
-function openSidebarSessionCreate() {
+// The name field under the list's title. A group's + names the group the
+// session is made in; the list's own + is handed its click, and names none.
+function openSidebarSessionCreate(group) {
   closeSidebarGroupName();
+  sidebarCreateGroup = typeof group === "string" ? group : null;
+  els.sessionSidebarCreateName.placeholder = sidebarCreateGroup ? `New session in ${sidebarCreateGroup}` : "Session name";
   els.sessionSidebarCreate.classList.remove("hidden");
   els.sessionSidebarCreateName.focus();
 }
@@ -11040,16 +11179,21 @@ function openSidebarSessionCreate() {
 function closeSidebarSessionCreate() {
   // A create already sent reads the name after the drafts it saves first.
   if (!sidebarSessionCreating) els.sessionSidebarCreateName.value = "";
+  sidebarCreateGroup = null;
   els.sessionSidebarCreate.classList.add("hidden");
 }
 
 async function createSidebarSession() {
   if (sidebarSessionCreating) return;
   sidebarSessionCreating = true;
+  const group = sidebarCreateGroup;
   try {
-    await createSession(els.sessionSidebarCreateName);
+    await createSession(els.sessionSidebarCreateName, group);
     // A created session clears the name; one stopped before sending keeps it.
-    if (!els.sessionSidebarCreateName.value) closeSidebarSessionCreate();
+    if (!els.sessionSidebarCreateName.value) {
+      unfoldSessionGroup(group);
+      closeSidebarSessionCreate();
+    }
   } finally {
     sidebarSessionCreating = false;
   }
@@ -11174,6 +11318,7 @@ function showSessionContextMenu(event, sessionId, place = "dashboard") {
     <div class="context-menu-divider"></div>
     <button class="context-menu-item" data-action="rename">Rename session</button>
     <button class="context-menu-item" data-action="folder">Open session folder</button>
+    <button class="context-menu-item" data-action="pin">${(state.sessionPinned || []).includes(sessionId) ? "Unpin" : "Pin"}</button>
     <div class="context-menu-divider"></div>
     ${sessionGroupMenuItems(session)}
     ${fed ? "" : '<div class="context-menu-divider"></div>'}
@@ -11203,6 +11348,8 @@ function showSessionContextMenu(event, sessionId, place = "dashboard") {
       });
     } else if (action === "delete") {
       deleteSessionById(sessionId);
+    } else if (action === "pin") {
+      toggleSessionPin(sessionId);
     } else if (action === "group" || action === "ungroup") {
       moveSessionToGroup(sessionId, btn.dataset.group || null).catch(handleWorkspaceActionError);
     } else if (action === "new-group") {
@@ -26838,10 +26985,14 @@ function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
   state.websocketLiveOnly = Boolean(snapshot?.websocket_live_only);
   state.replayTabsWrap = snapshot?.replay_tabs_wrap === true;
   state.sessionSidebarHidden = snapshot?.session_sidebar_hidden === true;
+  state.sessionSidebarWidth = sanitizeSessionSidebarWidth(snapshot?.session_sidebar_width);
+  applySessionSidebarWidth();
   const strings = (value) => (Array.isArray(value) ? value.filter((entry) => typeof entry === "string") : []);
   state.sessionGroupsCollapsed = strings(snapshot?.session_groups_collapsed);
   state.sessionOrder = strings(snapshot?.session_order);
   state.sessionGroupOrder = strings(snapshot?.session_group_order);
+  state.sessionPinned = strings(snapshot?.session_pinned);
+  state.sessionSort = typeof snapshot?.session_sort === "string" ? snapshot.session_sort : "manual";
   els.replayTabStrip?.classList?.toggle("wrap", state.replayTabsWrap);
   if (els.replayTabsWrapInput) els.replayTabsWrapInput.checked = state.replayTabsWrap;
   state.websocketStackHeight = sanitizeWebsocketStackHeight(snapshot?.websocket_stack_height);
@@ -26933,9 +27084,12 @@ function snapshotUiSettings() {
     websocket_live_only: Boolean(state.websocketLiveOnly),
     replay_tabs_wrap: state.replayTabsWrap === true,
     session_sidebar_hidden: state.sessionSidebarHidden === true,
+    session_sidebar_width: state.sessionSidebarWidth > 0 ? state.sessionSidebarWidth : null,
     session_groups_collapsed: state.sessionGroupsCollapsed,
     session_order: state.sessionOrder,
     session_group_order: state.sessionGroupOrder,
+    session_pinned: state.sessionPinned,
+    session_sort: state.sessionSort,
     websocket_stack_height: state.websocketStackHeight > 0 ? state.websocketStackHeight : null,
     ws_replay_left_width: state.wsReplayLeftWidth > 0 ? state.wsReplayLeftWidth : null,
     ws_replay_frame_detail_height: state.wsReplayFrameDetailHeight > 0 ? state.wsReplayFrameDetailHeight : null,
@@ -27232,6 +27386,62 @@ function bindServiceMapResizer(handle) {
     document.body.classList.add("pane-resizing-x");
     handle.classList.add("active");
     const onMove = (moveEvent) => setWidth(startWidth - (moveEvent.clientX - startX));
+    const onUp = () => {
+      document.body.classList.remove("pane-resizing-x");
+      handle.classList.remove("active");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      scheduleUiSettingsSave();
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
+// The session list is no narrower than its rows can be read, and leaves the
+// workspace its room. The server keeps a saved width to the same two.
+const SESSION_SIDEBAR_MIN_WIDTH = 160;
+const SESSION_SIDEBAR_MAX_WIDTH = 480;
+
+function sanitizeSessionSidebarWidth(candidate) {
+  const parsed = Number(candidate);
+  return Number.isFinite(parsed) && parsed > 0
+    ? clamp(Math.round(parsed), SESSION_SIDEBAR_MIN_WIDTH, SESSION_SIDEBAR_MAX_WIDTH) : null;
+}
+
+// The session list keeps the width it was dragged to.
+function applySessionSidebarWidth() {
+  const style = els.sessionSidebar?.style;
+  if (!style) return;
+  if (state.sessionSidebarWidth > 0) style.setProperty("--session-sidebar-width", `${state.sessionSidebarWidth}px`);
+  else style.removeProperty("--session-sidebar-width");
+}
+
+// The list's trailing edge: drag it, or focus it and press ←/→; a
+// double-click puts the width back.
+function bindSessionSidebarResizer(handle) {
+  if (!handle) return;
+  const setWidth = (width) => {
+    state.sessionSidebarWidth = sanitizeSessionSidebarWidth(width);
+    applySessionSidebarWidth();
+  };
+  handle.addEventListener("dblclick", () => {
+    state.sessionSidebarWidth = null;
+    applySessionSidebarWidth();
+    scheduleUiSettingsSave();
+  });
+  handle.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    setWidth(els.sessionSidebar.getBoundingClientRect().width + (event.key === "ArrowRight" ? 24 : -24));
+    scheduleUiSettingsSave();
+  });
+  handle.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    const startX = event.clientX, startWidth = els.sessionSidebar.getBoundingClientRect().width;
+    document.body.classList.add("pane-resizing-x");
+    handle.classList.add("active");
+    const onMove = (moveEvent) => setWidth(startWidth + moveEvent.clientX - startX);
     const onUp = () => {
       document.body.classList.remove("pane-resizing-x");
       handle.classList.remove("active");

@@ -112,13 +112,13 @@ function menuFixture() {
 test("a session's menu offers what its feed allows, and nothing the server would refuse", () => {
   const f = menuFixture();
   assert.deepEqual(f.labels("idle"), ["record=Record :8080 here", "open-port=Open a port", "-",
-    "rename=Rename session", "folder=Open session folder", "-", "new-group=New group…", "-", "delete=Delete session"]);
+    "rename=Rename session", "folder=Open session folder", "pin=Pin", "-", "new-group=New group…", "-", "delete=Delete session"]);
   // A session with an open port is not activated and not deleted.
   assert.deepEqual(f.labels("agent"), ["close-port=Close port :18081", "copy-address=Copy proxy address", "-",
-    "rename=Rename session", "folder=Open session folder", "-", "new-group=New group…"]);
+    "rename=Rename session", "folder=Open session folder", "pin=Pin", "-", "new-group=New group…"]);
   // The listener's session gets no port, and is not deleted.
   assert.deepEqual(f.labels("main"), ["copy-address=Copy proxy address", "-",
-    "rename=Rename session", "folder=Open session folder", "-", "new-group=New group…"]);
+    "rename=Rename session", "folder=Open session folder", "pin=Pin", "-", "new-group=New group…"]);
 });
 
 test("Capture says a session that records but receives nothing is not receiving", () => {

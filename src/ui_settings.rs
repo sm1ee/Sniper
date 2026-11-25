@@ -45,6 +45,8 @@ const ACTIVE_TOOL_OPTIONS: &[&str] = &[
     "tools",
     "logger",
 ];
+/// The orders the session list offers. "manual" is the dragged one.
+const SESSION_SORT_OPTIONS: &[&str] = &["manual", "recent", "created", "name", "agent"];
 const ACTIVE_PROXY_TAB_OPTIONS: &[&str] = &[
     "intercept",
     "http-history",
@@ -405,9 +407,17 @@ pub struct AppUiSettingsSnapshot {
     /// The order a person dragged sessions into, by id. A session not listed
     /// comes before the listed ones of its group, newest first.
     pub session_order: Vec<String>,
-    /// The order a person dragged the groups into. One not listed comes
-    /// after the listed ones, by name.
+    /// The groups a person made or dragged in the list, in their order. The
+    /// list keeps these while no session is in them. A group not listed
+    /// comes after, by name, and lasts while a session carries its name.
     pub session_group_order: Vec<String>,
+    /// The width a person dragged the session list to.
+    pub session_sidebar_width: Option<u16>,
+    /// The sessions kept at the top of the list, by id, in the order pinned.
+    pub session_pinned: Vec<String>,
+    /// How the list orders the sessions of each group. "manual" is the order
+    /// they were dragged into.
+    pub session_sort: String,
     pub websocket_stack_height: Option<u16>,
     pub ws_replay_left_width: Option<u16>,
     pub ws_replay_frame_detail_height: Option<u16>,
@@ -452,6 +462,9 @@ impl Default for AppUiSettingsSnapshot {
             session_groups_collapsed: Vec::new(),
             session_order: Vec::new(),
             session_group_order: Vec::new(),
+            session_sidebar_width: None,
+            session_pinned: Vec::new(),
+            session_sort: "manual".to_string(),
             websocket_stack_height: None,
             ws_replay_left_width: None,
             ws_replay_frame_detail_height: None,
@@ -529,14 +542,13 @@ impl AppUiSettingsSnapshot {
         sanitized.session_sidebar_hidden = self.session_sidebar_hidden;
         sanitized.session_groups_collapsed = sanitize_group_names(self.session_groups_collapsed);
         sanitized.session_group_order = sanitize_group_names(self.session_group_order);
-        let mut seen = BTreeMap::new();
-        sanitized.session_order = self
-            .session_order
-            .into_iter()
-            .filter(|id| uuid::Uuid::parse_str(id).is_ok())
-            .filter(|id| seen.insert(id.clone(), ()).is_none())
-            .take(2_000)
-            .collect();
+        sanitized.session_order = sanitize_session_ids(self.session_order);
+        sanitized.session_sidebar_width = self
+            .session_sidebar_width
+            .filter(|width| *width > 0)
+            .map(|width| width.clamp(160, 480));
+        sanitized.session_pinned = sanitize_session_ids(self.session_pinned);
+        sanitized.session_sort = sanitize_option(self.session_sort, "manual", SESSION_SORT_OPTIONS);
         sanitized.websocket_stack_height = self
             .websocket_stack_height
             .filter(|height| *height > 0)
@@ -798,6 +810,16 @@ fn sanitize_map_entries(entries: Vec<String>) -> Vec<String> {
         })
         .filter(|entry| seen.insert(entry.clone(), ()).is_none())
         .take(SERVICE_MAP_ENTRY_MAX_COUNT)
+        .collect()
+}
+
+/// Sessions the list keeps a place for: ids only, each once, and bounded.
+fn sanitize_session_ids(ids: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeMap::new();
+    ids.into_iter()
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        .filter(|id| seen.insert(id.clone(), ()).is_none())
+        .take(2_000)
         .collect()
 }
 
@@ -1687,6 +1709,10 @@ mod tests {
         snapshot.session_group_order = vec!["beta".into(), "acme".into(), "beta".into()];
         let dragged = uuid::Uuid::new_v4().to_string();
         snapshot.session_order = vec![dragged.clone(), "not an id".into(), dragged.clone()];
+        snapshot.session_sidebar_width = Some(9_999);
+        let pinned = uuid::Uuid::new_v4().to_string();
+        snapshot.session_pinned = vec![pinned.clone(), "not an id".into(), pinned.clone()];
+        snapshot.session_sort = "agent".to_string();
         snapshot.websocket_stack_height = Some(345);
         snapshot.ws_replay_left_width = Some(555);
         snapshot.ws_replay_frame_detail_height = Some(222);
@@ -1739,6 +1765,17 @@ mod tests {
         assert_eq!(persisted.session_groups_collapsed, ["acme"]);
         assert_eq!(persisted.session_group_order, ["beta", "acme"]);
         assert_eq!(persisted.session_order, [dragged]);
+        assert_eq!(persisted.session_sidebar_width, Some(480));
+        assert_eq!(persisted.session_pinned, [pinned]);
+        assert_eq!(persisted.session_sort, "agent");
+        // An order this build does not know is the dragged one.
+        let mut unknown = AppUiSettingsSnapshot::default();
+        assert_eq!(unknown.session_sort, "manual");
+        unknown.session_sort = "by moon phase".to_string();
+        unknown.session_sidebar_width = Some(12);
+        let unknown = unknown.sanitized();
+        assert_eq!(unknown.session_sort, "manual");
+        assert_eq!(unknown.session_sidebar_width, Some(160));
         assert_eq!(persisted.websocket_stack_height, Some(345));
         assert_eq!(persisted.ws_replay_left_width, Some(555));
         assert_eq!(persisted.ws_replay_frame_detail_height, Some(222));

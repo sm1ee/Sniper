@@ -743,6 +743,37 @@ now holds only the tools of the session on screen.
 - **Not checked in the desktop webview.** The page is a flex column with its
   view strip first, as Scan is.
 
+### After phase 3: the list's own tools
+
+What a person chooses about the list is kept in the UI settings and nowhere
+else. The registry and sniper-cli know none of it.
+
+- **The list's menu** is the button before the gear: the order the list is
+  in, and "New group…". The three buttons beside the title are quiet until the
+  pointer is on one.
+- **Pinned sessions** are a block at the top, in the order they were pinned
+  (`session_pinned`). A session is pinned from its menu, or by a drop among
+  the pinned; a drop anywhere else lets it go. A pinned session keeps its
+  group and is drawn only among the pinned.
+- **A sort** (`session_sort`) orders the sessions of each group and of none:
+  the dragged order, last capture, created, name, or agent, which puts a
+  person's own first and each agent's together. The pinned and the groups
+  keep the order they were put in. While a sort is on, the menu's button is
+  tinted, a drop changes the group only, and the dragged order waits.
+- **The list keeps a group** that was made by name or dragged there
+  (`session_group_order`), also while no session is in it. "Ungroup", or
+  "Delete group" when it is empty, ends it. A group that only sniper-cli
+  made is not kept: it lasts while a session carries its name, as before.
+- **A group's `+`** opens the name field under the title for a session in
+  that group. A new session is the one the window shows and the proxy
+  listener records into, as with the list's own `+`.
+- **The list's width** is dragged at its trailing edge, between 160 and
+  480 px (`session_sidebar_width`). ←/→ move it, and a double-click puts it
+  back.
+- **Not built**: a sort for the groups themselves, sessions gathered by
+  agent, a name field inside the group for its `+`. Not checked in the
+  desktop webview.
+
 ## Constraints
 
 - The persistence invariants in `AGENTS.md` §5: every write atomic, no fsync on

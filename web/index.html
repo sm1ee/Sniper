@@ -73,6 +73,11 @@
         <header class="session-sidebar-header">
           <span class="session-sidebar-title">Sessions</span>
           <span class="session-sidebar-actions">
+            <button class="utility-button icon-button" id="sessionArrangeButton" type="button" aria-label="Sort and group" title="Sort and group" aria-haspopup="menu">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false">
+                <path d="M4 7h16M7 12h10M10 17h4" />
+              </svg>
+            </button>
             <button class="utility-button icon-button" id="sessionPageButton" type="button" aria-label="Manage sessions" title="Manage sessions" aria-pressed="false" aria-controls="dashboardShell">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false">
                 <path fill-rule="evenodd" d="M10.29 6.04 L10.61 4.12 L13.39 4.12 L13.71 6.04 L15.01 6.58 L16.59 5.45 L18.55 7.41 L17.42 8.99 L17.96 10.29 L19.88 10.61 L19.88 13.39 L17.96 13.71 L17.42 15.01 L18.55 16.59 L16.59 18.55 L15.01 17.42 L13.71 17.96 L13.39 19.88 L10.61 19.88 L10.29 17.96 L8.99 17.42 L7.41 18.55 L5.45 16.59 L6.58 15.01 L6.04 13.71 L4.12 13.39 L4.12 10.61 L6.04 10.29 L6.58 8.99 L5.45 7.41 L7.41 5.45 L8.99 6.58 Z M14.6 12 a2.6 2.6 0 1 0-5.2 0 a2.6 2.6 0 1 0 5.2 0 Z" />
@@ -88,6 +93,7 @@
           <input id="sessionSidebarGroupName" type="text" placeholder="Group name" aria-label="New group name" spellcheck="false" autocomplete="off" />
         </div>
         <ul class="session-sidebar-list" id="sessionSidebarList"></ul>
+        <div class="session-sidebar-resizer" id="sessionSidebarResizer" role="separator" aria-orientation="vertical" aria-label="Resize session list" tabindex="0"></div>
       </nav>
 
       <main class="workspace">

@@ -47,6 +47,10 @@ function loadFunctions(names, globals = {}) {
       "sessionFeedMenuItems", "sessionMakerMark", "sessionGroupMenuItems"];
     names = [...new Set([...names, ...feed.filter(name => !(name in globals))])];
   }
+  // Whatever places a session in the list asks which order the list is in.
+  if (names.some(name => ["sessionSidebarLayout", "sidebarDropTarget", "dropSidebarSession"].includes(name))) {
+    names = [...new Set([...names, "sessionSortOrder"])];
+  }
   // Intercept shows a held binary body as bytes through the raw build and parse.
   const rawBodyCallers = ["buildEditableRawRequest", "parseEditableRawRequest", "buildEditableRawResponse", "parseEditableRawResponse"];
   if (names.some(name => rawBodyCallers.includes(name))) {

@@ -38,6 +38,11 @@ test("the top strip has no Session tab, and a gear beside the list's title opens
   const header = html.match(/<header class="session-sidebar-header">([^]*?)<\/header>/)[1];
   assert.match(header, /<button class="utility-button icon-button" id="sessionPageButton" type="button" aria-label="Manage sessions" title="Manage sessions" aria-pressed="false" aria-controls="dashboardShell">/);
   assert.ok(header.indexOf('id="sessionPageButton"') < header.indexOf('id="sessionSidebarNewButton"'), "the gear, then New session");
+  // The list's own menu: how it is ordered, and a new group.
+  assert.match(header, /<button class="utility-button icon-button" id="sessionArrangeButton" type="button" aria-label="Sort and group" title="Sort and group" aria-haspopup="menu">/);
+  assert.ok(header.indexOf('id="sessionArrangeButton"') < header.indexOf('id="sessionPageButton"'));
+  // Three buttons beside a title stay quiet until the pointer is on one.
+  assert.match(css, /\.session-sidebar-actions \.icon-button:not\(:hover\):not\(\[aria-pressed="true"\]\)\s*\{[^}]*border-color: transparent;[^}]*background: none;/);
 });
 
 test("the page has two views, the session on screen first, and one way to make a session", () => {
@@ -221,7 +226,8 @@ test("a rename from the Overview gives the focus back to its menu button", () =>
 
 function menuFixture(place) {
   const shown = session("shown", { group: "acme" });
-  const state = { sessions: [shown, session("other", { group: "beta" })], sessionActivity: new Map(), settings: {} };
+  const state = { sessions: [shown, session("other", { group: "beta" })], sessionActivity: new Map(), settings: {},
+    sessionPinned: place === "sidebar" ? ["shown"] : [] };
   const calls = [];
   const body = { appended: [], appendChild(node) { this.appended.push(node); } };
   const menu = { listeners: {}, style: {}, className: "", innerHTML: "",
@@ -235,6 +241,7 @@ function menuFixture(place) {
     revealSessionFolder: async () => {}, deleteSessionById: id => calls.push(["delete", id]),
     moveSessionToGroup: async (id, group) => { calls.push(["move", id, group]); },
     openSidebarGroupName: edit => calls.push(["new group", edit.session]),
+    toggleSessionPin: id => calls.push(["pin", id]),
     runSessionFeedAction: async () => {}, handleWorkspaceActionError() {},
   });
   context.showSessionContextMenu({ clientX: 900, clientY: 90 }, "shown", place);
@@ -246,12 +253,14 @@ for (const place of ["dashboard", "sidebar", "overview"]) {
   test(`a session's menu is the same in the ${place}: where it records, its name, its folder, its group`, () => {
     const f = menuFixture(place);
     const labels = [...f.menu.innerHTML.matchAll(/<button class="context-menu-item[^"]*" data-action="([^"]+)"[^>]*>([^<]*)<\/button>/g)].map(match => match[2]);
+    // A pinned session offers the way back, as here in the list.
     assert.deepEqual(labels, ["Record the proxy here", "Open a port", "Rename session", "Open session folder",
-      "Move to beta", "New group…", "Remove from group", "Delete session"]);
+      place === "sidebar" ? "Unpin" : "Pin", "Move to beta", "New group…", "Remove from group", "Delete session"]);
     f.choose("rename");
     f.choose("group", "beta");
     f.choose("new-group");
-    assert.deepEqual(f.calls, [["rename", "shown", place], ["move", "shown", "beta"], ["new group", "shown"]]);
+    f.choose("pin");
+    assert.deepEqual(f.calls, [["rename", "shown", place], ["move", "shown", "beta"], ["new group", "shown"], ["pin", "shown"]]);
   });
 }
 

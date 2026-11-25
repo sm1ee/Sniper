@@ -1,7 +1,8 @@
 // The session list beside the workspace. Synthetic sessions; no API runs.
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { loadFunctions } = require("./frontend-test-helpers.cjs");
+const vm = require("node:vm");
+const { appSource, loadFunctions } = require("./frontend-test-helpers.cjs");
 
 function element() {
   const classes = new Set();
@@ -263,12 +264,15 @@ test("a session's menu offers each other group, a new one, and the way out", () 
     [["group", "beta", "Move to beta"], ["new-group", undefined, "New group…"], ["ungroup", undefined, "Remove from group"]]);
   assert.deepEqual(items(context.sessionGroupMenuItems(state.sessions[2])),
     [["group", "acme", "Move to acme"], ["group", "beta", "Move to beta"], ["new-group", undefined, "New group…"]]);
+  // A group the list keeps is somewhere to move to before a session is in it.
+  state.sessionGroupOrder = ["empty", "acme"];
+  assert.deepEqual(items(context.sessionGroupMenuItems(state.sessions[0])).map(([, group]) => group).filter(Boolean), ["beta", "empty"]);
 });
 
 test("moving a session asks the server, shows its group open, and reads the list again", async () => {
   const requests = [], reads = [];
   const state = { sessionGroupsCollapsed: ["acme", "beta"] };
-  const context = loadFunctions(["moveSessionToGroup"], {
+  const context = loadFunctions(["moveSessionToGroup", "unfoldSessionGroup"], {
     state, encodeURIComponent,
     fetch: async (url, options) => { requests.push([url, options.method, JSON.parse(options.body)]); return { ok: true }; },
     requireOkResponse: async () => {},
@@ -285,10 +289,11 @@ test("moving a session asks the server, shows its group open, and reads the list
 for (const failing of [false, true]) test(`a new group's name ${failing ? "stays in its field when the server refuses it" : "moves the session and closes its field"}`, async () => {
   const moved = [];
   let closed = 0, shown = 0;
-  const state = { sessionSidebarHidden: false };
+  const state = { sessionSidebarHidden: false, sessionGroupOrder: ["beta"] };
   const els = { sessionSidebarGroup: element(), sessionSidebarGroupName: { value: "", focus() {}, select() {} } };
-  const context = loadFunctions(["openSidebarGroupName", "closeSidebarGroupName", "submitSidebarGroupName"], {
+  const context = loadFunctions(["openSidebarGroupName", "closeSidebarGroupName", "submitSidebarGroupName", "keepSessionGroup"], {
     els, state, sidebarGroupEdit: null,
+    renderSessionSidebar() {}, scheduleUiSettingsSave() {},
     toggleSessionSidebar: () => { shown += 1; state.sessionSidebarHidden = !state.sessionSidebarHidden; },
     closeSidebarSessionCreate: () => { closed += 1; },
     moveSessionToGroup: async (id, group) => { moved.push([id, group]); if (failing) throw new Error("refused"); },
@@ -302,6 +307,8 @@ for (const failing of [false, true]) test(`a new group's name ${failing ? "stays
   const outcome = await context.submitSidebarGroupName().then(() => "moved", error => error.message);
   assert.deepEqual(moved, [["s1", "acme"]]);
   assert.equal(outcome, failing ? "refused" : "moved");
+  // A group a person named is the list's to keep, once a session is in it.
+  assert.deepEqual([...state.sessionGroupOrder], failing ? ["beta"] : ["beta", "acme"]);
   assert.equal(els.sessionSidebarGroup.classList.contains("hidden"), !failing);
   assert.equal(els.sessionSidebarGroupName.value, failing ? "  acme  " : "");
   // An empty name moves nothing.
@@ -378,7 +385,7 @@ test("ids are put before or after the one they are dropped on", () => {
 function dropFixture(sessions) {
   const moved = [], renders = [];
   let saves = 0;
-  const state = { sessions, sessionOrder: [], sessionGroupOrder: [] };
+  const state = { sessions, sessionOrder: [], sessionGroupOrder: [], sessionPinned: [], sessionSort: "manual" };
   const context = loadFunctions(["dropSidebarSession", "dropSidebarGroup", "sessionSidebarLayout", "reorderedIds"], {
     state,
     moveSessionToGroup: async (id, group) => { moved.push([id, group]); },
@@ -438,36 +445,51 @@ test("a group dropped beside another changes place among the groups", () => {
 
 // A fake of the two things the target reads from an element: the nearest
 // draggable item of each kind, and its box.
-function dragElement({ session = null, group = null, top = 0, height = 20 } = {}) {
-  const item = kind => ({ dataset: kind === "session" ? { dragSession: session } : { dragGroup: group },
+function dragElement({ session = null, group = null, pinned = false, top = 0, height = 20 } = {}) {
+  const item = kind => ({ kind, dataset: kind === "session" ? { dragSession: session } : kind === "group" ? { dragGroup: group } : {},
     getBoundingClientRect: () => ({ top, height }) });
   return { closest: selector => (selector === "li[data-drag-session]" ? (session ? item("session") : null)
-    : selector === "li[data-drag-group]" ? (group ? item("group") : null) : null) };
+    : selector === "li[data-drag-group]" ? (group ? item("group") : null)
+      : selector === "li[data-drop-pinned]" ? (pinned ? item("pinned") : null) : null) };
 }
 
 test("where a drag may land depends on what is dragged", () => {
   const list = {};
-  const context = loadFunctions(["sidebarDropTarget"], { els: { sessionSidebarList: list }, sidebarDrag: null });
+  const state = { sessionSort: "manual" };
+  const context = loadFunctions(["sidebarDropTarget"], { state, els: { sessionSidebarList: list }, sidebarDrag: null });
   const at = (element, y) => {
     const target = context.sidebarDropTarget({ target: element, clientY: y });
-    return target && { ...target, element: target.element === list ? "list" : "item" };
+    return target && { ...target, element: target.element === list ? "list" : target.element.kind || "item" };
   };
   assert.equal(at(dragElement({ session: "b" }), 5), null, "nothing is dragged");
   context.sidebarDrag = { session: "a" };
-  assert.deepEqual(at(dragElement({ session: "b", group: "acme" }), 5), { element: "item", session: "b", after: false });
-  assert.deepEqual(at(dragElement({ session: "b" }), 15), { element: "item", session: "b", after: true });
+  assert.deepEqual(at(dragElement({ session: "b", group: "acme" }), 5), { element: "session", session: "b", after: false });
+  assert.deepEqual(at(dragElement({ session: "b" }), 15), { element: "session", session: "b", after: true });
   assert.equal(at(dragElement({ session: "a" }), 5), null, "not onto itself");
-  assert.deepEqual(at(dragElement({ group: "acme" }), 5), { element: "item", group: "acme", into: true });
+  assert.deepEqual(at(dragElement({ group: "acme" }), 5), { element: "group", group: "acme", into: true });
   assert.deepEqual(at(dragElement(), 5), { element: "list", group: null, into: true });
+  // Among the pinned: beside one of them, or on their block, which is last.
+  assert.deepEqual(at(dragElement({ session: "p", pinned: true }), 15), { element: "session", session: "p", after: true, pinned: true });
+  assert.deepEqual(at(dragElement({ pinned: true }), 5), { element: "pinned", pinned: true, into: true });
+  assert.equal(at(dragElement({ session: "a", pinned: true }), 5), null, "not onto itself");
+  // A sorted list has no place beside a session: the drop is into its group.
+  state.sessionSort = "name";
+  assert.deepEqual(at(dragElement({ session: "b", group: "acme" }), 5), { element: "group", group: "acme", into: true });
+  assert.deepEqual(at(dragElement({ session: "b" }), 5), { element: "list", group: null, into: true });
+  assert.deepEqual(at(dragElement({ session: "p", pinned: true }), 5), { element: "session", session: "p", after: false, pinned: true },
+    "the pinned keep the order they were put in");
+  state.sessionSort = "manual";
   context.sidebarDrag = { group: "acme" };
-  assert.deepEqual(at(dragElement({ session: "b", group: "beta", height: 40 }), 30), { element: "item", group: "beta", after: true });
+  assert.deepEqual(at(dragElement({ session: "b", group: "beta", height: 40 }), 30), { element: "group", group: "beta", after: true });
   assert.equal(at(dragElement({ session: "b", group: "acme" }), 5), null);
   assert.equal(at(dragElement({ session: "b" }), 5), null, "a group has no place among the sessions in none");
+  assert.equal(at(dragElement({ session: "p", pinned: true }), 5), null, "nor among the pinned");
 });
 
 test("renaming a group asks the server once and carries over what was saved for the old name", async () => {
   const requests = [], reads = [];
-  const state = { sessionGroupsCollapsed: ["acme", "beta"], sessionGroupOrder: ["beta", "acme"] };
+  const state = { sessionGroupsCollapsed: ["acme", "beta"], sessionGroupOrder: ["beta", "acme"],
+    sessions: [session("a", "01", { group: "acme" }), session("l", "02", { group: "lab" })] };
   const context = loadFunctions(["renameSessionGroup"], {
     state,
     fetch: async (url, options) => { requests.push([url, options.method, JSON.parse(options.body)]); return { ok: true }; },
@@ -484,5 +506,301 @@ test("renaming a group asks the server once and carries over what was saved for 
   assert.deepEqual(requests[1][2], { from: "lab", to: null });
   assert.deepEqual([...state.sessionGroupsCollapsed], ["beta"]);
   assert.deepEqual(reads, [{ preserveWorkspaceOwner: true }, { preserveWorkspaceOwner: true }]);
+  // A group no session is in is the list's alone: the server knows no such
+  // group, and is not asked.
+  await context.renameSessionGroup("beta", "gamma");
+  assert.deepEqual([...state.sessionGroupOrder], ["gamma"]);
+  await context.renameSessionGroup("gamma", null);
+  assert.deepEqual([...state.sessionGroupOrder], []);
+  assert.equal(requests.length, 2, "nothing more was asked");
 });
 
+
+// ── pinned, sorted, and groups the list keeps ──
+const loose = context => Array.from(context.sessionSidebarLayout().loose, entry => entry.id);
+
+test("pinned sessions are drawn first, in the order pinned, and nowhere else", () => {
+  const f = fixture({
+    sessions: [session("a", "01"), session("b", "02", { group: "acme" }), session("c", "03"), session("d", "04", { group: "acme" })],
+    activeId: "a",
+  });
+  f.context.renderSessionSidebar();
+  assert.doesNotMatch(f.els.sessionSidebarList.innerHTML, /session-sidebar-pinned/, "nothing pinned, no block for it");
+  f.state.sessionPinned = ["b", "gone", "a"];
+  f.context.renderSessionSidebar();
+  const html = f.els.sessionSidebarList.innerHTML;
+  assert.match(html, /^<li class="session-sidebar-pinned" data-drop-pinned><span class="session-sidebar-section">Pinned<\/span><ul class="session-sidebar-pinned-list">/);
+  assert.deepEqual(rows(html), ["b", "a", "c", "d"]);
+  assert.deepEqual(rows(html.slice(0, html.indexOf("</ul></li>"))), ["b", "a"]);
+  assert.deepEqual(groupHeaders(html), [["acme", "true", "1"]], "a pinned session is not counted where it is not drawn");
+});
+
+test("a group the list keeps is drawn while no session is in it", () => {
+  const f = fixture({ sessions: [session("a1", "01", { group: "acme" }), session("z1", "02", { group: "zeta" })], activeId: null });
+  f.state.sessionGroupOrder = ["lab", "acme"];
+  f.context.renderSessionSidebar();
+  assert.deepEqual(groupHeaders(f.els.sessionSidebarList.innerHTML), [["lab", "true", "0"], ["acme", "true", "1"], ["zeta", "true", "1"]]);
+});
+
+test("a group's name has a + beside it that makes a session there", () => {
+  const f = fixture({ sessions: [session("a1", "01", { group: "a&b" })], activeId: null });
+  f.context.renderSessionSidebar();
+  assert.match(f.els.sessionSidebarList.innerHTML,
+    /<div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" data-group="a&#38;b" aria-expanded="true">.*?<\/button><button class="session-sidebar-group-add" type="button" data-add-to-group="a&#38;b" aria-label="New session in a&#38;b" title="New session in a&#38;b">\+<\/button><\/div>/);
+});
+
+test("the list can be put in an order of its own, and the dragged order is kept for later", () => {
+  const f = fixture({
+    sessions: [
+      session("old", "01", { name: "delta", created_by: "Codex", overview: { last_captured_at: "2026-11-20T00:00:00Z" } }),
+      session("mid", "05", { name: "Bravo", overview: { last_captured_at: "2026-11-22T00:00:00Z" } }),
+      session("new", "09", { name: "alpha", created_by: "Claude" }),
+      session("own", "07", { name: "Charlie" }),
+      session("agent", "03", { name: "echo", created_by: "Claude" }),
+    ],
+    activeId: null,
+  });
+  f.state.sessionOrder = ["old", "new", "mid", "own", "agent"];
+  f.state.sessionSort = "manual";
+  assert.deepEqual(loose(f.context), ["old", "new", "mid", "own", "agent"]);
+  f.state.sessionSort = "created";
+  assert.deepEqual(loose(f.context), ["new", "own", "mid", "agent", "old"]);
+  // What captured last, then what never captured, newest first.
+  f.state.sessionSort = "recent";
+  assert.deepEqual(loose(f.context), ["mid", "old", "new", "own", "agent"]);
+  f.state.sessionSort = "name";
+  assert.deepEqual(loose(f.context), ["new", "mid", "own", "old", "agent"]);
+  // A person's own first, then each agent's together, newest first.
+  f.state.sessionSort = "agent";
+  assert.deepEqual(loose(f.context), ["own", "mid", "new", "agent", "old"]);
+  // A name this build does not know is the dragged order.
+  f.state.sessionSort = "by moon phase";
+  assert.deepEqual(loose(f.context), ["old", "new", "mid", "own", "agent"]);
+  assert.deepEqual([...f.state.sessionOrder], ["old", "new", "mid", "own", "agent"]);
+});
+
+test("a sort orders the sessions of a group, and leaves the pinned and the groups as they were put", () => {
+  const f = fixture({
+    sessions: [session("b1", "01", { name: "b", group: "zeta" }), session("a1", "02", { name: "a", group: "zeta" }),
+      session("p2", "03", { name: "z" }), session("p1", "04", { name: "y" }), session("c1", "05", { name: "c", group: "acme" })],
+    activeId: null,
+  });
+  f.state.sessionSort = "name";
+  f.state.sessionPinned = ["p2", "p1"];
+  f.state.sessionGroupOrder = ["zeta", "acme"];
+  const layout = f.context.sessionSidebarLayout();
+  assert.deepEqual(Array.from(layout.pinned, entry => entry.id), ["p2", "p1"]);
+  assert.deepEqual(Array.from(layout.groups, ([name, sessions]) => [name, Array.from(sessions, entry => entry.id)]),
+    [["zeta", ["a1", "b1"]], ["acme", ["c1"]]]);
+});
+
+test("pinning puts a session last among the pinned, and again takes it out", () => {
+  let saves = 0;
+  const f = fixture({
+    sessions: [session("a", "01"), session("b", "02")], activeId: "a",
+    names: ["toggleSessionPin"], globals: { scheduleUiSettingsSave: () => { saves += 1; } },
+  });
+  f.state.sessionPinned = ["deleted", "b"];
+  f.context.toggleSessionPin("a");
+  assert.deepEqual([...f.state.sessionPinned], ["b", "a"], "a session that is gone leaves the pinned");
+  assert.match(f.els.sessionSidebarList.innerHTML, /session-sidebar-pinned/);
+  f.context.toggleSessionPin("b");
+  assert.deepEqual([...f.state.sessionPinned], ["a"]);
+  assert.equal(saves, 2);
+});
+
+test("a session dropped among the pinned is pinned at that place, and keeps its group", async () => {
+  const f = dropFixture([session("a", "01", { group: "acme" }), session("p1", "02"), session("p2", "03")]);
+  f.state.sessionPinned = ["p1", "p2"];
+  await f.context.dropSidebarSession("a", { session: "p1", after: true, pinned: true });
+  assert.deepEqual([...f.state.sessionPinned], ["p1", "a", "p2"]);
+  // On the block itself it is last.
+  await f.context.dropSidebarSession("p1", { pinned: true, into: true });
+  assert.deepEqual([...f.state.sessionPinned], ["a", "p2", "p1"]);
+  assert.deepEqual(f.moved, [], "its group is not asked about");
+  assert.deepEqual([...f.state.sessionOrder], [], "nor its place among the others");
+  assert.equal(f.renders.length, 2);
+  assert.equal(f.saves(), 2);
+});
+
+test("a pinned session dropped anywhere else is pinned no more", async () => {
+  const f = dropFixture([session("a", "01"), session("b", "02"), session("g", "03", { group: "acme" })]);
+  f.state.sessionPinned = ["a", "g"];
+  await f.context.dropSidebarSession("a", { session: "b", after: true });
+  assert.deepEqual([...f.state.sessionPinned], ["g"]);
+  assert.deepEqual([...f.state.sessionOrder], ["b", "a"]);
+  assert.deepEqual(f.moved, []);
+  // Out of the pinned and out of its group, onto the list.
+  await f.context.dropSidebarSession("g", { group: null, into: true });
+  assert.deepEqual([...f.state.sessionPinned], []);
+  assert.deepEqual(f.moved, [["g", null]]);
+});
+
+test("a drop in a sorted list changes the group and leaves the dragged order alone", async () => {
+  const f = dropFixture([session("a", "01"), session("g1", "02", { group: "acme" })]);
+  f.state.sessionSort = "name";
+  f.state.sessionOrder = ["g1", "a"];
+  await f.context.dropSidebarSession("a", { group: "acme", into: true });
+  assert.deepEqual(f.moved, [["a", "acme"]]);
+  assert.deepEqual([...f.state.sessionOrder], ["g1", "a"]);
+});
+
+function arrangeFixture(sort = "manual") {
+  const state = { sessionSort: sort };
+  const calls = [];
+  const menu = { listeners: {}, style: {}, className: "", innerHTML: "", attributes: {},
+    setAttribute(name, value) { this.attributes[name] = value; },
+    getBoundingClientRect: () => ({ width: 180, height: 200 }),
+    addEventListener(type, handler) { this.listeners[type] = handler; } };
+  const context = loadFunctions(["showSessionArrangeMenu", "setSessionSort"], {
+    state, sessionContextMenuEl: null, closeSessionContextMenu: () => calls.push("closed"),
+    document: { createElement: () => menu, body: { appendChild() {} } }, window: { innerWidth: 1200 },
+    renderSessionSidebar: () => calls.push("render"), scheduleUiSettingsSave: () => calls.push("save"),
+    openSidebarGroupName: edit => calls.push(["group field", { ...edit }]),
+  });
+  const anchor = { getBoundingClientRect: () => ({ left: 120, bottom: 32 }) };
+  const choose = dataset => menu.listeners.click({ target: { closest: () => ({ dataset }) } });
+  return { state, calls, menu, context, anchor, choose };
+}
+
+test("the list's menu names the orders, marks the one in use, and makes a group", () => {
+  const f = arrangeFixture("name");
+  f.context.showSessionArrangeMenu(f.anchor);
+  assert.equal(f.menu.attributes.role, "menu");
+  assert.match(f.menu.innerHTML, /^<div class="context-menu-section"><span class="context-menu-label">Sort by<\/span><\/div>/);
+  const items = [...f.menu.innerHTML.matchAll(/<button class="context-menu-item" role="menuitemradio" aria-checked="(true|false)" data-sort="([a-z]+)">([^<]+)(<span class="context-menu-shortcut" aria-hidden="true">✓<\/span>)?<\/button>/g)]
+    .map(match => [match[2], match[3], match[1], Boolean(match[4])]);
+  assert.deepEqual(items, [["manual", "Manual order", "false", false], ["recent", "Last capture", "false", false],
+    ["created", "Created", "false", false], ["name", "Name", "true", true], ["agent", "Agent", "false", false]]);
+  assert.match(f.menu.innerHTML, /<div class="context-menu-divider"><\/div><button class="context-menu-item" data-action="new-group">New group…<\/button>$/);
+  assert.equal(f.menu.style.left, "120px");
+  assert.equal(f.menu.style.top, "36px");
+  assert.equal(f.context.sessionContextMenuEl, f.menu, "it closes as a session's menu does");
+});
+
+test("choosing an order sorts the list and saves the choice", () => {
+  const f = arrangeFixture();
+  f.context.showSessionArrangeMenu(f.anchor);
+  f.calls.length = 0;
+  f.choose({ sort: "agent" });
+  assert.equal(f.state.sessionSort, "agent");
+  assert.deepEqual(f.calls, ["render", "save", "closed"]);
+  f.calls.length = 0;
+  f.choose({ action: "new-group" });
+  assert.deepEqual(f.calls, [["group field", { create: true }], "closed"]);
+  assert.equal(f.state.sessionSort, "agent");
+});
+
+test("a group made by name is the list's to keep, and nothing is asked of the server", async () => {
+  const state = { sessionSidebarHidden: false, sessionGroupOrder: ["acme"] };
+  const calls = [];
+  const els = { sessionSidebarGroup: element(), sessionSidebarGroupName: { value: "", focus() {}, select() {} } };
+  const context = loadFunctions(["openSidebarGroupName", "closeSidebarGroupName", "submitSidebarGroupName", "keepSessionGroup"], {
+    els, state, sidebarGroupEdit: null, closeSidebarSessionCreate() {},
+    renderSessionSidebar: () => calls.push("render"), scheduleUiSettingsSave: () => calls.push("save"),
+    moveSessionToGroup: async () => { assert.fail("no session is moved"); },
+    renameSessionGroup: async () => { assert.fail("no group is renamed"); },
+  });
+  context.openSidebarGroupName({ create: true });
+  assert.equal(els.sessionSidebarGroupName.value, "");
+  els.sessionSidebarGroupName.value = "  lab ";
+  await context.submitSidebarGroupName();
+  assert.deepEqual([...state.sessionGroupOrder], ["acme", "lab"]);
+  assert.deepEqual(calls, ["render", "save"]);
+  assert.equal(els.sessionSidebarGroup.classList.contains("hidden"), true);
+  // A name the list already keeps is not kept twice.
+  context.openSidebarGroupName({ create: true });
+  els.sessionSidebarGroupName.value = "acme";
+  await context.submitSidebarGroupName();
+  assert.deepEqual([...state.sessionGroupOrder], ["acme", "lab"]);
+  assert.equal(calls.length, 2);
+});
+
+test("a group's menu ungroups its sessions, or deletes a group that has none", () => {
+  const menus = [];
+  const state = { sessions: [session("a", "01", { group: "acme" })] };
+  const context = loadFunctions(["showSessionGroupMenu"], {
+    state, sessionContextMenuEl: null, closeSessionContextMenu() {},
+    document: { createElement: () => { const menu = { style: {}, innerHTML: "", addEventListener() {}, getBoundingClientRect: () => ({ width: 10, height: 10 }) }; menus.push(menu); return menu; }, body: { appendChild() {} } },
+    window: { innerWidth: 800, innerHeight: 600 },
+  });
+  const labels = group => { context.showSessionGroupMenu({ clientX: 0, clientY: 0 }, group); return [...menus.at(-1).innerHTML.matchAll(/>([^<]+)<\/button>/g)].map(match => match[1]); };
+  assert.deepEqual(labels("acme"), ["Rename group", "Ungroup"]);
+  assert.deepEqual(labels("lab"), ["Rename group", "Delete group"]);
+});
+
+function createFixture() {
+  const state = { sessionGroupsCollapsed: ["acme", "beta"] };
+  const created = [];
+  let saves = 0;
+  const els = { sessionSidebarCreate: element(), sessionSidebarCreateName: { value: "", placeholder: "", focused: 0, focus() { this.focused += 1; } } };
+  els.sessionSidebarCreate.classList.add("hidden");
+  const context = loadFunctions(["openSidebarSessionCreate", "closeSidebarSessionCreate", "createSidebarSession", "unfoldSessionGroup"], {
+    state, els, sidebarSessionCreating: false, sidebarCreateGroup: null,
+    closeSidebarGroupName() {}, scheduleUiSettingsSave: () => { saves += 1; },
+    createSession: async (input, group) => { created.push([input === els.sessionSidebarCreateName, group]); input.value = ""; },
+  });
+  return { state, els, context, created, saves: () => saves };
+}
+
+test("a group's + opens the name field for a session in that group", async () => {
+  const f = createFixture();
+  f.context.openSidebarSessionCreate("acme");
+  assert.equal(f.els.sessionSidebarCreate.classList.contains("hidden"), false);
+  assert.equal(f.els.sessionSidebarCreateName.placeholder, "New session in acme");
+  assert.equal(f.els.sessionSidebarCreateName.focused, 1);
+  f.els.sessionSidebarCreateName.value = "Checkout";
+  await f.context.createSidebarSession();
+  assert.deepEqual(f.created, [[true, "acme"]]);
+  assert.deepEqual([...f.state.sessionGroupsCollapsed], ["beta"], "the group it went to is shown open");
+  assert.equal(f.saves(), 1);
+  assert.equal(f.els.sessionSidebarCreate.classList.contains("hidden"), true);
+});
+
+test("the list's own + makes a session in no group, also after a group's + was closed", async () => {
+  const f = createFixture();
+  f.context.openSidebarSessionCreate("acme");
+  f.context.closeSidebarSessionCreate();
+  // The button hands its click to the function.
+  f.context.openSidebarSessionCreate({ type: "click" });
+  assert.equal(f.els.sessionSidebarCreateName.placeholder, "Session name");
+  await f.context.createSidebarSession();
+  assert.deepEqual(f.created, [[true, null]]);
+  assert.deepEqual([...f.state.sessionGroupsCollapsed], ["acme", "beta"]);
+});
+
+test("a click on a group's + asks for a session in that group, and on its name folds it", () => {
+  const start = appSource.indexOf("  // On the list, which outlives the rows each render replaces.\n  els.sessionSidebarList.addEventListener(\"click\"");
+  const end = appSource.indexOf("  // \"Not receiving\" opens the two actions that change it.", start);
+  assert.ok(start !== -1 && end > start);
+  const calls = [];
+  let click;
+  const context = vm.createContext({
+    els: { sessionSidebarList: { addEventListener: (type, handler) => { click = handler; } } },
+    toggleSessionGroup: name => calls.push(["fold", name]),
+    openSidebarSessionCreate: group => calls.push(["new in", group]),
+    currentSessionId: () => "shown", withButtonProgress: () => assert.fail("no session is opened"),
+  });
+  vm.runInContext(appSource.slice(start, end), context);
+  const on = (selector, dataset) => ({ target: { closest: asked => (asked === selector ? { dataset } : null) } });
+  click(on(".session-sidebar-group-add", { addToGroup: "acme" }));
+  click(on(".session-sidebar-group-toggle", { group: "acme" }));
+  assert.deepEqual(calls, [["new in", "acme"], ["fold", "acme"]]);
+});
+
+test("what is pinned and how the list is sorted are read from the settings and written back", () => {
+  assert.match(appSource, /state\.sessionPinned = strings\(snapshot\?\.session_pinned\);/);
+  assert.match(appSource, /state\.sessionSort = typeof snapshot\?\.session_sort === "string" \? snapshot\.session_sort : "manual";/);
+  assert.match(appSource, /session_pinned: state\.sessionPinned,\n\s*session_sort: state\.sessionSort,/);
+});
+
+test("the list's menu button shows that a sort is on, so a drag that keeps no place is no surprise", () => {
+  const f = fixture({ sessions: [session("a", "01")], activeId: "a" });
+  f.els.sessionArrangeButton = element();
+  f.state.sessionSort = "name";
+  f.context.renderSessionSidebar();
+  assert.equal(f.els.sessionArrangeButton.classList.contains("is-sorted"), true);
+  f.state.sessionSort = "manual";
+  f.context.renderSessionSidebar();
+  assert.equal(f.els.sessionArrangeButton.classList.contains("is-sorted"), false);
+});

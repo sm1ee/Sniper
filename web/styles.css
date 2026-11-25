@@ -1101,12 +1101,49 @@ summary {
 .session-sidebar {
   grid-column: 1;
   grid-row: 1 / -1;
+  /* For the resize handle on its trailing edge. */
+  position: relative;
   display: flex;
   flex-direction: column;
-  width: 208px;
+  width: var(--session-sidebar-width, 208px);
+  /* A wide list still leaves the workspace most of a narrow window. */
+  max-width: 45vw;
   min-height: 0;
   border-right: 1px solid var(--line);
   background: var(--shell);
+}
+
+/* The list's trailing edge: drag it, or focus it and press ←/→. It lies over
+   the border, half on each side, and shows only under the pointer. */
+.session-sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  z-index: 3;
+  width: 7px;
+  cursor: col-resize;
+}
+
+.session-sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background 160ms ease;
+}
+
+.session-sidebar-resizer:hover::after,
+.session-sidebar-resizer.active::after,
+.session-sidebar-resizer:focus-visible::after {
+  background: var(--point);
+}
+
+.session-sidebar-resizer:focus-visible {
+  outline: none;
 }
 
 .session-sidebar-header {
@@ -1127,7 +1164,20 @@ summary {
 .session-sidebar-actions {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
+}
+
+/* Three buttons beside a title: quiet until the pointer is on one. */
+.session-sidebar-actions .icon-button:not(:hover):not([aria-pressed="true"]) {
+  border-color: transparent;
+  background: none;
+  color: var(--text-soft);
+}
+
+/* The list is in an order of its own, not the one it was dragged into. */
+.session-sidebar-actions .icon-button.is-sorted,
+.session-sidebar-actions .icon-button.is-sorted:not(:hover):not([aria-pressed="true"]) {
+  color: var(--point);
 }
 
 /* The gear, while the page it opens is on screen. */
@@ -1246,14 +1296,69 @@ summary {
   content: none;
 }
 
-/* A group of sessions. Its name folds the sessions under it. */
+/* The sessions kept at the top, above a line that parts them from the rest. */
+.session-sidebar-pinned {
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+  border-radius: 6px 6px 0 0;
+}
+
+.session-sidebar-section {
+  display: block;
+  padding: 6px 8px 2px;
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+  font-weight: 600;
+}
+
+.session-sidebar-pinned-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* A group of sessions. Its name folds the sessions under it, and the + beside
+   the name makes a session in it. */
+.session-sidebar-group-head {
+  display: flex;
+  align-items: center;
+  margin-top: 4px;
+  border-radius: 6px;
+}
+
+.session-sidebar-group-add {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: var(--font-md);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.session-sidebar-group-add:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.session-sidebar-group-add:focus-visible {
+  outline: 1px solid var(--point-border);
+  outline-offset: -1px;
+}
+
 .session-sidebar-group-toggle {
   display: flex;
   align-items: center;
+  flex: 1 1 auto;
   gap: 8px;
-  width: 100%;
+  min-width: 0;
   min-height: 28px;
-  margin-top: 4px;
   padding: 4px 8px;
   border: none;
   border-radius: 6px;
@@ -1323,7 +1428,8 @@ summary {
   box-shadow: inset 0 -2px 0 var(--point);
 }
 
-.session-sidebar-list .drop-into > .session-sidebar-group-toggle,
+.session-sidebar-list .drop-into > .session-sidebar-group-head,
+.session-sidebar-list .session-sidebar-pinned.drop-into,
 .session-sidebar-list.drop-into {
   background: var(--point-soft);
 }
@@ -6472,6 +6578,23 @@ button.utility-button.replay-tab-add {
 
 .session-context-menu .context-menu-item:hover {
   background: rgba(255, 255, 255, 0.06);
+}
+
+/* The session list's own menu: what it is sorted by, under a label that
+   lines up with the items, and a mark at the end of the order in use. */
+.session-context-menu .context-menu-section {
+  padding: 6px 14px 0;
+}
+
+.session-context-menu .context-menu-item[role="menuitemradio"] {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.session-context-menu .context-menu-item[aria-checked="true"] .context-menu-shortcut {
+  color: var(--point);
+  font-size: inherit;
 }
 
 .session-context-menu .context-menu-item.danger {
