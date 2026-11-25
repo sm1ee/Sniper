@@ -1518,6 +1518,15 @@ summary {
   background: var(--point);
 }
 
+/* A dot is smaller than its place, and in the middle of it: the signal is
+   quiet, and the names stay where they are. */
+.session-sidebar-status.receiving,
+.session-sidebar-status.finished {
+  width: 6px;
+  height: 6px;
+  margin: 0 1px;
+}
+
 /* A job running: the ring the buttons turn while they wait. A little over
    its place, to be read as a ring. */
 .session-sidebar-status.running {

@@ -955,6 +955,9 @@ test("the mark is in the column of a group's caret, and the rows run the list's 
   // The green of the proxy indicator, which says the same of the session on screen.
   assert.match(rule(".session-sidebar-status.receiving"), /background: #50c878;/);
   assert.match(rule(".session-sidebar-status.finished"), /background: var\(--point\);/);
+  // A dot is smaller than its place and in the middle of it: a quiet signal,
+  // and the names stay where they are.
+  assert.match(css, /^\.session-sidebar-status\.receiving,\n\.session-sidebar-status\.finished \{\s*width: 6px;\s*height: 6px;\s*margin: 0 1px;\s*\}/m);
   assert.match(rule(".session-sidebar-status.running"), /animation: button-spinner/);
   assert.match(rule(".session-sidebar-group-toggle::before"), /margin: 0 1\.5px;/, "a caret as wide as the mark under it");
   assert.doesNotMatch(css, /\.session-sidebar-running|\.session-sidebar-finished/);
