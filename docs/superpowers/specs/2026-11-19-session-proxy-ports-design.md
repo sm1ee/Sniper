@@ -760,6 +760,12 @@ else. The registry and sniper-cli know none of it.
   name, they are not dragged, and "Default" typed as a group's name means no
   group. A session's menu says "Move to Default" for the way out of a group,
   and the table of all sessions names Default too.
+- **A row begins with one mark** for what its session is doing, in the
+  column of a group's caret: a ring while a job runs, a dot for a job that
+  ended unseen, and the proxy indicator's green while traffic reaches it,
+  through the main listener or a port of its own. What needs a look comes
+  first. A session doing nothing has no mark, and the place stays, so a name
+  is under the name of its group. The port is still at the row's other end.
 - **Pinned sessions** are in the order they were pinned (`session_pinned`).
   A session is pinned from its menu, or by a drop among the pinned; a drop
   anywhere else lets it go. A pinned session keeps its group and is drawn

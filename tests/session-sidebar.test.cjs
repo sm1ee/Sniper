@@ -913,3 +913,49 @@ test("the top rows and the section names are styled as the list's own", () => {
   assert.match(css, /^\.session-sidebar-action \{[^}]*display: flex;[^}]*width: 100%;/m);
   assert.doesNotMatch(css, /session-sidebar-pinned-list|\.session-sidebar-section \{/, "one look for every section");
 });
+
+// ── what a session is doing, at the front of its row ──
+test("a row begins with what the session is doing: a job running, one that ended, traffic arriving, or nothing", () => {
+  const f = fixture({
+    sessions: [session("idle", "01"), session("main", "02"), session("port", "03"), session("busy", "04"), session("done", "05")],
+    activeId: "idle",
+  });
+  f.state.settings = { proxy_addr: "127.0.0.1:8080" };
+  const activity = (extra) => ({ name: "", running: [], held: 0, active: false, port: null, portOpen: false, ...extra });
+  f.state.sessionActivity = new Map([
+    ["main", activity({ active: true })],
+    ["port", activity({ port: 18081, portOpen: true })],
+    // What needs a look comes before what merely arrives.
+    ["busy", activity({ port: 18082, portOpen: true, running: ["fuzzer"] })],
+    ["done", activity({ port: 18083, portOpen: true })],
+  ]);
+  f.state.sessionsFinished = new Map([["done", ["scan"]]]);
+  const row = id => f.context.sessionSidebarRow(f.state.sessions.find(entry => entry.id === id), false, null);
+  const status = id => row(id).match(/<span class="session-sidebar-status([^"]*)"( title="[^"]*")?><\/span>/).slice(1, 3);
+  assert.deepEqual(status("idle"), ["", undefined], "the place is kept, so the names line up");
+  assert.deepEqual(status("main"), [" receiving", ' title="The proxy listener records into this session"']);
+  assert.deepEqual(status("port"), [" receiving", ' title="This session records from its own port"']);
+  assert.deepEqual(status("busy"), [" running", ' title="Running: Fuzzer"']);
+  assert.deepEqual(status("done"), [" finished", ' title="Scan finished"']);
+  for (const id of ["idle", "main", "busy", "done"]) {
+    // One mark, and it is the first thing in the row.
+    assert.match(row(id), /aria-label="[^"]*"><span class="session-sidebar-status[^>]*><\/span><span class="session-sidebar-text">/, id);
+    assert.equal(row(id).match(/session-sidebar-status/g).length, 1, id);
+    assert.doesNotMatch(row(id), /session-sidebar-running|session-sidebar-finished/, id);
+  }
+  // Which port is still said at the row's other end.
+  assert.match(row("busy"), /<span class="session-sidebar-port"[^>]*>:18082<\/span><\/button>/);
+});
+
+test("the mark is in the column of a group's caret, and the rows run the list's width", () => {
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const rule = selector => css.match(new RegExp(`^${selector.replace(/[.:]/g, "\\$&")} \\{[^}]*\\}`, "m"))?.[0] || "";
+  assert.match(rule(".session-sidebar-group-list"), /padding: 0;/, "no indent: the mark's place is the indent");
+  assert.match(rule(".session-sidebar-status"), /flex: none;[^}]*width: 8px;[^}]*height: 8px;/);
+  // The green of the proxy indicator, which says the same of the session on screen.
+  assert.match(rule(".session-sidebar-status.receiving"), /background: #50c878;/);
+  assert.match(rule(".session-sidebar-status.finished"), /background: var\(--point\);/);
+  assert.match(rule(".session-sidebar-status.running"), /animation: button-spinner/);
+  assert.match(rule(".session-sidebar-group-toggle::before"), /margin: 0 1\.5px;/, "a caret as wide as the mark under it");
+  assert.doesNotMatch(css, /\.session-sidebar-running|\.session-sidebar-finished/);
+});

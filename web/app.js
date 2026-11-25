@@ -10773,14 +10773,18 @@ function sessionSidebarRow(session, active, editing) {
     : "This session records from its own port";
   const label = [session.name, session.created_by && `made by ${session.created_by}`, port && `proxy ${port}`,
     heldLabel, running, finished].filter(Boolean).join(", ");
+  // One mark before the name says what the session is doing. What needs a
+  // look comes first: a job running, then one that ended unseen, then traffic
+  // arriving. A session doing nothing keeps the place, so the names line up.
+  const [status, statusTitle] = running ? ["running", running] : finished ? ["finished", finished]
+    : feed.kind !== "none" ? ["receiving", portTitle] : ["", ""];
   return `<li draggable="true" data-drag-session="${escapeHtml(session.id)}"><button class="session-sidebar-row${active ? " active" : ""}" type="button" data-id="${escapeHtml(session.id)}"`
     + `${active ? ' aria-current="true"' : ""} tabindex="${active ? 0 : -1}" aria-label="${escapeHtml(label)}">`
+    + `<span class="session-sidebar-status${status ? ` ${status}` : ""}"${status ? ` title="${escapeHtml(statusTitle)}"` : ""}></span>`
     + `<span class="session-sidebar-text"><span class="session-sidebar-name">${sessionMakerMark(session)}${name}</span>`
     + `${identity ? `<span class="session-sidebar-identity">${escapeHtml(identity)}</span>` : ""}</span>`
     + `${port ? `<span class="session-sidebar-port" title="${portTitle}">${escapeHtml(port)}</span>` : ""}`
     + `${held ? `<span class="findings-badge session-sidebar-held" title="${heldLabel}">${held.toLocaleString()}</span>` : ""}`
-    + `${running ? `<span class="session-sidebar-running" title="${escapeHtml(running)}"></span>` : ""}`
-    + `${finished ? `<span class="session-sidebar-finished" title="${escapeHtml(finished)}"></span>` : ""}`
     + "</button></li>";
 }
 
