@@ -1426,6 +1426,10 @@ function bindEvents() {
     arrowStep: tableArrowStep,
     formatTime: formatTimestamp,
     formatSize,
+    receiving: () => sessionFeed(currentSessionId()).kind !== "none",
+    // A listener that starts in a session nothing reaches opens that
+    // session's port: the rows and the indicator say so at once.
+    changed: () => { refreshSessionFeeds().catch((error) => console.error(error)); },
   });
 
   initializeTargetWorkspace();
@@ -10787,8 +10791,15 @@ function sessionSidebarRow(session, active, editing) {
   // A browser Sniper opened is sending to the session. One a person pointed
   // at the proxy by hand is not known, so nothing is said of it.
   const browser = activity?.browser ? "A browser opened from Sniper sends its traffic here" : "";
+  // The relay listeners the session has on, one to a line. A session keeps
+  // up to sixteen, so the row shows the first that runs and how many more
+  // there are, as one token: a bare "TCP" read as the name of the proxy port
+  // that follows it.
+  const relays = activity?.tcp || [];
+  const relay = relays.find((listener) => listener.running) || relays[0];
+  const relayLines = relays.map((listener) => `${listener.udp ? "UDP" : "TCP"} :${listener.port} → ${listener.target}${listener.running ? "" : ", not running"}`);
   const label = [session.name, session.created_by && `made by ${session.created_by}`, port && `proxy ${port}`,
-    browser && "browser open", heldLabel, running, finished].filter(Boolean).join(", ");
+    ...relayLines, browser && "browser open", heldLabel, running, finished].filter(Boolean).join(", ");
   const pinned = (state.sessionPinned || []).includes(session.id);
   // One mark before the name says what the session is doing. What needs a
   // look comes first: a job running, then one that ended unseen, then traffic
@@ -10800,6 +10811,8 @@ function sessionSidebarRow(session, active, editing) {
     + `<span class="session-sidebar-status${status ? ` ${status}` : ""}"${status ? ` title="${escapeHtml(statusTitle)}"` : ""}></span>`
     + `<span class="session-sidebar-text"><span class="session-sidebar-name">${sessionMakerMark(session)}${name}</span>`
     + `${identity ? `<span class="session-sidebar-identity">${escapeHtml(identity)}</span>` : ""}</span>`
+    + `${relay ? `<span class="session-sidebar-tcp${relays.some((listener) => !listener.running) ? " failed" : ""}" title="${escapeHtml(relayLines.join("\n"))}">`
+      + `${relay.udp ? "udp" : "tcp"}:${relay.port}${relays.length > 1 ? `+${relays.length - 1}` : ""}</span>` : ""}`
     + `${browser ? `<span class="session-sidebar-browser" title="${browser}"></span>` : ""}`
     + `${port ? `<span class="session-sidebar-port" title="${portTitle}">${escapeHtml(port)}</span>` : ""}`
     + `${held ? `<span class="findings-badge session-sidebar-held" title="${heldLabel}">${held.toLocaleString()}</span>` : ""}`
@@ -11186,6 +11199,11 @@ function applySessionActivity(entries) {
       portOpen: entry.proxy_port_open === true,
       // A browser Sniper opened sends to the session and still runs.
       browser: entry.browser === true,
+      // The relay listeners the session has on: where each listens, where it
+      // relays to, and whether it started.
+      tcp: (Array.isArray(entry.tcp) ? entry.tcp : [])
+        .filter((listener) => Number.isSafeInteger(listener?.local_port) && typeof listener.target === "string")
+        .map((listener) => ({ port: listener.local_port, target: listener.target, udp: listener.udp === true, running: listener.running === true })),
     });
   }
   for (const [id, before] of state.sessionActivity) {

@@ -4318,40 +4318,18 @@ fn session_load_failure_response(session_id: Uuid, error: anyhow::Error) -> Resp
 }
 
 /// The writable context of the session a write names, or the default
-/// session's when it names none.
-///
-/// A write is not refused because its session has work in flight: a session
-/// the UI shows, and one with a port of its own, are written while a Replay or
-/// a capture runs in them. What keeps that safe is the one writable context
-/// each session has, which every branch below returns.
+/// session's when it names none (`AppState::writable_session_context`).
 pub(crate) async fn resolve_session_for_optional_id(
     state: &Arc<AppState>,
     target_session_id: Option<Uuid>,
 ) -> std::result::Result<Arc<SessionContext>, Response> {
-    let active_session = state.session().await;
-    let Some(target_session_id) = target_session_id else {
-        return Ok(active_session);
-    };
-    if target_session_id == active_session.id() {
-        return Ok(active_session);
-    }
-    // The context its port records into, so a write never loads another.
-    if let Some(session) = state.session_port_context(target_session_id) {
-        return Ok(session);
-    }
-    if let Some(session) = proxy::live_websocket_session_context(target_session_id) {
-        return Ok(session);
-    }
-    if let Some(session) = proxy::pending_session_context(target_session_id) {
-        return Ok(session);
-    }
-    if !state.sessions.contains_session(target_session_id) {
-        return Err(StatusCode::NOT_FOUND.into_response());
-    }
     state
-        .session_context_for_id(target_session_id)
+        .writable_session_context(target_session_id)
         .await
-        .map_err(|error| session_load_failure_response(target_session_id, error))
+        // Only a session that is named can fail to resolve.
+        .map_err(|error| {
+            session_load_failure_response(target_session_id.unwrap_or_default(), error)
+        })
 }
 
 pub(crate) async fn resolve_read_session_for_optional_id(
@@ -7381,8 +7359,7 @@ async fn launch_browser(
     };
     let preferred = preferred_browser(&state).await;
     // Asked before the session's port is opened. A launch refused for what it
-    // asks would otherwise leave the session with a number it keeps for good,
-    // and with its TCP intercept released.
+    // asks would otherwise leave the session with a number it keeps for good.
     {
         let main = state.get_active_proxy_addr().await;
         let mut ctx = LaunchContext::new(
@@ -28803,10 +28780,11 @@ fn tcp_configuration_error(error: anyhow::Error) -> (StatusCode, String) {
     } else if message == "TCP capture cannot start while Sniper is shutting down" {
         StatusCode::SERVICE_UNAVAILABLE
     } else if message.starts_with("active session changed")
-        || message == crate::state::TCP_RELAY_SESSION
+        // The session's port, which a listener that starts there opens.
+        || error.is::<crate::session_ports::Refused>()
     {
         StatusCode::CONFLICT
-    } else if message == crate::tcp_capture::UNKNOWN_LISTENER {
+    } else if message == crate::tcp_capture::UNKNOWN_LISTENER || message.contains("was not found") {
         StatusCode::NOT_FOUND
     } else {
         StatusCode::BAD_REQUEST
@@ -29126,7 +29104,12 @@ mod tcp_intercept_api_tests {
         let stale = Uuid::new_v4();
         let conn = Uuid::new_v4();
         let ticket = Uuid::new_v4();
-        for field in ["session_id", "expected_active_session_id"] {
+        // A session that is named is the one asked, and this one is gone. A
+        // guard that expects another default session is stale.
+        for (field, answer) in [
+            ("session_id", StatusCode::NOT_FOUND),
+            ("expected_active_session_id", StatusCode::CONFLICT),
+        ] {
             for (method, route, body) in [
                 ("PUT", "/api/tcp/intercept".into(), policy),
                 ("POST", format!("/api/tcp/connections/{conn}/close"), ""),
@@ -29145,7 +29128,7 @@ mod tcp_intercept_api_tests {
                     )
                     .await
                     .status(),
-                    StatusCode::CONFLICT
+                    answer
                 );
             }
         }
@@ -29243,12 +29226,18 @@ mod tcp_intercept_api_tests {
         );
     }
 
+    // A listener that starts in a session nothing reaches opens that
+    // session's port, so the port's refusals come back from a TCP change.
     #[test]
-    fn a_relay_change_for_another_session_is_a_conflict() {
-        let error = anyhow::anyhow!(crate::state::TCP_RELAY_SESSION);
-        let (status, message) = super::tcp_configuration_error(error);
+    fn a_relay_change_answers_for_the_session_and_its_port() {
+        let refused = crate::session_ports::refused("16 session ports are open");
+        let (status, message) = super::tcp_configuration_error(refused);
         assert_eq!(status.as_u16(), 409);
-        assert_eq!(message, crate::state::TCP_RELAY_SESSION);
+        assert_eq!(message, "16 session ports are open");
+        let id = uuid::Uuid::new_v4();
+        let (status, _) =
+            super::tcp_configuration_error(anyhow::anyhow!("session {id} was not found"));
+        assert_eq!(status.as_u16(), 404);
     }
 
     #[test]

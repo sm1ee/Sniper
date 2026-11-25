@@ -871,6 +871,15 @@ impl ListenerChange {
             Self::Remove(_) | Self::StopAll => false,
         }
     }
+    /// Whether the settings a change carries can be used at all, which needs
+    /// no session. Asked before a session's port is opened for a listener.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        match self {
+            Self::Add(input) | Self::Update(_, input) => input.settings.validate(),
+            Self::Start(settings) => settings.validate(),
+            Self::Remove(_) | Self::StopAll => Ok(()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -936,7 +945,7 @@ impl TcpSettings {
         }
         Ok(host.to_owned())
     }
-    fn target_label(&self) -> String {
+    pub(crate) fn target_label(&self) -> String {
         if self.target_host.contains(':') {
             format!("[{}]:{}", self.target_host, self.target_port)
         } else {

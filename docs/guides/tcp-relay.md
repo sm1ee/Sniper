@@ -23,6 +23,19 @@ sniper-cli tcp listeners add --local-port 9000 --target-host db.example.com --ta
 A session can have up to 16. They are saved with it and start again when it
 opens; one whose port is taken shows why and the others still start.
 
+Each session that receives runs its own listeners: the session the proxy
+listener records into, and each session with a port of its own open.
+
+- A listener that starts in a session nothing reaches opens that session's
+  port (`--session-id` on the CLI).
+- Closing the port stops the session's listeners. They stay on and start again
+  when the session receives again.
+- After a restart only the active session's listeners start.
+- Two sessions can keep the same local port. The one that starts second shows
+  the port as in use.
+- The session list shows the local port a session relays from, as `tcp:9000`
+  (`+1` for one more listener); the tooltip lists each port and its target.
+
 | Setting | What it does |
 |---|---|
 | **TLS** | Off relays bytes as they are. **Decrypt** answers a client's TLS with a certificate from Sniper's CA and reaches the target over TLS, so the record holds plain text; a client that does not start TLS is relayed as it is. **TLS to target** adds TLS towards the target only. |

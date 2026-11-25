@@ -1627,30 +1627,371 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    // The TCP intercept controls reach only the session the main listener
-    // records into, so a read held in a session with a port could not be let go.
+    // ── The TCP relay of each session that receives ──
+
+    /// Loopback ports nothing listens on, each different from the others.
+    async fn free_ports<const N: usize>() -> [u16; N] {
+        let mut held = Vec::new();
+        for _ in 0..N {
+            held.push(TcpListener::bind("127.0.0.1:0").await.unwrap());
+        }
+        std::array::from_fn(|index| held[index].local_addr().unwrap().port())
+    }
+
+    fn relay_to(local_port: u16, target: SocketAddr) -> crate::tcp_capture::TcpSettings {
+        crate::tcp_capture::TcpSettings {
+            local_port,
+            target_host: "127.0.0.1".into(),
+            target_port: target.port(),
+            ..Default::default()
+        }
+    }
+
+    fn start(local_port: u16, target: SocketAddr) -> crate::tcp_capture::ListenerChange {
+        crate::tcp_capture::ListenerChange::Start(relay_to(local_port, target))
+    }
+
+    /// Whether bytes sent to a relay listener on `port` come back.
+    async fn relays(port: u16, bytes: &[u8]) -> bool {
+        match TcpStream::connect(loopback(port)).await {
+            Ok(mut stream) => echoes(&mut stream, bytes).await,
+            Err(_) => false,
+        }
+    }
+
+    // Two sessions that receive each run the listeners they saved: the relay
+    // is not the default session's alone.
     #[tokio::test]
-    async fn a_session_with_a_port_holds_no_tcp_reads() {
+    async fn a_session_with_a_port_runs_its_own_tcp_listeners() {
+        let dir = scratch("tcp-sessions");
+        let state = state_in(&dir);
+        let default = state.session().await;
+        let agent = inactive_session(&state, "agent").await;
+        let target = echo_upstream().await;
+        let [default_port, agent_port] = free_ports().await;
+
+        state
+            .change_tcp_listeners(start(default_port, target), None, None)
+            .await
+            .unwrap();
+        // Nothing reaches the session yet. A listener that starts there opens
+        // its port, as a browser opened for it does.
+        let status = state
+            .change_tcp_listeners(start(agent_port, target), Some(agent), None)
+            .await
+            .unwrap();
+        assert!(status.listeners[0].running);
+        assert!(state.session_port_status(agent).open);
+        let agent_session = state.session_port_context(agent).unwrap();
+
+        assert!(relays(default_port, b"\x00default").await);
+        assert!(relays(agent_port, b"\x00agent").await);
+        assert_eq!(default.tcp_capture.connection_count(), Some(1));
+        assert_eq!(agent_session.tcp_capture.connection_count(), Some(1));
+
+        // Closing the port ends what the session receives, its relay
+        // included. The listener stays on and runs again with the port.
+        state.close_session_port(agent).await.unwrap();
+        assert!(!relays(agent_port, b"\x00closed").await);
+        assert!(relays(default_port, b"\x00still").await);
+        let closed = agent_session.tcp_capture.status().await;
+        assert!(closed.listeners[0].config.enabled);
+        assert!(!closed.listeners[0].running);
+
+        state.open_session_port(agent).await.unwrap();
+        assert!(relays(agent_port, b"\x00again").await);
+
+        state.close_session_port(agent).await.unwrap();
+        default.tcp_capture.stop().await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // A change that starts nothing only changes what the session saves, so
+    // it opens no port and the session is given no number.
+    #[tokio::test]
+    async fn a_tcp_listener_that_is_off_is_saved_without_a_port() {
+        let dir = scratch("tcp-saved");
+        let state = state_in(&dir);
+        let agent = inactive_session(&state, "agent").await;
+        let [port] = free_ports().await;
+
+        let status = state
+            .change_tcp_listeners(
+                crate::tcp_capture::ListenerChange::Add(crate::tcp_capture::TcpListenerInput {
+                    enabled: false,
+                    settings: relay_to(port, echo_upstream().await),
+                }),
+                Some(agent),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(status.listeners.len(), 1);
+        assert_eq!(state.session_port_status(agent).proxy_port, None);
+        let saved = std::fs::read_to_string(
+            state
+                .session_storage_path(agent)
+                .unwrap()
+                .join("state.json"),
+        )
+        .unwrap();
+        assert!(saved.contains(&status.listeners[0].config.id.to_string()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // The port is opened for the listener. One that does not start leaves
+    // the session receiving nothing, as a browser that does not open does.
+    #[tokio::test]
+    async fn a_tcp_listener_that_does_not_start_leaves_its_sessions_port_closed() {
+        let dir = scratch("tcp-refused");
+        let state = state_in(&dir);
+        let agent = inactive_session(&state, "agent").await;
+        let taken = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = taken.local_addr().unwrap().port();
+
+        let error = state
+            .change_tcp_listeners(start(port, echo_upstream().await), Some(agent), None)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("already in use"), "{error}");
+        assert!(!state.session_port_status(agent).open);
+        // Settings that can never start do not get as far as opening it.
+        let error = state
+            .change_tcp_listeners(
+                crate::tcp_capture::ListenerChange::Start(crate::tcp_capture::TcpSettings {
+                    local_port: port,
+                    target_host: String::new(),
+                    target_port: 1,
+                    ..Default::default()
+                }),
+                Some(agent),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(!error.is::<Refused>(), "{error:#}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // Each session saved its listeners on its own, so two can have saved the
+    // same local port. The one that starts second says so, and the first
+    // keeps running.
+    #[tokio::test]
+    async fn the_second_session_to_start_a_local_port_says_it_is_in_use() {
+        let dir = scratch("tcp-clash");
+        let state = state_in(&dir);
+        let default = state.session().await;
+        let agent = inactive_session(&state, "agent").await;
+        let target = echo_upstream().await;
+        let [port] = free_ports().await;
+        state
+            .change_tcp_listeners(start(port, target), None, None)
+            .await
+            .unwrap();
+        // On in the other session too, as a listener is after a restart.
+        let agent_session = state.session_context_for_id(agent).await.unwrap();
+        agent_session
+            .tcp_capture
+            .restore_listeners(vec![crate::tcp_capture::TcpListenerConfig {
+                id: Uuid::new_v4(),
+                enabled: true,
+                settings: relay_to(port, target),
+            }]);
+
+        state.open_session_port(agent).await.unwrap();
+
+        let status = agent_session.tcp_capture.status().await;
+        assert!(!status.listeners[0].running);
+        let error = status.listeners[0].error.as_deref().unwrap_or_default();
+        assert!(error.contains("already in use"), "{error}");
+        assert!(relays(port, b"\x00first").await);
+        assert_eq!(default.tcp_capture.connection_count(), Some(1));
+        assert_eq!(agent_session.tcp_capture.connection_count(), Some(0));
+
+        state.close_session_port(agent).await.unwrap();
+        default.tcp_capture.stop().await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // A window shows a session and names it in every TCP control, so a read
+    // held in a session with a port can be let go.
+    #[tokio::test]
+    async fn tcp_intercept_holds_and_lets_go_in_a_session_with_a_port() {
+        use crate::tcp_capture::{DecisionAction, DecisionRequest, PolicyDirection, PolicyUpdate};
         let dir = scratch("tcp-intercept");
         let state = state_in(&dir);
-        let first = state.session().await;
-        let expected_revision = first.tcp_capture.policy().revision;
-        first
-            .tcp_capture
-            .set_policy(crate::tcp_capture::PolicyUpdate {
-                enabled: true,
-                direction: first.tcp_capture.policy().direction,
-                expected_revision,
-                filter: None,
-            })
+        let agent = inactive_session(&state, "agent").await;
+        let [port] = free_ports().await;
+        let policy = state
+            .configure_tcp_intercept(
+                PolicyUpdate {
+                    enabled: true,
+                    direction: PolicyDirection::ClientToServer,
+                    expected_revision: 0,
+                    filter: None,
+                },
+                Some(agent),
+                None,
+            )
+            .await
             .unwrap();
-        state.create_session(Some("second".into())).await.unwrap();
-        assert!(first.tcp_capture.policy().enabled);
+        assert!(policy.enabled);
+        assert!(!state.session().await.tcp_capture.policy().enabled);
 
-        state.open_session_port(first.id()).await.unwrap();
+        state
+            .change_tcp_listeners(start(port, echo_upstream().await), Some(agent), None)
+            .await
+            .unwrap();
+        let session = state.session_port_context(agent).unwrap();
+        // Opening the port left the session's intercept as it was set.
+        assert!(session.tcp_capture.policy().enabled);
 
-        assert!(!first.tcp_capture.policy().enabled);
-        state.close_session_port(first.id()).await.unwrap();
+        let mut client = TcpStream::connect(loopback(port)).await.unwrap();
+        client.write_all(b"\x00held").await.unwrap();
+        let mut held = None;
+        for _ in 0..250 {
+            if let Some(connection) = session.tcp_capture.summaries().await.first() {
+                if let Some(item) = session
+                    .tcp_capture
+                    .pending(connection.id)
+                    .ok()
+                    .and_then(|pending| pending.items.into_iter().next())
+                {
+                    held = Some((connection.id, item));
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let (connection, item) = held.expect("the read is held");
+        assert_eq!(
+            state
+                .session_activity()
+                .await
+                .iter()
+                .map(|entry| entry.held)
+                .sum::<usize>(),
+            1
+        );
+
+        state
+            .decide_tcp_intercept(
+                connection,
+                item.pending_id,
+                DecisionRequest {
+                    action: DecisionAction::Forward,
+                    replacement_base64: None,
+                    expected_revision: item.revision,
+                },
+                Some(agent),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut back = [0; 5];
+        tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut back))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&back, b"\x00held");
+
+        drop(client);
+        state.close_session_port(agent).await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn the_session_list_says_which_tcp_listeners_each_session_runs() {
+        use crate::session::SessionTcpListener;
+        let dir = scratch("tcp-activity");
+        let state = state_in(&dir);
+        let default = state.session().await;
+        let agent = inactive_session(&state, "agent").await;
+        let idle = inactive_session(&state, "idle").await;
+        let target = echo_upstream().await;
+        let [default_port, agent_port] = free_ports().await;
+        let taken = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let taken_port = taken.local_addr().unwrap().port();
+        state
+            .change_tcp_listeners(start(default_port, target), None, None)
+            .await
+            .unwrap();
+        state
+            .change_tcp_listeners(start(agent_port, target), Some(agent), None)
+            .await
+            .unwrap();
+        // One that is on and did not start, and one that is off.
+        let agent_session = state.session_port_context(agent).unwrap();
+        let mut saved = agent_session.tcp_capture.listener_configs();
+        saved.push(crate::tcp_capture::TcpListenerConfig {
+            id: Uuid::new_v4(),
+            enabled: true,
+            settings: relay_to(taken_port, target),
+        });
+        saved.push(crate::tcp_capture::TcpListenerConfig {
+            id: Uuid::new_v4(),
+            enabled: false,
+            settings: relay_to(1, target),
+        });
+        agent_session.tcp_capture.restore_listeners(saved);
+        agent_session.tcp_capture.start_saved().await;
+
+        let activity = state.session_activity().await;
+
+        let listeners = |id: Uuid| {
+            activity
+                .iter()
+                .find(|entry| entry.id == id)
+                .unwrap()
+                .tcp
+                .clone()
+        };
+        let listener = |local_port, running| SessionTcpListener {
+            local_port,
+            target: format!("127.0.0.1:{}", target.port()),
+            udp: false,
+            running,
+        };
+        assert_eq!(listeners(default.id()), [listener(default_port, true)]);
+        assert_eq!(
+            listeners(agent),
+            [listener(agent_port, true), listener(taken_port, false)]
+        );
+        assert_eq!(listeners(idle), []);
+
+        // A session nothing reaches runs none, whatever it kept on.
+        state.close_session_port(agent).await.unwrap();
+        let activity = state.session_activity().await;
+        let closed = activity.iter().find(|entry| entry.id == agent).unwrap();
+        assert_eq!(closed.tcp, []);
+        default.tcp_capture.stop().await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_shutdown_brings_a_port_sessions_tcp_listeners_back() {
+        let _work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let dir = scratch("tcp-resume");
+        let state = state_in(&dir);
+        let agent = inactive_session(&state, "agent").await;
+        serving_main_listener(&state).await;
+        let [port] = free_ports().await;
+        state
+            .change_tcp_listeners(start(port, echo_upstream().await), Some(agent), None)
+            .await
+            .unwrap();
+
+        state.stop_background_jobs().await.unwrap();
+        state.stop_proxy_listeners().await;
+        assert!(!relays(port, b"\x00stopped").await);
+
+        state.resume_after_cancelled_shutdown().await;
+
+        assert!(relays(port, b"\x00back").await);
+        state.close_session_port(agent).await.unwrap();
+        state.abort_proxy_task().await;
         let _ = std::fs::remove_dir_all(dir);
     }
 

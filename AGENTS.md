@@ -94,7 +94,7 @@ given change, including the parts that are easy to miss.
 | Opening a pre-wired browser | `src/browser.rs` (launch, SPKI trust, profile, which browser `auto` picks), `launch_browser` and `set_browser_preference` in `src/api.rs`, the saved default in `src/ui_settings.rs`, `capture browser` in `src/bin/sniper-cli.rs`, the launcher in `web/` (one component mounted by `[data-browser-launcher]`). A browser for a session with its own port: `browser_launch_target` in `src/api.rs`, `LaunchContext::for_session`, and the profiles in `browser-profiles/session-<id>/`, which `recover_driver_ports` and `sweep_session_profiles` read |
 | Scope matching | `src/scope.rs` — **the only matcher**; do not add a second one |
 | Intercept queues | `src/intercept.rs` |
-| TCP and UDP relay, its history, intercept and replay | `src/tcp_capture.rs`, `src/tcp_capture/history_io.rs`, `web/tcp-capture.js`; its listener form sits in Capture ▸ Settings (`web/index.html`); CONNECT tunnels reach it from `serve_connect_tunnel` in `src/proxy.rs`; `sniper-cli tcp` in `src/bin/sniper-cli.rs` |
+| TCP and UDP relay, its history, intercept and replay | `src/tcp_capture.rs`, `src/tcp_capture/history_io.rs`, `web/tcp-capture.js`; its listener form sits in Capture ▸ Settings (`web/index.html`); CONNECT tunnels reach it from `serve_connect_tunnel` in `src/proxy.rs`; `sniper-cli tcp` in `src/bin/sniper-cli.rs`. Which session a change reaches, and when a session's listeners run: `tcp_session` and `change_tcp_listeners` in `src/state.rs`; the list's `tcp:9000` token is `SessionActivity.tcp` (`src/session.rs`) drawn by `sessionSidebarRow` (`web/app.js`) |
 | Frontend | `web/app.js`, `web/index.html`, `web/styles.css` |
 
 Changes that must land in more than one place:
@@ -114,6 +114,12 @@ Changes that must land in more than one place:
   another way: a second one on the same directory shows another request's body
   with no error. This is also what lets a session be written while work runs
   in it; no check refuses such a write.
+- **A session's relay listeners run while it receives.** They start where a
+  session starts to receive (`start_saved_tcp_listeners`, activation,
+  `open_session_port_as`, `resume_after_cancelled_shutdown`) and stop where it
+  stops (activation, `finish_closing_session_port`, shutdown). A new way for a
+  session to receive must do both. A listener that ran in a session nothing
+  reaches would have nothing to stop it, and a delete would not wait for it.
 - **A window shows a session; it does not follow the active one.** In
   `web/app.js`, `state.activeSession` is the session on screen and
   `state.viewedSessionId` the one the next load shows. Read and write by

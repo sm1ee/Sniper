@@ -1502,6 +1502,20 @@ summary {
   background: var(--text-dim);
 }
 
+/* The local port a session relays TCP or UDP from. Where to, and its other
+   listeners, are the tooltip. */
+.session-sidebar-tcp {
+  flex: none;
+  color: var(--text-dim);
+  font-size: var(--font-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A listener that is on did not start. */
+.session-sidebar-tcp.failed {
+  color: var(--danger);
+}
+
 /* The globe and the port read as one thing. */
 .session-sidebar-browser + .session-sidebar-port {
   margin-left: -4px;

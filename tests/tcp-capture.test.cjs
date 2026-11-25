@@ -239,10 +239,54 @@ test("configuration errors reveal only recognized actionable messages", async ()
   for (const body of ["<script>alert(1)</script>","secret upstream traffic",conflict+"\n", "x".repeat(10000)]) assert.match(await tcp.requestError({status:400,text:async()=>body}),/TCP request failed/);
   assert.match(await tcp.requestError({status:400,text:async()=>{throw Error()}}),/400/);
   assert.match(await tcp.requestError({status:409,text:async()=>conflict}),/409/);
-  // A relay change from a window that shows another session says where the relay runs.
-  const relay = "The TCP relay runs in the session the proxy listener records into.";
-  assert.equal(await tcp.requestError({status:409,text:async()=>relay}),relay);
-  assert.match(await tcp.requestError({status:409,text:async()=>relay+" "}),/409/);
+  // A listener that starts in a session nothing reaches opens that session's
+  // port, so what refuses the port comes back from the listener change.
+  for (const refusal of ["16 session ports are open, which is the most; close one first",
+    "port 8101, which this session keeps, did not open (Address already in use (os error 48)); free it and try again",
+    "the next 64 port numbers are all in use; free one and try again",
+    "the session's port closed before its listener started; try again"]) {
+    assert.equal(await tcp.requestError({status:409,text:async()=>refusal}),refusal);
+    assert.match(await tcp.requestError({status:409,text:async()=>refusal+" "}),/409/);
+    assert.match(await tcp.requestError({status:400,text:async()=>refusal}),/400/);
+  }
+  assert.match(await tcp.requestError({status:409,text:async()=>"port 8101, which this session keeps, did not open (<b>); free it and try again"}),/409/);
+});
+
+test("a listener that is on in a session nothing reaches says so, and is not shown as failed", async () => {
+  const waiting = {...status, listeners:[listener("l1", 9000, {running:false})]};
+  const idle = fixture({receiving: () => false});
+  await pollStatus(idle, waiting);
+  assert.deepEqual(listenerRows(idle), [["127.0.0.1:9000", "127.0.0.1:9100", "Not receiving"]]);
+  assert.notEqual(idle.get("tcpListenerRows").children[0].children[3].className, "tcp-listener-error");
+  // The section says the same, not "Off" beside a switch that is on.
+  assert.equal(idle.get("tcpListenerStatus").textContent, "Not receiving");
+  await pollStatus(idle, {...status, listeners:[listener("l1", 9000, {enabled:false, running:false})]});
+  assert.equal(idle.get("tcpListenerStatus").textContent, "Off");
+  await pollStatus(idle, waiting);
+  // One that did not start says why, whatever the session receives.
+  await pollStatus(idle, twoListeners);
+  assert.equal(listenerRows(idle)[1][2], twoListeners.listeners[0].error);
+  assert.equal(idle.get("tcpListenerRows").children[1].children[3].className, "tcp-listener-error");
+  // In a session that receives, on and not running is a failure.
+  const fed = fixture();
+  await pollStatus(fed, waiting);
+  assert.deepEqual(listenerRows(fed), [["127.0.0.1:9000", "127.0.0.1:9100", "Not running"]]);
+  assert.equal(fed.get("tcpListenerRows").children[0].children[3].className, "tcp-listener-error");
+});
+
+test("a listener change that went through tells the app, which reads where each session receives", async () => {
+  let told = 0;
+  const f = fixture({changed: () => { told++; }}), pending = f.controller.refresh();
+  f.requests[0].resolve(runningStatus); f.requests[1].resolve([]); await pending;
+  const toggle = f.get("tcpListenerRows").children[0].children[0].children[0];
+  const press = () => f.get("tcpListenerRows").listeners.click({target:{closest:selector=>selector==="[data-listener-toggle]"?toggle:null}});
+  press();
+  f.requests[2].resolve("Local port 9000 is already in use. Choose another Local port or stop the listener using it.", 400); await tick();
+  f.requests[3].resolve(runningStatus); f.requests[4].resolve([]); await tick();
+  assert.equal(told, 0, "a change that was refused changed nothing");
+  press();
+  f.requests[5].resolve(runningStatus); await tick();
+  assert.equal(told, 1);
 });
 
 test("a new listener's bind conflict is shown and nothing is retried",async()=>{

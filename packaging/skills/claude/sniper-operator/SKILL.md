@@ -43,6 +43,7 @@ Traffic that is not HTTP is under `sniper-cli tcp`. A listener relays each conne
 - `tcp list --contains <text>` finds connections by their bytes (`--kind hex|regex`). `tcp get --id <uuid>` returns base64 chunks in read order; `tcp raw` returns one direction's bytes.
 - Intercept holds reads, not messages: `tcp intercept set --enabled true [--filter <text>]`, then `tcp pending --id <uuid>` and `tcp decide --id <uuid> --pending-id <uuid> --action forward|drop`. Turning it off forwards what is held. Passthrough tunnels are never held.
 - `tcp replay` opens a new connection and sends traffic. Use it only on an authorized target, after `--dry-run`.
+- Listeners belong to a session and run while traffic reaches it. In a session of your own pass `--session-id <session-uuid>`: a listener that starts there opens the session's port, and `session port close` stops the session's listeners until it receives again. `session port list` shows the local ports the other sessions' listeners hold (`tcp`); a port another one holds is reported as in use.
 
 ## Recon endpoint discovery
 

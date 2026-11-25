@@ -1009,6 +1009,45 @@ test("a row shows that a browser Sniper opened is sending to the session, before
   assert.match(css, /^\.session-sidebar-browser \{[^}]*mask: url\("data:image\/svg\+xml,[^}]*background: var\(--text-dim\);/m);
 });
 
+// ── the relay listeners a session runs ──
+test("a row shows the port a session relays TCP from, and its tooltip where to", () => {
+  const f = fixture({ sessions: [session("a", "01"), session("b", "02"), session("c", "03")], activeId: "a" });
+  f.state.settings = { proxy_addr: "127.0.0.1:8080" };
+  const rowsNow = () => Object.fromEntries(f.els.sessionSidebarList.innerHTML.split("</li>").filter(part => part.includes("data-id="))
+    .map(part => [part.match(/data-id="([^"]+)"/)[1], part]));
+  const idle = { id: "c", name: "Session c", running: [], held: 0, active: false };
+  f.context.applySessionActivity([
+    { id: "a", name: "Session a", running: [], held: 0, active: true, browser: true,
+      tcp: [{ local_port: 9000, target: "example.com:7000", udp: false, running: true }] },
+    { id: "b", name: "Session b", running: [], held: 0, active: false, proxy_port: 8101, proxy_port_open: true,
+      tcp: [{ local_port: 9001, target: "example.org:53", udp: true, running: true },
+        { local_port: 9000, target: "example.com:7000", udp: false, running: false }] },
+    idle,
+  ]);
+  // One token with its own port, so it is not read with the proxy port that
+  // follows. Before the globe and that port, which read as one thing.
+  assert.match(rowsNow().a, /<span class="session-sidebar-tcp" title="TCP :9000 → example.com:7000">tcp:9000<\/span><span class="session-sidebar-browser"/);
+  assert.match(rowsNow().a, /aria-label="Session a, proxy :8080, TCP :9000 → example.com:7000, browser open"/);
+  // The first that runs is shown, with how many more there are. A listener
+  // that is on and did not start colours the mark, and the tooltip says so.
+  assert.match(rowsNow().b, /<span class="session-sidebar-tcp failed" title="UDP :9001 → example.org:53\nTCP :9000 → example.com:7000, not running">udp:9001\+1<\/span><span class="session-sidebar-port"/);
+  assert.doesNotMatch(rowsNow().c, /session-sidebar-tcp|→/);
+  assert.deepEqual(Array.from(f.state.sessionActivity.get("c").tcp), [], "nothing said is no listener");
+
+  // What is not a listener is dropped.
+  f.context.applySessionActivity([
+    { id: "a", name: "Session a", running: [], held: 0, active: true,
+      tcp: [null, { local_port: "9000", target: "x:1" }, { local_port: 9000, target: "<b>:1", udp: true, running: true }] },
+    { id: "b", name: "Session b", running: [], held: 0, active: false, tcp: "9001" },
+    idle,
+  ]);
+  assert.match(rowsNow().a, /<span class="session-sidebar-tcp" title="UDP :9000 → &#60;b&#62;:1">udp:9000<\/span>/);
+  assert.doesNotMatch(rowsNow().b, /session-sidebar-tcp/);
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  assert.match(css, /^\.session-sidebar-tcp \{[^}]*color: var\(--text-dim\);[^}]*font-size: var\(--font-xs\);[^}]*font-variant-numeric: tabular-nums;/m);
+  assert.match(css, /^\.session-sidebar-tcp\.failed \{\s*color: var\(--danger\);/m);
+});
+
 // ── a pin under the pointer ──
 test("a row has a pin beside it that shows under the pointer, and says whether the session is pinned", () => {
   const f = fixture({ sessions: [session("a", "01"), session("b", "02")], activeId: "a" });

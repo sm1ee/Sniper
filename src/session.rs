@@ -160,6 +160,21 @@ pub struct SessionActivity {
     /// one wired to the port the session receives from. A browser a person
     /// pointed at the proxy by hand is not known here.
     pub browser: bool,
+    /// The session's TCP and UDP listeners that are on, in the order it
+    /// keeps them. None of a session nothing reaches is listed: it runs none.
+    pub tcp: Vec<SessionTcpListener>,
+}
+
+/// A relay listener of a session, for the session list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SessionTcpListener {
+    pub local_port: u16,
+    /// Where it relays to, as `host:port`.
+    pub target: String,
+    pub udp: bool,
+    /// False for one that is on and did not start, such as on a port another
+    /// session's listener holds.
+    pub running: bool,
 }
 
 /// Findings counted by severity.

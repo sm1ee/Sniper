@@ -1372,7 +1372,7 @@ fn tcp_manifest_operations() -> Vec<CliOperationSpec> {
     vec![
         op("tcp.status", "tcp status", "Read the TCP and UDP relay: each listener with its settings, whether it runs and why not, connections refused to other devices; history count and limit, connections relayed unrecorded because history was full, and storage errors. Local; contacts nothing.", Read, false, &[], vec![json!({})]),
         op("tcp.listeners.list", "tcp listeners list", "Read the session's listeners: id, on or off, settings (local_port, target_host, target_port, tls, protocol, remote, allowed_clients), whether each runs, and its error. Local; contacts nothing.", Read, false, &[], vec![json!({})]),
-        op("tcp.listeners.add", "tcp listeners add --local-port <port> --target-host <host> --target-port <port>", "Add a listener that relays each connection to the target and records it. tls decrypt answers clients' TLS with Sniper's CA and reaches the target over TLS; upstream adds TLS towards the target only. protocol udp relays datagrams, one flow per client. remote listens on every interface for the addresses in allowed_clients; Sniper's own ports stay out of reach. Saved with the session and started again with it.", Write, true, &["local_port", "target_host", "target_port"], vec![json!({"local_port":9000,"target_host":"db.example.com","target_port":5432}), json!({"local_port":9443,"target_host":"api.example.com","target_port":443,"tls":"decrypt"}), json!({"local_port":9053,"target_host":"127.0.0.1","target_port":53,"protocol":"udp","enabled":false})]),
+        op("tcp.listeners.add", "tcp listeners add --local-port <port> --target-host <host> --target-port <port>", "Add a listener that relays each connection to the target and records it. tls decrypt answers clients' TLS with Sniper's CA and reaches the target over TLS; upstream adds TLS towards the target only. protocol udp relays datagrams, one flow per client. remote listens on every interface for the addresses in allowed_clients; Sniper's own ports stay out of reach. Saved with the session and started again with it. With session_id it runs in that session, whose own port it opens when nothing reaches the session.", Write, true, &["local_port", "target_host", "target_port"], vec![json!({"local_port":9000,"target_host":"db.example.com","target_port":5432}), json!({"local_port":9443,"target_host":"api.example.com","target_port":443,"tls":"decrypt"}), json!({"local_port":9053,"target_host":"127.0.0.1","target_port":53,"protocol":"udp","enabled":false})]),
         op("tcp.listeners.set", "tcp listeners set --id <uuid>", "Change the given fields of one listener; the others stay as tcp status shows them. enabled false stops it and keeps its settings. Reads the listener first, then replaces it.", Write, true, &["id"], vec![json!({"id":id,"enabled":false}), json!({"id":id,"target_port":5433})]),
         op("tcp.listeners.remove", "tcp listeners remove --id <uuid>", "Stop and delete one listener. Its recorded connections stay in history.", Write, true, &["id"], vec![json!({"id":id})]),
         op("tcp.list", "tcp list [--contains <text>]", "List recorded connections newest first without their bytes: target, client, listener port or source (replay, connect for a CONNECT tunnel that was neither TLS nor HTTP, passthrough), status, failure, bytes each way. contains keeps the connections whose captured bytes hold it, as text, hex or a regex; truncated says the search stopped at its read limit. Local; contacts nothing.", Read, false, &[], vec![json!({}), json!({"contains":"PING"}), json!({"contains":"16 03","kind":"hex"})]),
@@ -4913,7 +4913,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "session.port.list",
             "session port list",
-            "List each session's own proxy port, whether it is open, and whether a browser Sniper opened is sending to the session. No port is open after Sniper restarts.",
+            "List each session's own proxy port, whether it is open, whether a browser Sniper opened is sending to the session, and the TCP and UDP relay listeners it has on. No port is open after Sniper restarts.",
             Read,
             false,
             &[],
@@ -12839,6 +12839,10 @@ struct SessionPortEntry {
     /// Whether a browser Sniper opened sends to the session and still runs.
     #[serde(default)]
     browser: bool,
+    /// The relay listeners the session has on: `local_port`, `target`, `udp`
+    /// and whether each is `running`. Printed as the server gives them.
+    #[serde(default)]
+    tcp: Vec<Value>,
 }
 
 fn validate_session_metadata_response_id(
@@ -24307,6 +24311,29 @@ mod tests {
         assert_eq!(printed[0]["browser"], true);
         assert_eq!(printed[1]["browser"], false);
         assert_eq!(printed[1]["proxy_port"], 18081);
+    }
+
+    // Before it starts a relay listener in its session, an agent can see the
+    // local ports the other sessions' listeners hold.
+    #[test]
+    fn session_port_list_says_which_relay_listeners_each_session_runs() {
+        let rows: Vec<super::SessionPortEntry> = serde_json::from_value(json!([
+            {"id": "00000000-0000-0000-0000-000000000001", "name": "a",
+             "tcp": [{"local_port": 9000, "target": "example.com:7000", "udp": false, "running": true}]},
+            // A Sniper from before the field says nothing of listeners.
+            {"id": "00000000-0000-0000-0000-000000000002", "name": "b"},
+        ]))
+        .unwrap();
+        let printed = serde_json::to_value(&rows).unwrap();
+        assert_eq!(printed[0]["tcp"][0]["local_port"], 9000);
+        assert_eq!(printed[0]["tcp"][0]["target"], "example.com:7000");
+        assert_eq!(printed[1]["tcp"], json!([]));
+        let description = super::manifest_operations()
+            .into_iter()
+            .find(|operation| operation.operation == "session.port.list")
+            .map(|operation| operation.description)
+            .unwrap_or_default();
+        assert!(description.contains("relay listeners"), "{description}");
     }
 
     // An agent puts the sessions of one target in a group, and finds the

@@ -105,7 +105,8 @@ changes.
 - TCP relay listeners and TCP intercept for a session that is not the default.
   The listeners' ports are fixed by the user, and two sessions may have saved
   the same one. A tunnel on a session port that is neither TLS nor HTTP is
-  relayed and recorded, never held.
+  relayed and recorded, never held. (Built later: see "After phase 3: a relay
+  for each session that receives".)
 - OAST polling, Service Map body reads and the recorded-socket-peer setting for
   a session that is not the default. Each serves the active session only today
   (`run_oast_poller_for_state`, the body endpoints near `src/api.rs:6202`,
@@ -799,6 +800,51 @@ else. The registry and sniper-cli know none of it.
 - **Not built**: a sort for the groups themselves, sessions gathered by
   agent, a name field inside the group for its `+`. Not checked in the
   desktop webview.
+
+### After phase 3: a relay for each session that receives
+
+The first non-goal is taken back. The TCP relay and its intercept ran only in
+the default session, for two reasons. Both had gone.
+
+- Two sessions can have saved the same local port. Each session has its own
+  `TcpCapture`, and a listener that cannot bind keeps its reason and leaves the
+  others running, so the one that starts second says "already in use".
+- No control reached another session's intercept. A window shows a session and
+  names it in every write since phase 3.
+
+What was built:
+
+- **A session's listeners run while it receives**: the main listener records
+  into it, or its own port is open. They start with the default session at
+  start-up, with the session the main listener moves to, when a session's port
+  opens, and when a cancelled shutdown brings that port back. They stop when
+  the main listener leaves, when the port closes, and at shutdown. No listener
+  is turned off by any of these.
+- **A listener that starts in a session nothing reaches opens that session's
+  port**, as a browser opened for the session does. If it does not start, the
+  port this call opened is closed again. Settings that can never start are
+  refused before the port is opened.
+- **Every TCP write goes to the session it names**, through that session's one
+  writable context (`AppState::writable_session_context`, which the API's
+  resolver now calls): listener changes, clearing history, the intercept
+  policy, decisions, close and replay. A change that starts nothing opens no
+  port. `TCP_RELAY_SESSION` is gone.
+- **Opening a port leaves the session's TCP intercept as it is.** What it holds
+  is counted in the session list's held badge, like a held request.
+- **The session list** shows the local port a session relays from as one
+  token, `tcp:9000` or `udp:9053`, before the globe and the proxy port: the
+  first listener that runs, and `+N` for the others. A bare `TCP` read as the
+  name of the proxy port after it. The tooltip has one line for each listener
+  that is on, and one that did not start colours the token
+  (`SessionActivity.tcp`).
+- **The listener table** reads "Not receiving", without the error colour, for
+  a listener that is on in a session nothing reaches.
+- **`session port list`** prints each session's listeners (`tcp`). The `tcp`
+  commands took `--session-id` before; the server now honours it.
+- **Not built**: listeners that run with no port open for their session, and a
+  restart that brings back the listeners of sessions other than the default.
+  Both need something other than a port to hold a session's context. The
+  session the main listener leaves still stops its listeners.
 
 ## Constraints
 

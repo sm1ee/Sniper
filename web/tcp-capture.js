@@ -40,9 +40,14 @@
     }
     return { local_port: Number(localPort), target_host: host, target_port: Number(targetPort) };
   }
-  // The server's answer to a relay change made from a window that shows a
-  // session the proxy listener does not record into.
-  const RELAY_SESSION = "The TCP relay runs in the session the proxy listener records into.";
+  // A listener that starts in a session nothing reaches opens that session's
+  // port. These are what refuses the port, in the server's words.
+  const PORT_REFUSALS = [
+    /^[0-9]{1,3} session ports are open, which is the most; close one first$/,
+    /^port [0-9]{1,5}, which this session keeps, did not open \([^<>]{1,120}\); free it and try again$/,
+    /^the next 64 port numbers are all in use; free one and try again$/,
+    /^the session's port closed before its listener started; try again$/,
+  ];
   async function requestError(response) {
     const fallback = "TCP request failed (" + response.status + "). Refresh and try again.";
     // Only display known, bounded configuration messages, never arbitrary server
@@ -51,7 +56,7 @@
     try {
       const message = await response.text();
       if (message.length > 240) return fallback;
-      if (response.status === 409) return message === RELAY_SESSION ? message : fallback;
+      if (response.status === 409) return PORT_REFUSALS.some(refusal => refusal.test(message)) ? message : fallback;
       if (response.status === 500 && message === "Some TCP records could not be deleted. History requires recovery.") return message;
       if (response.status === 500 && /^TCP capture stopped, but [0-9]{1,8} connection record\(s\) are not saved\. Keep Sniper open, restore storage, then retry saving\.$/.test(message)) return message;
       if (response.status === 503 && message === "TCP capture cannot start while Sniper is shutting down") return message;
@@ -212,14 +217,19 @@
   function listenerRoute(listener) {
     return listenAddress(listener.settings) + " → " + targetLabel(listener.settings);
   }
-  function listenerState(listener) {
-    const state = listener.running ? "Listening" : !listener.enabled ? "Off" : String(listener.error || "Not running");
+  // A listener that is on runs while its session receives, so in a session
+  // nothing reaches it waits, and has not failed.
+  function listenerState(listener, receiving = true) {
+    const state = listener.running ? "Listening" : !listener.enabled ? "Off" : String(listener.error || (receiving ? "Not running" : "Not receiving"));
     return listener.refused > 0 ? state + " · " + listener.refused + " refused" : state;
   }
   const listenAddress = settings => (settings?.remote ? "*:" : "127.0.0.1:") + settings?.local_port;
   function createController({ document, sessionId, readPath, writePath, request, openSettings, confirm = (message, run) => run(),
     download = url => { const link = document.createElement("a"); link.href = url; link.download = ""; link.click?.(); },
-    copy = text => globalThis.navigator?.clipboard?.writeText(text), intercept = false, arrowStep = () => 0, formatTime = clock, formatSize = byteSize }) {
+    copy = text => globalThis.navigator?.clipboard?.writeText(text), intercept = false, arrowStep = () => 0, formatTime = clock, formatSize = byteSize,
+    // Whether traffic reaches the session on screen, and what to tell when a
+    // listener change went through: it can have opened the session's port.
+    receiving = () => true, changed = () => {} }) {
     const replayController = createReplayController({ document, sessionId, writePath, request, onSent: async record => {
       await refresh(); await select(record.id); interceptController?.showStream();
     } });
@@ -257,7 +267,8 @@
         : full ? "History full (" + count + "/" + status.history_limit + ")"
         : atLimit ? status.active_count + " of " + status.active_limit + " connections; new ones wait" : "";
       text("tcpListenerStatus", !status ? "Unavailable"
-        : blocked || (running.length ? running.length + " listening" : all.length ? "Off" : "No listeners"));
+        : blocked || (running.length ? running.length + " listening"
+          : !receiving() && all.some(listener => listener.enabled) ? "Not receiving" : all.length ? "Off" : "No listeners"));
       el("tcpAddListener").disabled = unavailable || all.length >= MAX_LISTENERS;
       text("tcpOpenSettings", running.length === 1 ? listenerRoute(running[0])
         : running.length ? running.length + " listeners" : "Listener off");
@@ -286,7 +297,7 @@
     }
     const LISTENER_SORT = {
       local_port: listener => Number(listener.settings?.local_port) || 0,
-      target: listener => targetLabel(listener.settings), status: listenerState
+      target: listener => targetLabel(listener.settings), status: listener => listenerState(listener, receiving())
     };
     function renderListeners(all, unavailable) {
       const value = LISTENER_SORT[listenerSort.key] || LISTENER_SORT.local_port, factor = listenerSort.direction === "asc" ? 1 : -1;
@@ -309,9 +320,9 @@
         toggle.setAttribute("aria-label", "Listener on port " + listener.settings.local_port);
         const on = document.createElement("td");
         on.className = "tcp-col-on"; on.append(toggle); row.append(on);
-        const state = listenerState(listener);
+        const fed = receiving(), state = listenerState(listener, fed);
         for (const [content, className] of [[listenAddress(listener.settings), ""], [listenerTarget(listener.settings), ""],
-          [state, listener.enabled && !listener.running ? "tcp-listener-error" : ""]]) {
+          [state, listener.enabled && !listener.running && (fed || listener.error) ? "tcp-listener-error" : ""]]) {
           const cell = document.createElement("td");
           cell.textContent = content; cell.title = content;
           if (className) cell.className = className;
@@ -529,6 +540,7 @@
       try {
         await json(writePath(path, stamp.session), { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
         done = true;
+        changed();
       } catch (error) {
         if (current(stamp)) actionError = { message: error.message, action };
       } finally {
@@ -887,12 +899,7 @@
     }
     async function json(path, options) {
       const response = await request(path, options);
-      if (!response.ok) {
-        // A 409 is the bytes having changed, unless it is the relay running elsewhere.
-        const relay = response.status === 409 && typeof response.text === "function"
-          && (await response.text().catch(() => "")) === RELAY_SESSION;
-        throw Object.assign(new Error(relay ? RELAY_SESSION : response.status === 409 ? "The bytes changed. Review them, then try again." : "TCP request failed (" + response.status + ")."), { status: response.status });
-      }
+      if (!response.ok) throw Object.assign(new Error(response.status === 409 ? "The bytes changed. Review them, then try again." : "TCP request failed (" + response.status + ")."), { status: response.status });
       return response.status === 204 ? null : response.json();
     }
     function render() {
