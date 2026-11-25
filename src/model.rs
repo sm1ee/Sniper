@@ -265,12 +265,39 @@ pub struct MessageRecord {
 
 impl MessageRecord {
     pub fn from_headers_and_body(headers: &HeaderMap, body: &[u8], max_preview: usize) -> Self {
+        Self::from_headers_and_body_inner(headers, body, max_preview, true)
+    }
+
+    /// Build a record from a truncated wire prefix of a streamed body without
+    /// attempting content decompression on incomplete compressed bytes.
+    pub fn from_headers_and_body_truncated_wire(
+        headers: &HeaderMap,
+        preview: &[u8],
+        body_size: usize,
+        max_preview: usize,
+    ) -> Self {
+        let mut record = Self::from_headers_and_body_inner(headers, preview, max_preview, false);
+        record.body_size = body_size;
+        record.preview_truncated = true;
+        record
+    }
+
+    fn from_headers_and_body_inner(
+        headers: &HeaderMap,
+        body: &[u8],
+        max_preview: usize,
+        allow_decode: bool,
+    ) -> Self {
         let content_type = headers
             .get(http::header::CONTENT_TYPE)
             .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
 
         // Decompress body based on Content-Encoding header
-        let decoded_body = decode_content_encoding(headers, body);
+        let decoded_body = if allow_decode {
+            decode_content_encoding(headers, body)
+        } else {
+            None
+        };
         let content_decoded = decoded_body.is_some();
         let body_ref = decoded_body.as_deref().unwrap_or(body);
         let original_size = body.len();
@@ -944,20 +971,25 @@ fn decode_content_encoding_limited(
     if body.is_empty() {
         return None;
     }
-    let encodings = headers
-        .get(http::header::CONTENT_ENCODING)?
-        .to_str()
-        .ok()?
-        .split(',')
-        .map(|encoding| encoding.trim().to_ascii_lowercase())
-        .filter(|encoding| !encoding.is_empty())
-        .collect::<Vec<_>>();
-    if encodings.is_empty() {
+    let mut encodings = Vec::new();
+    for header in headers.get_all(http::header::CONTENT_ENCODING) {
+        let value = header.to_str().ok()?;
+        encodings.extend(
+            value
+                .split(',')
+                .map(|encoding| encoding.trim().to_ascii_lowercase())
+                .filter(|encoding| !encoding.is_empty()),
+        );
+    }
+    if encodings.is_empty() || encodings.iter().all(|encoding| encoding == "identity") {
         return None;
     }
 
     let mut decoded = body.to_vec();
     for encoding in encodings.iter().rev() {
+        if encoding == "identity" {
+            continue;
+        }
         decoded = decode_single_content_encoding(encoding, &decoded, max_decoded_bytes)?;
     }
 
@@ -1065,6 +1097,7 @@ pub(crate) fn is_binary_body_content_type(content_type: Option<&str>) -> bool {
             | "application/grpc+json"
             | "application/grpc-web"
             | "application/grpc-web+proto"
+            | "application/grpc-web+json"
     )
 }
 
@@ -1076,23 +1109,7 @@ fn is_textual_body(content_type: Option<&str>, sample: &[u8]) -> bool {
         return true;
     }
 
-    let valid_utf8 = std::str::from_utf8(sample).is_ok() && !sample.contains(&0);
-
-    if let Some(content_type) = content_type {
-        let normalized = content_type.to_ascii_lowercase();
-        if normalized.starts_with("text/")
-            || normalized.contains("json")
-            || normalized.contains("xml")
-            || normalized.contains("javascript")
-            || normalized.contains("x-www-form-urlencoded")
-            || normalized.contains("graphql")
-            || normalized.contains("yaml")
-        {
-            return valid_utf8;
-        }
-    }
-
-    valid_utf8
+    std::str::from_utf8(sample).is_ok() && !sample.contains(&0)
 }
 
 fn is_textual_body_preview(content_type: Option<&str>, sample: &[u8], truncated: bool) -> bool {
@@ -1103,27 +1120,11 @@ fn is_textual_body_preview(content_type: Option<&str>, sample: &[u8], truncated:
         return true;
     }
 
-    let valid_utf8 = match std::str::from_utf8(sample) {
-        Ok(_) => true,
+    match std::str::from_utf8(sample) {
+        Ok(_) => !sample.contains(&0),
         Err(error) if truncated && error.error_len().is_none() => !sample.contains(&0),
         Err(_) => false,
-    };
-
-    if let Some(content_type) = content_type {
-        let normalized = content_type.to_ascii_lowercase();
-        if normalized.starts_with("text/")
-            || normalized.contains("json")
-            || normalized.contains("xml")
-            || normalized.contains("javascript")
-            || normalized.contains("x-www-form-urlencoded")
-            || normalized.contains("graphql")
-            || normalized.contains("yaml")
-        {
-            return valid_utf8;
-        }
     }
-
-    valid_utf8
 }
 
 fn utf8_preview_len(sample: &[u8]) -> usize {
@@ -1950,5 +1951,59 @@ mod tests {
             .headers
             .iter()
             .all(|h| !h.name.eq_ignore_ascii_case("content-length")));
+    }
+
+    #[test]
+    fn multiple_content_encoding_headers_and_identity_decode_in_order() {
+        let mut inner = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut inner, b"layered payload").unwrap();
+        let once = inner.finish().unwrap();
+
+        let mut outer = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut outer, &once).unwrap();
+        let twice = outer.finish().unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.append(
+            http::header::CONTENT_ENCODING,
+            http::HeaderValue::from_static("gzip"),
+        );
+        headers.append(
+            http::header::CONTENT_ENCODING,
+            http::HeaderValue::from_static("gzip, identity"),
+        );
+
+        let record = MessageRecord::from_headers_and_body(&headers, &twice, 4096);
+        assert!(record.content_decoded);
+        assert_eq!(record.body_preview, "layered payload");
+
+        let mut identity_only = HeaderMap::new();
+        identity_only.insert(
+            http::header::CONTENT_ENCODING,
+            http::HeaderValue::from_static("identity"),
+        );
+        let plain = MessageRecord::from_headers_and_body(&identity_only, b"plain", 4096);
+        assert!(!plain.content_decoded);
+        assert_eq!(plain.body_preview, "plain");
+    }
+
+    #[test]
+    fn nul_byte_and_grpc_web_json_bodies_stay_base64() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/octet-stream"),
+        );
+        let with_nul = MessageRecord::from_headers_and_body(&headers, b"abc\x00def", 4096);
+        assert_eq!(with_nul.body_encoding, BodyEncoding::Base64);
+
+        let mut grpc_headers = HeaderMap::new();
+        grpc_headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/grpc-web+json"),
+        );
+        let grpc =
+            MessageRecord::from_headers_and_body(&grpc_headers, b"\x00\x00\x00\x00\x02{}", 4096);
+        assert_eq!(grpc.body_encoding, BodyEncoding::Base64);
     }
 }

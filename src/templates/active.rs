@@ -768,7 +768,8 @@ pub fn read_raw<'a>(text: &'a str, structure: &str) -> Option<RawRequest<'a>> {
         let colon = from + trimmed.find(':')?;
         let name = &text[from..colon];
         let value = text[colon + 1..from + trimmed.len()].trim();
-        multipart |= name.contains("Content-Type") && value.contains("multipart/");
+        multipart |= name.trim().eq_ignore_ascii_case("content-type")
+            && value.to_ascii_lowercase().starts_with("multipart/");
         headers.push((name, value));
     }
     let body = &text[body_start..];

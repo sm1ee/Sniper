@@ -1462,12 +1462,22 @@ fn has_csp_frame_ancestors(response: &crate::model::MessageRecord) -> bool {
     })
 }
 
+fn response_mime_essence(response: &crate::model::MessageRecord) -> String {
+    response
+        .header_value("content-type")
+        .or(response.content_type.as_deref())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
 fn is_html_page_response(response: &crate::model::MessageRecord) -> bool {
-    if let Some(content_type) = response.content_type.as_deref() {
-        let ct = content_type.trim();
-        if !ct.is_empty() {
-            return ct.to_ascii_lowercase().contains("text/html");
-        }
+    let essence = response_mime_essence(response);
+    if !essence.is_empty() {
+        return matches!(essence.as_str(), "text/html" | "application/xhtml+xml");
     }
 
     if !matches!(response.body_encoding, BodyEncoding::Utf8) {
@@ -1637,10 +1647,8 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
         return;
     }
     let script = javascript_or_css_response(record, response);
-    let page = response
-        .header_value("content-type")
-        .or(response.content_type.as_deref())
-        .is_some_and(|value| value.to_ascii_lowercase().contains("html"));
+    let essence = response_mime_essence(response);
+    let page = matches!(essence.as_str(), "text/html" | "application/xhtml+xml");
 
     static PATTERNS: &[(&str, &str, Severity)] = &[
         // ── Cloud provider secrets ──
@@ -3820,16 +3828,22 @@ fn javascript_or_css_response(
     record: &TransactionRecord,
     response: &crate::model::MessageRecord,
 ) -> bool {
-    let content_type = response
-        .header_value("content-type")
-        .or(response.content_type.as_deref())
+    let essence = response_mime_essence(response);
+    if !essence.is_empty() {
+        return essence.contains("javascript")
+            || essence.contains("ecmascript")
+            || essence == "text/css";
+    }
+    let clean_path = record
+        .path
+        .split(['?', '#'])
+        .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-    content_type.contains("javascript")
-        || content_type.contains("ecmascript")
-        || content_type.contains("text/css")
-        || record.path.ends_with(".js")
-        || record.path.ends_with(".css")
+    clean_path.ends_with(".js")
+        || clean_path.ends_with(".mjs")
+        || clean_path.ends_with(".cjs")
+        || clean_path.ends_with(".css")
 }
 
 fn git_commit_metadata_response_detected(body: &str) -> bool {

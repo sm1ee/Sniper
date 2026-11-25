@@ -1541,7 +1541,7 @@ fn canonicalize_intercept_forward_request(
     let body = request
         .try_body_bytes()
         .map_err(|_| "request body is not valid base64".to_string())?;
-    canonicalize_plain_chunked_transfer_encoding(&mut request.headers, body.len())?;
+    canonicalize_plain_chunked_transfer_encoding(&mut request.headers, body.len(), false)?;
     validate_editable_request(&request)?;
     Ok(request)
 }
@@ -1553,7 +1553,8 @@ fn canonicalize_intercept_forward_response(
     let body = response
         .try_body_bytes()
         .map_err(|_| "response body is not valid base64".to_string())?;
-    canonicalize_plain_chunked_transfer_encoding(&mut response.headers, body.len())?;
+    let bodyless = response_must_not_include_body(response.status, request_method);
+    canonicalize_plain_chunked_transfer_encoding(&mut response.headers, body.len(), bodyless)?;
     validate_editable_response_for_request_method(&response, request_method)?;
     Ok(response)
 }
@@ -1561,6 +1562,7 @@ fn canonicalize_intercept_forward_response(
 fn canonicalize_plain_chunked_transfer_encoding(
     headers: &mut Vec<HeaderRecord>,
     body_len: usize,
+    bodyless: bool,
 ) -> std::result::Result<(), String> {
     let codings = editable_transfer_encoding_tokens(headers)?;
     if codings.is_empty() {
@@ -1577,10 +1579,12 @@ fn canonicalize_plain_chunked_transfer_encoding(
         !header.name.eq_ignore_ascii_case("transfer-encoding")
             && !header.name.eq_ignore_ascii_case("content-length")
     });
-    headers.push(HeaderRecord {
-        name: header::CONTENT_LENGTH.as_str().to_string(),
-        value: body_len.to_string(),
-    });
+    if !bodyless || body_len > 0 {
+        headers.push(HeaderRecord {
+            name: header::CONTENT_LENGTH.as_str().to_string(),
+            value: body_len.to_string(),
+        });
+    }
     Ok(())
 }
 
@@ -1621,17 +1625,26 @@ fn validate_editable_body_framing(
             "Transfer-Encoding: chunked is not supported for editable messages".to_string(),
         );
     }
+    if headers
+        .iter()
+        .any(|header| header.name.eq_ignore_ascii_case("transfer-encoding"))
+    {
+        return Err("Transfer-Encoding is not supported for editable messages".to_string());
+    }
 
     let mut content_length: Option<usize> = None;
     for header in headers
         .iter()
         .filter(|header| header.name.eq_ignore_ascii_case("content-length"))
     {
-        let parsed = header
-            .value
-            .trim()
-            .parse::<usize>()
-            .map_err(|_| format!("invalid Content-Length: {}", header.value))?;
+        let trimmed = header.value.trim();
+        let parsed = if !trimmed.is_empty() && trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+            trimmed
+                .parse::<usize>()
+                .map_err(|_| format!("invalid Content-Length: {}", header.value))?
+        } else {
+            return Err(format!("invalid Content-Length: {}", header.value));
+        };
         if let Some(previous) = content_length {
             if previous != parsed {
                 return Err("conflicting Content-Length headers".to_string());
