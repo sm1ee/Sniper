@@ -2417,13 +2417,6 @@ summary {
   right: 72px;
 }
 
-.browser-menu-hint {
-  padding: 0 10px 6px;
-  color: var(--text-dim);
-  font-size: var(--font-2xs);
-  line-height: 1.4;
-}
-
 .browser-menu-option {
   display: flex;
   align-items: center;

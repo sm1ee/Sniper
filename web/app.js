@@ -22428,7 +22428,10 @@ function browserMenuRowHtml(entry) {
   // link: the page it points to is the vendor's, opened outside Sniper.
   const installUrl = !entry.installed && /^https:\/\//.test(entry.install_url || "") ? entry.install_url : "";
   const note = entry.installed ? (entry.default ? "Default" : "") : installUrl ? "" : "Not installed";
-  const title = !entry.installed ? entry.install_hint || "" : "";
+  // What a browser that is not installed needs, or what an installed one
+  // still lacks for an agent to drive it, is said on hover: the menu is a
+  // list of names.
+  const title = !entry.installed ? entry.install_hint || "" : missing.map((item) => item.hint || item.name).join(" ");
   // A saved choice that has since been uninstalled still has to be clearable,
   // or every open would keep warning about it with no way to stop.
   const pin = entry.preferred
@@ -22455,7 +22458,6 @@ function browserMenuRowHtml(entry) {
       ${pin}
       ${install}
     </div>
-    ${missing.length ? `<div class="browser-menu-hint">${escapeHtml(missing.map((item) => item.hint || item.name).join(" "))}</div>` : ""}
   `;
 }
 
@@ -22470,8 +22472,7 @@ function renderBrowserMenu(catalog) {
     ${rows.join("")}
     <div class="context-menu-divider"></div>
     <label class="browser-menu-option"><input type="checkbox" data-option="agent" ${wasChecked("agent")}> Let an agent drive it</label>
-    <label class="browser-menu-option"><input type="checkbox" data-option="fresh" ${wasChecked("fresh")}> Throwaway profile (discard logins on quit)</label>
-    <div class="browser-menu-hint">By default, reuse this browser's saved Sniper profile. Your everyday browser profile is separate. Site data stays between launches; sites can still expire logins.</div>
+    <label class="browser-menu-option" title="A new profile, deleted when the browser quits. Without this the browser's saved Sniper profile is used again. Your everyday browser profile is separate. Site data stays between launches; sites can still expire logins."><input type="checkbox" data-option="fresh" ${wasChecked("fresh")}> Throwaway profile</label>
   `;
   element.onclick = async (event) => {
     const prefer = event.target.closest("[data-prefer]");
