@@ -578,6 +578,17 @@ const ENDPOINT_INFO_TITLES: &[&str] = &[
     "GraphQL introspection enabled",
     "Swagger/OpenAPI spec exposed",
     "WSDL service definition exposed",
+    "PHP source code in response",
+    "JSP source code in response",
+    "ASP source code in response",
+    "ColdFusion source code in response",
+    "Server-side include directive in response",
+    "Server-side code in HTML comment",
+    "SQL query in HTML comment",
+    "Database dump exposed",
+    "Storage bucket listing exposed",
+    "Password hash file exposed",
+    "Log file exposed",
 ];
 
 /// Scans retained records again with the current rules, for a session whose
@@ -785,9 +796,12 @@ pub fn scan_transaction(record: &TransactionRecord, config: &ScannerConfig) -> V
     }
     if config.is_rule_enabled("misconfig") {
         check_security_misconfig(record, &mut findings);
+        check_cross_domain_policy(record, &mut findings);
     }
     if config.is_rule_enabled("info") {
         check_info_disclosure(record, &mut findings);
+        check_source_code_disclosure(record, &mut findings);
+        check_exposed_data_files(record, &mut findings);
         check_exposures(record, &mut findings);
     }
     if config.is_rule_enabled("auth") {
@@ -2031,10 +2045,16 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
             .collect()
     });
     let mut target_repetitions = None;
+    // A connection string's password is reported with the string it opens.
+    let connection = connection_string_password_match(body);
     for (&(_, label, ref severity), re) in PATTERNS.iter().zip(COMPILED.iter()) {
         if let Some(re) = re {
             if label == "Password" {
-                if let Some(span) = password_response_match(body, script, re) {
+                if let Some(span) = password_response_match(body, script, re).filter(|span| {
+                    !connection.as_ref().is_some_and(|(range, _)| {
+                        range.start <= span.start && span.end <= range.end
+                    })
+                }) {
                     let mut finding = make_finding(
                         record,
                         severity.clone(),
@@ -2145,7 +2165,40 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
         }
     }
 
+    if let Some((_, evidence)) = connection {
+        findings.push(make_finding(
+            record,
+            Severity::High,
+            "disclosure",
+            "Connection string with password detected in response",
+            "A database connection string with its password was found in the response body. Anyone who reads it can log in to the database it names.",
+            evidence,
+        ));
+    }
     check_internal_ip_disclosure(record, body, findings);
+}
+
+/// An ADO.NET or ODBC connection string with its password, as `web.config`
+/// and `appsettings.json` hold them: `Server=db;User ID=sa;Password=…`. The
+/// URI forms (`mysql://user:pass@host`) are the patterns above.
+static CONNECTION_STRING_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)\b(?:data source|server|address|addr|network address|host)\s*=\s*[^;"'<>\r\n]{1,200};[^"'<>\r\n]{0,300}?\b(?:password|pwd)\s*=\s*([^;"'<>\s]{3,})"#)
+        .unwrap()
+});
+
+/// The first connection string in `body` with a real password: where it is,
+/// and its evidence.
+fn connection_string_password_match(body: &str) -> Option<(std::ops::Range<usize>, String)> {
+    CONNECTION_STRING_PASSWORD
+        .captures_iter(body)
+        .find(|captures| {
+            let value = captures[1].trim_matches(['"', '\'']);
+            !secret_candidate_is_masked(value) && !secret_candidate_is_placeholder(value)
+        })
+        .map(|captures| {
+            let whole = captures.get(0).expect("whole match");
+            (whole.range(), truncate_evidence(whole.as_str(), 80))
+        })
 }
 
 // A supported token can occur inside a longer URL-safe opaque identifier.
@@ -2989,6 +3042,7 @@ fn check_error_messages(record: &TransactionRecord, findings: &mut Vec<ScannerFi
     // Only check 4xx/5xx responses
     let status = record.status.unwrap_or(0);
     if status < 400 {
+        check_success_error_signatures(record, response, findings);
         return;
     }
 
@@ -3178,6 +3232,101 @@ fn check_error_messages(record: &TransactionRecord, findings: &mut Vec<ScannerFi
             findings.push(finding);
             break; // One finding per response is enough
         }
+    }
+}
+
+/// PHP printing a warning or an error into a page, in its own markup, with
+/// the script's path and line.
+static PHP_HTML_ERROR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)<b>(Fatal error|Parse error|Catchable fatal error|Warning|Notice|Deprecated)</b>:\s+.{1,400}? in <b>[^<\n]{1,300}\.php</b> on line <b>\d+</b>")
+        .unwrap()
+});
+// A JSON string escapes the newline and tab before a frame: `\n\tat com.…`.
+static JAVA_STACK_FRAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:\\[nt]|\b)at\s+(?:[A-Za-z_$][\w$]*\.){2,}[\w$<>]+\([\w$]+\.(?:java|kt|scala|groovy):\d+\)")
+        .unwrap()
+});
+static DOTNET_STACK_FRAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"\bat [\w.`<>\[\]]+\([^)\n]{0,300}\) in [^\n"]{1,300}:line \d+"#).unwrap()
+});
+static PYTHON_TRACEBACK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"Traceback \(most recent call last\):(?:\\n|\s)+File \\?"[^"\n]{1,300}\\?", line \d+"#,
+    )
+    .unwrap()
+});
+
+/// What an answer that succeeded still gives away. PHP prints its warnings
+/// into the page with the script's path, and an API can return a stack trace
+/// with a 200. In a page only PHP's own markup counts: a page about
+/// programming quotes errors and traces in its text, so a trace counts in
+/// data and text responses alone.
+fn check_success_error_signatures(
+    record: &TransactionRecord,
+    response: &MessageRecord,
+    findings: &mut Vec<ScannerFinding>,
+) {
+    if is_binary_body(response) || javascript_or_css_response(record, response) {
+        return;
+    }
+    let body = &response.body_preview;
+    if body.is_empty() {
+        return;
+    }
+    let mut push = |severity: Severity, title: &str, start: usize, len: usize| {
+        let mut finding = make_finding(
+            record,
+            severity,
+            "error",
+            title,
+            "A successful response carries an error message or a stack trace. It shows file paths, code structure and the stack the application runs on.",
+            truncate_evidence(evidence_window(body, start, len, 0, 0), 160),
+        );
+        let line = response.headers.len()
+            + 3
+            + body[..start].bytes().filter(|byte| *byte == b'\n').count();
+        finding.location = Some(location_for_line(record, "response", line));
+        findings.push(finding);
+    };
+    if let Some(captures) = PHP_HTML_ERROR.captures(body) {
+        let m = captures.get(0).expect("whole match");
+        let severity = match &captures[1] {
+            "Fatal error" | "Parse error" | "Catchable fatal error" => Severity::Medium,
+            _ => Severity::Low,
+        };
+        push(
+            severity,
+            "PHP error message in response",
+            m.start(),
+            m.len(),
+        );
+        return;
+    }
+    if is_html_page_response(response) {
+        return;
+    }
+    let java = JAVA_STACK_FRAME.find_iter(body).take(2).collect::<Vec<_>>();
+    if java.len() == 2 {
+        push(
+            Severity::Medium,
+            "Java stack trace in response",
+            java[0].start(),
+            java[0].len(),
+        );
+    } else if let Some(m) = DOTNET_STACK_FRAME.find(body) {
+        push(
+            Severity::Medium,
+            ".NET stack trace in response",
+            m.start(),
+            m.len(),
+        );
+    } else if let Some(m) = PYTHON_TRACEBACK.find(body) {
+        push(
+            Severity::Medium,
+            "Python traceback in response",
+            m.start(),
+            m.len(),
+        );
     }
 }
 
@@ -4307,6 +4456,328 @@ fn contains_comment_keyword(comment: &str, keyword: &str) -> bool {
     })
 }
 
+/// A Flash or Silverlight cross-domain policy that lets every site read this
+/// host with its visitors' cookies. Browsers no longer run either plug-in, but
+/// other clients still honour the files.
+fn check_cross_domain_policy(record: &TransactionRecord, findings: &mut Vec<ScannerFinding>) {
+    static FLASH: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"(?is)<cross-domain-policy\b.*?<allow-access-from\b[^>]*\bdomain\s*=\s*["']\*["']"#,
+        )
+        .unwrap()
+    });
+    static SILVERLIGHT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?is)<access-policy\b.*?<domain\b[^>]*\buri\s*=\s*["']\*["']"#).unwrap()
+    });
+    let Some(response) = &record.response else {
+        return;
+    };
+    if is_binary_body(response) || !(200..300).contains(&record.status.unwrap_or(0)) {
+        return;
+    }
+    let body = &response.body_preview;
+    for (pattern, title) in [
+        (&*FLASH, "Permissive Flash cross-domain policy"),
+        (&*SILVERLIGHT, "Permissive Silverlight cross-domain policy"),
+    ] {
+        if let Some(m) = pattern.find(body) {
+            findings.push(make_finding(
+                record,
+                Severity::Low,
+                "misconfig",
+                title,
+                "The cross-domain policy admits every domain, so a plug-in on any site can read this host's responses with its visitors' cookies.",
+                truncate_evidence(evidence_window(body, m.end().saturating_sub(40), 40, 0, 0), 80),
+            ));
+        }
+    }
+}
+
+// ── Server-side source and data files ──
+
+/// Server-side code that reached the client as text: a page whose PHP, JSP,
+/// ASP or ColdFusion tags were sent instead of run, or a backup copy of a
+/// script served as a file. Each pattern is a tag or a call only the server's
+/// language has, so a page that runs the code never shows it, a page that
+/// shows code to its readers escapes it (`&lt;?php`), and a client-side
+/// template's `<% %>` calls none of them.
+static SOURCE_CODE: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
+    [
+        ("PHP", r"(?i)<\?php[\s(]|<\?=\s*\$[a-z_]"),
+        (
+            "JSP",
+            r"<%@\s*(?:page|taglib|include)\b|<jsp:(?:include|forward|useBean|setProperty|getProperty|param)\b|<%[^%]{0,300}?\b(?:request\.getParameter|session\.getAttribute|out\.print(?:ln)?)\s*\(",
+        ),
+        (
+            "ASP",
+            r"<%@\s*(?:Page|Control|Master|Import|Register|Assembly|WebService|Application)\b|<%@\s*(?i:language)\s*=|<%[^%]{0,300}?\b(?:Response\.Write|Server\.(?:CreateObject|MapPath)|Request\.(?:Form|QueryString))\b",
+        ),
+        (
+            "ColdFusion",
+            r"(?i)<cf(?:query|set|output|include|script|param|component|function|mail|location)\b",
+        ),
+    ]
+    .into_iter()
+    .map(|(language, pattern)| {
+        (
+            language,
+            Regex::new(pattern).expect("valid source code pattern"),
+        )
+    })
+    .collect()
+});
+
+/// A server-side include the server did not process: it names the files and
+/// commands the page is put together from.
+static SERVER_SIDE_INCLUDE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)<!--\s*#\s*(?:(?:include|exec|echo|set|config|fsize|flastmod)\s+[a-z]+\s*=|printenv\b)")
+        .unwrap()
+});
+
+/// Code a developer left in an HTML comment: PHP's request arrays and
+/// database calls, an included script, ASP's and JSP's request and response
+/// objects. A commented-out script calls none of them.
+static COMMENT_CODE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"\$_(?:GET|POST|REQUEST|SERVER|SESSION|COOKIE|FILES|ENV)\s*\[|\b(?:mysqli?_(?:query|connect|real_connect|fetch_[a-z]+)|pg_(?:query|connect)|sqlsrv_(?:query|connect)|oci_(?:parse|connect))\s*\(|\b(?:require|include)(?:_once)?\s*\(?\s*['"][^'"\s]{1,200}\.php['"]|\bResponse\.Write\s*\(|\bServer\.(?:CreateObject|MapPath)\s*\(|\bRequest\.(?:Form|QueryString)\s*[(\[]|\brequest\.getParameter\s*\(|\bSystem\.out\.println\s*\(|\bConfigurationManager\.(?:AppSettings|ConnectionStrings)\b"#,
+    )
+    .unwrap()
+});
+
+/// A query in a comment, in the capitals a developer writes it in; prose that
+/// happens to say "select" and "from" is not written so.
+static COMMENT_SQL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"\bSELECT\s+(?:DISTINCT\s+)?(?:\*|[\w.`"\[\]]+(?:\s*,\s*[\w.`"\[\]]+)*)\s+FROM\s+[\w.`"\[\]]+|\bINSERT\s+INTO\s+[\w.`"\[\]]+\s*(?:\(|VALUES\b)|\bUPDATE\s+[\w.`"\[\]]+\s+SET\s+[\w.`"\[\]]+\s*=|\bDELETE\s+FROM\s+[\w.`"\[\]]+"#,
+    )
+    .unwrap()
+});
+
+/// How far into a comment code is looked for: a commented-out block of a
+/// script runs longer than the 500 characters the keyword rule reads.
+const COMMENT_CODE_BYTES: usize = 16 * 1024;
+
+fn check_source_code_disclosure(record: &TransactionRecord, findings: &mut Vec<ScannerFinding>) {
+    let Some(response) = &record.response else {
+        return;
+    };
+    if is_binary_body(response) || javascript_or_css_response(record, response) {
+        return;
+    }
+    let essence = response_mime_essence(response);
+    // Data quotes code as data: a snippet in a JSON field is content.
+    if essence == "application/json" || essence.ends_with("+json") {
+        return;
+    }
+    let body = &response.body_preview;
+    if body.is_empty() {
+        return;
+    }
+    let push = |findings: &mut Vec<ScannerFinding>,
+                severity: Severity,
+                title: String,
+                detail: &str,
+                start: usize,
+                len: usize| {
+        let mut finding = make_finding(
+            record,
+            severity,
+            "info",
+            title,
+            detail,
+            truncate_evidence(evidence_window(body, start, len, 0, 100), 120),
+        );
+        let line = response.headers.len()
+            + 3
+            + body[..start].bytes().filter(|byte| *byte == b'\n').count();
+        finding.location = Some(location_for_line(record, "response", line));
+        findings.push(finding);
+    };
+    for (language, pattern) in SOURCE_CODE.iter() {
+        // An editor in a page, such as a CMS's theme editor, holds the code
+        // it edits in a textarea.
+        let Some(m) = pattern
+            .find_iter(body)
+            .find(|m| !inside_element(body, m.start(), "textarea"))
+        else {
+            continue;
+        };
+        push(
+            findings,
+            Severity::Medium,
+            format!("{language} source code in response"),
+            "Server-side code was sent to the client instead of being run. It can show the application's logic, file paths, queries and credentials.",
+            m.start(),
+            m.len(),
+        );
+    }
+    if let Some(m) = SERVER_SIDE_INCLUDE.find(body) {
+        push(
+            findings,
+            Severity::Low,
+            "Server-side include directive in response".to_string(),
+            "The page carries a server-side include the server did not process. It names the files or commands the page is built from.",
+            m.start(),
+            m.len(),
+        );
+    }
+    if !response_can_contain_html_comments(record, response) {
+        return;
+    }
+    let (mut code, mut sql) = (None, None);
+    let mut rest = 0;
+    while let Some(open) = body[rest..].find("<!--").map(|offset| rest + offset) {
+        let content_start = open + 4;
+        let Some(close) = body[content_start..]
+            .find("-->")
+            .map(|offset| content_start + offset)
+        else {
+            break;
+        };
+        let content = &body[content_start
+            ..previous_char_boundary(body, close.min(content_start + COMMENT_CODE_BYTES))];
+        if code.is_none() {
+            code = COMMENT_CODE
+                .find(content)
+                .map(|m| (content_start + m.start(), m.len()));
+        }
+        if sql.is_none() {
+            sql = COMMENT_SQL
+                .find(content)
+                .map(|m| (content_start + m.start(), m.len()));
+        }
+        if code.is_some() && sql.is_some() {
+            break;
+        }
+        rest = close + 3;
+    }
+    if let Some((start, len)) = code {
+        push(
+            findings,
+            Severity::Medium,
+            "Server-side code in HTML comment".to_string(),
+            "An HTML comment holds server-side code. Comments reach every visitor, and the code can show the application's logic, parameters and queries.",
+            start,
+            len,
+        );
+    }
+    if let Some((start, len)) = sql {
+        push(
+            findings,
+            Severity::Low,
+            "SQL query in HTML comment".to_string(),
+            "An HTML comment holds a SQL query. It shows table and column names an injection would need.",
+            start,
+            len,
+        );
+    }
+}
+
+/// Whether `index` is inside an open `<tag ...>` element of `body`.
+fn inside_element(body: &str, index: usize, tag: &str) -> bool {
+    let before = body[..index].to_ascii_lowercase();
+    let open = before.rfind(&format!("<{tag}"));
+    let close = before.rfind(&format!("</{tag}"));
+    match (open, close) {
+        (Some(open), Some(close)) => open > close,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+/// A database dump announces itself in its first lines.
+static DATABASE_DUMP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)^--\s+(?:MySQL dump \d|MariaDB dump \d|PostgreSQL database dump|phpMyAdmin SQL Dump)",
+    )
+    .unwrap()
+});
+
+/// A storage service listing a bucket's objects to anyone who asks: S3 and
+/// the services that speak its API, Google Cloud Storage's XML and JSON APIs,
+/// and Azure Blob Storage.
+static BUCKET_LISTING: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"<ListBucketResult\s+xmlns="https?://(?:s3\.amazonaws\.com/doc|doc\.s3\.amazonaws\.com)/2006-03-01/?"|<EnumerationResults\s+ServiceEndpoint="https?://[^"\s]+\.blob\.core\.windows\.net/|"kind"\s*:\s*"storage#objects""#)
+        .unwrap()
+});
+
+/// A user and a password hash, as `.htpasswd` and `/etc/shadow` hold them.
+static PASSWORD_HASH_LINE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^[A-Za-z0-9._@-]{1,64}:(?:\$(?:apr1|2[abxy]?|1|5|6|y)\$[./A-Za-z0-9$=]{8,}|\{SHA\}[A-Za-z0-9+/]{27}=)(?:\s*$|:\d*:)")
+        .unwrap()
+});
+
+/// A line of an access log, an Apache error log, a Laravel or Monolog log, or
+/// PHP's error log. Three of them in the head of a text answer make a log.
+static LOG_LINE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r#"(?m)^(?:\S+ \S+ \S+ \[\d{2}/[A-Z][a-z]{2}/\d{4}:\d{2}:\d{2}:\d{2} [+-]\d{4}\] "[A-Z]+ \S+ HTTP/[\d.]+" \d{3} "#,
+        r"|\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) [A-Z][a-z]{2} \d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)? \d{4}\] \[[a-z_]+(?::[a-z]+)?\]",
+        r"|\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?\] [A-Za-z0-9_-]+\.(?:DEBUG|INFO|NOTICE|WARNING|ERROR|CRITICAL|ALERT|EMERGENCY):",
+        r"|\[\d{2}-[A-Z][a-z]{2}-\d{4} \d{2}:\d{2}:\d{2}(?: [A-Za-z/_]+)?\] PHP (?:Fatal error|Warning|Notice|Parse error|Deprecated):)"
+    ))
+    .unwrap()
+});
+
+const DATA_FILE_HEAD_BYTES: usize = 4 * 1024;
+
+fn check_exposed_data_files(record: &TransactionRecord, findings: &mut Vec<ScannerFinding>) {
+    let Some(response) = &record.response else {
+        return;
+    };
+    if is_binary_body(response) || response.body_preview.is_empty() {
+        return;
+    }
+    let body = &response.body_preview;
+    let head = &body[..previous_char_boundary(body, body.len().min(DATA_FILE_HEAD_BYTES))];
+    // A page about databases quotes a dump's header in its text; the dump is
+    // served as a file.
+    if !is_html_page_response(response) {
+        if let Some(m) = DATABASE_DUMP.find(head) {
+            findings.push(make_finding(
+                record,
+                Severity::High,
+                "info",
+                "Database dump exposed",
+                "A database dump is served at this path. It can hold every table's rows, including users and their password hashes.",
+                truncate_evidence(evidence_window(head, m.start(), m.len(), 0, 60), 100),
+            ));
+        }
+    }
+    if !is_html_page_response(response) {
+        if let Some(m) = PASSWORD_HASH_LINE.find(head) {
+            findings.push(make_finding(
+                record,
+                Severity::High,
+                "info",
+                "Password hash file exposed",
+                "A file of users and their password hashes, such as .htpasswd or a shadow file, is served at this path. The hashes can be cracked offline.",
+                truncate_evidence(m.as_str().split(':').next().unwrap_or(""), 60),
+            ));
+        }
+        if LOG_LINE.find_iter(head).take(3).count() == 3 {
+            findings.push(make_finding(
+                record,
+                Severity::Medium,
+                "info",
+                "Log file exposed",
+                "A server or application log is served at this path. Logs hold client addresses, requested URLs, errors and often tokens.",
+                truncate_evidence(evidence_prefix(head, 120), 120),
+            ));
+        }
+    }
+    if let Some(m) = BUCKET_LISTING.find(head) {
+        findings.push(make_finding(
+            record,
+            Severity::Medium,
+            "info",
+            "Storage bucket listing exposed",
+            "A storage bucket lists its objects to anyone who asks, so every file in it can be found and fetched.",
+            truncate_evidence(m.as_str(), 100),
+        ));
+    }
+}
+
 // ── Exposures the Service Map names ──
 
 /// What the map names as exposed (`service_map_servers`) that no rule above
@@ -4401,7 +4872,81 @@ fn map_exposure_severity(product_id: &str) -> Option<Severity> {
 
 // ── Rule 10: Authentication Issues ──
 
+static PASSWORD_INPUT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)<input\b[^>]{0,300}?\btype\s*=\s*["']?password\b"#).unwrap()
+});
+static FORM_ACTION_HTTP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)^<form\b[^>]{0,1000}?\baction\s*=\s*["']?\s*http://"#).unwrap()
+});
+
+/// A password goes as its form is sent: in clear text when the page came over
+/// HTTP, or when an HTTPS page posts it to an `http://` URL. A page on this
+/// machine is a developer's own.
+fn check_password_form_transport(record: &TransactionRecord, findings: &mut Vec<ScannerFinding>) {
+    let Some(response) = &record.response else {
+        return;
+    };
+    if !(200..300).contains(&record.status.unwrap_or(0))
+        || is_binary_body(response)
+        || !is_html_page_response(response)
+        || host_is_loopback(&record.host)
+    {
+        return;
+    }
+    let body = &response.body_preview;
+    let Some(input) = PASSWORD_INPUT.find(body) else {
+        return;
+    };
+    if record.scheme == "http" {
+        findings.push(make_finding(
+            record,
+            Severity::Medium,
+            "auth",
+            "Password form served over HTTP",
+            "A page with a password field was served over HTTP. The password is sent in clear text and can be read by anyone on the network.",
+            truncate_evidence(input.as_str(), 120),
+        ));
+        return;
+    }
+    let before = body[..input.start()].to_ascii_lowercase();
+    let Some(form) = before.rfind("<form") else {
+        return;
+    };
+    if before[form..].contains("</form") {
+        return;
+    }
+    if let Some(action) = FORM_ACTION_HTTP.find(&body[form..input.start()]) {
+        findings.push(make_finding(
+            record,
+            Severity::Medium,
+            "auth",
+            "Password form submits over HTTP",
+            "An HTTPS page sends its password field to an http:// URL. The password leaves the browser in clear text.",
+            truncate_evidence(action.as_str(), 120),
+        ));
+    }
+}
+
+fn host_is_loopback(host: &str) -> bool {
+    let host = host.trim();
+    let name = match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(rest),
+        None => host.rsplit_once(':').map_or(host, |(name, port)| {
+            if port.bytes().all(|byte| byte.is_ascii_digit()) {
+                name
+            } else {
+                host
+            }
+        }),
+    };
+    name.eq_ignore_ascii_case("localhost")
+        || name.to_ascii_lowercase().ends_with(".localhost")
+        || name == "::1"
+        || name.starts_with("127.")
+}
+
 fn check_auth_issues(record: &TransactionRecord, findings: &mut Vec<ScannerFinding>) {
+    check_password_form_transport(record, findings);
     // Session token in URL
     if let Some(param) = session_token_parameter_in_url(record) {
         findings.push(make_finding(
@@ -4431,12 +4976,9 @@ fn check_auth_issues(record: &TransactionRecord, findings: &mut Vec<ScannerFindi
     }
 
     // Credentials in URL (userinfo component)
-    static CREDENTIALS_IN_URL: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"https?://[^@/\s]+:[^@/\s]+@").unwrap());
     {
-        let cred_re = &*CREDENTIALS_IN_URL;
         // Check request path / referer for credentials
-        if cred_re.is_match(&record.path) {
+        if url_text_carries_credentials(&record.path) {
             findings.push(make_finding(
                 record,
                 Severity::High,
@@ -4448,7 +4990,7 @@ fn check_auth_issues(record: &TransactionRecord, findings: &mut Vec<ScannerFindi
         }
         // Also check Referer header
         for h in &record.request.headers {
-            if h.name.eq_ignore_ascii_case("referer") && cred_re.is_match(&h.value) {
+            if h.name.eq_ignore_ascii_case("referer") && url_text_carries_credentials(&h.value) {
                 findings.push(make_finding(
                     record,
                     Severity::High,
@@ -4737,6 +5279,52 @@ fn password_key_names_a_package(body: &str, word_start: usize) -> bool {
             byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/' | b'@')
         })
         .any(|byte| *byte == b'/')
+}
+
+/// Whether some URL in `text`, as sent or decoded once or twice, names a user
+/// and a password before its host. A URL's authority ends at its first `/`,
+/// `?` or `#`, and one inside a query value ends with the value at `&`, so an
+/// encoded URL in a parameter (`goto=https://host%252Fpath:1&mail=a@b`) names
+/// none. Matching `user:pass@` across the whole text read those as one.
+fn url_text_carries_credentials(text: &str) -> bool {
+    if url_authority_carries_credentials(text) {
+        return true;
+    }
+    let once = percent_decode(text);
+    url_authority_carries_credentials(&once)
+        || url_authority_carries_credentials(&percent_decode(&once))
+}
+
+fn url_authority_carries_credentials(text: &str) -> bool {
+    text.match_indices("://").any(|(index, _)| {
+        let before = &text.as_bytes()[..index];
+        let ends_with = |scheme: &[u8]| {
+            before.len() >= scheme.len()
+                && before[before.len() - scheme.len()..].eq_ignore_ascii_case(scheme)
+        };
+        if !(ends_with(b"http") || ends_with(b"https")) {
+            return false;
+        }
+        let rest = &text[index + 3..];
+        let end = rest
+            .find(|ch: char| {
+                matches!(ch, '/' | '?' | '#' | '&' | '"' | '\'' | '<' | '>' | '\\')
+                    || ch.is_whitespace()
+            })
+            .unwrap_or(rest.len());
+        let Some((userinfo, host)) = rest[..end].rsplit_once('@') else {
+            return false;
+        };
+        let Some((user, password)) = userinfo.split_once(':') else {
+            return false;
+        };
+        !user.is_empty()
+            && !password.is_empty()
+            && !host.is_empty()
+            && host.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
+            })
+    })
 }
 
 fn session_token_parameter_in_url(record: &TransactionRecord) -> Option<String> {
@@ -8982,6 +9570,333 @@ mod tests {
         assert!(findings_for_rule(&record, "disclosure")
             .iter()
             .any(|finding| finding.title == "Sensitive file path detected in response"));
+    }
+
+    fn scan_titles(path: &str, content_type: &str, body: &str, status: u16) -> Vec<String> {
+        let mut record = make_record(vec![], vec![("content-type", content_type)], body, status);
+        record.path = path.into();
+        scan_transaction(&record, &ScannerConfig::default())
+            .into_iter()
+            .map(|finding| finding.title)
+            .collect()
+    }
+
+    #[test]
+    fn server_side_source_code_sent_as_text_is_reported() {
+        for (content_type, body, title) in [
+            (
+                "text/html",
+                "<p>Hi</p><!-- <?php echo $config['db_password']; ?> -->",
+                "PHP source code in response",
+            ),
+            (
+                "text/plain",
+                "<?php\n$db = new PDO('mysql:host=localhost', 'app', 'secret');\n",
+                "PHP source code in response",
+            ),
+            (
+                "text/html",
+                r#"<%@ Page Language="C#" AutoEventWireup="true" CodeBehind="Login.aspx.cs" %>"#,
+                "ASP source code in response",
+            ),
+            (
+                "text/html",
+                r#"<% Dim user : user = Request.Form("user") : Response.Write(user) %>"#,
+                "ASP source code in response",
+            ),
+            (
+                "text/html",
+                r#"<%@ page contentType="text/html; charset=UTF-8" %><html></html>"#,
+                "JSP source code in response",
+            ),
+            (
+                "text/html",
+                r#"<cfquery name="users" datasource="main">SELECT * FROM users</cfquery>"#,
+                "ColdFusion source code in response",
+            ),
+            (
+                "text/html",
+                r#"<!--#include virtual="/includes/header.html" --><p>Hi</p>"#,
+                "Server-side include directive in response",
+            ),
+        ] {
+            let titles = scan_titles("/index", content_type, body, 200);
+            assert!(
+                titles.iter().any(|found| found == title),
+                "{body}: {titles:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_shown_templated_or_quoted_as_data_is_not_source_disclosure() {
+        for (content_type, body) in [
+            ("text/html", "<pre>&lt;?php echo 'hello'; ?&gt;</pre>"),
+            (
+                "text/html",
+                r#"<?xml version="1.0" encoding="UTF-8"?><html></html>"#,
+            ),
+            (
+                "text/html",
+                r#"<script type="text/template"><% _.each(items, function(item) { %><li><%= item.name %></li><% }); %></script>"#,
+            ),
+            (
+                "text/html",
+                "<textarea name=\"theme\"><?php get_header(); ?></textarea>",
+            ),
+            ("application/json", r#"{"snippet":"<?php echo 1; ?>"}"#),
+            ("application/javascript", "var tpl = '<?php echo 1; ?>';"),
+            (
+                "text/html",
+                "<!--#region Header --><header></header><!--#endregion -->",
+            ),
+        ] {
+            let titles = scan_titles("/index", content_type, body, 200);
+            assert!(
+                !titles
+                    .iter()
+                    .any(|title| title.contains("source code") || title.starts_with("Server-side")),
+                "{body}: {titles:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_left_in_an_html_comment_is_reported() {
+        let body = format!(
+            "<p>Hi</p><!-- {} $id = $_GET['id']; $rows = mysql_query(\"SELECT id, name FROM users WHERE id=$id\"); -->",
+            "old listing code, kept for reference. ".repeat(20)
+        );
+        let titles = scan_titles("/users", "text/html", &body, 200);
+        for title in [
+            "Server-side code in HTML comment",
+            "SQL query in HTML comment",
+        ] {
+            assert!(titles.iter().any(|found| found == title), "{titles:?}");
+        }
+        for comment in [
+            "<!-- var $menu = $('.menu'); $menu.show(); -->",
+            "<!-- Please select an option from the list below -->",
+            "<!-- include the footer partial here -->",
+        ] {
+            let titles = scan_titles("/users", "text/html", comment, 200);
+            assert!(
+                !titles
+                    .iter()
+                    .any(|title| title.ends_with("in HTML comment")),
+                "{comment}: {titles:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn successful_answers_report_php_errors_and_data_stack_traces() {
+        let php = "<br />\n<b>Warning</b>:  Undefined variable $user in <b>/var/www/html/profile.php</b> on line <b>12</b><br />\n<html></html>";
+        let record = make_record(vec![], vec![("content-type", "text/html")], php, 200);
+        let found = findings_for_rule(&record, "error");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].title, "PHP error message in response");
+        assert_eq!(found[0].severity, Severity::Low);
+        let java = r#"{"error":"lookup failed","trace":"java.lang.NullPointerException\n\tat com.example.app.UserService.find(UserService.java:42)\n\tat com.example.app.UserController.get(UserController.java:17)"}"#;
+        let record = make_record(
+            vec![],
+            vec![("content-type", "application/json")],
+            java,
+            200,
+        );
+        let found = findings_for_rule(&record, "error");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].title, "Java stack trace in response");
+        let python = "Traceback (most recent call last):\n  File \"/srv/app/views.py\", line 31, in index\n    user = User.objects.get(id=uid)\n";
+        let record = make_record(vec![], vec![("content-type", "text/plain")], python, 200);
+        assert_eq!(
+            findings_for_rule(&record, "error")[0].title,
+            "Python traceback in response"
+        );
+        // A page about programming quotes them in its text.
+        for page in [
+            "<pre>at com.example.app.UserService.find(UserService.java:42)\nat com.example.app.UserController.get(UserController.java:17)</pre>",
+            "<p>PHP Warning: Undefined variable $x in /var/www/a.php on line 3</p>",
+            "<pre>Traceback (most recent call last):\n  File \"app.py\", line 3, in main</pre>",
+        ] {
+            let record = make_record(vec![], vec![("content-type", "text/html")], page, 200);
+            assert!(findings_for_rule(&record, "error").is_empty(), "{page}");
+        }
+    }
+
+    #[test]
+    fn database_dumps_and_bucket_listings_are_reported() {
+        let dump = "-- MySQL dump 10.13  Distrib 5.7.33, for Linux (x86_64)\n--\n-- Host: localhost    Database: app\n";
+        let titles = scan_titles("/backup.sql", "application/octet-stream", dump, 200);
+        assert!(
+            titles.iter().any(|title| title == "Database dump exposed"),
+            "{titles:?}"
+        );
+        let quoted = format!("<html><body><pre>{dump}</pre></body></html>");
+        let titles = scan_titles("/docs/backups", "text/html", &quoted, 200);
+        assert!(
+            !titles.iter().any(|title| title == "Database dump exposed"),
+            "{titles:?}"
+        );
+        for listing in [
+            r#"<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>assets</Name><Contents><Key>a.txt</Key></Contents></ListBucketResult>"#,
+            r#"<?xml version="1.0" encoding="utf-8"?><EnumerationResults ServiceEndpoint="https://example.blob.core.windows.net/" ContainerName="files"><Blobs></Blobs></EnumerationResults>"#,
+            r#"{"kind": "storage#objects", "items": [{"kind": "storage#object", "name": "a.txt"}]}"#,
+        ] {
+            let titles = scan_titles("/", "application/xml", listing, 200);
+            assert!(
+                titles
+                    .iter()
+                    .any(|title| title == "Storage bucket listing exposed"),
+                "{listing}: {titles:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn password_forms_sent_in_clear_text_are_reported() {
+        let form = r#"<html><body><form method="post" action="/login"><input name="user"><input type="password" name="pw"></form></body></html>"#;
+        let titles = |scheme: &str, host: &str, body: &str| -> Vec<String> {
+            let mut record = make_record(vec![], vec![("content-type", "text/html")], body, 200);
+            record.scheme = scheme.into();
+            record.host = host.into();
+            findings_for_rule(&record, "auth")
+                .into_iter()
+                .map(|finding| finding.title)
+                .collect()
+        };
+        assert_eq!(
+            titles("http", "example.com", form),
+            ["Password form served over HTTP"]
+        );
+        assert!(titles("https", "example.com", form).is_empty());
+        assert!(titles("http", "127.0.0.1:8080", form).is_empty());
+        assert!(titles("http", "localhost", form).is_empty());
+        let posts_out = form.replace(r#"action="/login""#, r#"action="http://example.com/login""#);
+        assert_eq!(
+            titles("https", "example.com", &posts_out),
+            ["Password form submits over HTTP"]
+        );
+        // Another form's action is not the password's.
+        let other =
+            format!(r#"<form action="http://example.com/search"><input name="q"></form>{form}"#);
+        assert!(titles("https", "example.com", &other).is_empty());
+    }
+
+    #[test]
+    fn password_hash_files_logs_and_connection_strings_are_reported() {
+        for (path, body, title) in [
+            ("/.htpasswd", "admin:$apr1$Jx8.4Hu1$3cGxOxrXcGcBWQ0aT1rN9/\n", "Password hash file exposed"),
+            ("/backup/shadow", "root:$6$rounds=5000$abcdefgh$0123456789abcdefghij:19000:0:99999:7:::\n", "Password hash file exposed"),
+            (
+                "/logs/access.log",
+                "203.0.113.5 - - [26/Nov/2026:10:00:01 +0900] \"GET / HTTP/1.1\" 200 512\n203.0.113.5 - - [26/Nov/2026:10:00:02 +0900] \"GET /login HTTP/1.1\" 200 811\n203.0.113.9 - - [26/Nov/2026:10:00:03 +0900] \"POST /login HTTP/1.1\" 302 0\n",
+                "Log file exposed",
+            ),
+            (
+                "/storage/logs/laravel.log",
+                "[2026-11-26 10:00:01] production.ERROR: SQLSTATE[HY000] [2002] Connection refused\n[2026-11-26 10:00:02] production.INFO: retry\n[2026-11-26 10:00:03] production.ERROR: giving up\n",
+                "Log file exposed",
+            ),
+            (
+                "/web.config",
+                r#"<connectionStrings><add name="Main" connectionString="Server=db01;Database=app;User ID=sa;Password=Pr0d-Passw0rd!" /></connectionStrings>"#,
+                "Connection string with password detected in response",
+            ),
+        ] {
+            let titles = scan_titles(path, "text/plain", body, 200);
+            assert!(titles.iter().any(|found| found == title), "{path}: {titles:?}");
+        }
+        // The string's password is one finding, not also the generic one.
+        let titles = scan_titles(
+            "/web.config",
+            "text/plain",
+            r#"connectionString="Server=db01;Database=app;User ID=sa;Password=Pr0d-Passw0rd!""#,
+            200,
+        );
+        assert!(
+            !titles
+                .iter()
+                .any(|title| title == "Password detected in response"),
+            "{titles:?}"
+        );
+        for (path, content_type, body) in [
+            ("/docs/htpasswd", "text/html", "<pre>admin:$apr1$Jx8.4Hu1$3cGxOxrXcGcBWQ0aT1rN9/\n</pre>"),
+            ("/notes.txt", "text/plain", "203.0.113.5 - - [26/Nov/2026:10:00:01 +0900] \"GET / HTTP/1.1\" 200 512\nsee above\n"),
+            ("/web.config", "text/plain", r#"connectionString="Server=db01;Database=app;User ID=sa;Password=********""#),
+            ("/web.config", "text/plain", r#"connectionString="Server=db01;Database=app;User ID=sa;Password=your_password_here""#),
+        ] {
+            let titles = scan_titles(path, content_type, body, 200);
+            assert!(
+                !titles.iter().any(|title| title == "Password hash file exposed"
+                    || title == "Log file exposed"
+                    || title.starts_with("Connection string with password")),
+                "{path}: {titles:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_domain_policies_that_admit_every_site_are_reported() {
+        let flash = r#"<?xml version="1.0"?><cross-domain-policy><allow-access-from domain="*" /></cross-domain-policy>"#;
+        let titles = scan_titles("/crossdomain.xml", "text/xml", flash, 200);
+        assert!(
+            titles
+                .iter()
+                .any(|title| title == "Permissive Flash cross-domain policy"),
+            "{titles:?}"
+        );
+        let silverlight = r#"<access-policy><cross-domain-access><policy><allow-from><domain uri="*"/></allow-from></policy></cross-domain-access></access-policy>"#;
+        let titles = scan_titles("/clientaccesspolicy.xml", "text/xml", silverlight, 200);
+        assert!(
+            titles
+                .iter()
+                .any(|title| title == "Permissive Silverlight cross-domain policy"),
+            "{titles:?}"
+        );
+        let narrow = r#"<cross-domain-policy><allow-access-from domain="*.example.com" /></cross-domain-policy>"#;
+        let titles = scan_titles("/crossdomain.xml", "text/xml", narrow, 200);
+        assert!(
+            !titles.iter().any(|title| title.starts_with("Permissive")),
+            "{titles:?}"
+        );
+    }
+
+    #[test]
+    fn credentials_in_a_url_need_a_user_and_a_password_before_its_host() {
+        let titles = |path: &str, referer: Option<&str>| -> Vec<String> {
+            let headers = referer
+                .map(|value| vec![("referer", value)])
+                .unwrap_or_default();
+            let mut record = make_record(headers, vec![], "", 200);
+            record.path = path.into();
+            findings_for_rule(&record, "auth")
+                .into_iter()
+                .map(|finding| finding.title)
+                .collect()
+        };
+        // An encoded URL in a parameter has no authority of its own to carry them.
+        for path in [
+            "/bitrix/redirect.php?goto=https://news.example.com%252Fnews%252Fview%253Ftime%253D12:30&mail=a@example.com",
+            "/r?url=https://example.com/a:b@c",
+            "/r?next=https://example.com?x=1:2&y=z@w",
+        ] {
+            assert!(!titles(path, None).iter().any(|title| title == "Credentials in URL"), "{path}");
+        }
+        for path in [
+            "/proxy?u=https://admin:s3cret@internal.example.com/",
+            "/proxy?u=https%3A%2F%2Fadmin%3As3cret%40internal.example.com%2F",
+        ] {
+            assert!(
+                titles(path, None)
+                    .iter()
+                    .any(|title| title == "Credentials in URL"),
+                "{path}"
+            );
+        }
+        assert!(titles("/", Some("https://user:pw@example.com/login"))
+            .iter()
+            .any(|title| title == "Credentials in Referer header"));
     }
 
     // Composer's `conflict` map names packages and the versions it rules out:
