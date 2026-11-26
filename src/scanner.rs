@@ -510,7 +510,10 @@ struct FindingDedupKey {
 
 fn finding_dedup_key(finding: &ScannerFinding) -> FindingDedupKey {
     FindingDedupKey {
-        host: finding.host.to_ascii_lowercase(),
+        // A finding saved before it kept its scheme has none, and keeps its
+        // host as it is until a rescan.
+        host: crate::store::host_without_default_port(&finding.host, &finding.scheme)
+            .to_ascii_lowercase(),
         rule_id: finding.rule_id.clone(),
         category: finding.category.clone(),
         title: finding.title.clone(),
@@ -553,7 +556,10 @@ fn finding_scope(finding: &ScannerFinding) -> String {
         // A SQL error or a stack trace on `/search` and on `/login` are two leads.
         ("error", _) => endpoint(),
         ("auth", "Possible open redirect") => endpoint(),
-        ("misconfig", title) if title.contains("Cache-Control") => endpoint(),
+        // A public policy is an endpoint's own mistake. A missing one is the
+        // host's, as a missing security header is: an API has hundreds of
+        // endpoints and one cache policy.
+        ("misconfig", title) if title.starts_with("Cache-Control: public") => endpoint(),
         ("info", title) if ENDPOINT_INFO_TITLES.contains(&title) => endpoint(),
         // A page the map names as exposed carries no evidence; one named from
         // a header or a cookie is on every answer of the host.
@@ -711,11 +717,45 @@ fn is_base64_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='
 }
 
+/// Whether the answer is one Sniper wrote itself: a refusal, or its answer for
+/// an upstream that failed. Such an answer is a line of plain text with no
+/// header but its type and length, and a note of the record says what its body
+/// says. It names the request's URL and the address Sniper tried; nothing in
+/// it is the target's. One record in twenty of thirteen sessions of real use
+/// was such an answer, read as a server with an internal address, a key and no
+/// cache policy.
+fn response_is_snipers_own(record: &TransactionRecord) -> bool {
+    let Some(response) = &record.response else {
+        return false;
+    };
+    !response.headers.is_empty()
+        && response.headers.iter().all(|header| {
+            (header.name.eq_ignore_ascii_case("content-type")
+                && header.value == "text/plain; charset=utf-8")
+                || header.name.eq_ignore_ascii_case("content-length")
+        })
+        && record
+            .notes
+            .iter()
+            .any(|note| note.contains(response.body_preview.trim()))
+}
+
 /// Run all passive scan rules against a transaction record, respecting config.
 pub fn scan_transaction(record: &TransactionRecord, config: &ScannerConfig) -> Vec<ScannerFinding> {
     if !config.enabled {
         return Vec::new();
     }
+    // What Sniper answered itself is read for its request alone.
+    let answered_here;
+    let record = if response_is_snipers_own(record) {
+        answered_here = TransactionRecord {
+            response: None,
+            ..record.clone()
+        };
+        &answered_here
+    } else {
+        record
+    };
 
     let mut findings = Vec::new();
 
@@ -1819,7 +1859,7 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
         ),
         (
             r#"(?i)(?:\b|[_-])(?:password|passwd|pwd)\b\s*["']?\s*[:=]\s*(?:"([^"]{4,})"|'([^']{4,})'|([^\s"'<>{}]{4,}))"#,
-            "Password in response",
+            "Password",
             Severity::High,
         ),
         (
@@ -1960,7 +2000,7 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
 
     for &(pattern, label, ref severity) in PATTERNS {
         if let Ok(re) = Regex::new(pattern) {
-            if label == "Password in response" {
+            if label == "Password" {
                 if let Some(span) = password_response_match(body, script, &re) {
                     let mut finding = make_finding(
                         record,
@@ -2279,6 +2319,13 @@ fn password_candidate_looks_like_secret(captures: &regex::Captures<'_>, script: 
         return false;
     };
     let quoted = captures.get(1).or(captures.get(2)).is_some();
+    // In a query string or a form the value ends at the next field: `pwd=1`
+    // is a flag, whatever follows the `&`.
+    let value = if quoted {
+        value
+    } else {
+        value.split('&').next().unwrap_or(value)
+    };
     password_value_looks_like_secret(value, quoted, script)
 }
 
@@ -2295,6 +2342,11 @@ fn password_value_looks_like_secret(value: &str, quoted: bool, script: bool) -> 
     {
         return false;
     }
+    // In a script a quote after the colon can close a string, and what runs
+    // to the next quote is code: `…("password:"),a?t.format("…`.
+    if script && quoted && value.starts_with([')', ',', ';', ']', '}']) {
+        return false;
+    }
     // A label shown to users: words with spaces, or another script's letters
     // ("비밀번호"); a template variable (`%pass%`, `{{pass}}`, `${pass}`), a
     // selector (`[name=pw]`), a regex, a path or a URL; and a value naming the
@@ -2303,6 +2355,7 @@ fn password_value_looks_like_secret(value: &str, quoted: bool, script: bool) -> 
     let wrapped = |open: &str, close: &str| value.starts_with(open) && value.ends_with(close);
     if value.contains(char::is_whitespace)
         || value.chars().any(|ch| ch.is_alphabetic() && !ch.is_ascii())
+        || spells_letters_of_another_script(value)
         || wrapped("%", "%")
         || wrapped("{{", "}}")
         || wrapped("${", "}")
@@ -2382,6 +2435,22 @@ fn password_value_looks_like_secret(value: &str, quoted: bool, script: bool) -> 
         collapsed.as_str(),
         "password required" | "confirm password" | "password confirmation"
     )
+}
+
+/// Whether a value spells letters of another script as JSON does: a backslash,
+/// `u` and four hex digits. A translation file names its fields, and the word
+/// for a password written in escapes is ASCII, as a password is.
+fn spells_letters_of_another_script(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (0..bytes.len().saturating_sub(5)).any(|at| {
+        bytes[at] == b'\\'
+            && bytes[at + 1] == b'u'
+            && value
+                .get(at + 2..at + 6)
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .and_then(char::from_u32)
+                .is_some_and(|letter| !letter.is_ascii() && letter.is_alphabetic())
+    })
 }
 
 fn is_generic_secret_label(label: &str) -> bool {
@@ -2491,6 +2560,8 @@ fn secret_candidate_is_placeholder(value: &str) -> bool {
         "secret_token",
         "password",
         "passwd",
+        "pass",
+        "pwd",
         "null",
         "none",
         "undefined",
@@ -3418,7 +3489,8 @@ fn check_security_misconfig(record: &TransactionRecord, findings: &mut Vec<Scann
         && !matches!(
             crate::service_map::request_kind(record),
             "script" | "static"
-        );
+        )
+        && served_a_page_or_data(record, response);
     if has_auth && !has_header("cache-control") {
         findings.push(make_finding(
             record,
@@ -3461,6 +3533,35 @@ fn check_security_misconfig(record: &TransactionRecord, findings: &mut Vec<Scann
             ));
         }
     }
+}
+
+/// Whether the answer is a page or data that was served: what a cache could
+/// hand to the next user. A redirect, an error and an answer with nothing in
+/// it carry nothing of the user's. A script, a style, an image or another
+/// file is the same for everyone, whatever asked for it: a service worker
+/// fetches a script with `Sec-Fetch-Dest: empty`, as an API is called.
+fn served_a_page_or_data(record: &TransactionRecord, response: &MessageRecord) -> bool {
+    if !matches!(record.status, Some(200..=299)) || response.body_size == 0 {
+        return false;
+    }
+    let mime = response_mime_essence(response);
+    // An answer that names no type is judged by what it holds.
+    if mime.is_empty() {
+        return is_html_page_response(response);
+    }
+    matches!(
+        mime.as_str(),
+        "text/html"
+            | "application/xhtml+xml"
+            | "text/plain"
+            | "text/csv"
+            | "application/pdf"
+            | "application/x-www-form-urlencoded"
+    ) || mime.contains("json")
+        || (mime.ends_with("xml") && mime != "image/svg+xml")
+        || ["protobuf", "grpc", "graphql"]
+            .iter()
+            .any(|kind| mime.contains(kind))
 }
 
 #[derive(Clone, Copy)]
@@ -5495,7 +5596,7 @@ mod tests {
         assert!(
             !findings
                 .iter()
-                .any(|finding| finding.title == "Password in response detected in response"),
+                .any(|finding| finding.title == "Password detected in response"),
             "validation copy should not be reported as a password leak"
         );
     }
@@ -5513,7 +5614,7 @@ mod tests {
         assert!(
             !findings
                 .iter()
-                .any(|finding| finding.title == "Password in response detected in response"),
+                .any(|finding| finding.title == "Password detected in response"),
             "password policy text should not be reported as a leaked password value"
         );
     }
@@ -5531,7 +5632,7 @@ mod tests {
         assert!(
             !findings
                 .iter()
-                .any(|finding| finding.title == "Password in response detected in response"),
+                .any(|finding| finding.title == "Password detected in response"),
             "password failure text should not be reported as a leaked password value"
         );
     }
@@ -5549,7 +5650,7 @@ mod tests {
         assert!(
             findings
                 .iter()
-                .any(|finding| finding.title == "Password in response detected in response"),
+                .any(|finding| finding.title == "Password detected in response"),
             "likely hardcoded passwords should still be reported"
         );
     }
@@ -5562,7 +5663,7 @@ mod tests {
         assert!(
             !findings
                 .iter()
-                .any(|finding| finding.title == "Password in response detected in response"),
+                .any(|finding| finding.title == "Password detected in response"),
             "masked password placeholders should not be reported as leaked passwords"
         );
     }
@@ -6920,12 +7021,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_context_title_change_keeps_endpoint_scope_and_legacy_until_rescan() {
-        for (response_headers, legacy_title) in [
-            (vec![], "Missing Cache-Control on authenticated response"),
+    async fn cache_context_title_change_keeps_its_scope_and_legacy_until_rescan() {
+        // A missing policy is the host's; a public one is its endpoint's.
+        for (response_headers, legacy_title, scope) in [
+            (
+                vec![],
+                "Missing Cache-Control on authenticated response",
+                "",
+            ),
             (
                 vec![("Cache-Control", "public, max-age=60")],
                 "Cache-Control: public on authenticated response",
+                "/test",
             ),
         ] {
             let record = make_record(
@@ -6938,7 +7045,7 @@ mod tests {
             let mut legacy = current.clone();
             legacy.id = Uuid::new_v4();
             legacy.title = legacy_title.into();
-            assert_eq!(finding_scope(&current), "/test");
+            assert_eq!(finding_scope(&current), scope);
             assert_eq!(finding_scope(&legacy), finding_scope(&current));
             assert_ne!(finding_dedup_key(&legacy), finding_dedup_key(&current));
             let mut same_endpoint = current.clone();
@@ -6949,9 +7056,9 @@ mod tests {
             );
             let mut different_endpoint = current.clone();
             different_endpoint.path = "/another".into();
-            assert_ne!(
-                finding_dedup_key(&current),
-                finding_dedup_key(&different_endpoint)
+            assert_eq!(
+                finding_dedup_key(&current) == finding_dedup_key(&different_endpoint),
+                scope.is_empty()
             );
 
             // A title change does not migrate saved findings: live capture can
@@ -6963,6 +7070,338 @@ mod tests {
             let restored = ScannerStore::from_findings(10, store.snapshot(None).await);
             assert_eq!(restored.count().await, 2);
         }
+    }
+
+    // What thirteen sessions of real use showed: seven in ten of the findings
+    // listed were "Missing Cache-Control", raised on redirects, errors and
+    // answers with nothing in them, and on Sniper's own 502s.
+    #[test]
+    fn the_cache_rules_judge_a_page_or_data_that_was_served() {
+        let titles =
+            |response_headers: Vec<(&str, &str)>, body: &str, status: u16| -> Vec<String> {
+                // As a browser's script asks: `Sec-Fetch-Dest: empty`, signed in.
+                let record = make_record(
+                    vec![
+                        ("Authorization", "Bearer synthetic-credential"),
+                        ("Sec-Fetch-Dest", "empty"),
+                    ],
+                    response_headers,
+                    body,
+                    status,
+                );
+                findings_for_rule(&record, "misconfig")
+                    .into_iter()
+                    .map(|finding| finding.title)
+                    .collect()
+            };
+        let missing = "Missing Cache-Control with session or authorization indicators";
+        let public = "Cache-Control: public with session or authorization indicators";
+        let cached = ("Cache-Control", "public, max-age=31536000, immutable");
+
+        // A page or data that was served is judged, as before.
+        for content_type in [
+            "application/json",
+            "application/problem+json",
+            "text/html; charset=utf-8",
+            "application/xml",
+            "text/plain",
+            "application/x-protobuf",
+        ] {
+            let served = r#"{"private":true}"#;
+            assert_eq!(
+                titles(vec![("Content-Type", content_type)], served, 200),
+                [missing],
+                "{content_type}"
+            );
+            assert_eq!(
+                titles(vec![("Content-Type", content_type), cached], served, 201),
+                [public],
+                "{content_type}"
+            );
+        }
+        // A redirect, an error and an answer with nothing in it give a cache
+        // nothing of the user's.
+        for (status, body) in [
+            (101, ""),
+            (204, ""),
+            (200, ""),
+            (302, ""),
+            (304, ""),
+            (404, r#"{"error":"not found"}"#),
+            (500, r#"{"error":"synthetic"}"#),
+        ] {
+            let json = ("Content-Type", "application/json");
+            assert!(titles(vec![json], body, status).is_empty(), "{status}");
+            assert!(
+                titles(vec![json, cached], body, status).is_empty(),
+                "{status} public"
+            );
+        }
+        // A script, a style or another file is the same for everyone, whatever
+        // asked for it: a service worker fetches a script as an API is called.
+        for content_type in [
+            "application/javascript",
+            "text/javascript; charset=utf-8",
+            "text/css",
+            "application/wasm",
+            "image/svg+xml",
+            "font/woff2",
+            "application/octet-stream",
+            "application/vnd.example.asset",
+        ] {
+            let file = "synthetic file content";
+            assert!(
+                titles(vec![("Content-Type", content_type), cached], file, 200).is_empty(),
+                "{content_type} public"
+            );
+            assert!(
+                titles(vec![("Content-Type", content_type)], file, 200).is_empty(),
+                "{content_type}"
+            );
+        }
+    }
+
+    // An API has hundreds of endpoints and one cache policy: the finding is the
+    // host's, as a missing security header is.
+    #[tokio::test]
+    async fn a_missing_cache_control_is_listed_once_for_a_host() {
+        let at = |path: &str, cached: bool| {
+            let mut headers = vec![("Content-Type", "application/json")];
+            if cached {
+                headers.push(("Cache-Control", "public, max-age=60"));
+            }
+            let mut record = make_record(
+                vec![("Authorization", "Bearer synthetic-credential")],
+                headers,
+                r#"{"private":true}"#,
+                200,
+            );
+            record.path = path.to_string();
+            findings_for_rule(&record, "misconfig").remove(0)
+        };
+        let store = ScannerStore::new(10);
+        assert!(store.push(at("/v1/orders", false)).await);
+        assert!(!store.push(at("/v1/profile", false)).await);
+        // A public policy is an endpoint's own mistake, and each one is a lead.
+        assert!(store.push(at("/v1/orders", true)).await);
+        assert!(store.push(at("/v1/profile", true)).await);
+        assert_eq!(store.count().await, 3);
+    }
+
+    // HTTPS captured through CONNECT keeps the tunnel's "host:443", and Replay
+    // and scans store the bare host. One issue was listed for each, and the
+    // Host column shows both the same.
+    #[tokio::test]
+    async fn a_host_with_its_default_port_is_the_same_host() {
+        let on = |scheme: &str, host: &str| {
+            let mut record = make_record(vec![], vec![], "", 200);
+            record.scheme = scheme.into();
+            record.host = host.into();
+            make_finding(&record, Severity::Low, "test", "title", "", "")
+        };
+        let store = ScannerStore::new(10);
+        assert!(store.push(on("https", "api.example.com:443")).await);
+        assert!(!store.push(on("https", "api.example.com")).await);
+        assert!(!store.push(on("https", "API.example.com:443")).await);
+        // Another port is another server, and 443 is not HTTP's own port.
+        assert!(store.push(on("https", "api.example.com:8443")).await);
+        assert!(store.push(on("http", "api.example.com:443")).await);
+        assert_eq!(store.count().await, 3);
+    }
+
+    // Sniper answers for an upstream that failed with a line of text that
+    // names the request's URL and the address it tried. The scanner read that
+    // line as the target's: an internal address, a key in the URL, no
+    // Cache-Control.
+    #[test]
+    fn an_answer_sniper_wrote_itself_is_not_judged() {
+        let key = concat!("api", "_key=Zx81QmPl04TnVb62KsWd93HrYc75JuEa");
+        let message = format!(
+            "Upstream request failed: error sending request for url (https://api.example.com/v1/items?{key}): tcp connect error to 10.20.30.40:8443"
+        );
+        let own = |notes: Vec<String>| {
+            let mut record = make_record(
+                vec![("Authorization", "Bearer synthetic-credential")],
+                vec![
+                    ("content-type", "text/plain; charset=utf-8"),
+                    ("content-length", "170"),
+                ],
+                &message,
+                502,
+            );
+            record.notes = notes;
+            scan_transaction(&record, &ScannerConfig::default())
+                .into_iter()
+                .map(|finding| finding.title)
+                .collect::<Vec<_>>()
+        };
+        // The record's note says what the body says: Sniper wrote both.
+        assert_eq!(own(vec![message.clone()]), Vec::<String>::new());
+        assert_eq!(
+            own(vec![format!(
+                "Proxy rejected request: {message} Repeats of it are not listed."
+            )]),
+            Vec::<String>::new()
+        );
+        // The same line from the target is the target's, and is read.
+        let theirs = own(Vec::new());
+        assert!(
+            theirs
+                .iter()
+                .any(|title| title.starts_with("Internal IP address")),
+            "{theirs:?}"
+        );
+        assert!(own(vec!["Rule (response): synthetic".to_string()])
+            .iter()
+            .any(|title| title.starts_with("Internal IP address")));
+    }
+
+    // What the request itself carries is still read when Sniper answered.
+    #[test]
+    fn a_request_sniper_answered_itself_is_still_read() {
+        let token = jwt_token(
+            serde_json::json!({ "alg": "none", "typ": "JWT" }),
+            serde_json::json!({ "sub": "1234" }),
+        );
+        let message = "Upstream request failed: connection refused";
+        let mut record = make_record(
+            vec![("Authorization", &format!("Bearer {token}"))],
+            vec![("content-type", "text/plain; charset=utf-8")],
+            message,
+            502,
+        );
+        record.notes = vec![message.to_string()];
+        let titles: Vec<_> = scan_transaction(&record, &ScannerConfig::default())
+            .into_iter()
+            .map(|finding| finding.title)
+            .collect();
+        assert!(
+            titles.iter().any(|title| title.starts_with("JWT")),
+            "{titles:?}"
+        );
+    }
+
+    // A translation file names its fields: `"password":"비밀번호"`. Written as
+    // JSON escapes the word is ASCII, and read as a password of 24 characters.
+    #[test]
+    fn a_label_in_another_script_written_as_escapes_is_not_a_password() {
+        let titles = |body: &str, content_type: &str| -> Vec<String> {
+            let record = make_record(vec![], vec![("content-type", content_type)], body, 200);
+            findings_for_rule(&record, "disclosure")
+                .into_iter()
+                .map(|finding| finding.title)
+                .collect()
+        };
+        // A word as JSON spells it outside ASCII: a backslash, `u` and four
+        // hex digits for each UTF-16 unit.
+        let escaped = |word: &str| -> String {
+            word.encode_utf16()
+                .map(|unit| format!("{}u{unit:04x}", '\\'))
+                .collect()
+        };
+        for word in ["비밀번호", "パスワード", "비밀번호확인", "Passwörter"] {
+            for key in ["password", "new_password"] {
+                let body = format!(r#"{{"{key}":"{}"}}"#, escaped(word));
+                assert!(body.is_ascii(), "{body}");
+                assert_eq!(
+                    titles(&body, "application/json"),
+                    Vec::<String>::new(),
+                    "{body}"
+                );
+                assert_eq!(
+                    titles(&body, "application/javascript"),
+                    Vec::<String>::new(),
+                    "{body}"
+                );
+            }
+        }
+        // Escapes that spell ASCII, or none, are a value as before.
+        let secret = format!(r#"{{"password":"Tr0ub4dor{}Horse9"}}"#, escaped("&"));
+        assert_eq!(
+            titles(&secret, "application/json"),
+            ["Password detected in response"]
+        );
+    }
+
+    // `pwd=1&t_ms=…` is a flag in a query string. The value ran on to the end
+    // of the query and was read as a password.
+    #[test]
+    fn a_password_field_of_a_query_ends_at_the_next_field() {
+        let titles = |body: &str| -> Vec<String> {
+            let record = make_record(
+                vec![],
+                vec![("content-type", "application/json")],
+                body,
+                200,
+            );
+            findings_for_rule(&record, "disclosure")
+                .into_iter()
+                .map(|finding| finding.title)
+                .collect()
+        };
+        assert_eq!(
+            titles(r#"{"next":"https://www.example.com/login?pwd=1&t_ms=1732600000000&mode=2"}"#),
+            Vec::<String>::new()
+        );
+        // A field that holds one is still read, and its evidence is the field.
+        let body = concat!(
+            r#"{"next":"https://www.example.com/login?password=Tr0ub"#,
+            r#"4dor9Horse&mode=2"}"#
+        );
+        assert_eq!(titles(body), ["Password detected in response"]);
+    }
+
+    // In a minified script a quote after `password:` can close a string, and
+    // what runs to the next quote is code.
+    #[test]
+    fn code_between_two_strings_of_a_script_is_not_a_password() {
+        let titles = |body: &str| -> Vec<String> {
+            let record = make_record(
+                vec![],
+                vec![("content-type", "application/javascript")],
+                body,
+                200,
+            );
+            findings_for_rule(&record, "disclosure")
+                .into_iter()
+                .map(|finding| finding.title)
+                .collect()
+        };
+        for body in [
+            r#"r.push(n("label.password:"),a?t.formatMessage("x"):null)"#,
+            r#"x=["user:","password:"],y.concat("z")"#,
+            r#"m={password:"};function check(){return q("ok")}"#,
+        ] {
+            assert_eq!(titles(body), Vec::<String>::new(), "{body}");
+        }
+        let real = concat!(r#"const cfg={password:"Tr0ub"#, r#"4dor9Horse"}"#);
+        assert_eq!(titles(real), ["Password detected in response"]);
+    }
+
+    // `postgresql://user:pass@localhost:5432/db` is what a manual prints.
+    #[test]
+    fn a_connection_string_from_a_manual_is_not_a_secret() {
+        let titles = |body: &str| -> Vec<String> {
+            let record = make_record(vec![], vec![("content-type", "text/javascript")], body, 200);
+            findings_for_rule(&record, "disclosure")
+                .into_iter()
+                .map(|finding| finding.title)
+                .collect()
+        };
+        for body in [
+            r#"const example = "postgresql://user:pass@localhost:5432/db";"#,
+            r#"const example = "mysql://root:pwd@localhost:3306/app";"#,
+        ] {
+            assert_eq!(titles(body), Vec::<String>::new(), "{body}");
+        }
+        let real = concat!(
+            r#"const url = "postgresql://app:"#,
+            r#"Vq7mK2xP9wLs@db.example.com:5432/app";"#
+        );
+        assert_eq!(
+            titles(real),
+            ["PostgreSQL connection string detected in response"]
+        );
     }
 
     #[test]
@@ -8583,7 +9022,7 @@ mod tests {
 
     #[test]
     fn password_rule_ignores_code_labels_templates_and_field_names() {
-        let password = "Password in response detected in response".to_string();
+        let password = "Password detected in response".to_string();
         let json = |body: &str| titles_for("/api/user", "application/json", body);
         let script = |body: &str| titles_for("/static/app.js", "application/javascript", body);
 
@@ -8642,7 +9081,6 @@ mod tests {
             (r#"password:'Ab12"Cd34'"#, true),
             (r#"password:"Ab12\\Cd34""#, true),
             (r#"password:"\u0041b12Cd34""#, true),
-            (r#"password:"\u5BC6\u78BCAb12Cd34""#, true),
             (r#"password:"Enter\npasscode""#, true),
             (r#"password:"Ab12🔐Cd34""#, true),
         ] {
@@ -8657,6 +9095,11 @@ mod tests {
                 "{body}"
             );
         }
+        // Letters of another script spelled as escapes are a label, as the
+        // letters themselves are: a translation file's word for the field.
+        let escaped = format!(r#"password:"{0}u5BC6{0}u78BCAb12Cd34""#, '\\');
+        assert_eq!(password_match_for_test(&escaped, true, false), None);
+        assert_eq!(password_match_for_test(&escaped, true, true), None);
     }
 
     #[test]
@@ -8863,7 +9306,7 @@ mod tests {
         let findings = scan_transaction(&record, &ScannerConfig::default());
         let passwords: Vec<_> = findings
             .iter()
-            .filter(|f| f.title == "Password in response detected in response")
+            .filter(|f| f.title == "Password detected in response")
             .collect();
         assert_eq!(passwords.len(), 1);
         assert_eq!(passwords[0].evidence, evidence);
@@ -8884,7 +9327,7 @@ mod tests {
         let findings = scan_transaction(&record, &ScannerConfig::default());
         let passwords: Vec<_> = findings
             .iter()
-            .filter(|f| f.title == "Password in response detected in response")
+            .filter(|f| f.title == "Password detected in response")
             .collect();
         assert_eq!(passwords.len(), 1);
         assert_eq!(passwords[0].evidence, truncate_evidence(&raw, 80));
