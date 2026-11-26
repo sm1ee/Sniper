@@ -31,6 +31,8 @@ function fixture(capturing) {
     "requireOkResponse", "readApiErrorMessage", "formatStructuredApiErrorMessage",
   ], {
     state, URLSearchParams, BUTTON_PROGRESS_DELAY_MS: 180,
+    // The proxy listener records into whichever session these tests show.
+    sessionFeed: () => ({ kind: "main", port: "8080" }),
     workspaceStateGeneration: 0,
     els: { targetScopeEditor: { value: "" }, targetScopeExcludeEditor: { value: "" } },
     syncTargetScopeDraft() {}, renderInterceptStatus() {}, renderProxySettings() {}, renderTarget() {},
@@ -49,7 +51,7 @@ function fixture(capturing) {
         reads.push(read);
         return read.promise;
       }
-      assert.equal(path, "/api/runtime?session_id=session-a&expected_active_session_id=session-a");
+      assert.equal(path, "/api/runtime?session_id=session-a");
       assert.equal(options.method, "POST");
       assert.deepEqual({ ...options.headers }, { "content-type": "application/json" });
       assert.deepEqual(JSON.parse(options.body), { http_capture_enabled: !capturing });

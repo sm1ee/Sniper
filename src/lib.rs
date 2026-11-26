@@ -44,6 +44,7 @@ pub mod service_map_peer_matches;
 pub mod service_map_servers;
 pub mod service_map_technology;
 pub mod session;
+pub mod session_ports;
 pub mod skill_status;
 pub mod skills;
 pub mod special_host;
@@ -106,6 +107,7 @@ pub async fn run_with_config(config: AppConfig) -> Result<()> {
                 .local_addr()
                 .context("failed to read bound proxy address")?;
             state.set_active_proxy_addr(proxy_addr).await;
+            state.claim_main_listener_port().await;
             let proxy_generation = state.mark_proxy_listener_online();
             state
                 .log_info(
@@ -134,12 +136,17 @@ pub async fn run_with_config(config: AppConfig) -> Result<()> {
             });
             state.set_proxy_task(proxy_task).await;
 
+            let tcp_state = state.clone();
+            tokio::spawn(async move { tcp_state.start_saved_tcp_listeners().await });
+
             let api_result = run_api_until_shutdown(state.clone()).await;
             let shutdown_result = shutdown_headless_runtime(&state, oast_task).await;
             combine_api_and_shutdown_results(api_result, shutdown_result)
         }
         Err(bind_error) => {
             warn!(%bind_error, "proxy listener failed to bind — starting UI only");
+            // Something else has the port: its address is not Sniper's.
+            state.set_proxy_online(false);
             state
                 .log_error(
                     "runtime",
@@ -150,6 +157,9 @@ pub async fn run_with_config(config: AppConfig) -> Result<()> {
                     ),
                 )
                 .await;
+
+            let tcp_state = state.clone();
+            tokio::spawn(async move { tcp_state.start_saved_tcp_listeners().await });
 
             let api_result = run_api_until_shutdown(state.clone()).await;
             let shutdown_result = shutdown_headless_runtime(&state, oast_task).await;
@@ -264,8 +274,13 @@ async fn shutdown_headless_runtime(
     )
     .await
     .context("failed to persist closed live WebSocket relays before headless shutdown");
-    state.abort_proxy_task().await;
+    state.stop_proxy_listeners().await;
     proxy::drain_proxy_connections(Duration::from_secs(1)).await;
+    // Any CONNECT or passthrough tunnel accepted before the proxy stopped
+    // finishes persisting its TCP history record here before process exit.
+    if let Err(error) = state.stop_tcp_captures_for_shutdown().await {
+        warn!(%error, "late TCP tunnel persistence failed during headless shutdown");
+    }
     let flush_result = proxy::flush_pending_session_persists(state)
         .await
         .context("failed to flush pending session snapshots before headless shutdown");
@@ -274,6 +289,7 @@ async fn shutdown_headless_runtime(
         .await
         .map(|_| ())
         .context("failed to persist active session before headless shutdown");
+    let active_result = active_result.and(state.persist_other_loaded_sessions().await);
     if let Err(error) = combine_api_and_shutdown_results(flush_result, active_result) {
         warn!(
             ?error,

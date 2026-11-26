@@ -19,11 +19,65 @@ function loadFunctions(names, globals = {}) {
   if (names.some(name => replaySizeCallers.includes(name))) {
     names = [...new Set([...names, "replayRequestSizeError", "canStoreReplayRequest", "replayRequestEditCandidate", "acceptReplayRequestEdit"])];
   }
+  // The Replay editor shows a binary body as bytes and keeps the draft in Base64.
+  const binaryBodyCallers = ["replayRequestEditorText", "replayEditorShowsDraft", "syncReplayRequestTextFromEditor",
+    "changeReplayMethod", "acceptReplayRequestEdit", "renderReplay", "renderReplayViewContent"];
+  if (names.some(name => binaryBodyCallers.includes(name))) {
+    names = [...new Set([...names, "replayTabBodyIsBinary", "replayDraftFromEditor", "replayDraftShown",
+      "rawRequestWithBinaryBody", "rawRequestWithBase64Body", "binaryBodyText", "binaryBodyBase64"])];
+  }
+  if (names.includes("parseCurlCommand")) names = [...new Set([...names, "parseCurlFormField"])];
+  // The Fuzzer editor shows a binary body as bytes and keeps the draft in Base64.
+  const fuzzerBodyCallers = ["renderFuzzer", "fuzzerRequestTextForAction", "markFuzzerPosition", "markFuzzerEditorSelection",
+    "fuzzerMarkerRemoval", "removeFuzzerEditorPosition", "clearFuzzerMarkers", "runFuzzerAttack", "readFuzzerSavedRun"];
+  if (names.some(name => fuzzerBodyCallers.includes(name))) {
+    names = [...new Set([...names, "fuzzerBodyIsBinary", "fuzzerShownText", "fuzzerStoredText", "fuzzerDraftShowsBytes",
+      "fuzzerMarkerDraft", "fuzzerBaseRequestFor"])];
+  }
+  // The Session table names a session as the sidebar does.
+  if (names.includes("renderDashboard")) names = [...new Set([...names, "sessionIdentity"])];
+  // Whatever says where a session's traffic comes from asks these. A fixture
+  // that supplies one of its own keeps it.
+  const feedCallers = ["renderDashboard", "sessionSidebarRow", "syncHttpCapturePill", "emptySessionMessage",
+    "emptySessionActions", "showSessionContextMenu", "sessionFeedMenuItems", "updateProxyStatusIndicator"];
+  // An empty history offers what makes traffic reach the session.
+  if (names.includes("renderHistory") && !("emptySessionActions" in globals)) names = [...new Set([...names, "emptySessionActions"])];
+  if (names.some(name => feedCallers.includes(name))) {
+    const feed = ["sessionFeed", "mainProxyPort", "mainListenerSession", "sessionProxyAddress", "recordHereLabel",
+      "sessionFeedMenuItems", "sessionMakerMark", "sessionGroupMenuItems"];
+    names = [...new Set([...names, ...feed.filter(name => !(name in globals))])];
+  }
+  // A row says under its name what the list's menu chose from what it offers.
+  if (names.includes("sessionSidebarRow")) names = [...new Set([...names, "sessionRowDetail", "sessionDay", "sessionIdentity"])];
+  if (names.some(name => ["showSessionViewMenu", "toggleSessionRowDetail"].includes(name))) {
+    names = [...new Set([...names, "sessionRowDetailChoices"])];
+  }
+  // Whatever draws or moves a folder asks where Default is among the groups.
+  if (names.some(name => ["renderSessionSidebar", "dropSidebarGroup", "renameSessionGroup"].includes(name))) {
+    names = [...new Set([...names, ...["sessionFolderOrder", "sessionSidebarLayout"].filter(name => !(name in globals))])];
+  }
+  // Whatever places a session in the list asks which order the list is in.
+  if (names.some(name => ["sessionSidebarLayout", "sidebarDropTarget", "dropSidebarSession"].includes(name))) {
+    names = [...new Set([...names, "sessionSortOrder"])];
+  }
+  // Intercept shows a held binary body as bytes through the raw build and parse.
+  const rawBodyCallers = ["buildEditableRawRequest", "parseEditableRawRequest", "buildEditableRawResponse", "parseEditableRawResponse"];
+  if (names.some(name => rawBodyCallers.includes(name))) {
+    names = [...new Set([...names, "binaryBodyText", "binaryBodyBase64"])];
+  }
+  // The lists read on a timer write their rows through one function.
+  const rowWriters = ["renderFindings", "renderFindingsVirtual", "renderOastCallbacks", "renderIntercepts", "renderResponseIntercepts"];
+  if (names.some(name => rowWriters.includes(name)) && !("writeRows" in globals)) names = [...new Set([...names, "writeRows"])];
   for (const name of names) {
     assert.match(name, /^[A-Za-z_$][\w$]*$/);
     const match = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, "m"));
     assert.ok(match, `Missing frontend function: ${name}`);
     vm.runInContext(match[0], context, { filename: `web/app.js:${name}` });
+  }
+  // Every Session table redraw redraws the sidebar and shows the page's view,
+  // which these fixtures lack.
+  for (const drawn of ["renderSessionSidebar", "renderSessionPageView"]) {
+    if (names.includes("renderDashboard") && !(drawn in context)) context[drawn] = () => {};
   }
   return context;
 }

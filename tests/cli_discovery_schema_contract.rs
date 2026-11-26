@@ -227,6 +227,65 @@ fn service_map_parse_errors_hide_rejected_credentials_and_queries() {
 }
 
 #[test]
+fn tcp_relay_operations_are_discoverable_offline() {
+    let reads = [
+        "tcp.status",
+        "tcp.listeners.list",
+        "tcp.list",
+        "tcp.get",
+        "tcp.raw",
+        "tcp.intercept.get",
+        "tcp.pending",
+    ];
+    let writes = [
+        "tcp.listeners.add",
+        "tcp.listeners.set",
+        "tcp.listeners.remove",
+        "tcp.clear",
+        "tcp.intercept.set",
+        "tcp.decide",
+        "tcp.forward_all",
+        "tcp.drop_all",
+        "tcp.close",
+        "tcp.replay",
+    ];
+    let listed: Vec<String> = cli(&["manifest"], 0)["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|spec| spec["operation"].as_str())
+        .filter(|operation| operation.starts_with("tcp."))
+        .map(str::to_owned)
+        .collect();
+    let mut expected: Vec<&str> = reads.iter().chain(&writes).copied().collect();
+    expected.sort_unstable();
+    let mut listed_sorted = listed.clone();
+    listed_sorted.sort_unstable();
+    assert_eq!(listed_sorted, expected);
+    for operation in reads.iter().chain(&writes) {
+        let operation_spec = spec(operation);
+        let write = writes.contains(operation);
+        assert_eq!(
+            operation_spec["side_effect"],
+            if write { "write" } else { "read" },
+            "{operation}"
+        );
+        assert_eq!(
+            operation_spec["requires_confirmation"], write,
+            "{operation}"
+        );
+        let schema = cli(&["schema", "input", operation], 0)["schema"].clone();
+        assert_eq!(schema, operation_spec["input_schema"], "{operation}");
+        assert_eq!(schema["additionalProperties"], false, "{operation}");
+    }
+    let input =
+        json!({"target_host":"db.example.com","target_port":5432,"messages":["PING"]}).to_string();
+    let plan = cli(&["--dry-run", "call", "tcp.replay", "--input", &input], 0)["data"].clone();
+    assert_eq!(plan["api"]["path"], "/api/tcp/replay");
+    assert_eq!(plan["api"]["body"]["messages"], json!(["UElORw=="]));
+}
+
+#[test]
 fn upstream_peer_settings_schemas_are_strict_and_discoverable_offline() {
     let mut value = json!({"session_id":Uuid::nil(),"enabled":false,"config_revision":"9007199254740993",
         "config_token":"a".repeat(64),"status":{"effective_enabled":false,"blocked_reason":null}});

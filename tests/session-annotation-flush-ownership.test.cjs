@@ -96,18 +96,18 @@ test('old drain cannot reuse its bypass for an actual newer failed note retry', 
   const draining = f.context.flushAllPendingAnnotations(externalOptions); await tick();
   f.replace(false); await f.context.updateAnnotations('note-b', { user_note: 'Synthetic B note' });
   const next = f.state._pendingAnnotations.get('note-b');
-  assert.equal(f.url(1).searchParams.get('expected_active_session_id'), 'session-b');
+  assert.equal(f.url(1).searchParams.has('expected_active_session_id'), false);
   f.fail(1); await tick(); f.succeed(0, 'note-a'); await tick();
   await f.nextTimer(); assert.equal(f.requests.length, 2); await draining;
   assert.equal(f.state._pendingAnnotations.get('note-b'), next);
   const retry = f.context.flushPendingAnnotations('note-b');
   assert.equal(f.url(2).searchParams.get('session_id'), 'session-b');
-  assert.equal(f.url(2).searchParams.get('expected_active_session_id'), 'session-b');
+  assert.equal(f.url(2).searchParams.has('expected_active_session_id'), false);
   assert.equal(JSON.parse(f.requests[2].options.body).user_note, 'Synthetic B note');
   f.succeed(2, 'note-b'); assert.equal(await retry, true); assert.equal(f.state._pendingAnnotations.size, 0);
 });
 for (const sameId of [false, true]) for (const outcome of ['success', 'failure']) {
-  test(`same transaction replacement survives old ${outcome} across ${sameId ? 'generation' : 'owner'} with an ordinary guarded retry`, async () => {
+  test(`same transaction replacement survives old ${outcome} across ${sameId ? 'generation' : 'owner'} with an ordinary retry`, async () => {
     const f = fixture(); f.entry('same-note');
     const draining = f.context.flushAllPendingAnnotations(externalOptions).then(() => null, error => error);
     f.replace(sameId); await f.context.updateAnnotations('same-note', { user_note: 'Synthetic new note' });
@@ -117,8 +117,22 @@ for (const sameId of [false, true]) for (const outcome of ['success', 'failure']
     assert.equal(await draining, null); assert.equal(f.requests.length, 2);
     assert.equal(f.state._pendingAnnotations.get('same-note'), next);
     assert.equal(f.url(1).searchParams.get('session_id'), f.state.activeSession.id);
-    assert.equal(f.url(1).searchParams.get('expected_active_session_id'), f.state.activeSession.id);
+    assert.equal(f.url(1).searchParams.has('expected_active_session_id'), false);
     assert.equal(JSON.parse(f.requests[1].options.body).user_note, 'Synthetic new note');
     f.succeed(1, 'same-note'); await tick(); assert.equal(f.state._pendingAnnotations.size, 0);
   });
 }
+// The session on screen was deleted elsewhere and the window moved on. A note
+// still queued for it answers 404 on every try. Kept, it refused every later
+// session change and every close of the desktop window.
+test('a note whose session is gone is dropped and the drain goes on', async () => {
+  const f = fixture(); f.entry('note-gone', 'session-deleted'); f.entry('note-here');
+  const draining = f.context.flushAllPendingAnnotations().then(() => null, error => error);
+  assert.equal(f.requests.length, 2);
+  const gone = [0, 1].find(index => f.url(index).searchParams.get('session_id') === 'session-deleted');
+  f.requests[gone].resolve({ ok: false, status: 404, text: async () => '' });
+  f.succeed(1 - gone, 'note-here');
+  assert.equal(await draining, null);
+  assert.equal(f.state._pendingAnnotations.size, 0);
+  assert.equal(f.state._annotationInFlight.size, 0);
+});

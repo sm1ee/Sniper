@@ -336,6 +336,49 @@ function decodedBase64Length(value) {
   }
 }
 
+/** A body that is not text, one character per byte, as Burp's Raw view shows it.
+ * Null when `base64` is not Base64. */
+function binaryBodyText(base64) {
+  try {
+    return atob(String(base64 ?? "").replace(/\s+/g, ""));
+  } catch (_error) {
+    return null;
+  }
+}
+
+/** Text from `binaryBodyText`, edited, back to Base64. A character up to U+00FF
+ * is that byte; one above it can only have been typed, and goes as UTF-8. */
+function binaryBodyBase64(text) {
+  const source = String(text ?? "");
+  if (!/[^\x00-\xff]/.test(source)) return btoa(source);
+  const encoder = new TextEncoder();
+  let bytes = "";
+  for (const character of source) {
+    if (character.codePointAt(0) <= 0xff) bytes += character;
+    else for (const byte of encoder.encode(character)) bytes += String.fromCharCode(byte);
+  }
+  return btoa(bytes);
+}
+
+/** A raw request whose body is Base64, with the body shown as bytes. */
+function rawRequestWithBinaryBody(text) {
+  const raw = String(text ?? "");
+  const boundary = /\r?\n\r?\n/.exec(raw);
+  if (!boundary) return raw;
+  const start = boundary.index + boundary[0].length;
+  const bytes = binaryBodyText(raw.slice(start));
+  return bytes === null ? raw : raw.slice(0, start) + bytes;
+}
+
+/** The inverse of `rawRequestWithBinaryBody`: the shown bytes back to Base64. */
+function rawRequestWithBase64Body(text) {
+  const raw = String(text ?? "");
+  const boundary = /\r?\n\r?\n/.exec(raw);
+  if (!boundary) return raw;
+  const start = boundary.index + boundary[0].length;
+  return raw.slice(0, start) + binaryBodyBase64(raw.slice(start));
+}
+
 function editableRequestBodyLength(body, bodyEncoding) {
   if (bodyEncoding === "base64") {
     return decodedBase64Length(body);
@@ -449,10 +492,41 @@ const state = {
   historyDirty: false,
   historyResetScrollOnNextLoad: false,
   sessions: [],
+  // The session this window shows. The name is from when a window always
+  // showed the session the proxy listener records into; it shows any now.
   activeSession: null,
+  // The session the next load shows; null is the one the listener records into.
+  viewedSessionId: null,
   selectedSessionId: null,
   sessionRename: null,
+  sessionSidebarHidden: false,
+  // The width the session list was dragged to; null is the stylesheet's.
+  sessionSidebarWidth: null,
+  // The groups of the session list that are folded shut, by name, and the
+  // list's own sections that are: "pinned" and "default".
+  sessionGroupsCollapsed: [],
+  sessionSectionsCollapsed: [],
+  // The order sessions (by id) and groups (by name) were dragged into. The
+  // list keeps a group named here while no session is in it.
+  sessionOrder: [],
+  sessionGroupOrder: [],
+  // The group Default was left under, by name. "" is no group: Default is
+  // the first folder.
+  sessionDefaultAfter: "",
+  // The sessions kept at the top of the list, by id, in the order pinned.
+  sessionPinned: [],
+  // How the list orders the sessions of a group; see `sessionSortOrder`.
+  sessionSort: "manual",
+  // What a row says under its session's name; see `sessionRowDetailChoices`.
+  sessionRowDetails: ["domains"],
+  // What each session is doing, from /api/sessions/activity.
+  sessionActivity: new Map(),
+  // Sessions whose jobs ended while another session was open: id → job kinds.
+  sessionsFinished: new Map(),
   dashboardStorageSessionId: null,
+  // The session page's view, and the session its Overview shows.
+  sessionPageView: "overview",
+  overviewSessionId: null,
   sessionSortKey: "created_at",
   sessionSortDir: "desc",
   activeTool: "proxy",
@@ -657,13 +731,31 @@ const els = {
   dashboardTiles: document.getElementById("dashboardTiles"),
   dashboardDetail: document.getElementById("dashboardDetail"),
   dashboardOpenStorageBtn: document.getElementById("dashboardOpenStorageBtn"),
-  dashboardCreateSessionName: document.getElementById("dashboardCreateSessionName"),
-  dashboardCreateSessionButton: document.getElementById("dashboardCreateSessionButton"),
-  dashboardCreateSessionForm: document.getElementById("dashboardCreateSessionForm"),
-  dashboardNewSessionButton: document.getElementById("dashboardNewSessionButton"),
+  sessionPageButton: document.getElementById("sessionPageButton"),
+  sessionPageTabs: Array.from(document.querySelectorAll("[data-session-view]")),
+  sessionOverviewPanel: document.getElementById("sessionOverviewPanel"),
+  sessionAllPanel: document.getElementById("sessionAllPanel"),
+  sessionOverviewName: document.getElementById("sessionOverviewName"),
+  sessionOverviewStorage: document.getElementById("sessionOverviewStorage"),
+  sessionOverviewPath: document.getElementById("sessionOverviewPath"),
+  sessionOverviewOpenStorageBtn: document.getElementById("sessionOverviewOpenStorageBtn"),
+  sessionOverviewMoreButton: document.getElementById("sessionOverviewMoreButton"),
+  sessionOverviewTiles: document.getElementById("sessionOverviewTiles"),
+  sessionOverviewDetail: document.getElementById("sessionOverviewDetail"),
   dashboardSessionsMore: document.getElementById("dashboardSessionsMore"),
   dashboardReloadSessionsButton: document.getElementById("dashboardReloadSessionsButton"),
   dashboardSessionsBody: document.getElementById("dashboardSessionsBody"),
+  sessionSidebar: document.getElementById("sessionSidebar"),
+  sessionSidebarToggle: document.getElementById("sessionSidebarToggle"),
+  sessionSidebarList: document.getElementById("sessionSidebarList"),
+  sessionSidebarResizer: document.getElementById("sessionSidebarResizer"),
+  sessionSidebarNewButton: document.getElementById("sessionSidebarNewButton"),
+  sessionSidebarNewGroupButton: document.getElementById("sessionSidebarNewGroupButton"),
+  sessionSortButton: document.getElementById("sessionSortButton"),
+  sessionSidebarCreate: document.getElementById("sessionSidebarCreate"),
+  sessionSidebarCreateName: document.getElementById("sessionSidebarCreateName"),
+  sessionSidebarGroup: document.getElementById("sessionSidebarGroup"),
+  sessionSidebarGroupName: document.getElementById("sessionSidebarGroupName"),
   proxyStatusIndicator: document.getElementById("proxyStatusIndicator"),
   proxyStatusLabel: document.getElementById("proxyStatusLabel"),
   remoteUiIndicator: document.getElementById("remoteUiIndicator"),
@@ -1220,6 +1312,11 @@ async function init() {
       console.error("init load failed:", result.reason);
     }
   }
+  // What each session in the sidebar is doing. Asking costs the server a few
+  // locks, unlike /api/sessions, which sizes every session on disk.
+  window.setInterval(() => {
+    loadSessionActivity().catch((error) => console.error(error));
+  }, 3000);
   connectEvents();
   auxTimer = window.setInterval(() => {
     pollAuxiliaryData().catch((error) => console.error(error));
@@ -1329,9 +1426,15 @@ function bindEvents() {
       renderProxyPanels();
       document.getElementById("tcpSettingsSection")?.scrollIntoView({ block: "start" });
     },
+    confirm: showConfirmDialog,
+    copy: text => copyTextToClipboard(text),
     arrowStep: tableArrowStep,
     formatTime: formatTimestamp,
     formatSize,
+    receiving: () => sessionFeed(currentSessionId()).kind !== "none",
+    // A listener that starts in a session nothing reaches opens that
+    // session's port: the rows and the indicator say so at once.
+    changed: () => { refreshSessionFeeds().catch((error) => console.error(error)); },
   });
 
   initializeTargetWorkspace();
@@ -1358,7 +1461,7 @@ function bindEvents() {
       rawExchange: (record) => ({ request: buildRawRequest(record), response: buildRawResponse(record) }),
     });
   }
-  document.querySelectorAll(".recon-table, .fuzzer-results-table, .tcp-table").forEach(bindTableColumnResizers);
+  document.querySelectorAll(".recon-table, .fuzzer-results-table, .tcp-table, .tcp-listener-table").forEach(bindTableColumnResizers);
   document.querySelectorAll(".list-detail-resizer").forEach(bindListDetailResizer);
   window.addEventListener("resize", resetLayoutTextareas);
   document.addEventListener("visibilitychange", flushWorkspaceStateBeforeHidden);
@@ -1380,9 +1483,6 @@ function bindEvents() {
     tab.addEventListener("click", () => {
       setActiveTool(tab.dataset.tool === "templates" ? state.scanTool || "templates" : tab.dataset.tool);
       renderToolPanels();
-      if (state.activeTool === "dashboard") {
-        loadSessions({ reloadOnActiveChange: true }).catch(handleWorkspaceActionError);
-      }
       if (state.activeTool === "map") targetServiceMapController?.refresh({ force: true });
       if (state.activeTool === "target") loadTargetSiteMap(true).catch((error) => console.error(error));
       if (state.activeTool === "logger") {
@@ -1942,15 +2042,135 @@ function bindEvents() {
     }
   });
   onClickWithProgress(els.dashboardReloadSessionsButton, () =>
-    loadSessions({ reloadOnActiveChange: true }).catch(handleWorkspaceActionError));
-  onClickWithProgress(els.dashboardCreateSessionButton, () =>
-    createSession()
-      .then(() => { if (!els.dashboardCreateSessionName.value) closeSessionCreateForm(); })
-      .catch(handleWorkspaceActionError));
-  els.dashboardNewSessionButton.addEventListener("click", openSessionCreateForm);
-  els.dashboardCreateSessionName.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") els.dashboardCreateSessionButton.click();
-    else if (event.key === "Escape") closeSessionCreateForm();
+    loadSessions().catch(handleWorkspaceActionError));
+  els.sessionPageButton.addEventListener("click", toggleSessionPage);
+  els.sessionPageTabs.forEach((tab) => {
+    tab.addEventListener("click", () => setSessionPageView(tab.dataset.sessionView));
+  });
+  els.sessionOverviewMoreButton.addEventListener("click", openSessionOverviewMenu);
+  els.sessionOverviewName.addEventListener("dblclick", () => {
+    if (state.overviewSessionId && !state.sessionRename) startSessionRename(state.overviewSessionId, "overview");
+  });
+  onClickWithProgress(els.sessionOverviewOpenStorageBtn, () => {
+    const sessionId = state.overviewSessionId;
+    if (!sessionId) return undefined;
+    return revealSessionFolder(sessionId).catch((error) => {
+      console.error(error);
+      showToast(error?.message || "Failed to open session folder.", "error");
+    });
+  });
+  els.sessionSidebarToggle.addEventListener("click", toggleSessionSidebar);
+  els.sessionSidebarNewButton.addEventListener("click", openSidebarSessionCreate);
+  els.sessionSidebarNewGroupButton.addEventListener("click", () => openSidebarGroupName({ create: true }));
+  els.sessionSortButton.addEventListener("click", (event) => {
+    // The document closes this menu on any click that reaches it.
+    event.stopPropagation();
+    showSessionViewMenu(els.sessionSortButton);
+  });
+  els.sessionSidebarCreateName.addEventListener("keydown", (event) => {
+    // Enter during IME composition picks a candidate; it does not create.
+    if (event.isComposing) return;
+    if (event.key === "Enter") createSidebarSession().catch(handleWorkspaceActionError);
+    else if (event.key === "Escape") closeSidebarSessionCreate();
+  });
+  els.sessionSidebarCreateName.addEventListener("blur", () => {
+    if (!sidebarSessionCreating && !els.sessionSidebarCreateName.value.trim()) closeSidebarSessionCreate();
+  });
+  els.sessionSidebarGroupName.addEventListener("keydown", (event) => {
+    if (event.isComposing) return;
+    if (event.key === "Enter") submitSidebarGroupName().catch(handleWorkspaceActionError);
+    else if (event.key === "Escape") closeSidebarGroupName();
+  });
+  els.sessionSidebarGroupName.addEventListener("blur", () => {
+    if (!els.sessionSidebarGroupName.value.trim()) closeSidebarGroupName();
+  });
+  // On the list, which outlives the rows each render replaces.
+  els.sessionSidebarList.addEventListener("click", (event) => {
+    // A row's pin is beside the row, not in it: the session is not opened.
+    const pin = event.target.closest?.(".session-sidebar-pin");
+    if (pin) {
+      toggleSessionPin(pin.dataset.pin);
+      return;
+    }
+    // A group folds by its name; the list's own sections by which they are.
+    const toggle = event.target.closest?.(".session-sidebar-group-toggle");
+    if (toggle) {
+      if (toggle.dataset.section) toggleSessionSection(toggle.dataset.section);
+      else toggleSessionGroup(toggle.dataset.group);
+      return;
+    }
+    const add = event.target.closest?.(".session-sidebar-group-add");
+    if (add) {
+      // Default's + names no group.
+      openSidebarSessionCreate(add.dataset.addToGroup || null);
+      return;
+    }
+    const row = event.target.closest?.(".session-sidebar-row");
+    const id = row?.dataset.id;
+    if (!id || id === currentSessionId()) return;
+    withButtonProgress(row, () => viewSessionById(id)).catch(handleWorkspaceActionError);
+  });
+  // "Not receiving" opens the two actions that change it.
+  els.proxyStatusIndicator?.addEventListener("click", (event) => {
+    // The document closes this menu on any click that reaches it.
+    event.stopPropagation();
+    showSessionFeedMenu(els.proxyStatusIndicator);
+  });
+  // The same two, beside the browser button of an empty history.
+  els.historyTableBody.addEventListener("click", (event) => {
+    const button = event.target.closest?.("[data-feed-action]");
+    if (!button) return;
+    withButtonProgress(button, () => runSessionFeedAction(button.dataset.feedAction, currentSessionId()))
+      .catch(handleWorkspaceActionError);
+  });
+  els.sessionSidebarList.addEventListener("contextmenu", (event) => {
+    const group = event.target.closest?.(".session-sidebar-group-toggle")?.dataset.group;
+    const id = event.target.closest?.(".session-sidebar-row")?.dataset.id;
+    if (!id && !group) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (group) showSessionGroupMenu(event, group);
+    else showSessionContextMenu(event, id, "sidebar");
+  });
+  // Dragging is wired on the list, which outlives the rows.
+  els.sessionSidebarList.addEventListener("dragstart", (event) => {
+    const item = event.target.closest?.("li[data-drag-session], li[data-drag-group], li[data-drop-default]");
+    if (!item) return;
+    sidebarDrag = item.dataset.dragSession ? { session: item.dataset.dragSession } : { group: item.dataset.dragGroup ?? null };
+    event.dataTransfer.effectAllowed = "move";
+    // A type of its own: text/plain would make every text field take the drop.
+    event.dataTransfer.setData("application/x-sniper-session", item.dataset.dragSession || item.dataset.dragGroup || "Default");
+    // After the browser has taken the drag image from the row as it is.
+    setTimeout(() => { if (sidebarDrag) item.classList.add("dragging"); }, 0);
+  });
+  els.sessionSidebarList.addEventListener("dragover", (event) => {
+    const target = sidebarDropTarget(event);
+    markSidebarDrop(target);
+    if (!target) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  });
+  els.sessionSidebarList.addEventListener("dragleave", (event) => {
+    if (!els.sessionSidebarList.contains(event.relatedTarget)) markSidebarDrop(null);
+  });
+  els.sessionSidebarList.addEventListener("drop", (event) => {
+    const target = sidebarDropTarget(event);
+    const drag = sidebarDrag;
+    if (target) event.preventDefault();
+    endSidebarDrag();
+    if (!target || !drag) return;
+    if (drag.session) dropSidebarSession(drag.session, target).catch(handleWorkspaceActionError);
+    else dropSidebarGroup(drag.group, target);
+  });
+  els.sessionSidebarList.addEventListener("dragend", endSidebarDrag);
+  els.sessionSidebarList.addEventListener("keydown", (event) => {
+    if ((event.key !== "ArrowUp" && event.key !== "ArrowDown")
+      || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    const rows = Array.from(els.sessionSidebarList.querySelectorAll(".session-sidebar-row"));
+    const index = rows.indexOf(document.activeElement);
+    if (index === -1) return;
+    event.preventDefault();
+    rows[Math.max(0, Math.min(rows.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)))].focus();
   });
   // The ⋯ menu closes once an item is chosen or the click lands elsewhere.
   els.dashboardSessionsMore.addEventListener("click", (event) => {
@@ -1984,7 +2204,7 @@ function bindEvents() {
         state.sessionSortDir = state.sessionSortDir === "asc" ? "desc" : "asc";
       } else {
         state.sessionSortKey = key;
-        state.sessionSortDir = key === "name" ? "asc" : "desc";
+        state.sessionSortDir = key === "name" || key === "group" ? "asc" : "desc";
       }
       renderDashboard();
     });
@@ -2174,6 +2394,17 @@ function bindEvents() {
         const mw = paneCtx.offsetWidth, mh = paneCtx.offsetHeight;
         paneCtx.style.left = `${Math.min(e.clientX, window.innerWidth - mw - 8)}px`;
         paneCtx.style.top = `${Math.min(e.clientY, window.innerHeight - mh - 8)}px`;
+      });
+    });
+    // The Findings detail shows a record's request and response too, and had
+    // the webview's own menu. It gets this one, for the record the finding is
+    // about: the Jump button holds its id once the detail has loaded.
+    [els.findingsReqCM, els.findingsResCM].forEach((view) => {
+      view?.addEventListener("contextmenu", (e) => {
+        const recordId = els.findingsDetailJump?.dataset.recordId;
+        if (!recordId) return;
+        e.preventDefault();
+        paneMenuOpen(e, createTransactionRecordMenuTarget(recordId, currentSessionId()));
       });
     });
     document.addEventListener("click", () => {
@@ -2527,8 +2758,9 @@ function bindEvents() {
         const updated = parseEditableRawRequest(next, current.baseRequest);
         next = updated._normalizedRawText || next;
         if (!acceptReplayRequestEdit(next, current)) throw new Error("The edited request exceeds Replay's save limit. Use a smaller request.");
-        setReplayRequestEditorText(next, { preserveSelection: false });
-        syncReplayRequestTextFromEditor(next);
+        const shown = replayDraftShown(next, current);
+        setReplayRequestEditorText(shown, { preserveSelection: false });
+        syncReplayRequestTextFromEditor(shown);
       },
       request: () => {
         if (!tab || tab.type === "websocket") return null;
@@ -2921,6 +3153,7 @@ function bindEvents() {
       !event.altKey &&
       !event.shiftKey &&
       state.activeTool === "dashboard" &&
+      state.sessionPageView === "all" &&
       !isEditableTarget(event.target)
     ) {
       if (event.key === "ArrowUp") {
@@ -3174,6 +3407,7 @@ function bindEvents() {
   bindWebsocketPaneResizer(els.websocketSplitResizer);
   bindWebsocketStackResizer(els.websocketStackResizer);
   bindServiceMapResizer(document.getElementById("serviceMapResizer"));
+  bindSessionSidebarResizer(els.sessionSidebarResizer);
   applyWsColumnWidths();
   bindWsColumnResizers();
 
@@ -3226,17 +3460,23 @@ function bindEvents() {
 }
 
 async function loadSettings(retries = 5, { isCurrent = () => true } = {}) {
+  // Read by name: the proxy listener may record into another session than
+  // the one on screen. The read also loads the session for writing.
+  // The session a click asked for comes first: the reload's own list read
+  // can lose to a newer rows-only read and leave the old one on screen.
+  const sessionId = state.viewedSessionId || currentSessionId();
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (!isCurrent()) return false;
     try {
-      const response = await fetch("/api/settings");
+      const response = await fetch(sessionQueryPath("/api/settings", sessionId));
+      if (response.status === 404 && sessionId) throw new WorkspaceSessionMismatchError(sessionId, true);
       if (!response.ok) {
         throw new Error(`loadSettings failed: ${response.status}`);
       }
-      return await _applySettings(response, { isCurrent });
+      return await _applySettings(response, { isCurrent, sessionId });
     } catch (err) {
       if (!isCurrent()) return false;
-      if (attempt < retries) {
+      if (attempt < retries && !err?.gone) {
         await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
         continue;
       }
@@ -3245,9 +3485,10 @@ async function loadSettings(retries = 5, { isCurrent = () => true } = {}) {
   }
 }
 
-async function _applySettings(response, { isCurrent = () => true } = {}) {
+async function _applySettings(response, { isCurrent = () => true, sessionId = null } = {}) {
   const settings = await response.json();
-  if (!isCurrent()) return false;
+  // The window may show another session by the time the answer is here.
+  if (!isCurrent() || (sessionId && sessionId !== (state.viewedSessionId || currentSessionId()))) return false;
   state.settings = settings;
   if (typeof targetServiceMapController !== "undefined") targetServiceMapController?.scopeChanged?.(state.runtime, state.settings.runtime);
   state.runtime = state.settings.runtime;
@@ -3518,7 +3759,7 @@ let sessionActivationIntent = null;
 let sessionsLoadGeneration = 0;
 let sessionsAppliedLoadGeneration = 0;
 
-async function loadSessions({ reloadOnActiveChange = false, preserveWorkspaceOwner = false, isCurrent = () => true } = {}) {
+async function loadSessions({ preserveWorkspaceOwner = false, isCurrent = () => true } = {}) {
   const generation = ++sessionsLoadGeneration;
   const workspaceGeneration = preserveWorkspaceOwner ? workspaceStateGeneration : null;
   const workspaceSessionId = preserveWorkspaceOwner ? currentSessionId() : null;
@@ -3545,26 +3786,31 @@ async function loadSessions({ reloadOnActiveChange = false, preserveWorkspaceOwn
   if (preserveWorkspaceOwner && (workspaceGeneration !== workspaceStateGeneration
     || workspaceSessionId !== currentSessionId())) return;
   sessionsAppliedLoadGeneration = generation;
+  const previousActiveSessionId = currentSessionId();
+  // The session this window shows, or the one a click just asked for.
+  // Another client moving the proxy listener changes neither.
+  const wanted = state.viewedSessionId;
+  const shown = sessions.find((session) => session.id === wanted);
+  if (!shown && wanted && wanted === previousActiveSessionId && workspaceLoaded) {
+    // The session on screen was deleted, here, by sniper-cli or by an agent.
+    state.sessions = sessions;
+    renderDashboard();
+    await showDefaultSessionAfterDelete(wanted);
+    return;
+  }
   if (preserveWorkspaceOwner) {
     state.sessions = sessions;
     renderDashboard();
     return;
   }
-  const previousActiveSessionId = currentSessionId();
-  const nextActiveSession = sessions.find((session) => session.active) || sessions[0] || null;
-  if (
-    reloadOnActiveChange
-    && previousActiveSessionId
-    && nextActiveSession?.id
-    && nextActiveSession.id !== previousActiveSessionId
-  ) {
-    state.sessions = sessions;
-    renderDashboard();
-    await handleExternalSessionChanged(previousActiveSessionId);
-    return;
-  }
+  // A window that shows no session yet, or whose session is gone, takes the
+  // one the proxy listener records into.
+  const nextActiveSession = shown || sessions.find((session) => session.active) || sessions[0] || null;
+  // A click asked for a session that was deleted before it loaded.
+  if (wanted && !shown) showToast("The session was deleted. Showing the session the proxy records into.", "info", 6000);
   state.sessions = sessions;
   state.activeSession = nextActiveSession;
+  state.viewedSessionId = nextActiveSession?.id || null;
   if (previousActiveSessionId !== currentSessionId()) resetFindingsUiState();
   if (typeof reconController !== "undefined") reconController?.syncSession();
   if (typeof templatesController !== "undefined") templatesController?.syncSession();
@@ -3583,14 +3829,10 @@ async function reconcileSessionsAfterActionError(sessionId, workspaceGeneration)
     console.warn("Failed to refresh sessions after a session action:", error);
   }
   if (sessionId !== currentSessionId() || workspaceGeneration !== workspaceStateGeneration) return;
-  const listedActiveSession = state.sessions.find((session) => session.active);
-  const activeSessionChanged = listedActiveSession && listedActiveSession.id !== currentSessionId();
   showToast(
     readFailed
       ? "The session action may have completed, but the session list could not be refreshed. Keep a copy of unsaved edits, then use Reload sessions before trying again."
-      : activeSessionChanged
-        ? "The active session changed. Your existing workspace is still open. Keep a copy of unsaved edits, then use Reload sessions to reconcile."
-        : "The session action may have completed. Check the session list before trying again.",
+      : "The session action may have completed. Check the session list before trying again.",
     "error",
     7000,
   );
@@ -3607,14 +3849,10 @@ async function reconcileSessionsAfterCompletedAction() {
     console.warn("Failed to refresh sessions after a completed session action:", error);
   }
   if (sessionId !== currentSessionId() || workspaceGeneration !== workspaceStateGeneration) return;
-  const listedActiveSession = state.sessions.find((session) => session.active);
-  const activeSessionChanged = listedActiveSession && listedActiveSession.id !== sessionId;
   showToast(
     readFailed
       ? "The session action completed, but the session list could not be refreshed. Your current workspace is still open. Keep a copy of unsaved edits, then use Reload sessions to reconcile."
-      : activeSessionChanged
-        ? "The session action completed and the active session changed. Your current workspace is still open. Keep a copy of unsaved edits, then use Reload sessions to reconcile."
-        : "The session action completed. Your current workspace is still open. Check the session list before continuing.",
+      : "The session action completed. Your current workspace is still open. Check the session list before continuing.",
     "error",
     7000,
   );
@@ -3637,8 +3875,10 @@ async function loadWorkspaceState({ isCurrent = () => true, onAdopt = () => {} }
   if (!workspaceLoaded) renderFuzzer();
   let snapshot;
   try {
-    const response = await fetch("/api/workspace-state");
+    const sessionId = state.viewedSessionId || currentSessionId();
+    const response = await fetch(sessionQueryPath("/api/workspace-state", sessionId));
     if (!isCurrent()) return false;
+    if (response.status === 404 && sessionId) throw new WorkspaceSessionMismatchError(sessionId, true);
     // Callers may toast this error; never surface captured data from a response body.
     if (!response.ok) throw new Error("Could not load session workspace.");
     snapshot = await response.json();
@@ -3677,10 +3917,13 @@ async function loadWorkspaceState({ isCurrent = () => true, onAdopt = () => {} }
 }
 
 class WorkspaceSessionMismatchError extends Error {
-  constructor(sessionId) {
-    super("Workspace state belongs to a different active session.");
+  // `gone`: a read named a session that was deleted, here, by sniper-cli or
+  // by an agent. No retry brings it back; the list says what to show.
+  constructor(sessionId, gone = false) {
+    super(gone ? "The session was deleted." : "Workspace state belongs to a different active session.");
     this.name = "WorkspaceSessionMismatchError";
     this.sessionId = sessionId;
+    this.gone = gone;
   }
 }
 
@@ -3954,7 +4197,7 @@ function replayTabHasUncommittedEditorState(tab) {
   if (tab.id !== state.activeReplayTabId) return false;
   if (state.replayMessageViews.request === "hex") return true;
   const editor = getCMView("replayReq");
-  const text = editor ? editor.getContent()
+  const text = editor ? editor.getText()
     : (els.replayRequestHighlight?.innerText ?? els.replayRequestEditor?.value ?? null);
   if (typeof text === "string" && !replayEditorShowsDraft(text, tab.requestText)) return true;
   const target = getRepeaterTargetConfig(tab);
@@ -5139,7 +5382,7 @@ function syncActiveHttpReplayDraftFromDom() {
   if (state.replayMessageViews.request !== "hex") {
     const cv = getCMView("replayReq");
     const requestText = cv
-      ? cv.getContent()
+      ? cv.getText()
       : (els.replayRequestEditor?.value ?? els.replayRequestHighlight?.innerText ?? null);
     if (typeof requestText === "string" && !replayEditorShowsDraft(requestText, tab.requestText)) {
       // The hidden legacy mirror can differ from the visible editor. Only skip
@@ -5818,6 +6061,10 @@ function resetSessionScopedUiState() {
   state.sequencePastRuns = [];
   clearCompareState();
   renderHistory();
+  // An empty list that may hold more asks for more at once. The session on
+  // screen is still the one being left, so that read was a page of its rows,
+  // thrown away. The reload that follows reads the session being shown.
+  clearHistoryBackfill();
   renderEmptyDetail();
   renderWebsocketSessions();
   hideFrameDetail();
@@ -5870,13 +6117,15 @@ async function reloadSessionWorkspace({ cleanupBeforeReset = true } = {}) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await loadSessions({ isCurrent });
       if (!isCurrent()) return false;
-      await loadSettings(5, { isCurrent });
-      if (!isCurrent()) return false;
       try {
+        await loadSettings(5, { isCurrent });
+        if (!isCurrent()) return false;
         if (await loadWorkspaceState({ isCurrent, onAdopt: () => { generation = workspaceStateGeneration; } }) === false) return false;
         if (!isCurrent()) return false;
         break;
       } catch (error) {
+        // The list is read again. It names another session, and says so,
+        // when this one was deleted while it loaded.
         if (error instanceof WorkspaceSessionMismatchError && attempt === 0) {
           continue;
         }
@@ -5990,7 +6239,7 @@ async function handleExternalSessionChanged(previousSessionId = currentSessionId
   }
 }
 
-async function createSession() {
+async function createSession(nameInput = els.sessionSidebarCreateName, group = null) {
   if (!preserveActiveHttpReplayDraftBeforeSessionChange("creating a session")) return;
   const entrySessionId = currentSessionId();
   const entryWorkspaceGeneration = workspaceStateGeneration;
@@ -6024,7 +6273,7 @@ async function createSession() {
   }
   if (!preserveActiveHttpReplayDraftBeforeSessionChange("creating a session")
     || !canLeaveSessionAfterDraftPreflight()) return;
-  const submittedName = els.dashboardCreateSessionName.value;
+  const submittedName = nameInput.value;
   const name = submittedName.trim();
   const actionSessionId = currentSessionId();
   const actionWorkspaceGeneration = workspaceStateGeneration;
@@ -6032,17 +6281,19 @@ async function createSession() {
   const actionScopeDraftVersion = state.targetScopeDraftVersion || 0;
   const actionMatchReplaceDraftVersion = state.matchReplaceDraftVersion || 0;
   const actionSequenceDraftVersion = state.sequenceDraftVersion || 0;
+  let createdSessionId = null;
   try {
     const response = await fetch("/api/sessions", {
       method: "POST",
       headers: {
         "content-type": "application/json",
       },
-      body: JSON.stringify({ name: name || null }),
+      body: JSON.stringify({ name: name || null, ...(group ? { group } : {}) }),
     });
     if (!response.ok) {
       throw new Error(await response.text());
     }
+    createdSessionId = (await response.json().catch(() => null))?.id || null;
   } catch (error) {
     await reconcileSessionsAfterActionError(actionSessionId, actionWorkspaceGeneration);
     throw error;
@@ -6054,15 +6305,17 @@ async function createSession() {
     await reconcileSessionsAfterCompletedAction();
     return;
   }
-  if (els.dashboardCreateSessionName.value === submittedName) els.dashboardCreateSessionName.value = "";
+  if (nameInput.value === submittedName) nameInput.value = "";
+  // The new session is the one the proxy listener records into, and the one
+  // this window shows next.
+  state.viewedSessionId = createdSessionId;
   await reloadSessionWorkspace({ cleanupBeforeReset: false });
 }
 
-async function activateSessionById(id, { force = false } = {}) {
+// Shows another session in this window. Nothing else changes: the proxy
+// listener keeps recording where it records, and no session's work is cut.
+async function viewSessionById(id) {
   if (!preserveActiveHttpReplayDraftBeforeSessionChange("switching sessions")) return;
-  // Busy confirmation follows the latest requested destination, not reply order.
-  // Ordinary completion still reconciles every request that reached the server.
-  const activationIntent = sessionActivationIntent = {};
   const entrySessionId = currentSessionId();
   const entryWorkspaceGeneration = workspaceStateGeneration;
   const canContinuePreflight = () => {
@@ -6101,42 +6354,20 @@ async function activateSessionById(id, { force = false } = {}) {
   const actionScopeDraftVersion = state.targetScopeDraftVersion || 0;
   const actionMatchReplaceDraftVersion = state.matchReplaceDraftVersion || 0;
   const actionSequenceDraftVersion = state.sequenceDraftVersion || 0;
-  const ownsActionWorkspace = () => actionSessionId === currentSessionId()
-    && actionWorkspaceGeneration === workspaceStateGeneration;
   try {
-    const response = await fetch(`/api/sessions/${id}/activate${force ? "?force=true" : ""}`, {
-      method: "POST",
-    });
+    // The server loads the session before this window lets go of the one it
+    // shows. A session that does not load leaves the window as it is, and
+    // loading a large one takes seconds, in which editing here goes on.
+    const response = await fetch(sessionQueryPath("/api/settings", id));
     if (!response.ok) {
-      const message = await response.text();
-      // The server already waited for work that was about to finish. What is left is
-      // a stream that does not end on its own — a server-sent event stream, a long
-      // poll — so offer to cut it rather than leaving the user stuck.
-      if (response.status === 409 && !force && message.includes("proxy activity is still running")) {
-        // Consent to cut activity belongs to this workspace, not just the fixed
-        // destination. Neither a late reply nor an open dialog may transfer it.
-        if (!ownsActionWorkspace() || activationIntent !== sessionActivationIntent) return;
-        showConfirmDialog(
-          `${message}.\n\nSwitch anyway? Anything still in flight is cut and will not be recorded.`,
-          () => {
-            if (!ownsActionWorkspace()) {
-              showToast("Switch canceled because the active workspace changed. Reopen the session to try again.", "error");
-              return;
-            }
-            if (activationIntent !== sessionActivationIntent) {
-              showToast("Switch canceled because a newer session action was started. Reopen the session to try again.", "error");
-              return;
-            }
-            activateSessionById(id, { force: true }).catch(handleWorkspaceActionError);
-          },
-          { title: "Proxy is busy", confirmLabel: "Switch anyway" },
-        );
-        return;
-      }
-      throw new Error(message);
+      throw new Error((await response.text()) || "Failed to open the session.");
     }
   } catch (error) {
-    await reconcileSessionsAfterActionError(actionSessionId, actionWorkspaceGeneration);
+    // Nothing changed. The list is read again in case the session is gone,
+    // unless the window has moved on to another workspace meanwhile.
+    if (actionSessionId === currentSessionId() && actionWorkspaceGeneration === workspaceStateGeneration) {
+      await loadSessions({ preserveWorkspaceOwner: true }).catch(() => {});
+    }
     throw error;
   }
   if (!canReloadWorkspaceAfterSessionAction(
@@ -6146,7 +6377,63 @@ async function activateSessionById(id, { force = false } = {}) {
     await reconcileSessionsAfterCompletedAction();
     return;
   }
+  state.viewedSessionId = id;
   state.selectedSessionId = id;
+  await reloadSessionWorkspace({ cleanupBeforeReset: false });
+}
+
+// Moves the proxy listener: it records into this session from its next
+// connection on. The window keeps showing the session it shows.
+async function recordMainListenerInto(id, { force = false } = {}) {
+  // Busy confirmation follows the latest requested destination, not reply order.
+  const activationIntent = sessionActivationIntent = {};
+  const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/activate${force ? "?force=true" : ""}`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    // The server already waited for work that was about to finish. What is left is
+    // a stream that does not end on its own — a server-sent event stream, a long
+    // poll — so offer to cut it rather than leaving the user stuck.
+    if (response.status === 409 && !force && message.includes("proxy activity is still running")) {
+      if (activationIntent !== sessionActivationIntent) return;
+      showConfirmDialog(
+        `${message}.\n\nMove the proxy anyway? Anything still in flight is cut and will not be recorded.`,
+        () => {
+          if (activationIntent !== sessionActivationIntent) {
+            showToast("Canceled because a newer session action was started. Try again from the session's menu.", "error");
+            return;
+          }
+          recordMainListenerInto(id, { force: true }).catch(handleWorkspaceActionError);
+        },
+        { title: "Proxy is busy", confirmLabel: "Move anyway" },
+      );
+      return;
+    }
+    throw new Error(message || "Failed to move the proxy.");
+  }
+  await refreshSessionFeeds();
+}
+
+// What a change to a session's feed leaves stale in a window that keeps its
+// view: where each session's traffic comes from, and what Intercept holds,
+// which the session the proxy listener leaves drops.
+async function refreshSessionFeeds() {
+  await Promise.all([
+    loadSessions({ preserveWorkspaceOwner: true }),
+    loadSessionActivity({ fresh: true }),
+    loadIntercepts(false),
+    loadResponseIntercepts(false),
+  ]);
+}
+
+// The session on screen was deleted, here, by sniper-cli or by an agent.
+// Nothing of it is left to save into, so no draft is flushed, and the window
+// shows the session the proxy listener records into.
+async function showDefaultSessionAfterDelete(deletedId) {
+  if (deletedId !== currentSessionId()) return;
+  state.viewedSessionId = null;
+  showToast("The session on screen was deleted. Showing the session the proxy records into.", "info", 6000);
   await reloadSessionWorkspace({ cleanupBeforeReset: false });
 }
 
@@ -6204,11 +6491,12 @@ function sessionQueryPath(path, sessionId = currentSessionId()) {
   return `${path}${separator}session_id=${encodeURIComponent(sessionId)}`;
 }
 
-function expectedActiveSessionIdForWrite(sessionId = currentSessionId(), options = {}) {
-  if (options.bypassExpectedActiveSessionGuard) {
-    return null;
-  }
-  return sessionId && sessionId === currentSessionId() ? sessionId : null;
+// The server refuses a write that carries this when the proxy listener
+// records into another session. The window used to send it with every write,
+// because it showed that session and nothing else. It shows any session now
+// and writes to the one it names, so it sends none; other clients still can.
+function expectedActiveSessionIdForWrite() {
+  return null;
 }
 
 function sessionWritePath(path, sessionId = currentSessionId(), options = {}) {
@@ -8948,8 +9236,14 @@ function connectEvents() {
     }
   });
 
+  // The session's context was replaced on the server: read it again.
   eventSource.addEventListener("session_changed", () => {
     handleExternalSessionChanged(eventSessionId).catch((error) => console.error(error));
+  });
+
+  eventSource.addEventListener("session_deleted", () => {
+    if (eventSource !== eventStreamOwner) return;
+    showDefaultSessionAfterDelete(eventSessionId).catch(handleWorkspaceActionError);
   });
 
   eventSource.addEventListener("workspace_state", (event) => {
@@ -9801,6 +10095,7 @@ function renderToolPanels() {
   const reconVisible = state.activeTool === "recon";
   const templatesVisible = state.activeTool === "templates";
   els.dashboardShell.classList.toggle("hidden", !dashboardVisible);
+  els.sessionPageButton?.setAttribute("aria-pressed", String(dashboardVisible));
   els.proxyShell.classList.toggle("hidden", !proxyVisible);
   els.replayShell.classList.toggle("hidden", !replayVisible);
   els.toolsShell.classList.toggle("hidden", !decoderVisible);
@@ -10087,17 +10382,58 @@ function loadScriptOnce(source) {
   });
 }
 
-// New session gives its place to a name field; Escape, or a created session,
-// gives it back.
-function openSessionCreateForm() {
-  els.dashboardNewSessionButton.classList.add("hidden");
-  els.dashboardCreateSessionForm.classList.remove("hidden");
-  els.dashboardCreateSessionName.focus();
+// ── Session page ──
+// The session on screen first, and every session beside it. It has no tab in
+// the top strip: the gear beside the session list opens it over the tool in
+// use and gives that tool back.
+function toggleSessionPage() {
+  if (state.activeTool !== "dashboard") {
+    state.toolUnderSessionPage = state.activeTool;
+    state.sessionPageView = "overview";
+    setActiveTool("dashboard");
+    renderToolPanels();
+    loadSessions().catch(handleWorkspaceActionError);
+    return;
+  }
+  // As a click on that tool's tab, which also loads what the tool shows. With
+  // none remembered the page was open when the window loaded.
+  const tool = state.toolUnderSessionPage || "proxy";
+  const tabName = tool === "recon" || tool === "templates" ? "templates" : tool;
+  mainTabs.find((tab) => tab.dataset.tool === tabName)?.click();
 }
 
-function closeSessionCreateForm() {
-  els.dashboardCreateSessionForm.classList.add("hidden");
-  els.dashboardNewSessionButton.classList.remove("hidden");
+function setSessionPageView(view) {
+  state.sessionPageView = view === "all" ? "all" : "overview";
+  renderDashboard();
+}
+
+function renderSessionPageView() {
+  const view = state.sessionPageView === "all" ? "all" : "overview";
+  (els.sessionPageTabs || []).forEach((tab) => tab.classList.toggle("active", tab.dataset.sessionView === view));
+  els.sessionOverviewPanel.classList.toggle("hidden", view !== "overview");
+  els.sessionAllPanel.classList.toggle("hidden", view !== "all");
+}
+
+// The menu a session has in the list, under the Overview's ⋯.
+function openSessionOverviewMenu(event) {
+  // The document closes this menu on any click that reaches it.
+  event.stopPropagation();
+  if (!state.overviewSessionId) return;
+  const at = els.sessionOverviewMoreButton.getBoundingClientRect();
+  showSessionContextMenu({ clientX: at.left, clientY: at.bottom + 4 }, state.overviewSessionId, "overview");
+  // Its right edge under the button's, as the ⋯ menu of All sessions opens.
+  if (sessionContextMenuEl) {
+    sessionContextMenuEl.style.left = `${Math.max(4, at.right - sessionContextMenuEl.getBoundingClientRect().width)}px`;
+  }
+}
+
+// What a session is about: its scope, or else the hosts it captured most.
+function sessionIdentity(overview) {
+  const scope = overview?.scope || [];
+  const items = scope.length ? scope : (overview?.top_hosts || []).map((entry) => entry.host);
+  const total = scope.length ? overview.scope_count || scope.length : items.length;
+  const shown = Math.min(2, items.length);
+  return items.slice(0, 2).join(", ") + (total > shown ? ` +${total - shown}` : "");
 }
 
 function renderDashboard() {
@@ -10112,9 +10448,9 @@ function renderDashboard() {
   // A redraw replaces the rename field too; keep the caret where it was.
   const renameSelection = focusedControl?.classList?.contains("session-name-input")
     ? [focusedControl.selectionStart, focusedControl.selectionEnd] : null;
-  // Ensure selectedSessionId defaults to active session
-  const activeSession = state.sessions.find((session) => session.active)
-    || state.sessions.find((session) => session.id === state.activeSession?.id) || null;
+  // The selection starts on the session on screen.
+  const activeSession = state.sessions.find((session) => session.id === state.activeSession?.id)
+    || state.sessions.find((session) => session.active) || null;
   if (!state.sessions.some((session) => session.id === state.selectedSessionId)) {
     state.selectedSessionId = null;
   }
@@ -10136,12 +10472,6 @@ function renderDashboard() {
   const severityLine = (findings) => SEVERITIES.filter((name) => findings?.[name])
     .map((name) => `${Number(findings[name]).toLocaleString()} ${name}`).join(" · ");
   const more = (shown, total) => (total > shown ? ` +${total - shown}` : "");
-  const sessionIdentity = (overview) => {
-    const scope = overview?.scope || [];
-    if (scope.length) return scope.slice(0, 2).join(", ") + more(Math.min(2, scope.length), overview.scope_count || scope.length);
-    const hosts = (overview?.top_hosts || []).map((entry) => entry.host);
-    return hosts.slice(0, 2).join(", ") + more(Math.min(2, hosts.length), hosts.length);
-  };
   const tile = (label, value, note) => `<div class="dashboard-tile"><div class="dashboard-tile-value">${value}</div>`
     + `<div class="dashboard-tile-label">${label}</div>${note ? `<div class="dashboard-tile-note">${note}</div>` : ""}</div>`;
   const totals = { bytes: 0, requests: 0, websockets: 0, tcp: 0, tcpUnknown: false, findings: {}, latest: null };
@@ -10170,44 +10500,75 @@ function renderDashboard() {
   ].join("") : "";
   const largest = Math.max(1, ...state.sessions.map((session) => Number(session.storage_bytes) || 0));
 
-  const overview = current?.overview || {};
   const section = (title, body) => (body ? `<section><h4>${title}</h4>${body}</section>` : "");
   const list = (items) => (items.length ? `<ul>${items.map((item) => `<li>${item}</li>`).join("")}</ul>` : "");
-  const scopeBody = (overview.scope || []).length
-    ? `<div class="dashboard-chips">${overview.scope.map((pattern) => `<span class="dashboard-chip">${escapeHtml(pattern)}</span>`).join("")}`
-      + `${more(overview.scope.length, overview.scope_count)}</div>`
-    : "";
-  const excludedBody = (overview.excluded_scope || []).length
-    ? `<p class="dashboard-dim">Excluded: ${escapeHtml(overview.excluded_scope.join(", "))}${more(overview.excluded_scope.length, overview.excluded_scope_count)}</p>`
-    : "";
-  const kept = [
-    overview.marked_requests ? `${Number(overview.marked_requests).toLocaleString()} marked in HTTP history` : "",
-    overview.pinned_replay_count ? `Pinned in Replay: ${escapeHtml(overview.pinned_replays.join(", "))}${more(overview.pinned_replays.length, overview.pinned_replay_count)}` : "",
-    overview.replace_rule_count ? `Replace: ${escapeHtml(overview.replace_rules.join(", "))}${more(overview.replace_rules.length, overview.replace_rule_count)}` : "",
-  ].filter(Boolean);
   const KINDS = { "manual scan": "Manual scan", "auto scan": "Auto scan", recon: "Recon" };
-  const scans = (overview.activity || []).map((entry) => [
-    KINDS[entry.kind] || escapeHtml(entry.kind),
-    entry.status && entry.status !== "completed" ? escapeHtml(entry.status) : "", escapeHtml(entry.target),
-    entry.matched != null ? `${Number(entry.matched).toLocaleString()} matched` : "",
-    escapeHtml(formatTimestamp(entry.started_at)),
-  ].filter(Boolean).join(" · "));
-  const findingBadges = SEVERITIES.filter((name) => overview.findings?.[name])
-    .map((name) => `<span class="dashboard-severity"><span class="severity-badge severity-${name}">${name.toUpperCase()}</span>${Number(overview.findings[name]).toLocaleString()}</span>`)
-    .join("");
-  const sections = [
-    section("Scope", scopeBody + excludedBody),
-    section("Hosts", list((overview.top_hosts || []).map((entry) => `${escapeHtml(entry.host)} <span class="dashboard-dim">${Number(entry.requests).toLocaleString()}</span>`))),
-    section("Marked and kept", list(kept)),
-    section("TCP", current?.tcp_connection_count > 0
-      ? `<p>${Number(current.tcp_connection_count).toLocaleString()} retained connection${current.tcp_connection_count === 1 ? "" : "s"} · Open this session, then Capture → TCP.</p>`
-      : current?.tcp_connection_count === null ? '<p class="dashboard-dim">History count unavailable. Open this session, then Capture → TCP to inspect.</p>' : ""),
-    section("Scans", list(scans) + (overview.activity_count > scans.length ? `<p class="dashboard-dim">${more(scans.length, overview.activity_count).trim()} earlier</p>` : "")),
-    section("Findings", findingBadges ? `<div class="dashboard-severities">${findingBadges}</div>` : ""),
-  ].join("");
-  els.dashboardDetail.innerHTML = current
-    ? `<h3>${escapeHtml(current.name)}</h3>${sections ? `<div class="dashboard-detail-grid">${sections}</div>` : '<p class="dashboard-dim">Nothing recorded in this session yet.</p>'}`
-    : "";
+  // What was set up and done in one session.
+  const summary = (session) => {
+    const overview = session.overview || {};
+    const scopeBody = (overview.scope || []).length
+      ? `<div class="dashboard-chips">${overview.scope.map((pattern) => `<span class="dashboard-chip">${escapeHtml(pattern)}</span>`).join("")}`
+        + `${more(overview.scope.length, overview.scope_count)}</div>`
+      : "";
+    const excludedBody = (overview.excluded_scope || []).length
+      ? `<p class="dashboard-dim">Excluded: ${escapeHtml(overview.excluded_scope.join(", "))}${more(overview.excluded_scope.length, overview.excluded_scope_count)}</p>`
+      : "";
+    const kept = [
+      overview.marked_requests ? `${Number(overview.marked_requests).toLocaleString()} marked in HTTP history` : "",
+      overview.pinned_replay_count ? `Pinned in Replay: ${escapeHtml(overview.pinned_replays.join(", "))}${more(overview.pinned_replays.length, overview.pinned_replay_count)}` : "",
+      overview.replace_rule_count ? `Replace: ${escapeHtml(overview.replace_rules.join(", "))}${more(overview.replace_rules.length, overview.replace_rule_count)}` : "",
+    ].filter(Boolean);
+    const scans = (overview.activity || []).map((entry) => [
+      KINDS[entry.kind] || escapeHtml(entry.kind),
+      entry.status && entry.status !== "completed" ? escapeHtml(entry.status) : "", escapeHtml(entry.target),
+      entry.matched != null ? `${Number(entry.matched).toLocaleString()} matched` : "",
+      escapeHtml(formatTimestamp(entry.started_at)),
+    ].filter(Boolean).join(" · "));
+    const findingBadges = SEVERITIES.filter((name) => overview.findings?.[name])
+      .map((name) => `<span class="dashboard-severity"><span class="severity-badge severity-${name}">${name.toUpperCase()}</span>${Number(overview.findings[name]).toLocaleString()}</span>`)
+      .join("");
+    // Its TCP history is in Capture, once the session is the one on screen.
+    const tcpWhere = session.id === state.activeSession?.id ? "Capture → TCP" : "Open this session, then Capture → TCP";
+    const sections = [
+      section("Scope", scopeBody + excludedBody),
+      section("Hosts", list((overview.top_hosts || []).map((entry) => `${escapeHtml(entry.host)} <span class="dashboard-dim">${Number(entry.requests).toLocaleString()}</span>`))),
+      section("Marked and kept", list(kept)),
+      section("TCP", session.tcp_connection_count > 0
+        ? `<p>${Number(session.tcp_connection_count).toLocaleString()} retained connection${session.tcp_connection_count === 1 ? "" : "s"} · ${tcpWhere}.</p>`
+        : session.tcp_connection_count === null ? `<p class="dashboard-dim">History count unavailable. ${tcpWhere} to inspect.</p>` : ""),
+      section("Scans", list(scans) + (overview.activity_count > scans.length ? `<p class="dashboard-dim">${more(scans.length, overview.activity_count).trim()} earlier</p>` : "")),
+      section("Findings", findingBadges ? `<div class="dashboard-severities">${findingBadges}</div>` : ""),
+    ].join("");
+    return sections ? `<div class="dashboard-detail-grid">${sections}</div>` : '<p class="dashboard-dim">Nothing recorded in this session yet.</p>';
+  };
+  els.dashboardDetail.innerHTML = current ? `<h3>${escapeHtml(current.name)}</h3>${summary(current)}` : "";
+
+  // The Overview: the session on screen, by itself. Its actions keep to the
+  // session drawn here, as the folder button above keeps to its path.
+  const shown = activeSession;
+  state.overviewSessionId = shown?.id || null;
+  const renamingTitle = Boolean(shown) && state.sessionRename?.place === "overview" && state.sessionRename.id === shown.id;
+  // The field being replaced is no longer the editor: its blur must not save.
+  if (renamingTitle) sessionRenameInput = null;
+  els.sessionOverviewName.innerHTML = !shown ? "No session"
+    : renamingTitle
+      ? `<input class="session-name-input" type="text" value="${escapeHtml(state.sessionRename.draft)}" aria-label="Rename session ${escapeHtml(shown.name)}" spellcheck="false" autocomplete="off" />`
+      : `${sessionMakerMark(shown)}${escapeHtml(shown.name)}`;
+  els.sessionOverviewPath.textContent = shown?.storage_path || "";
+  els.sessionOverviewStorage.hidden = !shown;
+  const websockets = Number(shown?.websocket_count) || 0;
+  const tcp = Number(shown?.tcp_connection_count) || 0;
+  els.sessionOverviewTiles.innerHTML = shown ? [
+    tile("Requests", formatCappedCount(shown.request_count),
+      [websockets ? `and ${websockets.toLocaleString()} WebSocket session${websockets === 1 ? "" : "s"}` : "",
+        tcp ? `${tcp.toLocaleString()} TCP connection${tcp === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ")),
+    tile("Findings", sessionFindingCount(shown).toLocaleString(), severityLine(shown.overview?.findings)),
+    tile("Last HTTP capture", shown.overview?.last_captured_at ? escapeHtml(formatTimestamp(shown.overview.last_captured_at)) : "None yet"),
+    tile("On disk", formatSize(shown.storage_bytes)),
+  ].join("") : "";
+  els.sessionOverviewDetail.innerHTML = shown ? summary(shown) : "";
+  if (renamingTitle) wireSessionRenameInput(renameSelection, els.sessionOverviewName);
+  renderSessionPageView();
 
   // Sort sessions
   const sortedSessions = getSortedSessions();
@@ -10230,15 +10591,23 @@ function renderDashboard() {
     });
   }
 
+  const renamingHere = state.sessionRename?.place === "dashboard";
   // The field being replaced is no longer the editor: its blur must not save.
-  sessionRenameInput = null;
+  if (renamingHere) sessionRenameInput = null;
   els.dashboardSessionsBody.innerHTML = sortedSessions.length
     ? sortedSessions
-        .map((session) => `
-          <tr class="${["history-row", session.id === state.selectedSessionId && "selected", session.active && "session-active"].filter(Boolean).join(" ")}" data-id="${session.id}">
-            <td>${state.sessionRename?.id === session.id
+        .map((session) => {
+          const shown = session.id === state.activeSession?.id;
+          const feed = sessionFeed(session.id);
+          const port = feed.kind !== "none" && feed.port ? `:${feed.port}` : "";
+          const portTitle = feed.kind === "main" ? "The proxy listener records into this session"
+            : "This session records from its own port";
+          return `
+          <tr class="${["history-row", session.id === state.selectedSessionId && "selected", shown && "session-active"].filter(Boolean).join(" ")}" data-id="${session.id}">
+            <td>${renamingHere && state.sessionRename.id === session.id
               ? `<input class="session-name-input" type="text" value="${escapeHtml(state.sessionRename.draft)}" aria-label="Rename session ${escapeHtml(session.name)}" spellcheck="false" autocomplete="off" />`
-              : `<button class="session-name session-select-button" type="button" title="${escapeHtml(session.name)}" aria-pressed="${session.id === state.selectedSessionId}" aria-label="Select session ${escapeHtml(session.name)}">${escapeHtml(session.name)}</button>`}${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
+              : `<button class="session-name session-select-button" type="button" title="${escapeHtml(session.name)}" aria-pressed="${session.id === state.selectedSessionId}" aria-label="Select session ${escapeHtml(session.name)}">${sessionMakerMark(session)}${escapeHtml(session.name)}</button>`}${port ? `<span class="session-sidebar-port in-table" title="${portTitle}">${escapeHtml(port)}</span>` : ""}${sessionIdentity(session.overview) ? `<div class="session-identity">${escapeHtml(sessionIdentity(session.overview))}</div>` : ""}</td>
+            <td class="session-group-cell"${session.group ? ` title="${escapeHtml(session.group)}"` : ""}>${session.group ? escapeHtml(session.group) : '<span class="dashboard-dim">Default</span>'}</td>
             <td><div class="session-size"><span class="session-size-bar"><span style="width:${Math.max(2, Math.round((Number(session.storage_bytes) || 0) / largest * 100))}%"></span></span>${formatSize(session.storage_bytes)}</div></td>
             <td>${formatCappedCount(session.request_count)}</td>
             <td>${formatCappedCount(session.websocket_count, retainedEntriesCap())}</td>
@@ -10247,17 +10616,18 @@ function renderDashboard() {
             <td>${session.overview?.last_captured_at ? escapeHtml(formatTimestamp(session.overview.last_captured_at)) : "-"}</td>
             <td>${escapeHtml(formatTimestamp(session.created_at))}</td>
             <td>
-              ${session.active ? "" : `<div class="session-actions">
+              ${shown ? "" : `<div class="session-actions">
                 <button class="secondary-action session-open-button" type="button" aria-label="Open session ${escapeHtml(session.name)}">Open</button>
-                <button class="session-delete-button" type="button" aria-label="Delete session ${escapeHtml(session.name)}">Delete</button>
+                ${feed.kind === "none" ? `<button class="session-delete-button" type="button" aria-label="Delete session ${escapeHtml(session.name)}">Delete</button>` : ""}
               </div>`}
             </td>
           </tr>
-        `)
+        `;
+        })
         .join("")
     : `
         <tr class="empty-row">
-          <td colspan="9">No sessions are available yet.</td>
+          <td colspan="10">No sessions are available yet.</td>
         </tr>
       `;
 
@@ -10272,7 +10642,7 @@ function renderDashboard() {
       renderDashboard();
     });
   });
-  if (state.sessionRename) wireSessionRenameInput(renameSelection);
+  if (renamingHere) wireSessionRenameInput(renameSelection);
 
   // Activate button = switch session
   Array.from(els.dashboardSessionsBody.querySelectorAll(".session-open-button")).forEach((btn) => {
@@ -10282,7 +10652,7 @@ function renderDashboard() {
       if (!row) return;
       const { id } = row.dataset;
       if (!id) return;
-      withButtonProgress(btn, () => activateSessionById(id)).catch(handleWorkspaceActionError);
+      withButtonProgress(btn, () => viewSessionById(id)).catch(handleWorkspaceActionError);
     });
   });
 
@@ -10315,6 +10685,704 @@ function renderDashboard() {
       .find((row) => row.dataset.id === focusedSessionId);
     replacementRow?.querySelector(`.${focusedClass}`)?.focus({ preventScroll: true });
   }
+  // The sidebar lists the same sessions.
+  renderSessionSidebar();
+}
+
+// ── Session sidebar ──
+// Every session one click away, as Claude and Codex list their conversations.
+// A click shows the session, as Open does in the table of all sessions.
+// The rows last drawn: a read that changes nothing leaves focus, hover and a
+// click in progress alone.
+let sessionSidebarMarkup = "";
+// The rename whose field the rows last drawn hold.
+let sidebarRenameEdit = null;
+let sessionListRefresh = null;
+// The activity read in flight, if one is.
+let sessionActivityReading = null;
+let sidebarSessionCreating = false;
+// The group a new session is made in, when a group's + opened the name field.
+let sidebarCreateGroup = null;
+// What the group name field is for; see `openSidebarGroupName`.
+let sidebarGroupEdit = null;
+// What is dragged in the session list: { session: id }, or a folder as
+// { group: name }, where Default, which is no group, is null.
+let sidebarDrag = null;
+// The element marked as where the drop would land.
+let sidebarDropMark = null;
+
+function renderSessionSidebar() {
+  const list = els.sessionSidebarList;
+  if (!list) return;
+  const hidden = state.sessionSidebarHidden === true;
+  els.sessionSidebar.classList.toggle("hidden", hidden);
+  const label = hidden ? "Show sessions" : "Hide sessions";
+  els.sessionSidebarToggle.setAttribute("aria-expanded", String(!hidden));
+  els.sessionSidebarToggle.setAttribute("aria-label", label);
+  els.sessionSidebarToggle.title = label;
+  // While a sort is on the dragged order waits, and the list's menu says so.
+  els.sessionSortButton?.classList.toggle("is-sorted", Boolean(sessionSortOrder()));
+  const activeId = currentSessionId();
+  // Opening a session is seeing what finished in it, with the list shown or not.
+  state.sessionsFinished.delete(activeId);
+  if (hidden) return;
+  const editing = state.sessionRename?.place === "sidebar" ? state.sessionRename : null;
+  // A name being typed keeps its field: a new one would lose IME composition
+  // and undo. The rows catch up when the rename ends.
+  if (editing && editing === sidebarRenameEdit && sessionRenameInput?.isConnected) return;
+  // The row under the pointer must stay while it is dragged. The drop, or the
+  // end of the drag, draws the list again.
+  if (sidebarDrag) return;
+  const rows = (sessions) => sessions
+    .map((session) => sessionSidebarRow(session, session.id === activeId, editing)).join("");
+  // The list has two sections, each under a name that folds. Pinned is
+  // there when anything is pinned. Sessions holds all the others
+  // in folders: Default, the sessions in no group, which is always there, and
+  // each group. A + beside a folder makes a session in it. The sections and
+  // Default are the list's own: no group has their name. The sections keep
+  // their place, and Default is dragged among the groups as they are.
+  const layout = sessionSidebarLayout();
+  const foldedGroups = new Set(state.sessionGroupsCollapsed);
+  const foldedSections = new Set(state.sessionSectionsCollapsed);
+  // One shape for everything that folds. `key` is the attribute that says
+  // which name this is, and `group` the group a + makes a session in: "" is
+  // none, null is no + at all.
+  const block = (attributes, key, label, open, group, body) => `<li class="session-sidebar-group${attributes}>`
+    + `<div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" ${key} aria-expanded="${open}">`
+    + `<span class="session-sidebar-group-name">${label}</span></button>`
+    + `${group === null ? "" : `<button class="session-sidebar-group-add" type="button" data-add-to-group="${group}" aria-label="New session in ${label}" title="New session in ${label}">+</button>`}</div>`
+    + `${open ? body : ""}</li>`;
+  const listed = (sessions) => `<ul class="session-sidebar-group-list">${rows(sessions)}</ul>`;
+  const grouped = new Map(layout.groups);
+  const folders = sessionFolderOrder(layout.groups).map((name) => {
+    if (name === null) {
+      return block(' session-sidebar-default" draggable="true" data-drop-default', 'data-section="default"', "Default",
+        !foldedSections.has("default"), "", listed(layout.loose));
+    }
+    const group = escapeHtml(name);
+    return block(`" draggable="true" data-drag-group="${group}"`, `data-group="${group}"`, group,
+      !foldedGroups.has(name), group, listed(grouped.get(name)));
+  }).join("");
+  const markup = (layout.pinned.length
+    ? block(' session-sidebar-section session-sidebar-pinned" data-drop-pinned', 'data-section="pinned"', "Pinned",
+      !foldedSections.has("pinned"), null, listed(layout.pinned)) : "")
+    + block(' session-sidebar-section"', 'data-section="sessions"', "Sessions", !foldedSections.has("sessions"), null,
+      `<ul class="session-sidebar-folders">${folders}</ul>`);
+  if (markup === sessionSidebarMarkup) return;
+  const focused = document.activeElement;
+  const focusedId = focused?.classList?.contains("session-sidebar-row") ? focused.dataset.id : null;
+  const focusedGroup = focused?.classList?.contains("session-sidebar-group-toggle") ? focused.dataset.group : null;
+  const selection = focused?.classList?.contains("session-sidebar-rename")
+    ? [focused.selectionStart, focused.selectionEnd] : null;
+  // The field being replaced is no longer the editor: its blur must not save.
+  if (editing) sessionRenameInput = null;
+  list.innerHTML = markup;
+  sessionSidebarMarkup = markup;
+  sidebarRenameEdit = editing;
+  if (focusedId) {
+    Array.from(list.querySelectorAll(".session-sidebar-row"))
+      .find((row) => row.dataset.id === focusedId)?.focus({ preventScroll: true });
+  }
+  // A group folded from the keyboard keeps the focus on its name.
+  if (focusedGroup) {
+    Array.from(list.querySelectorAll(".session-sidebar-group-toggle"))
+      .find((toggle) => toggle.dataset.group === focusedGroup)?.focus({ preventScroll: true });
+  }
+  // After the row: a rename just started takes the focus from it.
+  if (editing) wireSessionRenameInput(selection, list);
+}
+
+function sessionSidebarRow(session, active, editing) {
+  const name = escapeHtml(session.name);
+  if (editing?.id === session.id) {
+    return `<li><input class="session-name-input session-sidebar-rename" type="text" value="${escapeHtml(editing.draft)}"`
+      + ` aria-label="Rename session ${name}" spellcheck="false" autocomplete="off" /></li>`;
+  }
+  const JOBS = { fuzzer: "Fuzzer", scan: "Scan", recon: "Recon" };
+  const jobs = (kinds) => kinds.map((kind) => JOBS[kind] || kind).join(", ");
+  const activity = state.sessionActivity.get(session.id);
+  const held = activity?.held || 0;
+  const heldLabel = held ? `${held.toLocaleString()} held in Intercept` : "";
+  const running = activity?.running?.length ? `Running: ${jobs(activity.running)}` : "";
+  const finished = !running && state.sessionsFinished.has(session.id)
+    ? `${jobs(state.sessionsFinished.get(session.id))} finished` : "";
+  const detail = sessionRowDetail(session);
+  // Which port feeds the session, if any: the list is where that is read.
+  const feed = sessionFeed(session.id);
+  const port = feed.kind !== "none" && feed.port ? `:${feed.port}` : "";
+  const portTitle = feed.kind === "main" ? "The proxy listener records into this session"
+    : "This session records from its own port";
+  // A browser Sniper opened is sending to the session. One a person pointed
+  // at the proxy by hand is not known, so nothing is said of it.
+  const browser = activity?.browser ? "A browser opened from Sniper sends its traffic here" : "";
+  // The relay listeners the session has on, one to a line. A session keeps
+  // up to sixteen, so the row shows the first that runs and how many more
+  // there are, as one token: a bare "TCP" read as the name of the proxy port
+  // that follows it.
+  const relays = activity?.tcp || [];
+  const relay = relays.find((listener) => listener.running) || relays[0];
+  const relayLines = relays.map((listener) => `${listener.udp ? "UDP" : "TCP"} :${listener.port} → ${listener.target}${listener.running ? "" : ", not running"}`);
+  const label = [session.name, session.created_by && `made by ${session.created_by}`, ...detail.spoken, port && `proxy ${port}`,
+    ...relayLines, browser && "browser open", heldLabel, running, finished].filter(Boolean).join(", ");
+  const pinned = (state.sessionPinned || []).includes(session.id);
+  // One mark before the name says what the session is doing. What needs a
+  // look comes first: a job running, then one that ended unseen, then traffic
+  // arriving. A session doing nothing keeps the place, so the names line up.
+  const [status, statusTitle] = running ? ["running", running] : finished ? ["finished", finished]
+    : feed.kind !== "none" ? ["receiving", portTitle] : ["", ""];
+  return `<li draggable="true" data-drag-session="${escapeHtml(session.id)}"><button class="session-sidebar-row${active ? " active" : ""}" type="button" data-id="${escapeHtml(session.id)}"`
+    + `${active ? ' aria-current="true"' : ""} tabindex="${active ? 0 : -1}" aria-label="${escapeHtml(label)}">`
+    + `<span class="session-sidebar-status${status ? ` ${status}` : ""}"${status ? ` title="${escapeHtml(statusTitle)}"` : ""}></span>`
+    + `<span class="session-sidebar-text"><span class="session-sidebar-name">${sessionMakerMark(session)}${name}</span>`
+    + `${detail.text ? `<span class="session-sidebar-identity" title="${escapeHtml(detail.title)}">${escapeHtml(detail.text)}</span>` : ""}</span>`
+    + `${relay ? `<span class="session-sidebar-tcp${relays.some((listener) => !listener.running) ? " failed" : ""}" title="${escapeHtml(relayLines.join("\n"))}">`
+      + `${relay.udp ? "udp" : "tcp"}:${relay.port}${relays.length > 1 ? `+${relays.length - 1}` : ""}</span>` : ""}`
+    + `${browser ? `<span class="session-sidebar-browser" title="${browser}"></span>` : ""}`
+    + `${port ? `<span class="session-sidebar-port" title="${portTitle}">${escapeHtml(port)}</span>` : ""}`
+    + `${held ? `<span class="findings-badge session-sidebar-held" title="${heldLabel}">${held.toLocaleString()}</span>` : ""}`
+    + "</button>"
+    // Beside the row, where the mark is: it shows under the pointer, and a
+    // click pins the session or lets it go. The row's menu does the same for
+    // the keyboard.
+    + `<button class="session-sidebar-pin" type="button" data-pin="${escapeHtml(session.id)}" tabindex="-1" aria-pressed="${pinned}"`
+    + ` aria-label="${pinned ? "Unpin" : "Pin"} ${name}" title="${pinned ? "Unpin" : "Pin"}"></button></li>`;
+}
+
+// What a row can say under its session's name, in the order the list's menu
+// offers them: the name kept in the settings, then the menu's word for it.
+function sessionRowDetailChoices() {
+  return [["domains", "Domains"], ["captured", "Last capture"], ["created", "Created"], ["requests", "Requests"]];
+}
+
+// The day of a time as the list says it: "Nov 26", with the year when it is
+// not this one. "" for no time.
+function sessionDay(value, now = new Date()) {
+  const date = new Date(value ?? NaN);
+  if (!Number.isFinite(date.getTime())) return "";
+  return date.toLocaleDateString("en-US", date.getFullYear() === now.getFullYear()
+    ? { month: "short", day: "numeric" } : { month: "short", day: "numeric", year: "numeric" });
+}
+
+// What a row says under its name: the facts the list's menu chose. The days
+// and the count are short and come first, so a long list of domains is what
+// gives way. `title` names each fact, and `spoken` is for the row's label.
+// The days and the count are as of the last read of the session list.
+function sessionRowDetail(session) {
+  const shown = new Set(state.sessionRowDetails || ["domains"]);
+  const created = shown.has("created") ? sessionDay(session.created_at) : "";
+  const captured = shown.has("captured") ? sessionDay(session.overview?.last_captured_at) : "";
+  const count = Number(session.request_count) || 0;
+  const requests = shown.has("requests") ? `${count.toLocaleString("en-US")} ${count === 1 ? "request" : "requests"}` : "";
+  const domains = shown.has("domains") ? sessionIdentity(session.overview) : "";
+  // Both days read as the span the session was used over. The same day is
+  // said once.
+  const days = created && captured && created !== captured ? `${created} – ${captured}` : created || captured;
+  const named = [created && `Created ${created}`, captured && `Last capture ${captured}`, requests].filter(Boolean);
+  return {
+    text: [days, requests, domains].filter(Boolean).join(" · "),
+    title: [...named, domains].filter(Boolean).join(" · "),
+    spoken: named.map((fact) => fact[0].toLowerCase() + fact.slice(1)),
+  };
+}
+
+// The order a sort gives two sessions, by the name saved for it, or null
+// while the list is in the order it was dragged into.
+function sessionSortOrder() {
+  const newest = (a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0);
+  const captured = (session) => Date.parse(session.overview?.last_captured_at) || 0;
+  return {
+    // What captured last, then what never captured.
+    recent: (a, b) => (captured(b) - captured(a)) || newest(a, b),
+    created: newest,
+    name: (a, b) => (a.name || "").localeCompare(b.name || "") || newest(a, b),
+    // A person's own first, then each agent's together.
+    agent: (a, b) => (a.created_by || "").localeCompare(b.created_by || "") || newest(a, b),
+  }[state.sessionSort] || null;
+}
+
+// The session list as it is drawn: the pinned sessions, the sessions in no
+// group, then each group. The pinned are in the order they were pinned, and
+// the groups in the order they were dragged into, whatever the sort. A group
+// that was made or dragged in the list is drawn while no session is in it;
+// one that was not comes after those, by name.
+// With no sort, sessions are in the order a person dragged them into. One
+// never dragged is newest first and ahead of the dragged ones, so a new
+// session shows at the top.
+function sessionSidebarLayout() {
+  const rank = new Map((state.sessionOrder || []).map((id, index) => [id, index]));
+  const sessions = [...state.sessions].sort(sessionSortOrder() || ((a, b) => {
+    const [placeA, placeB] = [rank.get(a.id), rank.get(b.id)];
+    if (placeA !== undefined && placeB !== undefined) return placeA - placeB;
+    if (placeA !== placeB) return placeA === undefined ? -1 : 1;
+    return (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0);
+  }));
+  const pins = state.sessionPinned || [];
+  const rest = sessions.filter((session) => !pins.includes(session.id));
+  const order = state.sessionGroupOrder || [];
+  const groups = new Map(order.map((name) => [name, []]));
+  for (const session of rest) {
+    if (session.group) groups.set(session.group, [...(groups.get(session.group) || []), session]);
+  }
+  const place = (name) => (order.includes(name) ? order.indexOf(name) : Infinity);
+  return {
+    pinned: pins.map((id) => sessions.find((session) => session.id === id)).filter(Boolean),
+    loose: rest.filter((session) => !session.group),
+    // Two groups that were never dragged have no place to tell them apart.
+    groups: [...groups].sort(([a], [b]) => (place(a) - place(b)) || a.localeCompare(b)),
+  };
+}
+
+// The folders of Sessions in the order they are drawn: each group by its name,
+// and null for Default, which is no group. Default is first until a person
+// drags it, or a group above it; then it follows the group it was left under.
+function sessionFolderOrder(groups = sessionSidebarLayout().groups) {
+  const folders = groups.map(([name]) => name);
+  folders.splice(folders.indexOf(state.sessionDefaultAfter) + 1, 0, null);
+  return folders;
+}
+
+// `ids` with `moved` put before or after `target`, or last when `target` is
+// not among them.
+function reorderedIds(ids, moved, target, after) {
+  const rest = ids.filter((id) => id !== moved);
+  const at = rest.indexOf(target);
+  rest.splice(at === -1 ? rest.length : at + (after ? 1 : 0), 0, moved);
+  return rest;
+}
+
+// Where the pointer is, for what is dragged. A session lands beside another
+// session, in a group by its name, or on the list itself, which is no group.
+// Among the pinned it lands beside one of them, or on their block. A folder
+// lands beside another folder: a group, or Default. Null where a drop means
+// nothing.
+function sidebarDropTarget(event) {
+  if (!sidebarDrag) return null;
+  const row = event.target.closest?.("li[data-drag-session]");
+  const groupItem = event.target.closest?.("li[data-drag-group]");
+  const pinnedItem = event.target.closest?.("li[data-drop-pinned]");
+  const lowerHalf = (element) => {
+    const box = element.getBoundingClientRect();
+    return event.clientY > box.top + box.height / 2;
+  };
+  if (!sidebarDrag.session) {
+    const folder = groupItem || event.target.closest?.("li[data-drop-default]");
+    const group = groupItem ? groupItem.dataset.dragGroup : null;
+    if (!folder || group === sidebarDrag.group) return null;
+    return { element: folder, group, after: lowerHalf(folder) };
+  }
+  if (row?.dataset.dragSession === sidebarDrag.session) return null;
+  if (pinnedItem) {
+    return row ? { element: row, session: row.dataset.dragSession, after: lowerHalf(row), pinned: true }
+      : { element: pinnedItem, pinned: true, into: true };
+  }
+  // A sorted list has no place beside a session: the drop is into its group.
+  if (row && !sessionSortOrder()) return { element: row, session: row.dataset.dragSession, after: lowerHalf(row) };
+  if (groupItem) return { element: groupItem, group: groupItem.dataset.dragGroup, into: true };
+  // On Default, or on the space under everything, which is Default too.
+  const defaultItem = event.target.closest?.("li[data-drop-default]")
+    || els.sessionSidebarList.querySelector?.("li[data-drop-default]");
+  return { element: defaultItem || els.sessionSidebarList, group: null, into: true };
+}
+
+function markSidebarDrop(target) {
+  sidebarDropMark?.classList.remove("drop-before", "drop-after", "drop-into");
+  sidebarDropMark = target?.element || null;
+  sidebarDropMark?.classList.add(target.into ? "drop-into" : target.after ? "drop-after" : "drop-before");
+}
+
+function endSidebarDrag() {
+  if (!sidebarDrag) return;
+  sidebarDrag = null;
+  markSidebarDrop(null);
+  els.sessionSidebarList.querySelector(".dragging")?.classList.remove("dragging");
+  // What changed while the drag held the list still.
+  renderSessionSidebar();
+}
+
+// A session dropped beside another takes that session's group and the place
+// next to it. Dropped on a group's name it is first in that group, and on the
+// list itself first among the sessions in no group.
+async function dropSidebarSession(id, target) {
+  const session = state.sessions.find((entry) => entry.id === id);
+  if (!session) return;
+  if (target.pinned) {
+    // Pinned beside the session it was dropped on, or last. Its group and its
+    // place among the others stay.
+    state.sessionPinned = reorderedIds(state.sessionPinned || [], id, target.session, target.after);
+    scheduleUiSettingsSave();
+    renderSessionSidebar();
+    return;
+  }
+  // Dropped anywhere else, a pinned session is pinned no more.
+  state.sessionPinned = (state.sessionPinned || []).filter((entry) => entry !== id);
+  const beside = target.session ? state.sessions.find((entry) => entry.id === target.session) : null;
+  const group = (beside ? beside.group : target.group) || null;
+  // A sorted list places the session itself, and the dragged order waits.
+  if (!sessionSortOrder()) {
+    // A session that is gone leaves the kept order here.
+    const known = new Set(state.sessions.map((entry) => entry.id));
+    const others = (state.sessionOrder || []).filter((entry) => known.has(entry) && entry !== id);
+    const layout = sessionSidebarLayout();
+    const siblings = ((group ? layout.groups.find(([name]) => name === group)?.[1] : layout.loose) || [])
+      .map((entry) => entry.id);
+    // Beside a session, or first where it was dropped.
+    const placed = beside ? reorderedIds(siblings, id, beside.id, target.after)
+      : [id, ...siblings.filter((entry) => entry !== id)];
+    state.sessionOrder = [...others.filter((entry) => !placed.includes(entry)), ...placed];
+  }
+  scheduleUiSettingsSave();
+  if ((session.group || null) !== group) await moveSessionToGroup(id, group);
+  else renderSessionSidebar();
+}
+
+// A folder dropped beside another takes the place next to it. `name` and
+// `target.group` are a group's name, or null for Default. What is kept is
+// the order of the groups, and the group Default comes after.
+function dropSidebarGroup(name, target) {
+  const folders = reorderedIds(sessionFolderOrder(), name, target.group, target.after);
+  state.sessionGroupOrder = folders.filter((folder) => folder !== null);
+  state.sessionDefaultAfter = folders[folders.indexOf(null) - 1] || "";
+  renderSessionSidebar();
+  scheduleUiSettingsSave();
+}
+
+// Renames a group for all its sessions, or ends it when there is no new name.
+async function renameSessionGroup(from, to) {
+  // A group no session is in is the list's alone: the server knows a group
+  // by the sessions that carry its name.
+  if (state.sessions.some((session) => session.group === from)) {
+    const response = await fetch("/api/session-groups/rename", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ from, to: to || null }),
+    });
+    await requireOkResponse(response, to ? "Failed to rename the group." : "Failed to ungroup the sessions.");
+  }
+  // What was saved for the old name goes to the new one.
+  const renamed = (names) => [...new Set((names || []).flatMap((name) => (name !== from ? [name] : to ? [to] : [])))];
+  // Default stays under the folder it was under, or under the one before a
+  // folder that ended.
+  const folders = renamed(sessionFolderOrder());
+  state.sessionDefaultAfter = folders[folders.indexOf(null) - 1] || "";
+  state.sessionGroupsCollapsed = renamed(state.sessionGroupsCollapsed);
+  state.sessionGroupOrder = renamed(state.sessionGroupOrder);
+  scheduleUiSettingsSave();
+  await loadSessions({ preserveWorkspaceOwner: true });
+}
+
+// A group's own menu, on its name.
+function showSessionGroupMenu(event, group) {
+  closeSessionContextMenu();
+  const menu = document.createElement("div");
+  menu.className = "context-menu session-context-menu";
+  // Its sessions stay, in no group. With none there is only the group to end.
+  const ending = state.sessions.some((session) => session.group === group) ? "Ungroup" : "Delete group";
+  menu.innerHTML = '<button class="context-menu-item" data-action="rename">Rename group</button>'
+    + `<button class="context-menu-item" data-action="ungroup">${ending}</button>`;
+  document.body.appendChild(menu);
+  const size = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(event.clientX, window.innerWidth - size.width - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(event.clientY, window.innerHeight - size.height - 4))}px`;
+  sessionContextMenuEl = menu;
+  menu.addEventListener("click", (click) => {
+    const action = click.target.closest("[data-action]")?.dataset.action;
+    if (action === "rename") openSidebarGroupName({ group });
+    else if (action === "ungroup") renameSessionGroup(group, null).catch(handleWorkspaceActionError);
+    closeSessionContextMenu();
+  });
+}
+
+// Who made the session, before its name: the name sniper-cli gave, which a
+// Replay tab carries too, so the styles draw both with one glyph. A session
+// the person made in this window names nobody.
+function sessionMakerMark(session) {
+  const maker = session.created_by;
+  return maker ? `<span class="session-actor" data-actor="${escapeHtml(maker)}" title="Made by ${escapeHtml(maker)}"></span>` : "";
+}
+
+// Keeps a session at the top of the list, or lets it go back to its place.
+function toggleSessionPin(sessionId) {
+  // A session that is gone leaves the pinned here.
+  const known = new Set(state.sessions.map((session) => session.id));
+  const pinned = (state.sessionPinned || []).filter((id) => known.has(id));
+  state.sessionPinned = pinned.includes(sessionId) ? pinned.filter((id) => id !== sessionId) : [...pinned, sessionId];
+  renderSessionSidebar();
+  scheduleUiSettingsSave();
+}
+
+function setSessionSort(sort) {
+  state.sessionSort = sort;
+  renderSessionSidebar();
+  scheduleUiSettingsSave();
+}
+
+// Shows a fact under each session's name, or stops showing it. What is kept
+// is in the menu's order, and only what the menu offers.
+function toggleSessionRowDetail(key) {
+  const shown = new Set(state.sessionRowDetails);
+  if (!shown.delete(key)) shown.add(key);
+  state.sessionRowDetails = sessionRowDetailChoices().map(([name]) => name).filter((name) => shown.has(name));
+  renderSessionSidebar();
+  scheduleUiSettingsSave();
+}
+
+// The list's view options, under the button above it: the order its sessions
+// are in, and what each row says under its name.
+function showSessionViewMenu(anchor) {
+  closeSessionContextMenu();
+  const sorts = [["manual", "Manual order"], ["recent", "Last capture"], ["created", "Created"], ["name", "Name"], ["agent", "Agent"]];
+  const menu = document.createElement("div");
+  menu.className = "context-menu session-context-menu";
+  menu.setAttribute("role", "menu");
+  const section = (label) => `<div class="context-menu-section"><span class="context-menu-label">${label}</span></div>`;
+  const item = (role, kind, key, label, on) => `<button class="context-menu-item" role="${role}" aria-checked="${on}" data-${kind}="${key}">${label}`
+    + `${on ? '<span class="context-menu-shortcut" aria-hidden="true">✓</span>' : ""}</button>`;
+  const draw = () => {
+    const current = sorts.some(([key]) => key === state.sessionSort) ? state.sessionSort : "manual";
+    menu.innerHTML = section("Sort by")
+      + sorts.map(([key, label]) => item("menuitemradio", "sort", key, label, key === current)).join("")
+      + section("Show")
+      + sessionRowDetailChoices().map(([key, label]) => item("menuitemcheckbox", "show", key, label, state.sessionRowDetails.includes(key))).join("");
+  };
+  draw();
+  document.body.appendChild(menu);
+  const at = anchor.getBoundingClientRect();
+  const size = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(at.left, window.innerWidth - size.width - 4))}px`;
+  menu.style.top = `${at.bottom + 4}px`;
+  sessionContextMenuEl = menu;
+  menu.addEventListener("click", (event) => {
+    const choice = event.target.closest("[data-sort], [data-show]")?.dataset;
+    if (choice?.show) {
+      // More than one can be shown, so the menu stays open: the click does
+      // not reach the document, which closes it. The item is drawn again
+      // with its mark, and keeps the focus a keyboard gave it.
+      event.stopPropagation();
+      toggleSessionRowDetail(choice.show);
+      draw();
+      menu.querySelector(`[data-show="${choice.show}"]`)?.focus();
+      return;
+    }
+    if (choice?.sort) setSessionSort(choice.sort);
+    closeSessionContextMenu();
+  });
+}
+
+// Folds or unfolds one of the list's own sections: "pinned", "sessions" or
+// "default".
+function toggleSessionSection(name) {
+  const folded = new Set(state.sessionSectionsCollapsed);
+  if (!folded.delete(name)) folded.add(name);
+  state.sessionSectionsCollapsed = [...folded];
+  renderSessionSidebar();
+  scheduleUiSettingsSave();
+}
+
+function toggleSessionGroup(name) {
+  const folded = new Set(state.sessionGroupsCollapsed);
+  if (!folded.delete(name)) folded.add(name);
+  state.sessionGroupsCollapsed = [...folded];
+  renderSessionSidebar();
+  scheduleUiSettingsSave();
+}
+
+// Where a session can go, as menu items: Default when it is in a group, each
+// group it is not in, and a new one.
+function sessionGroupMenuItems(session) {
+  const item = (action, label, group) => `<button class="context-menu-item" data-action="${action}"`
+    + `${group ? ` data-group="${escapeHtml(group)}"` : ""}>${escapeHtml(label)}</button>`;
+  // The groups sessions are in, and the ones the list keeps for later.
+  const groups = [...new Set([...(state.sessionGroupOrder || []), ...state.sessions.map((entry) => entry.group).filter(Boolean)])]
+    .sort((a, b) => a.localeCompare(b));
+  return (session.group ? item("ungroup", "Move to Default") : "")
+    + groups.filter((group) => group !== session.group).map((group) => item("group", `Move to ${group}`, group)).join("")
+    + item("new-group", "New group…");
+}
+
+// Puts a session in a group, or takes it out when there is no name. A group
+// is the sessions that carry its name, so the first one in makes it.
+async function moveSessionToGroup(sessionId, group) {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/group`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ group: group || null }),
+  });
+  await requireOkResponse(response, "Failed to move the session.");
+  unfoldSessionGroup(group);
+  await loadSessions({ preserveWorkspaceOwner: true });
+}
+
+// The group a session just went to is shown open.
+function unfoldSessionGroup(group) {
+  if (!group || !state.sessionGroupsCollapsed.includes(group)) return;
+  state.sessionGroupsCollapsed = state.sessionGroupsCollapsed.filter((name) => name !== group);
+  scheduleUiSettingsSave();
+}
+
+// A group a person named is the list's to keep: it is drawn while no session
+// is in it, until it is ungrouped or deleted.
+function keepSessionGroup(name) {
+  if ((state.sessionGroupOrder || []).includes(name)) return;
+  state.sessionGroupOrder = [...(state.sessionGroupOrder || []), name];
+  renderSessionSidebar();
+  scheduleUiSettingsSave();
+}
+
+// `edit` is { session: id } for a new group that session starts,
+// { group: name } to rename that group, or { create: true } for a new group
+// with no session in it yet.
+function openSidebarGroupName(edit) {
+  // The field is in the list, which a menu elsewhere can ask for while hidden.
+  if (state.sessionSidebarHidden) toggleSessionSidebar();
+  // One field at a time at the top: the two look alike.
+  closeSidebarSessionCreate();
+  sidebarGroupEdit = edit;
+  els.sessionSidebarGroupName.value = edit.group || "";
+  // The field takes the place of the New group row.
+  els.sessionSidebarNewGroupButton.classList.add("hidden");
+  els.sessionSidebarGroup.classList.remove("hidden");
+  els.sessionSidebarGroupName.focus();
+  els.sessionSidebarGroupName.select();
+}
+
+function closeSidebarGroupName() {
+  sidebarGroupEdit = null;
+  els.sessionSidebarGroupName.value = "";
+  els.sessionSidebarGroup.classList.add("hidden");
+  els.sessionSidebarNewGroupButton.classList.remove("hidden");
+}
+
+// A name the server refuses stays in the field, to be put right.
+async function submitSidebarGroupName() {
+  const typed = els.sessionSidebarGroupName.value.trim();
+  // Default is the list's name for no group: a second one is not made.
+  const name = typed.toLowerCase() === "default" ? null : typed;
+  const edit = sidebarGroupEdit;
+  if (typed && edit?.session) {
+    await moveSessionToGroup(edit.session, name);
+    if (name) keepSessionGroup(name);
+  } else if (typed && edit?.group && name !== edit.group) await renameSessionGroup(edit.group, name);
+  else if (name && edit?.create) keepSessionGroup(name);
+  closeSidebarGroupName();
+}
+
+async function loadSessionActivity({ fresh = false } = {}) {
+  // A read held up, as by a switch saving a large session, is not asked
+  // again. After a change to a feed it is: the read in flight may have been
+  // answered before the change, and the rows would show that until the next.
+  while (sessionActivityReading) {
+    if (!fresh) return;
+    await sessionActivityReading.catch(() => {});
+  }
+  const read = (async () => {
+    const response = await fetch("/api/sessions/activity");
+    // The next read asks again; the rows keep what they last showed.
+    if (response.ok) applySessionActivity(await response.json());
+  })();
+  sessionActivityReading = read;
+  try {
+    await read;
+  } finally {
+    if (sessionActivityReading === read) sessionActivityReading = null;
+  }
+}
+
+// A job that ends in a session not on screen marks the session until it is
+// opened, as an unread conversation is marked.
+function applySessionActivity(entries) {
+  if (!Array.isArray(entries)) return;
+  const activeId = currentSessionId();
+  const feeds = (activity) => [...activity]
+    .map(([id, entry]) => `${id}:${entry.active ? "main" : entry.portOpen ? entry.port : ""}`).join(",");
+  const feedsBefore = feeds(state.sessionActivity);
+  const next = new Map();
+  for (const entry of entries) {
+    if (typeof entry?.id !== "string" || typeof entry.name !== "string") continue;
+    next.set(entry.id, {
+      name: entry.name,
+      running: Array.isArray(entry.running) ? entry.running.filter((kind) => typeof kind === "string") : [],
+      held: Number.isSafeInteger(entry.held) && entry.held > 0 ? entry.held : 0,
+      // Where the session's traffic comes from.
+      active: entry.active === true,
+      port: Number.isSafeInteger(entry.proxy_port) ? entry.proxy_port : null,
+      portOpen: entry.proxy_port_open === true,
+      // A browser Sniper opened sends to the session and still runs.
+      browser: entry.browser === true,
+      // The relay listeners the session has on: where each listens, where it
+      // relays to, and whether it started.
+      tcp: (Array.isArray(entry.tcp) ? entry.tcp : [])
+        .filter((listener) => Number.isSafeInteger(listener?.local_port) && typeof listener.target === "string")
+        .map((listener) => ({ port: listener.local_port, target: listener.target, udp: listener.udp === true, running: listener.running === true })),
+    });
+  }
+  for (const [id, before] of state.sessionActivity) {
+    const after = next.get(id);
+    if (id === activeId || !after) continue;
+    const ended = before.running.filter((kind) => !after.running.includes(kind));
+    if (ended.length) state.sessionsFinished.set(id, [...new Set([...(state.sessionsFinished.get(id) || []), ...ended])]);
+  }
+  for (const id of state.sessionsFinished.keys()) {
+    if (!next.has(id)) state.sessionsFinished.delete(id);
+  }
+  state.sessionActivity = next;
+  // Another client can move the proxy listener. The rows follow without a
+  // list read, and the window keeps the session it shows.
+  for (const session of state.sessions) {
+    const activity = next.get(session.id);
+    if (activity) session.active = activity.active;
+  }
+  if (feeds(next) !== feedsBefore) renderSessionFeed();
+  // sniper-cli and agents create, rename and delete sessions too.
+  const listed = new Map(state.sessions.map((session) => [session.id, session.name]));
+  if (!sessionListRefresh
+    && (listed.size !== next.size || [...next].some(([id, entry]) => listed.get(id) !== entry.name))) {
+    sessionListRefresh = loadSessions({ preserveWorkspaceOwner: true })
+      .catch((error) => console.error(error))
+      .finally(() => { sessionListRefresh = null; });
+  }
+  renderSessionSidebar();
+}
+
+function toggleSessionSidebar() {
+  state.sessionSidebarHidden = !state.sessionSidebarHidden;
+  renderSessionSidebar();
+  scheduleUiSettingsSave();
+}
+
+// The name field at the top, in the place of the New session row. A group's
+// + names the group the session is made in; the row is handed its click, and
+// Default's + null: both name none.
+function openSidebarSessionCreate(group) {
+  closeSidebarGroupName();
+  sidebarCreateGroup = typeof group === "string" ? group : null;
+  els.sessionSidebarCreateName.placeholder = sidebarCreateGroup ? `New session in ${sidebarCreateGroup}` : "Session name";
+  els.sessionSidebarNewButton.classList.add("hidden");
+  els.sessionSidebarCreate.classList.remove("hidden");
+  els.sessionSidebarCreateName.focus();
+}
+
+function closeSidebarSessionCreate() {
+  // A create already sent reads the name after the drafts it saves first.
+  if (!sidebarSessionCreating) els.sessionSidebarCreateName.value = "";
+  sidebarCreateGroup = null;
+  els.sessionSidebarCreate.classList.add("hidden");
+  els.sessionSidebarNewButton.classList.remove("hidden");
+}
+
+async function createSidebarSession() {
+  if (sidebarSessionCreating) return;
+  sidebarSessionCreating = true;
+  const group = sidebarCreateGroup;
+  try {
+    await createSession(els.sessionSidebarCreateName, group);
+    // A created session clears the name; one stopped before sending keeps it.
+    if (!els.sessionSidebarCreateName.value) {
+      unfoldSessionGroup(group);
+      closeSidebarSessionCreate();
+    }
+  } finally {
+    sidebarSessionCreating = false;
+  }
 }
 
 // ── Session rename ──
@@ -10322,10 +11390,10 @@ function renderDashboard() {
 // Enter or leaving the field saves, Escape cancels, as Replay tab names do.
 let sessionRenameInput = null;
 
-function startSessionRename(id) {
+function startSessionRename(id, place = "dashboard") {
   const session = state.sessions.find((entry) => entry.id === id);
   if (!session) return;
-  state.sessionRename = { id, draft: session.name, pending: false, focus: true };
+  state.sessionRename = { id, draft: session.name, pending: false, focus: true, place };
   renderDashboard();
 }
 
@@ -10334,7 +11402,7 @@ function cancelSessionRename({ refocus = false } = {}) {
   if (!edit) return;
   state.sessionRename = null;
   renderDashboard();
-  if (refocus) focusSessionNameButton(edit.id);
+  if (refocus) focusSessionNameButton(edit.id, edit.place);
 }
 
 async function commitSessionRename({ refocus = false } = {}) {
@@ -10367,13 +11435,13 @@ async function commitSessionRename({ refocus = false } = {}) {
   session.name = name;
   if (state.sessionRename === edit) state.sessionRename = null;
   renderDashboard();
-  if (refocus) focusSessionNameButton(edit.id);
+  if (refocus) focusSessionNameButton(edit.id, edit.place);
   // The name also shows outside this list, for the session in use.
   loadSessions().catch((error) => console.error(error));
 }
 
-function wireSessionRenameInput(selection) {
-  const input = els.dashboardSessionsBody.querySelector?.(".session-name-input");
+function wireSessionRenameInput(selection, container = els.dashboardSessionsBody) {
+  const input = container.querySelector?.(".session-name-input");
   const edit = state.sessionRename;
   if (!input || !edit) return;
   sessionRenameInput = input;
@@ -10404,7 +11472,16 @@ function wireSessionRenameInput(selection) {
   }
 }
 
-function focusSessionNameButton(id) {
+function focusSessionNameButton(id, place = "dashboard") {
+  if (place === "overview") {
+    els.sessionOverviewMoreButton.focus({ preventScroll: true });
+    return;
+  }
+  if (place === "sidebar") {
+    Array.from(els.sessionSidebarList.querySelectorAll(".session-sidebar-row"))
+      .find((row) => row.dataset.id === id)?.focus({ preventScroll: true });
+    return;
+  }
   Array.from(els.dashboardSessionsBody.querySelectorAll("tr[data-id]"))
     .find((row) => row.dataset.id === id)
     ?.querySelector(".session-select-button")?.focus({ preventScroll: true });
@@ -10413,17 +11490,25 @@ function focusSessionNameButton(id) {
 // ── Session context menu ──
 let sessionContextMenuEl = null;
 
-function showSessionContextMenu(event, sessionId) {
+function showSessionContextMenu(event, sessionId, place = "dashboard") {
   closeSessionContextMenu();
   const session = state.sessions.find((s) => s.id === sessionId);
   if (!session) return;
 
   const menu = document.createElement("div");
   menu.className = "context-menu session-context-menu";
+  // The server deletes no session that has a feed.
+  const fed = sessionFeed(sessionId).kind !== "none";
   menu.innerHTML = `
+    ${sessionFeedMenuItems(sessionId)}
+    <div class="context-menu-divider"></div>
     <button class="context-menu-item" data-action="rename">Rename session</button>
     <button class="context-menu-item" data-action="folder">Open session folder</button>
-    ${session.active ? "" : `<button class="context-menu-item danger" data-action="delete">Delete session</button>`}
+    <button class="context-menu-item" data-action="pin">${(state.sessionPinned || []).includes(sessionId) ? "Unpin" : "Pin"}</button>
+    <div class="context-menu-divider"></div>
+    ${sessionGroupMenuItems(session)}
+    ${fed ? "" : '<div class="context-menu-divider"></div>'}
+    ${fed ? "" : `<button class="context-menu-item danger" data-action="delete">Delete session</button>`}
   `;
   document.body.appendChild(menu);
 
@@ -10441,7 +11526,7 @@ function showSessionContextMenu(event, sessionId) {
     if (!btn) return;
     const action = btn.dataset.action;
     if (action === "rename") {
-      startSessionRename(sessionId);
+      startSessionRename(sessionId, place);
     } else if (action === "folder") {
       revealSessionFolder(sessionId).catch((error) => {
         console.error(error);
@@ -10449,6 +11534,14 @@ function showSessionContextMenu(event, sessionId) {
       });
     } else if (action === "delete") {
       deleteSessionById(sessionId);
+    } else if (action === "pin") {
+      toggleSessionPin(sessionId);
+    } else if (action === "group" || action === "ungroup") {
+      moveSessionToGroup(sessionId, btn.dataset.group || null).catch(handleWorkspaceActionError);
+    } else if (action === "new-group") {
+      openSidebarGroupName({ session: sessionId });
+    } else {
+      runSessionFeedAction(action, sessionId).catch(handleWorkspaceActionError);
     }
     closeSessionContextMenu();
   });
@@ -10527,6 +11620,12 @@ async function deleteSessionById(id) {
       await reconcileSessionsAfterActionError(actionSessionId, actionWorkspaceGeneration);
       console.error("Failed to delete session:", error);
       showToast(error?.message || "Failed to delete session.", "error");
+      return;
+    }
+    // Outside the delete's own error handling: the session is gone whatever
+    // happens to the reload that follows.
+    if (id === currentSessionId()) {
+      await showDefaultSessionAfterDelete(id).catch(handleWorkspaceActionError);
     }
   });
 }
@@ -10560,7 +11659,7 @@ function getSortedSessions() {
     const value = (session) => key === "finding_count" ? sessionFindingCount(session)
       : key === "last_captured_at" ? session.overview?.last_captured_at : session[key];
     let va = value(a), vb = value(b);
-    if (key === "name") {
+    if (key === "name" || key === "group") {
       va = (va || "").toLowerCase();
       vb = (vb || "").toLowerCase();
       const cmp = va < vb ? -1 : va > vb ? 1 : 0;
@@ -10937,7 +12036,15 @@ function refreshHistoryFindings() {
     }
   }
   state._historyFindings = marks;
-  renderHistoryVirtual();
+  // The findings are read again every second and are mostly the same ones.
+  // The rows are drawn again only when what marks them changed: each read
+  // rewrote every visible row, whether History was on screen or not.
+  const drawn = JSON.stringify([Boolean(state.httpShowFindings), color,
+    findingsData.map((finding) => [finding.id, finding.record_id, finding.severity, finding.title])]);
+  if (drawn !== state._historyFindingsDrawn) {
+    state._historyFindingsDrawn = drawn;
+    renderHistoryVirtual();
+  }
   // The server gathers tinted rows into the colour filter, so a filtered list
   // is read again once the findings or how they are drawn change.
   const filterSignature = `${Boolean(state.httpShowFindings)}:${color}:${findingsData.length}:${findingsData[0]?.id || ""}`;
@@ -11147,7 +12254,7 @@ function renderFindings() {
     const message = findingsData.length
       ? "No findings match your filters."
       : "No findings yet. Browse with the proxy to start scanning.";
-    els.findingsBody.innerHTML = `<tr class="empty-row"><td colspan="6">${message}</td></tr>`;
+    writeRows(els.findingsBody, `<tr class="empty-row"><td colspan="6">${message}</td></tr>`);
     return;
   }
 
@@ -11176,6 +12283,17 @@ function getFindingsRowHeight(options = {}) {
   // A font change invalidates old spacers before selection can set scrollTop.
   if (options.refreshLayout && measuredFindingsRowHeight !== previous) renderFindingsVirtual();
   return measuredFindingsRowHeight || FINDINGS_ROW_HEIGHT;
+}
+
+// Writes a list's rows only when they differ from what was written last.
+// Findings, Intercept and OAST are read again every second or so, and writing
+// the same rows again made new elements each time: the row under the pointer
+// lost its hover, and one with the keyboard's focus lost that.
+function writeRows(body, markup) {
+  if (body._rows === markup) return false;
+  body.innerHTML = markup;
+  body._rows = markup;
+  return true;
 }
 
 function renderFindingsVirtual() {
@@ -11217,10 +12335,10 @@ function renderFindingsVirtual() {
       </tr>`);
     }
 
-    els.findingsBody.innerHTML =
+    writeRows(els.findingsBody,
       (topPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${topPadding}px;padding:0;border:none"></td></tr>` : "") +
       rows.join("") +
-      (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : "");
+      (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : ""));
 
     if (attempt === 0 && getFindingsRowHeight() !== rowHeight) continue;
     if (shell.scrollTop !== scrollTop) shell.scrollTop = scrollTop;
@@ -12270,6 +13388,10 @@ async function loadOastCallbacks() {
 // custom server it polls. Provider names are the Settings select's.
 function oastStatusLine(status, runtime) {
   if (!runtime?.oast_enabled) return { text: "Off", registered: false };
+  // Callbacks are polled for one session only.
+  if (sessionFeed(currentSessionId()).kind !== "main") {
+    return { text: "Polled only in the session the proxy records into", registered: false };
+  }
   const provider = { interactsh: "Interactsh", boast: "BOAST", custom: "Custom" }[status?.provider] || "Custom";
   if (status.registered) {
     return { text: `${provider} · Registered (${status.payload_domain || status.correlation_id || ""})`, registered: true };
@@ -12288,7 +13410,7 @@ function oastStatusLine(status, runtime) {
 
 function renderOastCallbacks() {
   if (!els.oastTableBody) return;
-  els.oastTableBody.innerHTML = state.oastCallbacks.length
+  writeRows(els.oastTableBody, state.oastCallbacks.length
     ? state.oastCallbacks.map((cb) => {
         const selected = cb.id === state.selectedOastId ? "selected" : "";
         return `<tr class="history-row ${selected}" data-oast-id="${cb.id}">
@@ -12298,7 +13420,7 @@ function renderOastCallbacks() {
           <td>${escapeHtml(cb.correlation_id)}</td>
         </tr>`;
       }).join("")
-    : '<tr class="empty-row"><td colspan="4">No callbacks yet.</td></tr>';
+    : '<tr class="empty-row"><td colspan="4">No callbacks yet.</td></tr>');
 }
 
 function updateOastBadge() {
@@ -12847,15 +13969,134 @@ function updateRemoteUiIndicator(exposed) {
     "Traffic to it is not encrypted — use an SSH tunnel or a TLS reverse proxy across an untrusted network.";
 }
 
-function updateProxyStatusIndicator(online) {
-  if (!els.proxyStatusIndicator) return;
-  const isOnline = Boolean(online);
-  els.proxyStatusIndicator.classList.toggle("online", isOnline);
-  els.proxyStatusIndicator.classList.toggle("offline", !isOnline);
-  els.proxyStatusLabel.textContent = isOnline ? "Proxy" : "Offline";
-  els.proxyStatusIndicator.title = isOnline
-    ? `Proxy listening on ${state.settings?.proxy_addr || "..."}`
-    : `Proxy failed to bind on ${state.settings?.proxy_addr || "..."}. Restart the app after freeing the port.`;
+// ── Where a session's traffic comes from ──
+// A session receives through the main proxy listener, through a port of its
+// own, or not at all. The top strip says which for the session on screen,
+// and each row of the session list for its own.
+function sessionFeed(sessionId) {
+  const activity = state.sessionActivity?.get(sessionId);
+  // The activity rows are read every few seconds, the list only on a change.
+  const main = activity ? activity.active : state.sessions?.find((session) => session.id === sessionId)?.active;
+  if (main) return { kind: "main", port: mainProxyPort() };
+  if (activity?.portOpen && activity.port) return { kind: "port", port: activity.port };
+  return { kind: "none", port: null };
+}
+
+function mainProxyPort() {
+  // "127.0.0.1:8080" and "[::1]:8080" both end in the port.
+  return String(state.settings?.proxy_addr || "").match(/:(\d+)$/)?.[1] || "";
+}
+
+// The session the main proxy listener records into.
+function mainListenerSession() {
+  for (const [id, activity] of state.sessionActivity || []) {
+    if (activity.active) return state.sessions?.find((session) => session.id === id) || { id, name: activity.name };
+  }
+  return state.sessions?.find((session) => session.active) || null;
+}
+
+// Where a client connects to be recorded in the session, if anywhere.
+function sessionProxyAddress(sessionId) {
+  const feed = sessionFeed(sessionId);
+  if (feed.kind === "main") return state.settings?.proxy_addr || null;
+  return feed.kind === "port" ? `127.0.0.1:${feed.port}` : null;
+}
+
+function updateProxyStatusIndicator(online = state.settings?.proxy_online) {
+  const indicator = els.proxyStatusIndicator;
+  if (!indicator) return;
+  const feed = sessionFeed(currentSessionId());
+  const addr = state.settings?.proxy_addr || "...";
+  // The listener being down matters to the session it records into. A
+  // session with a port of its own receives all the same.
+  const status = feed.kind === "none" ? "idle" : feed.kind === "main" && !online ? "offline" : "online";
+  for (const name of ["online", "offline", "idle"]) indicator.classList.toggle(name, name === status);
+  els.proxyStatusLabel.textContent = status === "offline" ? "Offline"
+    : status === "idle" ? "Not receiving" : `Proxy :${feed.port}`;
+  // Only a session nothing reaches has something to choose here.
+  indicator.disabled = status !== "idle";
+  indicator.title = status === "offline"
+    ? `Proxy failed to bind on ${addr}. Restart the app after freeing the port.`
+    : status === "idle"
+      ? `No traffic reaches this session. The proxy on ${addr} records into ${mainListenerSession()?.name || "another session"}. Click to change that.`
+      : feed.kind === "main"
+        ? `Proxy listening on ${addr}. It records into this session.`
+        : `This session records from its own port 127.0.0.1:${feed.port}.`;
+}
+
+// What changes how a session receives, as menu items. An action the server
+// refuses is not offered: the listener's session gets no port, and the
+// listener does not record into a session whose own port is open.
+function sessionFeedMenuItems(sessionId) {
+  const feed = sessionFeed(sessionId);
+  const item = (action, label) => `<button class="context-menu-item" data-action="${action}">${escapeHtml(label)}</button>`;
+  if (feed.kind === "none") return item("record", recordHereLabel()) + item("open-port", "Open a port");
+  return (feed.kind === "port" ? item("close-port", `Close port :${feed.port}`) : "")
+    + item("copy-address", "Copy proxy address");
+}
+
+function recordHereLabel() {
+  const port = mainProxyPort();
+  return port ? `Record :${port} here` : "Record the proxy here";
+}
+
+async function runSessionFeedAction(action, sessionId) {
+  if (action === "record") {
+    await recordMainListenerInto(sessionId);
+    return;
+  }
+  if (action === "copy-address") {
+    const address = sessionProxyAddress(sessionId);
+    if (!address) return;
+    await copyTextToClipboard(address);
+    showToast(`Copied ${address}`);
+    return;
+  }
+  const opening = action === "open-port";
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/proxy-port`, {
+    method: opening ? "POST" : "DELETE",
+  });
+  await requireOkResponse(response, opening ? "Failed to open a port." : "Failed to close the port.");
+  await refreshSessionFeeds();
+}
+
+// The two actions that make traffic reach the session on screen, under the
+// indicator that says none does.
+function showSessionFeedMenu(anchor) {
+  closeSessionContextMenu();
+  const sessionId = currentSessionId();
+  if (!sessionId || sessionFeed(sessionId).kind !== "none") return;
+  const menu = document.createElement("div");
+  menu.className = "context-menu session-context-menu";
+  menu.innerHTML = sessionFeedMenuItems(sessionId);
+  document.body.appendChild(menu);
+  const at = anchor.getBoundingClientRect();
+  const size = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(at.left, window.innerWidth - size.width - 4))}px`;
+  menu.style.top = `${at.bottom + 4}px`;
+  sessionContextMenuEl = menu;
+  menu.addEventListener("click", (event) => {
+    const action = event.target.closest("[data-action]")?.dataset.action;
+    if (action) runSessionFeedAction(action, sessionId).catch(handleWorkspaceActionError);
+    closeSessionContextMenu();
+  });
+}
+
+// Everything that says where the session on screen receives from.
+function renderSessionFeed() {
+  updateProxyStatusIndicator();
+  syncHttpCapturePill();
+  renderDashboard();
+  // An empty history names the feed and offers what changes it.
+  if (Array.isArray(state._historyEntries) && !state._historyEntries.length) renderHistory();
+}
+
+// Beside the browser button of an empty history: what makes traffic reach a
+// session that gets none.
+function emptySessionActions() {
+  if (sessionFeed(currentSessionId()).kind !== "none") return "";
+  return `<button class="secondary-action" type="button" data-feed-action="record">${escapeHtml(recordHereLabel())}</button>`
+    + '<button class="secondary-action" type="button" data-feed-action="open-port">Open a port</button>';
 }
 
 function renderHistory(options = {}) {
@@ -12900,7 +14141,7 @@ function renderHistory(options = {}) {
       <tr class="empty-row">
         <td colspan="${state.historyColumnOrder.length}">
           ${escapeHtml(nothingCaptured ? emptySessionMessage() : historyEmptyMessage(hiddenConnectCount, paging))}
-          ${nothingCaptured ? '<div class="empty-row-action"><span data-browser-launcher></span></div>' : ""}
+          ${nothingCaptured ? `<div class="empty-row-action">${emptySessionActions()}<span data-browser-launcher></span></div>` : ""}
         </td>
       </tr>
     `;
@@ -12992,7 +14233,11 @@ function isSessionEmpty(hiddenConnectCount, paging) {
 }
 
 function emptySessionMessage() {
-  return `Nothing captured yet. Open a browser that already sends its traffic through Sniper, or point any client at ${state.settings?.proxy_addr || "the proxy"}.`;
+  const address = sessionProxyAddress(currentSessionId());
+  if (!address && sessionFeed(currentSessionId()).kind === "none") {
+    return `No traffic reaches this session. The proxy on ${state.settings?.proxy_addr || "its port"} records into ${mainListenerSession()?.name || "another session"}.`;
+  }
+  return `Nothing captured yet. Open a browser that already sends its traffic through Sniper, or point any client at ${address || "the proxy"}.`;
 }
 
 function historyEmptyMessage(hiddenConnectCount, paging) {
@@ -13623,7 +14868,7 @@ function renderDetail(record, options = {}) {
   els.requestHeadersBody.innerHTML = renderHeaderList(requestHeaders);
   els.responseHeadersBody.innerHTML = response
     ? renderHeaderList(responseHeaders)
-    : "<p class=\"empty-copy\">No response headers were captured.</p>";
+    : "<p class=\"empty-copy\">No response headers.</p>";
 
   const noteParts = [];
   if (record.user_note) {
@@ -13634,7 +14879,7 @@ function renderDetail(record, options = {}) {
   }
   els.notesCard.innerHTML = noteParts.length
     ? noteParts.join("")
-    : "<p>No anomalies were recorded for this transaction.</p>";
+    : "<p>No notes.</p>";
 
   renderViewTabs();
   renderMessagePanes();
@@ -13656,7 +14901,7 @@ function renderEmptyDetail(errorMessage = "") {
   ]);
   els.requestHeadersBody.innerHTML = `<p class="empty-copy">${escapeHtml(errorMessage || "Select a transaction from HTTP.")}</p>`;
   els.responseHeadersBody.innerHTML = `<p class="empty-copy">${escapeHtml(errorMessage || "No response selected.")}</p>`;
-  els.notesCard.innerHTML = "<p>No anomalies were recorded for this transaction.</p>";
+  els.notesCard.innerHTML = "<p>No notes.</p>";
   renderViewTabs();
   renderMessagePanes();
 }
@@ -13676,7 +14921,7 @@ function renderLoadingDetail(message = "Loading selected transaction…") {
   ]);
   els.requestHeadersBody.innerHTML = `<p class="empty-copy">${escapeHtml(message)}</p>`;
   els.responseHeadersBody.innerHTML = "<p class=\"empty-copy\">Loading response details.</p>";
-  els.notesCard.innerHTML = "<p>No anomalies were recorded for this transaction.</p>";
+  els.notesCard.innerHTML = "<p>No notes.</p>";
   renderViewTabs();
   renderMessagePanes();
 }
@@ -14439,14 +15684,18 @@ function handleInterceptDraftReadFailure(queue, status, { capture = false, owner
   if (!record || record.id !== id || seed !== id || !visible.some(item => item.id === id)) return;
   const view = getCMView(response ? "interceptRes" : "interceptReq");
   const editor = response ? els.interceptResponseEditor : els.interceptRequestEditor;
-  const text = view ? view.getContent() : editor?.value;
-  const original = response ? buildEditableRawResponse(record.response) : buildEditableRawRequest(record.request, true);
-  // Both CM and native textareas normalize line endings. Compare in that
-  // editor domain without rewriting the text retained for recovery.
-  const comparableOriginal = original.replace(/\r\n?/g, "\n");
+  const text = view ? view.getText() : editor?.value;
+  // Only CM keeps a binary body's CR bytes, so only CM shows the body as bytes.
+  const bytes = Boolean(view);
+  const original = response ? buildEditableRawResponse(record.response, { bytes })
+    : buildEditableRawRequest(record.request, true, { bytes });
+  // Only a native textarea (or a view without exact line-ending tracking)
+  // normalizes line endings; SniperCodeView preserves exact CR/CRLF/LF bytes.
+  const normalize = value => (view?.preservesLineEndings ? value : value.replace(/\r\n?/g, "\n"));
+  const comparableOriginal = normalize(original);
   // Read at failure settlement so typing during the fetch is included. Empty
   // and invalid drafts are still edits; parsing belongs to explicit Forward.
-  state[key] = typeof text === "string" && text.replace(/\r\n?/g, "\n") !== comparableOriginal
+  state[key] = typeof text === "string" && normalize(text) !== comparableOriginal
     ? { sessionId: currentSessionId(), workspaceGeneration: workspaceStateGeneration, id, owner: {}, text } : null;
 }
 
@@ -14656,7 +15905,8 @@ function renderIntercepts() {
   reconcileRequestInterceptSelection(filteredIntercepts);
   getInterceptDraftRecovery("request");
   const feedback = updateInterceptDetailFeedback("request");
-  els.interceptTableBody.innerHTML = filteredIntercepts.length
+  // A row's listeners are added with the row, so only when it is written.
+  if (writeRows(els.interceptTableBody, filteredIntercepts.length
     ? filteredIntercepts
         .map((item) => {
           const selected = item.id === state.selectedInterceptId ? "selected" : "";
@@ -14674,23 +15924,23 @@ function renderIntercepts() {
         <tr class="empty-row">
           <td colspan="4">No held requests.</td>
         </tr>
-      `;
-
-  Array.from(els.interceptTableBody.querySelectorAll(".history-row")).forEach((row) => {
-    row.addEventListener("click", () => {
-      selectInterceptQueueItem("request", row.dataset.id).catch((error) => console.error(error));
+      `)) {
+    Array.from(els.interceptTableBody.querySelectorAll(".history-row")).forEach((row) => {
+      row.addEventListener("click", () => {
+        selectInterceptQueueItem("request", row.dataset.id).catch((error) => console.error(error));
+      });
+      row.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        const id = row.dataset.id;
+        if (!id) return;
+        // Select first, so the menu acts on what the operator sees highlighted.
+        if (state.selectedInterceptId !== id) {
+          selectInterceptQueueItem("request", id).catch((error) => console.error(error));
+        }
+        openInterceptContextMenu(event.clientX, event.clientY, id);
+      });
     });
-    row.addEventListener("contextmenu", (event) => {
-      event.preventDefault();
-      const id = row.dataset.id;
-      if (!id) return;
-      // Select first, so the menu acts on what the operator sees highlighted.
-      if (state.selectedInterceptId !== id) {
-        selectInterceptQueueItem("request", id).catch((error) => console.error(error));
-      }
-      openInterceptContextMenu(event.clientX, event.clientY, id);
-    });
-  });
+  }
   updateInterceptQueueSelectionStatus("request", filteredIntercepts);
 
   if (!state.selectedInterceptRecord) {
@@ -14732,7 +15982,8 @@ function renderIntercepts() {
   if (els.interceptRequestCM) {
     if (state.interceptEditorSeedId !== state.selectedInterceptRecord.id) {
       setInterceptPaneContent("interceptReq", els.interceptRequestCM,
-        takeInterceptDraftRecovery("request", state.selectedInterceptRecord) ?? buildEditableRawRequest(state.selectedInterceptRecord.request, true), {
+        takeInterceptDraftRecovery("request", state.selectedInterceptRecord)
+          ?? buildEditableRawRequest(state.selectedInterceptRecord.request, true, { bytes: true }), {
         mode: "http", readOnly: false,
       });
       state.interceptEditorSeedId = state.selectedInterceptRecord.id;
@@ -16059,7 +17310,7 @@ function renderReplay(options = {}) {
   if (tab.baseRequest && tab.baseRequest.body_encoding !== "base64") {
     const raw = tab.requestBytes ? new TextDecoder().decode(tab.requestBytes) : String(tab.requestText || "");
     const split = splitRawHttpMessage(raw);
-    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/im;
+    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/im;
     const baseHeaders = (tab.baseRequest.headers || []).map(h => `${h.name}: ${h.value}`).join("\n");
     const boundary = /\r?\n\r?\n/.exec(raw);
     if (boundary && (binaryMime.test(split.head) || binaryMime.test(baseHeaders))) {
@@ -16272,26 +17523,53 @@ function replayRequestTextsEquivalent(left, right) {
 // captured: a signed or byte-compared body must not change because someone looked
 // at it. Once the operator edits the text, what they see becomes the draft.
 // ponytail: edit-then-undo keeps the formatted text, not the captured bytes.
-function replayRequestEditorText(draft) {
+function replayRequestEditorText(draft, tab = getActiveReplayTab()) {
   const text = draft || "";
+  // A body that is not text shows its bytes, as Burp's Raw view does, in every
+  // view; the draft keeps it as Base64.
+  if (replayTabBodyIsBinary(tab)) return rawRequestWithBinaryBody(text);
   if (state.replayMessageViews.request !== "pretty") return text;
   const normalized = text.replace(/\r\n/g, "\n");
   const pretty = prettyFormat(normalized, {}, { jsonLines: false });
   return pretty === normalized ? text : pretty;
 }
 
-function replayEditorShowsDraft(shown, draft) {
-  return replayRequestTextsEquivalent(shown, draft) || shown === replayRequestEditorText(draft);
+function replayTabBodyIsBinary(tab) {
+  return tab?.baseRequest?.body_encoding === "base64";
 }
 
-function syncReplayRequestTextFromEditor(newText, validatedCandidate = null) {
+/** What the Replay editor shows, as the draft it stands for. */
+function replayDraftFromEditor(shown, tab = getActiveReplayTab()) {
+  return replayTabBodyIsBinary(tab) ? rawRequestWithBase64Body(shown) : shown;
+}
+
+/**
+ * An edited draft as the editor shows it, without Pretty's reformatting. Given
+ * the text the editor shows now, a binary body stays as typed: a character above
+ * U+00FF becomes its UTF-8 bytes in the draft only, so neither the caret nor an
+ * input method's composition moves.
+ */
+function replayDraftShown(draft, tab = getActiveReplayTab(), shown = null) {
+  if (!replayTabBodyIsBinary(tab)) return draft;
+  const head = /\r?\n\r?\n/.exec(draft), body = shown === null ? null : /\r?\n\r?\n/.exec(shown);
+  return head && body ? draft.slice(0, head.index + head[0].length) + shown.slice(body.index + body[0].length)
+    : rawRequestWithBinaryBody(draft);
+}
+
+function replayEditorShowsDraft(shown, draft, tab = getActiveReplayTab()) {
+  return replayRequestTextsEquivalent(shown, draft) || shown === replayRequestEditorText(draft, tab)
+    || replayDraftFromEditor(shown, tab) === draft;
+}
+
+function syncReplayRequestTextFromEditor(shownText, validatedCandidate = null) {
   const activeTab = getActiveReplayTab();
   if (!activeTab || activeTab.type === "websocket") {
     return;
   }
   const previousText = activeTab.requestText;
   const rendered = replayRequestEditorText(previousText);
-  if (rendered !== previousText && newText === rendered) return;
+  if (rendered !== previousText && shownText === rendered) return;
+  const newText = replayDraftFromEditor(shownText, activeTab);
   let candidate = validatedCandidate;
   if (!candidate && !acceptReplayRequestEdit(newText, activeTab, value => { candidate = value; })) {
     // CodeMirror rejects before dispatch; the legacy editor has already applied
@@ -16307,7 +17585,7 @@ function syncReplayRequestTextFromEditor(newText, validatedCandidate = null) {
   }
   if (renderedHttpReplayDraftOwner?.tab === activeTab) renderedHttpReplayDraftOwner.preservedVersionDraft = null;
   activeTab.protobufEditRevision = (activeTab.protobufEditRevision || 0) + 1;
-  if (nextText !== newText) setReplayRequestEditorText(nextText, { preserveSelection: true });
+  if (nextText !== newText) setReplayRequestEditorText(replayDraftShown(nextText, activeTab, shownText), { preserveSelection: true });
   activeTab.requestText = nextText;
   activeTab.httpVersionMode = replayHttpVersionState(parsed, nextText, activeTab.httpVersionMode);
   activeTab.requestBytes = null;
@@ -17203,7 +18481,7 @@ function renderTarget() {
           `;
         })
         .join("")
-    : "<p class=\"empty-copy\">No targets yet. Capture proxy traffic or run Recon to build a site map.</p>";
+    : "<p class=\"empty-copy\">No targets yet. Capture proxy traffic or run Recon.</p>";
 
   const hostButtons = Array.from(targetTree.querySelectorAll(".target-host-toggle"));
   hostButtons.forEach((button) => {
@@ -17294,7 +18572,7 @@ function renderFuzzer() {
   if (base && base.body_encoding !== "base64") {
     const raw = String(state.fuzzerRequestText || "");
     const boundary = /\r?\n\r?\n/.exec(raw);
-    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/im;
+    const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/im;
     const originalHeaders = (base.headers || []).map(h => `${h.name}: ${h.value}`).join("\n");
     if (boundary && (binaryMime.test(raw.slice(0, boundary.index)) || binaryMime.test(originalHeaders))) {
       const body = raw.slice(boundary.index + boundary[0].length);
@@ -17328,8 +18606,13 @@ function renderFuzzer() {
     const generation = workspaceStateGeneration;
     const owner = JSON.stringify([sessionId, generation, state.fuzzerBinaryPresentationRevision || 0]);
     // A session/workspace replacement retires history even for identical text.
-    if (!cv || cv._owner !== owner || cv._editable !== (workspaceLoaded && !binaryMarkersBlocked) || cv.getContent() !== state.fuzzerRequestText) {
-      updateCodePaneCM("fuzzerReq", els.fuzzerRequestCM, state.fuzzerRequestText, {
+    // A binary body shows in bytes, and stays as typed while it holds the draft.
+    const shown = fuzzerShownText(state.fuzzerRequestText);
+    // The exact text where the view keeps line endings, as the request has them.
+    const typed = cv && (typeof cv.getText === "function" ? cv.getText() : cv.getContent());
+    if (!cv || cv._owner !== owner || cv._editable !== (workspaceLoaded && !binaryMarkersBlocked)
+      || (typed !== shown && fuzzerStoredText(typed) !== state.fuzzerRequestText)) {
+      updateCodePaneCM("fuzzerReq", els.fuzzerRequestCM, shown, {
         mode: "http", readOnly: !workspaceLoaded || binaryMarkersBlocked, owner,
         payloadHighlight: true,
         placeholder: "Paste an HTTP request, then mark the values to fuzz",
@@ -17343,7 +18626,7 @@ function renderFuzzer() {
         addCMUpdateListener(newCv.view, (newText) => {
           if (!workspaceLoaded || binaryMarkersBlocked || getCMView("fuzzerReq") !== newCv || sessionId !== currentSessionId()
             || generation !== workspaceStateGeneration) return;
-          updateFuzzerRequestText(newText, { userEdit: true });
+          updateFuzzerRequestText(fuzzerStoredText(newText), { userEdit: true });
           scheduleWorkspaceStateSave();
         });
         wireFuzzerMarkerSelection(newCv);
@@ -17780,6 +19063,9 @@ async function readFuzzerSavedRun(action) {
         throw new Error("A saved payload contains a line break and cannot be restored into the one-payload-per-line editor.");
       }
       const requestText = buildEditableRawRequest(record.template);
+      // A binary body must be Base64 around its positions: say so before asking.
+      const baseRequest = fuzzerBaseRequestFor(cloneEditableRequest(record.template));
+      if (record.template.http_version) baseRequest.http_version = record.template.http_version;
       const payloads = recovered?.payloads || record.results.map((result) => String(result.payload ?? ""));
       const originalCount = recovered?.originalCount
         ?? (Number.isSafeInteger(savedRecord.payload_count) && savedRecord.payload_count > 0 ? savedRecord.payload_count : null);
@@ -17796,11 +19082,9 @@ async function readFuzzerSavedRun(action) {
         "Replace the current request and payload draft with this retained run?\n\nThe request is reconstructed from its saved template; original raw formatting, source transaction and target override are unavailable. Any current source and target override will be cleared. A saved template HTTP version is kept when present; otherwise the draft uses HTTP/1.1. The original separate HTTP-version override cannot be recovered. Review the destination and HTTP version before starting. Reuse does not send requests." + partialNotice,
         () => {
           if (!ownsSelection()) return;
-          const template = cloneEditableRequest(record.template);
-          if (record.template.http_version) template.http_version = record.template.http_version;
           invalidateFuzzerRun();
           state.fuzzerDraftVersion = (state.fuzzerDraftVersion || 0) + 1;
-          state.fuzzerBaseRequest = template;
+          state.fuzzerBaseRequest = baseRequest;
           state.fuzzerRequestText = requestText;
           state.fuzzerPayloadsText = payloadsText;
           if (record.attack_type) state.fuzzerAttackType = record.attack_type;
@@ -18619,19 +19903,83 @@ async function saveTargetScope(options = {}) {
   return true;
 }
 
+function fuzzerBodyIsBinary() {
+  return state.fuzzerBaseRequest?.body_encoding === "base64";
+}
+
+/** The Fuzzer draft as its editor shows it: a binary body in bytes, as Replay
+ * shows one, its positions marked between them (see fuzzer-workflow.js). */
+function fuzzerShownText(text) {
+  const raw = String(text ?? "");
+  const boundary = fuzzerBodyIsBinary() ? /\r?\n\r?\n/.exec(raw) : null;
+  if (!boundary) return raw;
+  const start = boundary.index + boundary[0].length;
+  const shown = SniperFuzzerWorkflow.showBinaryBody(raw.slice(start));
+  return shown === null ? raw : raw.slice(0, start) + shown;
+}
+
+/** Whether the editor shows the draft's body in bytes: a binary body that is
+ * Base64 around its positions. Any other body shows as it is stored. */
+function fuzzerDraftShowsBytes() {
+  const draft = String(state.fuzzerRequestText ?? "");
+  const boundary = fuzzerBodyIsBinary() ? /\r?\n\r?\n/.exec(draft) : null;
+  return !!boundary && SniperFuzzerWorkflow.showBinaryBody(draft.slice(boundary.index + boundary[0].length)) !== null;
+}
+
+/** The inverse of `fuzzerShownText`: what the editor shows, as the draft. A
+ * body the editor shows as it is stored is edited as it is stored, so its
+ * Base64 text never turns into bytes. */
+function fuzzerStoredText(text) {
+  const raw = String(text ?? "");
+  const boundary = fuzzerBodyIsBinary() ? /\r?\n\r?\n/.exec(raw) : null;
+  if (!boundary || !fuzzerDraftShowsBytes()) return raw;
+  const start = boundary.index + boundary[0].length;
+  return raw.slice(0, start) + SniperFuzzerWorkflow.storeBinaryBody(raw.slice(start));
+}
+
+/** A template as the base request the workspace keeps, which must stay a
+ * request: a binary body with every position at its original. */
+function fuzzerBaseRequestFor(template) {
+  if (template?.body_encoding !== "base64" || !/\$payload\$|§[^§]*§/.test(template.body || "")) return template;
+  return { ...template, body: btoa(SniperFuzzerWorkflow.binaryBodyOriginals(template.body)) };
+}
+
+/** The draft as the position actions mark it, and the way back to the draft:
+ * a binary body in the bytes the editor shows, as typed when the editor holds
+ * this draft. The plain editor shows the draft as it is stored. */
+function fuzzerMarkerDraft(raw) {
+  const editor = getCMView("fuzzerReq");
+  const shown = editor?.getText ? editor.getText() : null;
+  const typed = fuzzerBodyIsBinary() && shown !== null ? shown : raw;
+  const text = typed === raw || fuzzerStoredText(typed) === raw ? typed : fuzzerShownText(raw);
+  return {
+    text,
+    stored: marked => (text === raw ? marked : fuzzerStoredText(marked)),
+    // The editor's own breaks place a position exactly, even where a lone CR and
+    // a lone LF side by side read as one CRLF in the text.
+    offset: position => (shown === text ? editor.textOffset(position) : fuzzerRawOffsetForEditorOffset(text, position)),
+  };
+}
+
 function fuzzerRequestTextForAction() {
   const editor = getCMView("fuzzerReq");
-  const visible = editor ? editor.getContent() : els.fuzzerRequestEditor?.value;
+  const hasExact = typeof editor?.getText === "function";
   const saved = String(state.fuzzerRequestText || "");
-  // CodeMirror normalizes line breaks. Preserve the untouched source bytes when
-  // its displayed document still matches that source (notably multipart CRLF).
-  if (visible == null || String(visible) === saved.replace(/\r\n?/g, "\n")) return saved;
+  if (fuzzerBodyIsBinary() && hasExact) {
+    const shown = editor.getText();
+    // A body that will not show as bytes is shown as it is stored.
+    return shown === fuzzerShownText(saved) ? saved : fuzzerStoredText(shown);
+  }
+  const visible = editor ? (hasExact ? editor.getText() : editor.getContent()) : els.fuzzerRequestEditor?.value;
+  // Native textareas (and views without getText) normalize line breaks; keep
+  // untouched source bytes when their text still matches (notably CRLF).
+  if (visible == null || (!hasExact && String(visible) === saved.replace(/\r\n?/g, "\n"))) return saved;
   return String(visible);
 }
 
 function parseFuzzerRequestTemplate(text, fallback = state.fuzzerBaseRequest || createDefaultEditableRequest()) {
   const raw = String(text || "");
-  const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/im;
+  const binaryMime = /^content-type:\s*application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/im;
   const split = splitRawHttpMessage(raw);
   const originalHeaders = (fallback?.headers || []).map(h => `${h.name}: ${h.value}`).join("\n");
   if (fallback?.body_encoding !== "base64" && /§|\$payload\$/.test(split.body)
@@ -18642,12 +19990,22 @@ function parseFuzzerRequestTemplate(text, fallback = state.fuzzerBaseRequest || 
   const boundary = /\r?\n\r?\n/.exec(raw);
   const { body } = splitRawHttpMessage(raw);
   const bodyEncoding = fallback?.body_encoding === "base64" ? "base64" : "utf8";
+  // A binary body keeps its positions between Base64 pieces. The shared parser
+  // checks it with every position at its original.
+  const binaryPositions = bodyEncoding === "base64" && /\$payload\$|§[^§]*§/.test(body);
+  let checkedBody = body;
   let bodyLength;
-  try {
-    bodyLength = editableRequestBodyLength(body, bodyEncoding);
-  } catch (error) {
-    if (bodyEncoding !== "base64") throw error;
-    throw new Error("Request body must be valid base64. Restore valid base64 in Request; use header or query positions instead of body markers.");
+  if (binaryPositions) {
+    const originals = SniperFuzzerWorkflow.binaryBodyOriginals(body);
+    checkedBody = btoa(originals);
+    bodyLength = originals.length;
+  } else {
+    try {
+      bodyLength = editableRequestBodyLength(body, bodyEncoding);
+    } catch (error) {
+      if (bodyEncoding !== "base64") throw error;
+      throw new Error("Request body must be valid Base64.");
+    }
   }
   const headEnd = boundary ? boundary.index : raw.length;
   // The engine always recalculates Content-Length after expansion. Normalize
@@ -18660,7 +20018,10 @@ function parseFuzzerRequestTemplate(text, fallback = state.fuzzerBaseRequest || 
     throw new Error("Invalid or conflicting Content-Length headers in the request template.");
   }
   const head = originalHead.replace(/^([ \t]*content-length[ \t]*:[ \t]*)[^\r\n]*/gmi, (_line, prefix) => `${prefix}${bodyLength}`);
-  return parseEditableRawRequest(head + raw.slice(headEnd), fallback);
+  const bodyStart = boundary ? boundary.index + boundary[0].length : raw.length;
+  const request = parseEditableRawRequest(head + raw.slice(headEnd, bodyStart) + checkedBody, fallback);
+  if (binaryPositions) request.body = body;
+  return request;
 }
 
 function fuzzerSetupNode(id) {
@@ -18811,12 +20172,6 @@ function renderFuzzerSetup() {
   renderFuzzerPayloadImportStatus();
   if (typeof SniperFuzzerWorkflow === "undefined" || !fuzzerSetupNode("fuzzerPreflightSummary")) return;
   const raw = fuzzerRequestTextForAction();
-  // Source encoding still applies when the edited body cannot be parsed.
-  const bodyEncodingHelp = workspaceLoaded && state.fuzzerBaseRequest?.body_encoding === "base64"
-    ? "Base64 body · header and query positions only" : "";
-  const requestHelp = fuzzerSetupNode("fuzzerRequestHelp");
-  if (requestHelp) requestHelp.textContent = bodyEncodingHelp
-    ? bodyEncodingHelp : "";
   const select = fuzzerSetupNode("fuzzerCandidateSelect");
   let candidates = [];
   let template = null;
@@ -18899,7 +20254,7 @@ function renderFuzzerSetup() {
     summary.textContent = raw.trim() ? `${fuzzerPayloadCount(state.fuzzerPayloadsText || "")} payloads` : "";
     notice.textContent = raw.trim() ? error : "";
     notice.classList?.toggle("fuzzer-notice-error", !!raw.trim() && !!error);
-    if (previewNotes) previewNotes.textContent = bodyEncodingHelp;
+    if (previewNotes) previewNotes.textContent = "";
     if (samples) samples.textContent = "Add a valid request and payloads to preview.";
     return;
   }
@@ -18920,7 +20275,8 @@ function renderFuzzerSetup() {
   if (previewNotes) previewNotes.textContent = (model.warnings || []).join(" ");
   if (samples) {
     samples.innerHTML = (model.samples || []).map((sample) => {
-      const text = buildEditableRawRequest(sample.request);
+      // A binary body shows in bytes, as in the editor.
+      const text = buildEditableRawRequest(sample.request, false, { bytes: true });
       const preview = text.slice(0, 16384);
       return `<details class="fuzzer-request-sample"><summary>Template-expanded sample ${sample.index + 1} · ${escapeHtml(sample.effectiveTarget || destination || "")}${text.length > preview.length ? " (display truncated)" : ""}</summary><pre>${escapeHtml(preview)}</pre></details>`;
     }).join("") || (model.samplesOmitted ? "Samples omitted because the expanded requests exceed the local preview budget." : "Samples appear after adding at least one payload and one marker.");
@@ -18971,32 +20327,37 @@ function markFuzzerPosition(start, end, expectedRaw = fuzzerRequestTextForAction
   const raw = fuzzerRequestTextForAction();
   if (raw !== expectedRaw) throw new Error("The request changed. Choose the value again.");
   const template = parseFuzzerRequestTemplate(raw);
-  const boundary = /\r?\n\r?\n/.exec(raw);
-  const bodyStart = boundary ? boundary.index + boundary[0].length : raw.length;
-  if (boundary && (end > bodyStart || start === bodyStart) && (template.body_encoding === "base64" || template.preview_truncated)) {
-    throw new Error("Body positions require a complete UTF-8 request body. Header and query positions remain available.");
+  // Offsets are in the text the editor shows, which shows a binary body in bytes.
+  const draft = fuzzerMarkerDraft(raw);
+  const boundary = /\r?\n\r?\n/.exec(draft.text);
+  const bodyStart = boundary ? boundary.index + boundary[0].length : draft.text.length;
+  if (boundary && (end > bodyStart || start === bodyStart) && template.preview_truncated) {
+    throw new Error("Body positions require the complete request body. Header and query positions remain available.");
   }
-  const next = SniperFuzzerWorkflow.markRequestSelection(raw, start, end);
+  const marked = SniperFuzzerWorkflow.markRequestSelection(draft.text, start, end);
+  const next = draft.stored(marked);
   parseFuzzerRequestTemplate(next);
   state._fuzzerMarkerUndo = { before: raw, after: next, sessionId: currentSessionId(), runToken: state.fuzzerRunToken };
   updateFuzzerRequestText(next, { userEdit: true });
+  getCMView("fuzzerReq")?.setContent?.(marked);
   scheduleWorkspaceStateSave();
   renderFuzzer();
   const editor = getCMView("fuzzerReq");
   if (editor?.view) {
-    const anchor = next.slice(0, start).replace(/\r\n?/g, "\n").length;
-    const marked = next.slice(start, end + 2).replace(/\r\n?/g, "\n").length;
-    editor.view.dispatch({ selection: { anchor: start === end ? anchor + 1 : anchor, head: start === end ? anchor + 1 : anchor + marked }, scrollIntoView: true });
+    const anchor = marked.slice(0, start).replace(/\r\n?/g, "\n").length;
+    const length = marked.slice(start, end + 2).replace(/\r\n?/g, "\n").length;
+    editor.view.dispatch({ selection: { anchor: start === end ? anchor + 1 : anchor, head: start === end ? anchor + 1 : anchor + length }, scrollIntoView: true });
     editor.view.focus();
   }
 }
 
 function markFuzzerEditorSelection() {
   const raw = fuzzerRequestTextForAction();
+  const draft = fuzzerMarkerDraft(raw);
   const editor = getCMView("fuzzerReq");
   const selection = editor?.view?.state?.selection?.main;
   if (selection) {
-    markFuzzerPosition(fuzzerRawOffsetForEditorOffset(raw, selection.from), fuzzerRawOffsetForEditorOffset(raw, selection.to), raw);
+    markFuzzerPosition(draft.offset(selection.from), draft.offset(selection.to), raw);
   } else {
     const input = els.fuzzerRequestEditor;
     if (!input) throw new Error("Place the caret or select a value in the request editor first.");
@@ -19004,15 +20365,17 @@ function markFuzzerEditorSelection() {
   }
 }
 
+/** The selected position removed, in the text the editor shows, and as the draft. */
 function fuzzerMarkerRemoval() {
-  const raw = fuzzerRequestTextForAction();
+  const draft = fuzzerMarkerDraft(fuzzerRequestTextForAction());
   const editor = getCMView("fuzzerReq");
   const selection = editor?.view?.state?.selection?.main;
   const input = els.fuzzerRequestEditor;
   if (!selection && !input) throw new Error("Select a marked position in the request editor first.");
-  const start = fuzzerRawOffsetForEditorOffset(raw, selection ? selection.from : input.selectionStart);
-  const end = fuzzerRawOffsetForEditorOffset(raw, selection ? selection.to : input.selectionEnd);
-  return SniperFuzzerWorkflow.removeRequestSelection(raw, start, end);
+  const start = selection ? draft.offset(selection.from) : fuzzerRawOffsetForEditorOffset(draft.text, input.selectionStart);
+  const end = selection ? draft.offset(selection.to) : fuzzerRawOffsetForEditorOffset(draft.text, input.selectionEnd);
+  const removed = SniperFuzzerWorkflow.removeRequestSelection(draft.text, start, end);
+  return { ...removed, draft: draft.stored(removed.text) };
 }
 
 function wireFuzzerMarkerSelection(editor) {
@@ -19039,8 +20402,9 @@ function removeFuzzerEditorPosition() {
   if (state.fuzzerRunning || state.fuzzerRunningAttackId) throw new Error("Wait for the current run to finish before changing positions.");
   const raw = fuzzerRequestTextForAction();
   const result = fuzzerMarkerRemoval();
-  state._fuzzerMarkerUndo = { before: raw, after: result.text, sessionId: currentSessionId(), runToken: state.fuzzerRunToken };
-  updateFuzzerRequestText(result.text, { userEdit: true });
+  state._fuzzerMarkerUndo = { before: raw, after: result.draft, sessionId: currentSessionId(), runToken: state.fuzzerRunToken };
+  updateFuzzerRequestText(result.draft, { userEdit: true });
+  getCMView("fuzzerReq")?.setContent?.(result.text);
   scheduleWorkspaceStateSave();
   renderFuzzer();
   const anchor = result.text.slice(0, result.from).replace(/\r\n?/g, "\n").length;
@@ -19060,10 +20424,13 @@ function clearFuzzerMarkers() {
   if (!workspaceLoaded) return false;
   if (state.fuzzerRunning || state.fuzzerRunningAttackId) throw new Error("Wait for the current run to finish before changing positions.");
   const raw = fuzzerRequestTextForAction();
-  const next = SniperFuzzerWorkflow.clearRequestPositions(raw);
+  const draft = fuzzerMarkerDraft(raw);
+  const cleared = SniperFuzzerWorkflow.clearRequestPositions(draft.text);
+  const next = draft.stored(cleared);
   if (next === raw) return;
   state._fuzzerMarkerUndo = { before: raw, after: next, sessionId: currentSessionId(), runToken: state.fuzzerRunToken };
   updateFuzzerRequestText(next, { userEdit: true });
+  getCMView("fuzzerReq")?.setContent?.(cleared);
   scheduleWorkspaceStateSave();
   renderFuzzer();
   getCMView("fuzzerReq")?.view?.focus();
@@ -19870,7 +21237,7 @@ async function runFuzzerAttack() {
       scheduleRefresh();
       return;
     }
-    state.fuzzerBaseRequest = template;
+    state.fuzzerBaseRequest = fuzzerBaseRequestFor(template);
     state.fuzzerTarget = target;
     state.fuzzerTargetRequestText = target ? fuzzerTargetAuthorityFromRequestText(fuzzerReqText) : null;
     state.fuzzerRequestText = fuzzerReqText;
@@ -20648,7 +22015,7 @@ function renderSequencePanel({ focusExtractionStepId = null } = {}) {
       // Body template substitution operates on text: do not silently encode it.
       delete step.binary_body_blocked;
       if (step.request?.body_encoding !== "base64" && (Array.isArray(step.request?.headers) ? step.request.headers : []).some(h =>
-        String(h?.name || "").toLowerCase() === "content-type" && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()))) {
+        String(h?.name || "").toLowerCase() === "content-type" && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()))) {
         try {
           const raw = step.request_text ?? buildEditableRawRequest(step.request);
           const originalBody = splitRawHttpMessage(raw).body;
@@ -21004,9 +22371,12 @@ async function saveProxySettings() {
     state.settings.startup = startupResult;
   }
 
-  // If proxy was rebound, update the main proxy_addr in settings too
+  // A rebind leaves the listener up on its new address, and the indicator,
+  // the sidebar and the session page print its port.
   if (startupResult?.rebound === true) {
     state.settings.proxy_addr = startupResult.active_proxy_addr;
+    state.settings.proxy_online = true;
+    renderSessionFeed();
   }
 
   renderInterceptStatus();
@@ -21085,6 +22455,10 @@ async function openSniperBrowser({ browser, agent, fresh } = {}) {
   if (browser) body.browser = browser;
   if (agent) body.agent = true;
   if (fresh) body.fresh = true;
+  // For the session on screen. The server opens that session's own port when
+  // the proxy listener records into another one, and gives it its own profile.
+  const sessionId = currentSessionId();
+  if (sessionId) body.session_id = sessionId;
   try {
     const response = await fetch("/api/browser/launch", {
       method: "POST",
@@ -21093,6 +22467,11 @@ async function openSniperBrowser({ browser, agent, fresh } = {}) {
     });
     await requireOkResponse(response, "Could not open a browser.");
     const launched = await response.json();
+    // The launch may have opened the session's port: the rows and the
+    // indicator say so without waiting for the next read.
+    if (sessionId && sessionFeed(sessionId).kind !== "main") {
+      refreshSessionFeeds().catch((error) => console.error(error));
+    }
     // A 200 is not proof a window appeared: a browser that ends at once still
     // comes back as success with a warning saying why, and that warning is the
     // only place the reason is.
@@ -21216,7 +22595,10 @@ function browserMenuRowHtml(entry) {
   // link: the page it points to is the vendor's, opened outside Sniper.
   const installUrl = !entry.installed && /^https:\/\//.test(entry.install_url || "") ? entry.install_url : "";
   const note = entry.installed ? (entry.default ? "Default" : "") : installUrl ? "" : "Not installed";
-  const title = !entry.installed ? entry.install_hint || "" : "";
+  // What a browser that is not installed needs, or what an installed one
+  // still lacks for an agent to drive it, is said on hover: the menu is a
+  // list of names.
+  const title = !entry.installed ? entry.install_hint || "" : missing.map((item) => item.hint || item.name).join(" ");
   // A saved choice that has since been uninstalled still has to be clearable,
   // or every open would keep warning about it with no way to stop.
   const pin = entry.preferred
@@ -21228,7 +22610,7 @@ function browserMenuRowHtml(entry) {
   // own driver. The driver, not a list of names, decides, so a new AI browser
   // is marked without touching this.
   const agentMark = entry.driver && entry.driver !== "cdp"
-    ? ` <span class="browser-menu-agent" title="Built for AI agents" aria-label="AI browser">✨</span>`
+    ? ` <span class="browser-menu-agent" title="Built for AI agents">AI</span>`
     : "";
   const install = installUrl
     ? `<a class="browser-menu-install" href="${escapeHtml(installUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Install ${escapeHtml(entry.browser)}">Install &#8599;</a>`
@@ -21243,7 +22625,6 @@ function browserMenuRowHtml(entry) {
       ${pin}
       ${install}
     </div>
-    ${missing.length ? `<div class="browser-menu-hint">${escapeHtml(missing.map((item) => item.hint || item.name).join(" "))}</div>` : ""}
   `;
 }
 
@@ -21258,8 +22639,7 @@ function renderBrowserMenu(catalog) {
     ${rows.join("")}
     <div class="context-menu-divider"></div>
     <label class="browser-menu-option"><input type="checkbox" data-option="agent" ${wasChecked("agent")}> Let an agent drive it</label>
-    <label class="browser-menu-option"><input type="checkbox" data-option="fresh" ${wasChecked("fresh")}> Throwaway profile (discard logins on quit)</label>
-    <div class="browser-menu-hint">By default, reuse this browser's saved Sniper profile. Your everyday browser profile is separate. Site data stays between launches; sites can still expire logins.</div>
+    <label class="browser-menu-option" title="A new profile, deleted when the browser quits. Without this the browser's saved Sniper profile is used again. Your everyday browser profile is separate. Site data stays between launches; sites can still expire logins."><input type="checkbox" data-option="fresh" ${wasChecked("fresh")}> Throwaway profile</label>
   `;
   element.onclick = async (event) => {
     const prefer = event.target.closest("[data-prefer]");
@@ -21347,19 +22727,24 @@ async function forwardSelectedIntercept() {
 
   const sessionId = currentSessionId();
   const id = state.selectedInterceptRecord.id;
-  const interceptReqText = getCMView("interceptReq")
-    ? getCMView("interceptReq").getContent()
-    : (els.interceptRequestEditor ? els.interceptRequestEditor.value : "");
+  const view = getCMView("interceptReq");
+  const interceptReqText = view ? view.getText() : (els.interceptRequestEditor ? els.interceptRequestEditor.value : "");
+  // CM shows a binary body as bytes; a native textarea keeps it as Base64.
+  const bytes = Boolean(view);
   const request = parseEditableRawRequest(
     interceptReqText,
     state.selectedInterceptRecord.request,
     true,
+    { bytes },
   );
   // The editor is the only place that knows whether anything was actually typed.
   // Comparing the parsed request against the held one on the server reports edits
   // that never happened, because the round trip through text normalises headers
   // and can rewrite Content-Length on its own.
-  const edited = interceptReqText.replace(/\r\n?/g, "\n") !== buildEditableRawRequest(state.selectedInterceptRecord.request, true).replace(/\r\n?/g, "\n");
+  const originalReqText = buildEditableRawRequest(state.selectedInterceptRecord.request, true, { bytes });
+  const edited = view?.preservesLineEndings
+    ? interceptReqText !== originalReqText
+    : interceptReqText.replace(/\r\n?/g, "\n") !== originalReqText.replace(/\r\n?/g, "\n");
   if (state.selectedInterceptRecord.is_websocket && request.body) {
     showToast("WebSocket upgrade requests must not include a request body.", "error");
     return;
@@ -21527,7 +22912,7 @@ async function loadResponseInterceptDetail(id, { explicit = false } = {}) {
   }
 }
 
-function buildEditableRawResponse(resp) {
+function buildEditableRawResponse(resp, { bytes = false } = {}) {
   const source = resp || {};
   let text = `HTTP/1.1 ${source.status ?? 200}\r\n`;
   for (const h of normalizedHeaders(source.headers)) {
@@ -21535,19 +22920,19 @@ function buildEditableRawResponse(resp) {
   }
   text += "\r\n";
   const binaryMime = normalizedHeaders(source.headers).some(h =>
-    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
+  let body = source.body || "";
   if (source.body_encoding !== "base64" && binaryMime) {
     // Encode UTF-8 bytes, not Latin-1 code units, before the editor normalizes lines.
     let binary = "";
-    for (const byte of new TextEncoder().encode(source.body || "")) binary += String.fromCharCode(byte);
-    text += btoa(binary);
-  } else {
-    text += source.body || "";
+    for (const byte of new TextEncoder().encode(body)) binary += String.fromCharCode(byte);
+    body = btoa(binary);
   }
-  return text;
+  if (bytes && (source.body_encoding === "base64" || binaryMime)) body = binaryBodyText(body) ?? body;
+  return text + body;
 }
 
-function parseEditableRawResponse(text, original, requestMethod = "") {
+function parseEditableRawResponse(text, original, requestMethod = "", { bytes = false } = {}) {
   const { head, body } = splitRawHttpMessage(text);
   const lines = head.split("\n").filter((line) => line.length > 0);
   const statusLine = lines[0] || "";
@@ -21572,11 +22957,11 @@ function parseEditableRawResponse(text, original, requestMethod = "") {
     }
   }
 
-  const bodyText = body;
   const originalBinaryMime = normalizedHeaders(original?.headers).some(h =>
-    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
   const isText = (!original || original.body_encoding === "utf8") && !originalBinaryMime;
   const bodyEncoding = isText ? "utf8" : "base64";
+  const bodyText = bytes && bodyEncoding === "base64" ? binaryBodyBase64(body) : body;
   const bodyLength = editableResponseBodyLength(bodyText, bodyEncoding);
   if (responseMustNotIncludeBody(status, requestMethod) && bodyLength > 0) {
     throw new Error(`Response status ${status} must not include a body`);
@@ -21609,7 +22994,7 @@ function renderResponseIntercepts() {
   reconcileResponseInterceptSelection(filteredResponseIntercepts);
   getInterceptDraftRecovery("response");
   const feedback = updateInterceptDetailFeedback("response");
-  els.responseInterceptTableBody.innerHTML = filteredResponseIntercepts.length
+  if (writeRows(els.responseInterceptTableBody, filteredResponseIntercepts.length
     ? filteredResponseIntercepts
         .map((item) => {
           const selected = item.id === state.selectedResponseInterceptId ? "selected" : "";
@@ -21628,13 +23013,13 @@ function renderResponseIntercepts() {
         <tr class="empty-row">
           <td colspan="5">No held responses.</td>
         </tr>
-      `;
-
-  Array.from(els.responseInterceptTableBody.querySelectorAll(".history-row")).forEach((row) => {
-    row.addEventListener("click", () => {
-      selectInterceptQueueItem("response", row.dataset.id).catch((error) => console.error(error));
+      `)) {
+    Array.from(els.responseInterceptTableBody.querySelectorAll(".history-row")).forEach((row) => {
+      row.addEventListener("click", () => {
+        selectInterceptQueueItem("response", row.dataset.id).catch((error) => console.error(error));
+      });
     });
-  });
+  }
   updateInterceptQueueSelectionStatus("response", filteredResponseIntercepts);
 
   if (!state.selectedResponseInterceptRecord) {
@@ -21669,7 +23054,7 @@ function renderResponseIntercepts() {
     if (els.interceptResponseCM) {
       if (state.responseInterceptEditorSeedId !== rec.id) {
         setInterceptPaneContent("interceptRes", els.interceptResponseCM,
-          takeInterceptDraftRecovery("response", rec) ?? buildEditableRawResponse(rec.response), {
+          takeInterceptDraftRecovery("response", rec) ?? buildEditableRawResponse(rec.response, { bytes: true }), {
           mode: "http", readOnly: false,
         });
         state.responseInterceptEditorSeedId = rec.id;
@@ -21693,16 +23078,20 @@ async function forwardSelectedResponseIntercept() {
 
   const sessionId = currentSessionId();
   const id = state.selectedResponseInterceptRecord.id;
-  const interceptResText = getCMView("interceptRes")
-    ? getCMView("interceptRes").getContent()
-    : (els.interceptResponseEditor ? els.interceptResponseEditor.value : "");
+  const view = getCMView("interceptRes");
+  const interceptResText = view ? view.getText() : (els.interceptResponseEditor ? els.interceptResponseEditor.value : "");
+  // CM shows a binary body as bytes; a native textarea keeps it as Base64.
+  const bytes = Boolean(view);
   const editedResponse = parseEditableRawResponse(
     interceptResText,
     state.selectedResponseInterceptRecord.response,
     state.selectedResponseInterceptRecord.method,
+    { bytes },
   );
-  const edited =
-    interceptResText.replace(/\r\n?/g, "\n") !== buildEditableRawResponse(state.selectedResponseInterceptRecord.response).replace(/\r\n?/g, "\n");
+  const originalResText = buildEditableRawResponse(state.selectedResponseInterceptRecord.response, { bytes });
+  const edited = view?.preservesLineEndings
+    ? interceptResText !== originalResText
+    : interceptResText.replace(/\r\n?/g, "\n") !== originalResText.replace(/\r\n?/g, "\n");
 
   // Optimistic UI
   state.responseIntercepts = state.responseIntercepts.filter((i) => i.id !== id);
@@ -22715,7 +24104,7 @@ function replayRequestEditCandidate(tab, newText) {
 }
 
 function acceptReplayRequestEdit(text, tab = getActiveReplayTab(), acceptedCandidate = null) {
-  if (!tab || tab.type === "websocket" || replayEditorShowsDraft(text, tab.requestText)) return true;
+  if (!tab || tab.type === "websocket" || replayEditorShowsDraft(text, tab.requestText, tab)) return true;
   if (!canStoreReplayRequest(text, null)) return false;
   const candidate = replayRequestEditCandidate(tab, text);
   if (!canStoreReplayRequest(candidate.requestText, candidate.request || tab.baseRequest)) return false;
@@ -23408,11 +24797,11 @@ function preserveActiveHttpReplayDraftBeforeNavigation(tab, action) {
   const hexMode = state.replayMessageViews.request === "hex";
   const legacyText = els.replayRequestCM ? null
     : (els.replayRequestHighlight?.innerText ?? els.replayRequestEditor?.value ?? null);
-  const visibleText = hexMode ? null : (editor ? editor.getContent()
+  const visibleText = hexMode ? null : (editor ? editor.getText()
     : legacyText);
   let textChanged = typeof visibleText === "string"
     && !replayEditorShowsDraft(visibleText, tab.requestText);
-  let requestText = textChanged ? visibleText : (tab.requestText || "");
+  let requestText = textChanged ? replayDraftFromEditor(visibleText, tab) : (tab.requestText || "");
   const target = getRepeaterTargetConfig(tab);
   const host = els.replayHostInput?.value ?? target.host;
   const port = els.replayPortInput?.value ?? target.port;
@@ -23628,7 +25017,9 @@ function replayTabLabel(tab) {
 }
 
 function replayTabTooltipLabel(tab, label = replayTabLabel(tab), autoLabel = replayTabAutoLabel(tab)) {
-  return tab.customLabel ? label : autoLabel;
+  const name = tab.customLabel ? label : autoLabel;
+  // The agent's row may show who opened a tab as a glyph alone.
+  return tab.openedBy && !tab.pinned ? `${name}\nOpened by ${tab.openedBy}` : name;
 }
 
 function replayTabAutoLabel(tab) {
@@ -25800,6 +27191,18 @@ function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
   state.websocketInScopeOnly = Boolean(snapshot?.websocket_in_scope_only);
   state.websocketLiveOnly = Boolean(snapshot?.websocket_live_only);
   state.replayTabsWrap = snapshot?.replay_tabs_wrap === true;
+  state.sessionSidebarHidden = snapshot?.session_sidebar_hidden === true;
+  state.sessionSidebarWidth = sanitizeSessionSidebarWidth(snapshot?.session_sidebar_width);
+  applySessionSidebarWidth();
+  const strings = (value) => (Array.isArray(value) ? value.filter((entry) => typeof entry === "string") : []);
+  state.sessionGroupsCollapsed = strings(snapshot?.session_groups_collapsed);
+  state.sessionSectionsCollapsed = strings(snapshot?.session_sections_collapsed);
+  state.sessionOrder = strings(snapshot?.session_order);
+  state.sessionGroupOrder = strings(snapshot?.session_group_order);
+  state.sessionDefaultAfter = typeof snapshot?.session_default_after === "string" ? snapshot.session_default_after : "";
+  state.sessionPinned = strings(snapshot?.session_pinned);
+  state.sessionSort = typeof snapshot?.session_sort === "string" ? snapshot.session_sort : "manual";
+  state.sessionRowDetails = Array.isArray(snapshot?.session_row_details) ? strings(snapshot.session_row_details) : ["domains"];
   els.replayTabStrip?.classList?.toggle("wrap", state.replayTabsWrap);
   if (els.replayTabsWrapInput) els.replayTabsWrapInput.checked = state.replayTabsWrap;
   state.websocketStackHeight = sanitizeWebsocketStackHeight(snapshot?.websocket_stack_height);
@@ -25890,6 +27293,16 @@ function snapshotUiSettings() {
     websocket_in_scope_only: Boolean(state.websocketInScopeOnly),
     websocket_live_only: Boolean(state.websocketLiveOnly),
     replay_tabs_wrap: state.replayTabsWrap === true,
+    session_sidebar_hidden: state.sessionSidebarHidden === true,
+    session_sidebar_width: state.sessionSidebarWidth > 0 ? state.sessionSidebarWidth : null,
+    session_groups_collapsed: state.sessionGroupsCollapsed,
+    session_sections_collapsed: state.sessionSectionsCollapsed,
+    session_order: state.sessionOrder,
+    session_group_order: state.sessionGroupOrder,
+    session_default_after: state.sessionDefaultAfter,
+    session_pinned: state.sessionPinned,
+    session_sort: state.sessionSort,
+    session_row_details: state.sessionRowDetails,
     websocket_stack_height: state.websocketStackHeight > 0 ? state.websocketStackHeight : null,
     ws_replay_left_width: state.wsReplayLeftWidth > 0 ? state.wsReplayLeftWidth : null,
     ws_replay_frame_detail_height: state.wsReplayFrameDetailHeight > 0 ? state.wsReplayFrameDetailHeight : null,
@@ -26198,6 +27611,62 @@ function bindServiceMapResizer(handle) {
   });
 }
 
+// The session list is no narrower than its rows can be read, and leaves the
+// workspace its room. The server keeps a saved width to the same two.
+const SESSION_SIDEBAR_MIN_WIDTH = 160;
+const SESSION_SIDEBAR_MAX_WIDTH = 480;
+
+function sanitizeSessionSidebarWidth(candidate) {
+  const parsed = Number(candidate);
+  return Number.isFinite(parsed) && parsed > 0
+    ? clamp(Math.round(parsed), SESSION_SIDEBAR_MIN_WIDTH, SESSION_SIDEBAR_MAX_WIDTH) : null;
+}
+
+// The session list keeps the width it was dragged to.
+function applySessionSidebarWidth() {
+  const style = els.sessionSidebar?.style;
+  if (!style) return;
+  if (state.sessionSidebarWidth > 0) style.setProperty("--session-sidebar-width", `${state.sessionSidebarWidth}px`);
+  else style.removeProperty("--session-sidebar-width");
+}
+
+// The list's trailing edge: drag it, or focus it and press ←/→; a
+// double-click puts the width back.
+function bindSessionSidebarResizer(handle) {
+  if (!handle) return;
+  const setWidth = (width) => {
+    state.sessionSidebarWidth = sanitizeSessionSidebarWidth(width);
+    applySessionSidebarWidth();
+  };
+  handle.addEventListener("dblclick", () => {
+    state.sessionSidebarWidth = null;
+    applySessionSidebarWidth();
+    scheduleUiSettingsSave();
+  });
+  handle.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    setWidth(els.sessionSidebar.getBoundingClientRect().width + (event.key === "ArrowRight" ? 24 : -24));
+    scheduleUiSettingsSave();
+  });
+  handle.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    const startX = event.clientX, startWidth = els.sessionSidebar.getBoundingClientRect().width;
+    document.body.classList.add("pane-resizing-x");
+    handle.classList.add("active");
+    const onMove = (moveEvent) => setWidth(startWidth + moveEvent.clientX - startX);
+    const onUp = () => {
+      document.body.classList.remove("pane-resizing-x");
+      handle.classList.remove("active");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      scheduleUiSettingsSave();
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
 function serializeWorkbenchPaneWidths() {
   if (!state.workbenchPaneWidths) {
     return {};
@@ -26224,16 +27693,20 @@ function syncHttpCapturePill({ confirmed = false } = {}) {
   if (!pill) return;
   const unconfirmed = state.httpCaptureUnconfirmedSessions?.has(currentSessionId()) || false;
   const capturing = state.runtime?.http_capture_enabled !== false;
-  pill.classList.toggle("active", capturing && !unconfirmed);
+  // Recording is on and nothing arrives: "Capturing" would not be true.
+  const idle = capturing && !unconfirmed && sessionFeed(currentSessionId()).kind === "none";
+  pill.classList.toggle("active", capturing && !unconfirmed && !idle);
   pill.classList.toggle("paused", !capturing && !unconfirmed);
-  pill.textContent = unconfirmed ? "Capture unconfirmed" : capturing ? "Capturing" : "Paused";
+  pill.textContent = unconfirmed ? "Capture unconfirmed" : idle ? "Not receiving" : capturing ? "Capturing" : "Paused";
   if (unconfirmed) {
     pill.title = `Capture state is unconfirmed. Last confirmed: ${capturing ? "Capturing" : "Paused"}. Click to request capture ${capturing ? "off" : "on"}. Traffic still passes through.`;
     return;
   }
-  pill.title = capturing
-    ? "Recording proxied traffic. Click to pause; traffic still passes through."
-    : "Not recording. Traffic still passes through. Click to resume.";
+  pill.title = idle
+    ? "Recording is on, but no traffic reaches this session. Click to pause."
+    : capturing
+      ? "Recording proxied traffic. Click to pause; traffic still passes through."
+      : "Not recording. Traffic still passes through. Click to resume.";
 }
 
 function hydrateFilterForm({ preserveDraft = false } = {}) {
@@ -27039,7 +28512,7 @@ function prettyFormat(text, message, { jsonLines = true } = {}) {
 
   const head = text.slice(0, boundary);
   const body = text.slice(boundary + divider.length);
-  const contentType = (message.content_type || "").toLowerCase();
+  const contentType = (message.content_type || "").split(";", 1)[0].trim().toLowerCase();
   // HTML and XML are laid out by tag, as Burp's Pretty does; minified pages
   // were one line. The editable request passes no type, so its body stays
   // as captured.
@@ -27105,20 +28578,30 @@ function compactFormat(text) {
 
 function editableRequestFromRecord(record) {
   const request = record.request || {};
+  let headers = normalizedHeaders(request.headers);
+  // MessageRecord stores the decompressed body when content_decoded is true
+  // while keeping wire Content-Encoding / Content-Length headers. Strip them
+  // so Replay, Fuzzer and Sequence do not send decoded bytes claiming to be
+  // compressed (matching recordToFormat and EditableRequest::from_message_record).
+  if (request.content_decoded) {
+    headers = headers.filter((header) => !headerNameEquals(header, "content-encoding") && !headerNameEquals(header, "content-length"));
+  }
   return {
     scheme: record.scheme,
     host: record.host,
     method: record.method,
     path: record.path || "/",
     http_version: record.http_version,
-    headers: normalizedHeaders(request.headers),
+    headers,
     body: request.body_preview || "",
     body_encoding: request.body_encoding,
     preview_truncated: request.preview_truncated,
   };
 }
 
-function buildEditableRawRequest(request, binarySafe = false) {
+// `bytes` shows a Base64 body one character per byte, as Burp's Raw view does;
+// parse with the same option to turn the shown bytes back into Base64.
+function buildEditableRawRequest(request, binarySafe = false, { bytes = false } = {}) {
   const source = request || {};
   const headers = normalizedHeaders(source.headers);
   if (!headers.some((header) => headerNameEquals(header, "host")) && source.host) {
@@ -27128,18 +28611,22 @@ function buildEditableRawRequest(request, binarySafe = false) {
   const head = `${source.method || "GET"} ${source.path || "/"} ${httpVer}`;
   const headerBlock = mergeHeaders(headers).map((header) => `${header.name}: ${header.value}`).join("\n");
   let body = source.body || "";
+  let base64 = source.body_encoding === "base64";
   if (binarySafe && source.body_encoding !== "base64" && headers.some(h =>
-    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()))) {
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()))) {
     let binary = "";
     for (const byte of new TextEncoder().encode(body)) binary += String.fromCharCode(byte);
     body = btoa(binary);
+    base64 = true;
   }
+  if (bytes && base64) body = binaryBodyText(body) ?? body;
   const rawHead = headerBlock ? `${head}\n${headerBlock}` : head;
   return body.length > 0 ? `${rawHead}\n\n${body}` : rawHead;
 }
 
-function parseEditableRawRequest(text, fallback, binarySafe = false) {
-  const { head, body } = splitRawHttpMessage(text);
+function parseEditableRawRequest(text, fallback, binarySafe = false, { bytes = false } = {}) {
+  const { head, body: shownBody } = splitRawHttpMessage(text);
+  let body = shownBody;
   const lines = head.split("\n").filter((line) => line.length > 0);
   const fallbackPath = fallback?.path && String(fallback.path).trim()
     ? String(fallback.path)
@@ -27216,8 +28703,9 @@ function parseEditableRawRequest(text, fallback, binarySafe = false) {
   }
 
   const legacyBinary = binarySafe && normalizedHeaders(fallback?.headers).some(h =>
-    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
+    headerNameEquals(h, "content-type") && /^application\/(?:(?:x-)?(?:protobuf|msgpack)|cbor|octet-stream|grpc(?:\+proto|\+json|-web(?:\+proto|\+json)?)?)(?:\s*;|\s*$)/i.test(String(h.value || "").trim()));
   const bodyEncoding = fallback?.body_encoding === "base64" || legacyBinary ? "base64" : "utf8";
+  if (bytes && bodyEncoding === "base64") body = binaryBodyBase64(body);
   const bodyLength = editableRequestBodyLength(body, bodyEncoding);
   const acceptedBodyLengths = [bodyLength];
   let contentLengthChanged = false;
@@ -27289,6 +28777,8 @@ function validateRawHttpBodyFraming(headers, bodyLength, acceptedBodyLengths = [
     && String(header.value || "").split(",").some((value) => value.trim().toLowerCase() === "chunked"))) {
     throw new Error("Raw HTTP input with Transfer-Encoding: chunked is not supported");
   }
+  // Any other coding is sent as written: a request-smuggling test is made of
+  // values such as "xchunked" that one server reads as chunked and another not.
 
   let contentLength = null;
   for (const header of headers.filter((item) => headerNameEquals(item, "content-length"))) {
@@ -28898,7 +30388,7 @@ function highlightBodyLine(line, mode = "plain") {
     return escapeHtml(line) || "&nbsp;";
   }
 
-  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+  if (trimmed === "[preview truncated]" || (mode === "plain" && /^\[[a-z][a-z0-9\s.:-]*\]$/i.test(trimmed))) {
     return `<span class="token-meta">${escapeHtml(line)}</span>`;
   }
 
@@ -28950,7 +30440,7 @@ function looksLikeFormEncoded(line) {
 }
 
 function highlightJsonLine(line) {
-  const regex = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?/g;
+  const regex = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
   let cursor = 0;
   let html = "";
   let match;
@@ -29240,7 +30730,7 @@ function scheduleWsMessageJsonHighlight(text) {
 
 function renderHeaderList(headers) {
   if (!headers.length) {
-    return "<p class=\"empty-copy\">No headers were captured.</p>";
+    return "<p class=\"empty-copy\">No headers.</p>";
   }
 
   return headers
@@ -29308,18 +30798,20 @@ function renderProtocolStrip(protocolState) {
 function inferMimeType(item) {
   if (item._mime) return item._mime;
   if (item.is_websocket) return (item._mime = "websocket");
-  const contentType = (item.content_type || "").toLowerCase();
-  if (contentType.includes("html")) return (item._mime = "html");
-  if (contentType.includes("javascript") || contentType.includes("ecmascript")) return (item._mime = "script");
-  if (contentType.includes("css")) return (item._mime = "css");
-  if (contentType.includes("json")) return (item._mime = "json");
-  if (contentType.includes("image")) return (item._mime = "image");
-  const extension = extractSummaryPathExtension(item.path || "");
-  if (extension === "js") return (item._mime = "script");
-  if (extension === "css") return (item._mime = "css");
-  if (extension === "json") return (item._mime = "json");
-  if (extension === "html") return (item._mime = "html");
-  if (["png", "jpg", "jpeg", "gif", "svg", "ico"].includes(extension)) return (item._mime = "image");
+  const essence = (item.content_type || "").split(";", 1)[0].trim().toLowerCase();
+  if (essence.includes("html")) return (item._mime = "html");
+  if (essence.includes("javascript") || essence.includes("ecmascript")) return (item._mime = "script");
+  if (essence.includes("css")) return (item._mime = "css");
+  if (essence.includes("json")) return (item._mime = "json");
+  if (essence.startsWith("image/")) return (item._mime = "image");
+  if (!essence || essence === "application/octet-stream") {
+    const extension = extractSummaryPathExtension(item.path || "");
+    if (["js", "mjs", "cjs"].includes(extension)) return (item._mime = "script");
+    if (extension === "css") return (item._mime = "css");
+    if (extension === "json") return (item._mime = "json");
+    if (["html", "htm"].includes(extension)) return (item._mime = "html");
+    if (["png", "jpg", "jpeg", "gif", "svg", "ico", "webp", "avif", "bmp"].includes(extension)) return (item._mime = "image");
+  }
   return (item._mime = "other");
 }
 
@@ -30987,7 +32479,7 @@ function renderWsFrameList() {
     els.wsFrameList.onclick = null;
     els.wsFrameList.ondblclick = null;
     els.wsFrameList.onwheel = null;
-    els.wsFrameList.innerHTML = '<div class="empty-copy">Connect to start a WebSocket conversation.</div>';
+    els.wsFrameList.innerHTML = '<div class="empty-copy">Not connected.</div>';
     renderWsFrameDetail();
     return;
   }
@@ -32221,6 +33713,7 @@ async function flushPendingAnnotations(transactionId, options = {}) {
   state._annotationInFlight.add(transactionId);
   let failureMessage = "";
   let saved = false;
+  let gone = false;
   try {
     const response = await fetch(sessionWritePath(
       `/api/transactions/${encodeURIComponent(transactionId)}/annotations?search_headers=true`,
@@ -32234,6 +33727,13 @@ async function flushPendingAnnotations(transactionId, options = {}) {
     if (entry.retentionDeleted) return false;
     if (response.status === 404 && currentSessionId() === sessionId) {
       applyConfirmedHistoryRemoval([transactionId], sessionId);
+      return false;
+    }
+    if (response.status === 404) {
+      // The request, or its whole session, was deleted while the window shows
+      // another one. Nothing takes this annotation any more, and kept in the
+      // queue it would refuse every session change and every close.
+      gone = true;
       return false;
     }
     if (!response.ok) {
@@ -32340,7 +33840,7 @@ async function flushPendingAnnotations(transactionId, options = {}) {
   } finally {
     state._annotationInFlight.delete(transactionId);
     if (pending.get(transactionId) === entry) {
-      if (saved) {
+      if (saved || gone) {
         pending.delete(transactionId);
       }
     } else if (pending.has(transactionId)) {
@@ -32664,9 +34164,9 @@ function changeReplayMethod(newMethod, tabId = state.activeReplayTabId) {
   const isActiveTab = state.activeReplayTabId === tab.id;
   const cv = isActiveTab ? getCMView("replayReq") : null;
   const shown = cv
-    ? cv.getContent()
+    ? cv.getText()
     : (isActiveTab && els.replayRequestEditor ? els.replayRequestEditor.value : tab.requestText) || "";
-  const text = replayEditorShowsDraft(shown, tab.requestText) ? tab.requestText || "" : shown;
+  const text = replayEditorShowsDraft(shown, tab.requestText) ? tab.requestText || "" : replayDraftFromEditor(shown, tab);
   const nextText = requestTextWithMethod(text, newMethod);
   if (!acceptReplayRequestEdit(nextText, tab)) return;
   tab.requestText = nextText;
@@ -33129,11 +34629,14 @@ function parseCurlCommand(text) {
   let method = "GET";
   let methodExplicit = false;
   let getMode = false;
+  let headMode = false;
   let pathAsIs = false;
   let httpVersion = "";
   let url = "";
   const headers = [];
   const bodyParts = [];
+  const formFields = [];
+  let notice = "";
   let bodyProvided = false;
   let needsDefaultFormContentType = false;
   let needsDefaultJsonHeaders = false;
@@ -33254,6 +34757,7 @@ function parseCurlCommand(text) {
     else if (tok === "-I" || tok === "--head") {
       if (!methodExplicit) method = "HEAD";
       methodExplicit = true;
+      headMode = true;
     }
     else if (tok === "-G" || tok === "--get") {
       getMode = true;
@@ -33313,10 +34817,15 @@ function parseCurlCommand(text) {
     else if (tok === "-F" || tok === "--form" || tok === "--form-string") {
       const value = requireOptionValue(tok);
       if (value.error) return value;
-      return { error: "cURL multipart form imports are not supported yet." };
+      const field = parseCurlFormField(value.value, tok === "--form-string");
+      if (field.error) return field;
+      formFields.push(field);
     }
     else if ((tok.startsWith("-F") && tok.length > 2) || tok.startsWith("--form=") || tok.startsWith("--form-string=")) {
-      return { error: "cURL multipart form imports are not supported yet." };
+      const field = parseCurlFormField(tok.startsWith("-F") ? tok.slice(2) : tok.slice(tok.indexOf("=") + 1),
+        tok.startsWith("--form-string="));
+      if (field.error) return field;
+      formFields.push(field);
     }
     else if (tok === "-u" || tok === "--user") {
       const value = requireOptionValue(tok);
@@ -33398,6 +34907,29 @@ function parseCurlCommand(text) {
     body = "";
     bodyProvided = false;
   }
+  if (formFields.length) {
+    // curl itself refuses a form together with -d or -I.
+    if (bodyParts.length || headMode) return { error: "cURL -F cannot be combined with -d, --json or -I." };
+    const boundary = `${"-".repeat(24)}${Math.random().toString(16).slice(2, 18).padEnd(16, "0")}`;
+    const escape = text => text.replace(/"/g, "%22").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+    body = formFields.map(field => [
+      `--${boundary}`,
+      `Content-Disposition: form-data${field.name ? `; name="${escape(field.name)}"` : ""}${
+        field.filename === null ? "" : `; filename="${escape(field.filename)}"`}`,
+      ...(field.type ? [`Content-Type: ${field.type}`] : []),
+      ...field.headers,
+      "",
+      field.content,
+    ].join("\r\n")).join("\r\n") + `\r\n--${boundary}--\r\n`;
+    bodyProvided = true;
+    if (!methodExplicit) method = "POST";
+    // Like curl, a Content-Type given with -H gets the boundary appended.
+    const contentType = headers.find(header => headerNameEquals(header, "content-type"));
+    if (contentType) contentType.value += `; boundary=${boundary}`;
+    else headers.push({ name: "Content-Type", value: `multipart/form-data; boundary=${boundary}` });
+    const files = formFields.filter(field => field.file).map(field => field.file);
+    if (files.length) notice = `File contents are not imported; these parts are empty: ${files.join(", ")}`;
+  }
   let scheme = "https";
   let host = "";
   let port = "";
@@ -33426,7 +34958,93 @@ function parseCurlCommand(text) {
   const headerText = headers.map((h) => `${h.name}: ${h.value}`).join("\n");
   const requestHttpVersion = httpVersion || "HTTP/1.1";
   const requestText = bodyProvided ? `${method} ${path} ${requestHttpVersion}\n${headerText}\n\n${body}` : `${method} ${path} ${requestHttpVersion}\n${headerText}`;
-  return { scheme, host, port, method, path, headers, body, httpVersion, requestText };
+  return { scheme, host, port, method, path, headers, body, httpVersion, requestText, notice };
+}
+
+// One -F field, read as curl's tool_formparse.c reads it: name=content, where
+// content starting with @ uploads a file and < fills a field from a file, then
+// ;type=, ;filename= and ;headers= parameters. A "quoted" word takes \" and \\
+// escapes; an unquoted one ends at ; and loses its trailing spaces. Sniper does
+// not read local files, so contents from a file stay empty, with its path kept
+// in `file`.
+function parseCurlFormField(value, literal = false) {
+  const eq = value.indexOf("=");
+  if (eq < 0) return { error: "cURL -F requires a name=content value." };
+  const text = value.slice(eq + 1);
+  const field = { name: value.slice(0, eq), content: text, file: "", filename: null, type: "", headers: [] };
+  if (literal) return field;
+  if (text.startsWith("(") || (!field.name && text === ")")) return { error: "cURL -F nested multipart parts are not supported." };
+  const source = /^[@<]/.test(text) ? text[0] : "";
+  const stops = source === "@" ? ";," : ";";
+  const skipSpace = at => { while (/\s/.test(text[at] || "")) at += 1; return at; };
+  const word = start => {
+    let at = skipSpace(start);
+    if (text[at] === '"') {
+      let out = "";
+      for (let i = at + 1; i < text.length; i++) {
+        if (text[i] === "\\" && /["\\]/.test(text[i + 1] || "")) out += text[++i];
+        else if (text[i] !== '"') out += text[i];
+        else {
+          let end = i + 1;
+          while (end < text.length && !stops.includes(text[end])) end += 1;
+          return [out, end];
+        }
+      }
+    }
+    let end = at;
+    while (end < text.length && !stops.includes(text[end])) end += 1;
+    return [text.slice(at, end).trimEnd(), end];
+  };
+  let [data, at] = word(source ? 1 : 0);
+  field.content = source ? "" : data;
+  field.file = source ? data : "";
+  if (source === "@") field.filename = data.split(/[\\/]/).pop();
+  // As in curl, a content type runs on over parameters it does not know.
+  let typeStart = -1;
+  while (text[at] === ";") {
+    const p = skipSpace(at + 1);
+    const key = /^(type|filename|headers|encoder)=/i.exec(text.slice(p))?.[1].toLowerCase();
+    if (key === "type" && typeStart < 0) {
+      const valueStart = skipSpace(p + 5);
+      if (text[valueStart] === '"') {
+        const [found, end] = word(valueStart);
+        field.type = found;
+        at = end;
+      } else {
+        typeStart = at = valueStart;
+        while (at < text.length && !'()<>@,;:\\"[]?=\r\n '.includes(text[at])) at += 1;
+        field.type = text.slice(typeStart, at);
+        at = skipSpace(at);
+      }
+    } else if (key && key !== "type") {
+      typeStart = -1;
+      if (key === "encoder") return { error: "cURL -F encoder= imports are not supported." };
+      if (key === "headers" && /[@<]/.test(text[skipSpace(p + 8)] || "")) return { error: "cURL -F headers= files are not supported." };
+      const [found, end] = word(p + key.length + 1);
+      if (key === "filename") field.filename = found || null;
+      else field.headers.push(found);
+      at = end;
+    } else if (typeStart >= 0) {
+      for (at = p; at < text.length && !stops.includes(text[at]);) at += 1;
+      field.type = text.slice(typeStart, at).trimEnd();
+    } else {
+      at = word(p)[1];
+    }
+  }
+  if (text[at] === ",") return { error: "cURL -F with several files in one field is not supported." };
+  if (source === "<") field.filename = null;
+  const types = { gif: "image/gif", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", svg: "image/svg+xml",
+    txt: "text/plain", htm: "text/html", html: "text/html", pdf: "application/pdf", xml: "application/xml" };
+  const byExtension = name => types[/\.([^./\\]+)$/.exec(name || "")?.[1].toLowerCase()];
+  // curl takes a Content-Type in headers= as the type and sends it once. A file
+  // has a guessed type, standard input none, and a part without a file name
+  // drops a guessed text/plain.
+  const given = field.headers.find(header => /^content-type\s*:/i.test(header));
+  field.headers = field.headers.filter(header => !/^content-type\s*:/i.test(header));
+  const guessed = byExtension(field.filename) || byExtension(field.file)
+    || (source === "@" && field.file !== "-" ? "application/octet-stream" : "");
+  field.type ||= given?.replace(/^[^:]*:\s*/, "") || (guessed === "text/plain" && field.filename === null ? "" : guessed);
+  return field;
 }
 
 function curlDataBinaryBodyIsPlainText(value) {
@@ -33721,6 +35339,7 @@ function applyCurlImport() {
   closeCurlImportModal();
   scheduleWorkspaceStateSave();
   renderToolPanels();
+  if (result.notice) showToast(result.notice, "warning", 6000);
 }
 
 function initReplayContextMenu() {
@@ -34078,6 +35697,7 @@ const sniperCMTheme = CM.EditorView.theme({
   ".tok-diff-header":  { color: "var(--point, #7d91ab)", fontWeight: "600" },
   /* ── Payload placeholder ── */
   ".tok-payload":      { color: "#f8d06b", background: "rgba(248, 208, 107, 0.18)", borderRadius: "3px", padding: "0 2px", fontWeight: "600" },
+  ".tok-byte-a7":      { color: "var(--token-plain-color, #cdd2da)", opacity: "0.55" },
   /* ── Search highlight ── */
   ".tok-search-hit":   { background: "rgba(132, 151, 173, 0.42)", borderRadius: "4px", padding: "0 1px", boxShadow: "inset 0 0 0 1px rgba(170, 190, 214, 0.72)" },
   ".tok-search-active": { background: "rgba(201, 169, 110, 0.62)", borderRadius: "4px", padding: "0 1px", boxShadow: "inset 0 0 0 1px rgba(232, 201, 141, 0.9)" },
@@ -34306,6 +35926,24 @@ const diffDecoPlugin = CM.ViewPlugin.fromClass(
 );
 
 // ─── Payload marker decoration plugin ($payload$) ────────
+// A byte of a binary body that could be read as a mark is drawn as the `§`
+// or `$` it is, apart from the marks.
+class FuzzerByteWidget extends CM.WidgetType {
+  constructor(byte) { super(); this.byte = byte; }
+  eq(other) { return other.byte === this.byte; }
+  toDOM() {
+    const byte = document.createElement("span");
+    byte.className = "tok-byte-a7";
+    byte.textContent = this.byte;
+    byte.title = `Byte ${this.byte.charCodeAt(0).toString(16).toUpperCase()} (${this.byte}), not a position`;
+    return byte;
+  }
+}
+const fuzzerByteDecorations = new Map([
+  [SniperFuzzerWorkflow.BYTE_A7, CM.Decoration.replace({ widget: new FuzzerByteWidget("\xa7") })],
+  [SniperFuzzerWorkflow.BYTE_24, CM.Decoration.replace({ widget: new FuzzerByteWidget("$") })],
+]);
+
 function buildPayloadDecorations(view) {
   const doc = view.state.doc;
   const text = doc.toString();
@@ -34316,7 +35954,12 @@ function buildPayloadDecorations(view) {
   while ((m = re.exec(text)) !== null) {
     builder.push(CM.Decoration.mark({ class: "tok-payload" }).range(m.index, m.index + m[0].length));
   }
-  return builder.length ? CM.Decoration.set(builder) : CM.Decoration.none;
+  for (const [stand, decoration] of fuzzerByteDecorations) {
+    for (let at = text.indexOf(stand); at !== -1; at = text.indexOf(stand, at + 1)) {
+      builder.push(decoration.range(at, at + 1));
+    }
+  }
+  return builder.length ? CM.Decoration.set(builder, true) : CM.Decoration.none;
 }
 
 const payloadDecoPlugin = CM.ViewPlugin.fromClass(
@@ -34364,7 +36007,7 @@ function addCMUpdateListener(view, callback) {
           candidate = pending.candidate;
         }
       }
-      callback(update.state.doc.toString(), candidate);
+      callback(lineEndings.text(update.state), candidate);
     }
   });
   const extensions = [listener];
@@ -34374,7 +36017,9 @@ function addCMUpdateListener(view, callback) {
       const currentView = getCMView("replayReq")?.view;
       if (!transaction.docChanged || cmProgrammaticViews.has(currentView)) return transaction;
       const before = identity();
-      const accepted = acceptReplayRequestEdit(transaction.newDoc.toString(), getActiveReplayTab(), candidate => {
+      // The line endings live in the new state, so read it rather than newDoc.
+      const draft = replayDraftFromEditor(lineEndings.text(transaction.state));
+      const accepted = acceptReplayRequestEdit(draft, getActiveReplayTab(), candidate => {
         validated = { startState: transaction.startState, doc: transaction.newDoc, identity: before, candidate };
       });
       return accepted ? transaction : [];
@@ -34773,7 +36418,9 @@ function createBaseExtensions(options = {}) {
       },
     }]));
   } else {
-    exts.push(CM.history());
+    // Text the app sets right after an edit, such as a new Content-Length, is
+    // undone with that edit in one step.
+    exts.push(CM.history({ joinToEvent: (transaction, adjacent) => adjacent || lineEndings.recorded(transaction) }));
     exts.push(CM.keymap.of([...CM.defaultKeymap, ...CM.historyKeymap]));
   }
   if (options.placeholder) {
@@ -34793,8 +36440,85 @@ function createBaseExtensions(options = {}) {
   return exts;
 }
 
+
 // Search decoration effect & field
 const setSearchQuery = CM.StateEffect.define();
+// CodeMirror keeps "\n" between lines and forgets whether a break was CRLF or a
+// lone CR. A raw request needs them back byte for byte: multipart parts end in
+// CRLF, and file bytes hold lone CR and LF. Each break that came in is kept as
+// a mark over its newline, mapped through edits and written back. A break the
+// user types takes the ending of the next break, as the line it splits had;
+// after the last break, the ending of the one before.
+function createLineEndingTracker() {
+  // The history maps these marks when it joins two edits into one Undo step.
+  // A change kept out of the history would map them by the wrong positions.
+  const record = CM.StateEffect.define({ map: (marks, mapping) => marks.map(mapping) });
+  const field = CM.StateField.define({
+    create: () => CM.Decoration.none,
+    update(marks, transaction) {
+      marks = marks.map(transaction.changes);
+      for (const effect of transaction.effects) if (effect.is(record)) marks = effect.value;
+      return marks;
+    },
+  });
+  const kinds = new Map(["\r\n", "\r", "\n"].map(ending => [ending, CM.Decoration.mark({ ending })]));
+  /** `text`'s line endings, placed in the document CodeMirror makes of it. */
+  const marks = text => {
+    const found = [], breaks = /\r\n|\r|\n/g;
+    let at = 0, last = 0, match;
+    while ((match = breaks.exec(text))) {
+      at += match.index - last;
+      found.push(kinds.get(match[0]).range(at, at + 1));
+      at += 1;
+      last = match.index + match[0].length;
+    }
+    return CM.Decoration.set(found);
+  };
+  /** Each line break's ending, in document order. */
+  const endings = state => {
+    const marks = state.field(field, false);
+    const found = new Array(state.doc.lines - 1).fill("\n");
+    if (!marks || marks.size === 0) return found;
+    const kept = new Map();
+    let next = "\n";
+    marks.between(0, state.doc.length, (from, to, mark) => {
+      if (to === from + 1) kept.set(from, next = mark.spec.ending);
+    });
+    for (let number = state.doc.lines - 1; number >= 1; number--) {
+      found[number - 1] = next = kept.get(state.doc.line(number).to) ?? next;
+    }
+    return found;
+  };
+  return {
+    field,
+    marks,
+    // Undo and Redo bring back the marks of the text they return to: the history
+    // keeps the deleted breaks, not the marks that went with them.
+    undoable: CM.invertedEffects.of(transaction => transaction.docChanged
+      ? [record.of(transaction.startState.field(field, false) ?? CM.Decoration.none)] : []),
+    /** The effect that records `text`'s line endings, sent with its insertion. */
+    record: text => record.of(marks(text)),
+    recorded: transaction => transaction.effects.some(effect => effect.is(record)),
+    /** The document with each line break written as it came in. */
+    text(state) {
+      const marks = state.field(field, false);
+      if (!marks || marks.size === 0) return state.doc.toString();
+      const ending = endings(state);
+      const parts = [];
+      for (let number = 1; number <= state.doc.lines; number++) {
+        parts.push(state.doc.line(number).text);
+        if (number < state.doc.lines) parts.push(ending[number - 1]);
+      }
+      return parts.join("");
+    },
+    /** Where document position `position` falls in `text(state)`. */
+    offset(state, position) {
+      const before = state.doc.lineAt(position).number - 1;
+      return endings(state).slice(0, before).reduce((at, ending) => at + ending.length - 1, position);
+    },
+  };
+}
+const lineEndings = createLineEndingTracker();
 const setSearchActiveIndex = CM.StateEffect.define();
 const searchDecoField = CM.StateField.define({
   create() {
@@ -34895,11 +36619,13 @@ class SniperCodeView {
   constructor(container, options = {}, editorState = null) {
     this._options = options;
     this._searchNavIndex = -1;
+    this.preservesLineEndings = true;
     this.view = new CM.EditorView({
       state: editorState || CM.EditorState.create({
         // Initial content is a baseline, not an undoable edit from an empty pane.
         doc: options.content || "",
-        extensions: [...createBaseExtensions(options), searchDecoField, changedDecoField, packetEvidenceField],
+        extensions: [...createBaseExtensions(options), searchDecoField, changedDecoField, packetEvidenceField,
+          lineEndings.field.init(() => lineEndings.marks(options.content || "")), lineEndings.undoable],
       }),
       parent: container,
     });
@@ -34921,13 +36647,14 @@ class SniperCodeView {
     // Even an identical replacement can belong to a newer selected record.
     view.sniperDecodedPreview?.hide();
     const nextText = text || "";
-    if (view.state.doc.toString() === nextText.replace(/\r\n?/g, "\n")) {
+    if (lineEndings.text(view.state) === nextText) {
       return;
     }
     cmProgrammaticViews.add(view);
     try {
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: nextText },
+        effects: lineEndings.record(nextText),
       });
     } finally {
       cmProgrammaticViews.delete(view);
@@ -34938,17 +36665,23 @@ class SniperCodeView {
     const { view } = this;
     view.sniperDecodedPreview?.hide();
     const nextText = text || "";
-    if (view.state.doc.toString() === nextText.replace(/\r\n?/g, "\n")) {
+    if (lineEndings.text(view.state) === nextText) {
       return;
     }
-    const selection = view.state.selection.main;
-    const anchor = Math.min(selection.anchor, nextText.length);
-    const head = Math.min(selection.head, nextText.length);
+    // Replace only what differs, so the caret moves with the text around it when
+    // Content-Length gains a digit. The history joins it to the edit it follows.
+    const before = view.state.doc.toString();
+    const after = nextText.replace(/\r\n?/g, "\n");
+    let from = 0;
+    while (from < before.length && from < after.length && before[from] === after[from]) from += 1;
+    let tail = 0;
+    while (tail < before.length - from && tail < after.length - from
+      && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail += 1;
     cmProgrammaticViews.add(view);
     try {
       view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: nextText },
-        selection: { anchor, head },
+        changes: { from, to: before.length - tail, insert: after.slice(from, after.length - tail) },
+        effects: lineEndings.record(nextText),
       });
     } finally {
       cmProgrammaticViews.delete(view);
@@ -34987,8 +36720,19 @@ class SniperCodeView {
     return this._searchNavIndex;
   }
 
+  /** CodeMirror's document: every line break is "\n", so offsets are positions. */
   getContent() {
     return this.view.state.doc.toString();
+  }
+
+  /** The text with each line break as it came in: CRLF, CR or LF. */
+  getText() {
+    return lineEndings.text(this.view.state);
+  }
+
+  /** Where a document position falls in `getText()`. */
+  textOffset(position) {
+    return lineEndings.offset(this.view.state, position);
   }
 
   destroy() {
@@ -35040,7 +36784,7 @@ function updateCodePaneCM(key, container, text, options = {}) {
     // another presentation must not resurrect an obsolete draft or listener.
     const restoreState = editable && suspendedEditableState?.mode === mode
       && suspendedEditableState.onChange === options.onChange
-      && suspendedEditableState.state.doc.toString() === (text || "").replace(/\r\n?/g, "\n");
+      && lineEndings.text(suspendedEditableState.state) === (text || "");
     cmOpts.readOnly = !editable;
     if (mode === "http") cmOpts.httpHighlight = true;
     else if (mode === "hex") cmOpts.hexHighlight = true;

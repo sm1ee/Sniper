@@ -306,6 +306,83 @@
     return value.length / 4 * 3 - (value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0);
   }
 
+  // A body that is not text keeps its positions between Base64 pieces, each
+  // piece and each original Base64 by itself, as src/fuzzer.rs reads it: `§`
+  // and `$` are not Base64, so no byte pairs up into a position. The editor
+  // shows the bytes, one character per byte, with byte A7 (`§`) as BYTE_A7 so
+  // that it never pairs with a typed `§`, and the `$` of bytes that spell
+  // `$payload` as BYTE_24 so that they never read as `$payload$`.
+  const BYTE_A7 = "\uE0A7";
+  const BYTE_24 = "\uE024";
+
+  function base64Piece(piece) {
+    if (base64Length(piece) === null) throw new Error("The request body is not valid Base64 around its positions.");
+    return atob(piece);
+  }
+
+  /** A binary body in order: strings of bytes, one character per byte, and
+   * `{ original, payload }` for each position, `payload` for `$payload$`. */
+  function binaryBodyParts(body) {
+    const parts = [];
+    let cursor = 0;
+    for (const found of positions(body)) {
+      parts.push(base64Piece(body.slice(cursor, found.index)));
+      parts.push({ original: found[1] === undefined ? "" : base64Piece(found[1]), payload: found[1] === undefined });
+      cursor = found.index + found[0].length;
+    }
+    parts.push(base64Piece(body.slice(cursor)));
+    return parts;
+  }
+
+  /** A binary body's bytes with every position at its original. */
+  function binaryBodyOriginals(body) {
+    return binaryBodyParts(String(body ?? "")).map(part => typeof part === "string" ? part : part.original).join("");
+  }
+
+  const latin1 = values => {
+    let text = "";
+    for (const value of values) text += String.fromCharCode(value);
+    return text;
+  };
+
+  /** A stored binary body as the editor shows it, or null when it is not
+   * Base64 around its positions. */
+  function showBinaryBody(body) {
+    let parts;
+    try {
+      parts = binaryBodyParts(String(body ?? ""));
+    } catch (_) {
+      return null;
+    }
+    const shown = value => value.replaceAll("\xa7", BYTE_A7).replace(/\$(?=payload)/g, BYTE_24);
+    return parts.map(part => typeof part === "string" ? shown(part)
+      : part.payload ? MARKER : `§${shown(part.original)}§`).join("");
+  }
+
+  /** The editor's text of a binary body, stored again. A character up to U+00FF
+   * is that byte, BYTE_A7 is byte A7 and BYTE_24 is `$`; any other character can only have been
+   * typed, and goes as UTF-8. */
+  function storeBinaryBody(text) {
+    text = String(text ?? "");
+    const piece = value => {
+      // Bytes alone, the usual case, go to btoa as they are: this runs on edits.
+      if (!/[^\x00-\xff]/.test(value)) return btoa(value);
+      let raw = "";
+      for (const character of value) {
+        if (character === BYTE_A7) raw += "\xa7";
+        else if (character === BYTE_24) raw += "$";
+        else raw += character.codePointAt(0) <= 0xff ? character : latin1(encoder.encode(character));
+      }
+      return btoa(raw);
+    };
+    let stored = "", cursor = 0;
+    for (const found of positions(text)) {
+      stored += piece(text.slice(cursor, found.index)) + (found[1] === undefined ? MARKER : `§${piece(found[1])}§`);
+      cursor = found.index + found[0].length;
+    }
+    return stored + piece(text.slice(cursor));
+  }
+
   // The payload goes into `position`, or into every position when it is null
   // (Battering ram); the others keep their originals. Positions count in the
   // order build_request uses: method, path, the authority when no Host header
@@ -328,7 +405,21 @@
       header.name = fill(header.name);
       header.value = fill(header.value);
     }
-    request.body = fill(request.body);
+    if (request.body_encoding === "base64" && positions(request.body).length) {
+      // The payload goes into the bytes, and the whole body back to Base64.
+      let filled = "";
+      for (const part of binaryBodyParts(request.body)) {
+        if (typeof part === "string") {
+          filled += part;
+          continue;
+        }
+        const here = next++;
+        filled += position === null || position === here ? latin1(encoder.encode(payload)) : part.original;
+      }
+      request.body = btoa(filled);
+    } else {
+      request.body = fill(request.body);
+    }
     const host = request.headers.find(header => isHeader(header, "host"));
     if (host) request.host = host.value;
     if (request.headers.some(header => isHeader(header, "content-length"))) {
@@ -349,7 +440,8 @@
     const fields = [[template.method, 1], [template.path, urlEncode ? 3 : 1]];
     if (!hasHost) fields.push([template.host, 1]);
     for (const header of template.headers) fields.push([header.name, 1], [header.value, 1]);
-    fields.push([template.body, 1]);
+    // Base64 sends 4 bytes for every 3 a payload puts in the body.
+    fields.push([template.body, template.body_encoding === "base64" ? 2 : 1]);
     let base = bytes(template.scheme) + (hasHost ? bytes(template.host) : 0), originals = 0;
     const markers = [];
     for (const [value, multiplier] of fields) {
@@ -399,11 +491,17 @@
       errors.push(`This attack would send ${plan.length} requests; an attack sends at most ${limits.requests}. Use fewer payloads or positions.`);
     }
     if (template.preview_truncated) errors.push("The request body preview is truncated. Load or supply the complete body first.");
+    if (template.body_encoding === "base64" && positions(template.body).length) {
+      try {
+        binaryBodyParts(template.body);
+      } catch (error) {
+        errors.push(error.message);
+      }
+    }
     const maxExpandedRequestBytes = budget.maxSize(validation.maxPayloadBytes, attackType);
     if (validation.count && maxExpandedRequestBytes > limits.expandedRequestBytes) {
       errors.push(`An expanded request exceeds the ${limits.expandedRequestBytes} byte limit.`);
     }
-    if (template.body_encoding === "base64") warnings.push("The body is base64-encoded text. Use header or query positions instead of body markers.");
     const hostHeader = template.headers.find(header => isHeader(header, "host"));
     if (markerCount(hostHeader ? hostHeader.value : template.host)) {
       warnings.push("Host markers can change the request authority by payload. Check the sample requests and connection target.");
@@ -437,7 +535,7 @@
     };
   }
 
-  const api = Object.freeze({ MARKER, limits, presets, payloadLines, payloadText, validatePayloads, numericRange, candidates, replaceSelection, clearPositions, clearRequestPositions, removeRequestSelection, markRequestSelection, encodeUrlPayload, planRequests, expandTemplate, preflight });
+  const api = Object.freeze({ MARKER, BYTE_A7, BYTE_24, limits, presets, payloadLines, payloadText, validatePayloads, numericRange, candidates, replaceSelection, clearPositions, clearRequestPositions, removeRequestSelection, markRequestSelection, encodeUrlPayload, planRequests, showBinaryBody, storeBinaryBody, binaryBodyOriginals, expandTemplate, preflight });
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.SniperFuzzerWorkflow = api;
 })(typeof window !== "undefined" ? window : null);

@@ -282,6 +282,7 @@ fn run_desktop() -> Result<()> {
     let state = Arc::new(AppState::new(config.clone())?);
 
     let initial_proxy_generation = if proxy_listener.is_some() {
+        runtime.block_on(state.claim_main_listener_port());
         let proxy_generation = state.mark_proxy_listener_online();
         runtime.block_on(state.log_info(
             "runtime",
@@ -293,6 +294,8 @@ fn run_desktop() -> Result<()> {
         ));
         Some(proxy_generation)
     } else {
+        // Something else has the port: its address is not Sniper's.
+        state.set_proxy_online(false);
         runtime.block_on(state.log_error(
             "runtime",
             "Proxy listener failed",
@@ -343,6 +346,8 @@ fn run_desktop() -> Result<()> {
         state.templates.clone(),
     ));
     runtime.spawn(sniper::vulndata::run_daily_update(state.vulndata.clone()));
+    let tcp_state = state.clone();
+    runtime.spawn(async move { tcp_state.start_saved_tcp_listeners().await });
 
     let event_loop = EventLoopBuilder::<DesktopUserEvent>::with_user_event().build();
     let event_proxy = event_loop.create_proxy();
@@ -471,7 +476,7 @@ fn run_desktop() -> Result<()> {
                     );
                 }
             }
-            runtime.block_on(state.abort_proxy_task());
+            runtime.block_on(state.stop_proxy_listeners());
             remove_runtime_state_file(&state.config.data_dir, state.runtime_instance_id);
             return Err(anyhow::anyhow!("failed to build desktop webview: {error}"));
         }
@@ -533,7 +538,7 @@ fn run_desktop() -> Result<()> {
                 }
             }
             runtime.block_on(close_state.ws_replay.disconnect_all());
-            runtime.block_on(close_state.abort_proxy_task());
+            runtime.block_on(close_state.stop_proxy_listeners());
             if let Err(error) = runtime.block_on(proxy::close_live_websocket_relays(
                 close_state.as_ref(),
                 "Sniper desktop shutdown closed the live WebSocket relay.",
@@ -821,7 +826,9 @@ fn persist_desktop_session_state(
 ) -> Result<()> {
     let result = persist_desktop_session_state_inner(runtime, state);
     if result.is_err() {
-        state.cancel_tcp_shutdown();
+        // The quit is stopped and Sniper carries on, so every listener the
+        // attempt stopped comes back with it.
+        runtime.block_on(state.resume_after_cancelled_shutdown());
     }
     result
 }
@@ -837,7 +844,7 @@ fn persist_desktop_session_state_inner(
             "Sniper desktop shutdown closed the live WebSocket relay.",
         ))
         .context("failed to persist closed live WebSocket relays before desktop shutdown");
-    runtime.block_on(state.abort_proxy_task());
+    runtime.block_on(state.stop_proxy_listeners());
     runtime.block_on(proxy::drain_proxy_connections(
         std::time::Duration::from_secs(1),
     ));
@@ -848,6 +855,7 @@ fn persist_desktop_session_state_inner(
         .block_on(state.persist_active_session())
         .map(|_| ())
         .context("failed to persist active session before desktop shutdown");
+    let active_result = active_result.and(runtime.block_on(state.persist_other_loaded_sessions()));
     combine_desktop_persist_results(flush_result, active_result)?;
     relay_result?;
     Ok(())
@@ -1124,6 +1132,7 @@ fn with_window_icons(builder: WindowBuilder) -> WindowBuilder {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(deprecated)]
 fn enable_window_fullscreen_support(window: &tao::window::Window) {
     use cocoa::{
         appkit::{NSWindow, NSWindowCollectionBehavior},
@@ -1152,6 +1161,7 @@ fn enable_window_fullscreen_support(_window: &tao::window::Window) {}
 /// bar sits directly under the traffic lights, and "Sniper" above it is a second
 /// label for something already named by the window itself.
 #[cfg(target_os = "macos")]
+#[allow(deprecated)]
 fn hide_window_title_text(window: &tao::window::Window) {
     use cocoa::{
         appkit::{NSWindow, NSWindowTitleVisibility},
@@ -1180,6 +1190,7 @@ fn hide_window_title_text(_window: &tao::window::Window) {}
 /// went quiet" as a release, which fires under the operator's hand whenever they
 /// pause mid-pull. The monitor returns the event untouched — it only observes.
 #[cfg(target_os = "macos")]
+#[allow(deprecated, unexpected_cfgs)]
 fn forward_scroll_gesture_phase(proxy: tao::event_loop::EventLoopProxy<DesktopUserEvent>) {
     use block::ConcreteBlock;
     use cocoa::{
@@ -1692,6 +1703,7 @@ mod tests {
 
     #[test]
     fn desktop_persist_blocks_on_tcp_failure_and_reopens_start_after_recovery() {
+        use sniper::tcp_capture::ListenerChange::{Start, StopAll};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -1715,10 +1727,11 @@ mod tests {
                 local_port: probe.local_addr().unwrap().port(),
                 target_host: "127.0.0.1".into(),
                 target_port: upstream.local_addr().unwrap().port(),
+                ..Default::default()
             };
             drop(probe);
             state
-                .configure_tcp_capture(Some(settings.clone()), None, None)
+                .change_tcp_listeners(Start(settings.clone()), None, None)
                 .await
                 .unwrap();
             let mut client = tokio::net::TcpStream::connect((
@@ -1754,17 +1767,74 @@ mod tests {
         std::fs::remove_file(&directory).unwrap();
         std::fs::rename(&held, &directory).unwrap();
         runtime.block_on(async {
-            state.configure_tcp_capture(None, None, None).await.unwrap();
-            // A blocked close must not leave the continuing desktop in shutdown.
             state
-                .configure_tcp_capture(Some(settings), None, None)
+                .change_tcp_listeners(StopAll, None, None)
                 .await
                 .unwrap();
-            state.configure_tcp_capture(None, None, None).await.unwrap();
+            // A blocked close must not leave the continuing desktop in shutdown.
+            state
+                .change_tcp_listeners(Start(settings), None, None)
+                .await
+                .unwrap();
+            state
+                .change_tcp_listeners(StopAll, None, None)
+                .await
+                .unwrap();
             assert!(state.session().await.tcp_capture.summaries().await[0].durable);
         });
         drop((client, server));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // A quit that a failed save stops leaves Sniper running, and it must run
+    // as before. The attempt had already stopped the proxy listener, and
+    // nothing brought it back.
+    #[test]
+    fn a_quit_stopped_by_a_failed_save_brings_the_proxy_listener_back() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "sniper-desktop-quit-stopped-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let state = Arc::new(
+            AppState::new(AppConfig {
+                proxy_addr: "127.0.0.1:0".parse().unwrap(),
+                ui_addr: "127.0.0.1:0".parse().unwrap(),
+                max_entries: 32,
+                max_transaction_entries: 32,
+                body_preview_bytes: 4096,
+                data_dir: root.clone(),
+            })
+            .unwrap(),
+        );
+        let (proxy_addr, session_dir) = runtime.block_on(async {
+            let start = state.get_active_proxy_addr().await;
+            sniper::proxy::rebind_proxy(state.clone(), start)
+                .await
+                .unwrap();
+            (
+                state.get_active_proxy_addr().await,
+                state.session().await.storage_dir().to_path_buf(),
+            )
+        });
+        // The active session cannot be saved.
+        let held = session_dir.with_extension("held");
+        std::fs::rename(&session_dir, &held).unwrap();
+        std::fs::write(&session_dir, b"storage unavailable").unwrap();
+
+        persist_desktop_session_state(&runtime, &state).unwrap_err();
+
+        assert!(state.is_proxy_online());
+        runtime.block_on(async {
+            tokio::net::TcpStream::connect(proxy_addr)
+                .await
+                .expect("the proxy listener answers again after the quit was stopped");
+            state.abort_proxy_task().await;
+        });
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

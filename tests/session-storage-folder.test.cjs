@@ -73,7 +73,7 @@ function fixture({ render = true } = {}) {
   const context = loadFunctions([
     "renderDashboard", "sessionFindingCount", "formatSize", "getSortedSessions", "revealSessionFolder", "requireOkResponse", "readApiErrorMessage",
     "onClickWithProgress", "withButtonProgress", "showSessionContextMenu", "closeSessionContextMenu",
-    "activateSessionById", "reloadSessionWorkspace", "resetSessionScopedUiState", "loadSessions", "currentSessionId",
+    "viewSessionById", "reloadSessionWorkspace", "resetSessionScopedUiState", "loadSessions", "currentSessionId", "sessionQueryPath",
     "canReloadWorkspaceAfterSessionAction", "canLeaveSessionAfterDraftPreflight", "hasPendingWorkspaceStateSave",
   ], {
     state, els, document, sessionActivationIntent: null,
@@ -175,7 +175,8 @@ async function beginActivation(f) {
   const event = f.row(f.b.id).open.dispatch("click");
   assert.equal(event.stopped, true);
   await tick();
-  assert.equal(f.requests[0].url, `/api/sessions/${f.b.id}/activate`);
+  // Showing a session asks the server to load it and moves nothing.
+  assert.equal(f.requests[0].url, `/api/settings?session_id=${f.b.id}`);
   f.requests[0].resolve(response({ ...f.b, active: true }));
   await tick();
   assert.equal(f.requests[1].url, "/api/sessions");

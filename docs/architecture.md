@@ -59,6 +59,14 @@ works.
 - `src/session.rs`: session metadata and the active workspace; persists each
   session's settings, records, WebSockets, rules and fuzzer records under
   `data_dir/sessions/<session-id>`.
+- `src/session_ports.rs`: a loopback proxy port that records into one session,
+  whichever session is active, so several sessions capture at once. Each open
+  port holds its session's one writable context, and its requests use that
+  directly. A number is given once, from 18081 up, and kept in
+  `session-ports.json` until the session is deleted. The module also keeps the
+  one list of Sniper's own listeners that every guard against a connection
+  leading back into Sniper reads. The design is in
+  [the session ports design](superpowers/specs/2026-11-19-session-proxy-ports-design.md).
 - `src/model.rs`: the transaction schema shared by the proxy, the API and other
   tooling.
 - `src/scanner.rs`: the passive vulnerability scanner.
@@ -66,10 +74,14 @@ works.
   the match & replace rules.
 - `src/fuzzer.rs`, `src/websocket.rs`: the payload fuzzer engine and WebSocket
   capture.
-- `src/tcp_capture.rs`, `web/tcp-capture.js`: the TCP relay. It listens on
-  127.0.0.1 only, forwards to one target, records each direction's reads with
-  bounded previews, holds read ranges for Intercept, and keeps one record per
-  connection under the session's `tcp-history/`.
+- `src/tcp_capture.rs`, `web/tcp-capture.js`: the TCP and UDP relay. Each
+  session's listeners relay to one target each, on loopback or, for listed
+  devices, every interface; they can decrypt TLS with Sniper's CA. The proxy
+  hands it CONNECT tunnels that carry neither TLS nor HTTP, and passthrough
+  tunnels (`serve_connect_tunnel` in `src/proxy.rs`). It records each
+  direction's reads with bounded previews, holds read ranges for Intercept,
+  replays a conversation, and keeps one record per connection under the
+  session's `tcp-history/`.
 - `src/service_map*.rs`, `web/service-map.js`: the Service Map, a bounded,
   on-demand projection of retained history. It starts no network discovery and
   keeps no persistent index; see [Service Map](integrations/service-map.md).
@@ -80,7 +92,9 @@ works.
 - `src/bin/sniper-cli.rs`: the JSON-first CLI.
 - `src/platform.rs`: the data directory shared by desktop, server and CLI, plus
   Windows file locks, process identity and persistence operations.
-- `web/`: the frontend SPA.
+- `web/`: the frontend SPA. A window shows one session, which need not be the
+  one the proxy listener records into: it reads and writes by session id, and
+  a click on a session changes what the window shows and nothing else.
 - `packaging/macos/`, `packaging/skills/`: the `.app` and `.dmg` packaging
   scripts, and the Claude and Codex skill templates.
 

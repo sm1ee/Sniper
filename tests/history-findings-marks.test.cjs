@@ -50,6 +50,30 @@ function fixture({ show = true, color = "severity", colorTags = [] } = {}) {
   return { context, state, pill, pills, reads, redraws };
 }
 
+// The findings are read again every second and are mostly the same ones.
+// Drawing the history rows again for each read rewrote every visible row,
+// whether History was on screen or not.
+test("a read that brings the same findings does not draw the history rows again", () => {
+  const f = fixture();
+  assert.equal(f.redraws.rows, 1);
+  f.context.refreshHistoryFindings();
+  f.context.refreshHistoryFindings();
+  assert.equal(f.redraws.rows, 1);
+  // The rows still read the marks from the newest answer.
+  assert.equal(f.state._historyFindings.get("rec-a").rowClass, " has-finding finding-tone-yellow");
+  // One finding more, the pill, or the colour: each draws them again.
+  f.context.findingsData = [...FINDINGS, finding("f-new", "rec-c", "high", "Server error disclosed")];
+  f.context.refreshHistoryFindings();
+  assert.equal(f.redraws.rows, 2);
+  f.state.httpShowFindings = false;
+  f.context.refreshHistoryFindings();
+  assert.equal(f.redraws.rows, 3);
+  f.state.httpShowFindings = true;
+  f.state.displaySettings.findingsColor = "red";
+  f.context.refreshHistoryFindings();
+  assert.equal(f.redraws.rows, 4);
+});
+
 test("records are marked by their worst finding, in the chosen colour, only while shown", () => {
   const f = fixture();
   assert.equal(f.pill.checked, true);

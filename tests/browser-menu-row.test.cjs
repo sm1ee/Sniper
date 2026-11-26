@@ -55,7 +55,22 @@ test("names and hints are escaped", () => {
   assert.match(html, /title="say &quot;hi&quot; &lt;now&gt;"/);
 });
 
+test("what an installed browser still lacks is said on hover, not in a paragraph under its row", () => {
+  const hint = 'The agent command is installed separately; see "the docs".';
+  const html = browserMenuRowHtml({ browser: "aside", installed: true, driver: "aside-cli",
+    requirements: [{ name: "aside", found: false, hint }, { name: "skill", found: true, hint: "never shown" }, { name: "other", found: false }] });
+  assert.match(html, /data-open="aside" title="The agent command is installed separately; see &quot;the docs&quot;\. other"/);
+  assert.doesNotMatch(html, /browser-menu-hint|never shown/);
+  // Nothing lacking, nothing said.
+  assert.match(browserMenuRowHtml({ browser: "chrome", installed: true, driver: "cdp", requirements: [{ name: "x", found: true, hint: "y" }] }), /data-open="chrome" title=""/);
+});
+
 test("a browser built for an agent is marked, a plain CDP one is not", () => {
   assert.match(browserMenuRowHtml({ browser: "ego", installed: true, driver: "ego-cli" }), /browser-menu-agent/);
+  // The mark is the word, in the menu's own quiet text, and not a sparkle.
+  assert.match(browserMenuRowHtml({ browser: "ego", installed: true, driver: "ego-cli" }),
+    /<span class="browser-menu-agent" title="Built for AI agents">AI<\/span>/);
+  const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
+  assert.match(css, /^\.browser-menu-agent \{[^}]*color: var\(--text-dim\);[^}]*font-size: var\(--font-2xs\);/m);
   assert.doesNotMatch(browserMenuRowHtml({ browser: "chrome", installed: true, driver: "cdp" }), /browser-menu-agent/);
 });

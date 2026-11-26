@@ -3,7 +3,9 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { loadFunctions } = require("./frontend-test-helpers.cjs");
 
-const context = loadFunctions(["oastStatusLine"], { URL });
+// Callbacks are polled for the session the proxy listener records into.
+let feed = "main";
+const context = loadFunctions(["oastStatusLine"], { URL, currentSessionId: () => "session-a", sessionFeed: () => ({ kind: feed }) });
 // Copied out of the vm realm, so deepEqual compares values, not prototypes.
 const oastStatusLine = (...args) => ({ ...context.oastStatusLine(...args) });
 const runtime = (extras = {}) => ({ oast_enabled: true, oast_server_url: "https://oast.example.com", ...extras });
@@ -18,4 +20,15 @@ test("the OAST status says whether it is off, has no server, or which server it 
     { text: "Interactsh · Registered (abc.oast.example.com)", registered: true });
   assert.deepEqual(oastStatusLine({ provider: "custom" }, runtime({ oast_server_url: "not a url" })), { text: "Custom · not a url", registered: false });
   assert.deepEqual(oastStatusLine({}, null), { text: "Off", registered: false });
+});
+
+test("the OAST status of a session the proxy does not record into says where callbacks are polled", () => {
+  for (const kind of ["port", "none"]) {
+    feed = kind;
+    assert.deepEqual(oastStatusLine({ provider: "interactsh", registered: true, payload_domain: "abc.oast.example.com" }, runtime()),
+      { text: "Polled only in the session the proxy records into", registered: false });
+    // Off is still what the session is set to.
+    assert.deepEqual(oastStatusLine({ provider: "custom" }, runtime({ oast_enabled: false })), { text: "Off", registered: false });
+  }
+  feed = "main";
 });

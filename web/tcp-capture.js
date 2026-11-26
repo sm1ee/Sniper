@@ -9,10 +9,14 @@
     ["resolution_timeout", "Name lookup timed out"], ["resolution_failed", "Name lookup failed"],
     ["connect_timeout", "Connection timed out"], ["connection_refused", "Connection refused"],
     ["connect_failed", "Connection failed"], ["self_target", "Target is this listener"],
-    ["relay_failed", "Stream interrupted"], ["storage_failed", "History storage failed"]
+    ["relay_failed", "Stream interrupted"], ["storage_failed", "History storage failed"],
+    ["proxy_failed", "Upstream proxy failed"], ["tls_failed", "TLS handshake failed"],
+    ["guarded_target", "Target is Sniper itself"]
   ]);
+  // Where a connection without a listener came from, for the Listener column.
+  const SOURCE_LABELS = new Map([["connect", "Proxy"], ["passthrough", "Passthrough"], ["replay", "Replay"]]);
   const DIRECTIONS = ["client_to_server", "server_to_client"];
-  const MAX_DISPLAY_BYTES = 256 * 1024;
+  const MAX_DISPLAY_BYTES = 1024 * 1024;
   const GAP = "Missing bytes in this capture.";
   const MALFORMED = "This capture is malformed.";
   const TOO_LARGE = "This capture is too large to show.";
@@ -36,18 +40,37 @@
     }
     return { local_port: Number(localPort), target_host: host, target_port: Number(targetPort) };
   }
+  // A listener that starts in a session nothing reaches opens that session's
+  // port. These are what refuses the port, in the server's words.
+  const PORT_REFUSALS = [
+    /^[0-9]{1,3} session ports are open, which is the most; close one first$/,
+    /^port [0-9]{1,5}, which this session keeps, did not open \([^<>]{1,120}\); free it and try again$/,
+    /^the next 64 port numbers are all in use; free one and try again$/,
+    /^the session's port closed before its listener started; try again$/,
+  ];
   async function requestError(response) {
     const fallback = "TCP request failed (" + response.status + "). Refresh and try again.";
     // Only display known, bounded configuration messages, never arbitrary server
     // output (which could be HTML or contain captured traffic).
-    if (![400, 500, 503].includes(response.status) || typeof response.text !== "function") return fallback;
+    if (![400, 404, 409, 500, 503].includes(response.status) || typeof response.text !== "function") return fallback;
     try {
       const message = await response.text();
       if (message.length > 240) return fallback;
+      if (response.status === 409) return PORT_REFUSALS.some(refusal => refusal.test(message)) ? message : fallback;
+      if (response.status === 500 && message === "Some TCP records could not be deleted. History requires recovery.") return message;
       if (response.status === 500 && /^TCP capture stopped, but [0-9]{1,8} connection record\(s\) are not saved\. Keep Sniper open, restore storage, then retry saving\.$/.test(message)) return message;
       if (response.status === 503 && message === "TCP capture cannot start while Sniper is shutting down") return message;
+      if (response.status === 404 && message === "unknown TCP listener") return "This listener was removed. Refresh and try again.";
       if (response.status !== 400) return fallback;
       if (/^Local port [0-9]{1,5} is already in use\. Choose another Local port or stop the listener using it\.$/.test(message)
+        || /^Another listener already uses local port [0-9]{1,5}\.$/.test(message)
+        || /^A session keeps at most [0-9]{1,3} TCP listeners\.$/.test(message)
+        || message === "TCP history requires recovery before capture can start"
+        || message === "Name the devices that may connect: IP addresses or networks such as 192.0.2.0/24."
+        || message === "Each device is an IP address or a network such as 192.0.2.0/24, at most 32 of them."
+        || message === "A pattern is 1 to 1024 characters." || message === "Enter whole hex byte pairs."
+        || message === "The pattern is not a valid regular expression."
+        || message === "TCP history is full; use a new session"
         || /^Could not bind local port [0-9]{1,5}\. Check the port and local permissions\.$/.test(message)
         || message === "Enter a hostname or IP address without a port; use Target port separately."
         || message === "invalid target host" || message === "ports must be 1–65535") return message;
@@ -75,6 +98,56 @@
     }
     return parts;
   }
+  // The end of the message that starts at `start`, as a length, or 0 while it
+  // is still incomplete: after a delimiter, or after a length-prefixed body.
+  function boundary(bytes, start, split) {
+    if (split.kind === "delimiter") {
+      const delimiter = split.delimiter, len = delimiter.length;
+      if (!len) return 0;
+      const first = delimiter[0], limit = bytes.length - len;
+      for (let i = bytes.indexOf(first, start); i !== -1 && i <= limit; i = bytes.indexOf(first, i + 1)) {
+        let match = true;
+        for (let j = 1; j < len && match; j++) match = bytes[i + j] === delimiter[j];
+        if (match) return i + len - start;
+      }
+      return 0;
+    }
+    if (bytes.length - start < split.size) return 0;
+    let length = 0;
+    for (let i = 0; i < split.size; i++) length = length * 256 + bytes[start + (split.littleEndian ? split.size - 1 - i : i)];
+    return bytes.length - start >= split.size + length ? split.size + length : 0;
+  }
+  // Each direction's bytes cut into messages, a delimiter or a length header
+  // kept with its message. A message is placed where its last byte arrived;
+  // what is left at a direction's end is marked partial.
+  function splitMessages(record, direction, split) {
+    const parts = conversation(record, direction), messages = [];
+    const ordered = parts.map((part, order) => ({ part, order }));
+    for (const side of DIRECTIONS) {
+      const own = ordered.filter(entry => entry.part.direction === side);
+      const bytes = new Uint8Array(own.reduce((sum, entry) => sum + entry.part.bytes.length, 0)), ends = [];
+      let at = 0;
+      for (const { part, order } of own) { bytes.set(part.bytes, at); at += part.bytes.length; ends.push({ end: at, order, time: part.at }); }
+      const base = own[0]?.part.offset ?? 0;
+      let cursor = 0;
+      for (let start = 0; start < bytes.length;) {
+        let length = boundary(bytes, start, split);
+        const partial = length === 0;
+        if (partial) length = bytes.length - start;
+        while (cursor < ends.length - 1 && ends[cursor].end < start + length) cursor++;
+        const last = ends[cursor];
+        messages.push({ direction: side, at: last.time, offset: base + start, bytes: bytes.subarray(start, start + length), partial, order: last.order + (partial ? 0.5 : 0) });
+        start += length;
+      }
+    }
+    return messages.sort((a, b) => a.order - b.order);
+  }
+  const SPLITS = {
+    lines: { kind: "delimiter", delimiter: [0x0a] }, crlf: { kind: "delimiter", delimiter: [0x0d, 0x0a] }, nul: { kind: "delimiter", delimiter: [0] },
+    u8: { kind: "length", size: 1, littleEndian: false }, u16be: { kind: "length", size: 2, littleEndian: false },
+    u16le: { kind: "length", size: 2, littleEndian: true }, u32be: { kind: "length", size: 4, littleEndian: false },
+    u32le: { kind: "length", size: 4, littleEndian: true }
+  };
   // One direction's bytes, joined: what an export or a copy would take.
   function streamBytes(record, direction) {
     const parts = conversation(record, direction);
@@ -83,7 +156,9 @@
     for (const part of parts) { bytes.set(part.bytes, offset); offset += part.bytes.length; }
     return bytes;
   }
-  const MAX_CACHED_CHUNKS = 1024, MAX_CACHED_BASE64 = 512 * 1024;
+  const MAX_CACHED_CHUNKS = 1024, MAX_CACHED_BASE64 = Math.ceil(MAX_DISPLAY_BYTES / 3) * 4, MAX_RENDERED_PARTS = 2000;
+  const appendQuery = (url, params) => url + (url.includes("?") ? "&" : "?") + params;
+  const LOSSY_UTF8 = typeof TextDecoder === "function" ? new TextDecoder("utf-8") : null;
   function sameChunks(a, b) {
     return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((chunk, i) => chunk.sequence === b[i]?.sequence
       && chunk.direction === b[i]?.direction && chunk.offset === b[i]?.offset && chunk.data_base64 === b[i]?.data_base64);
@@ -98,7 +173,8 @@
   }
   function formatText(bytes) {
     // A projection only: replacement glyphs and escaped controls are never writable.
-    return new TextDecoder("utf-8").decode(bytes).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, c => "\\x" + c.charCodeAt(0).toString(16).padStart(2, "0"));
+    const text = LOSSY_UTF8 ? LOSSY_UTF8.decode(bytes) : new TextDecoder("utf-8").decode(bytes);
+    return text.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, c => "\\x" + c.charCodeAt(0).toString(16).padStart(2, "0"));
   }
   function clock(value) {
     const date = new Date(value);
@@ -132,11 +208,48 @@
     const seconds = Math.floor(elapsed / 1000);
     return seconds < 60 ? seconds + "s" : seconds < 3600 ? Math.floor(seconds / 60) + "m" : Math.floor(seconds / 3600) + "h " + Math.floor(seconds % 3600 / 60) + "m";
   }
-  function createController({ document, sessionId, readPath, writePath, request, openSettings, intercept = false, arrowStep = () => 0, formatTime = clock, formatSize = byteSize }) {
-    const interceptController = intercept ? createInterceptController({ document, sessionId, readPath, writePath, request, formatSize, onChanged: () => refresh() }) : null;
+  const MAX_LISTENERS = 16;
+  function targetLabel(settings) {
+    const host = String(settings?.target_host || "");
+    return (host.includes(":") ? "[" + host + "]" : host) + ":" + settings?.target_port;
+  }
+  const TLS_LABELS = { decrypt: "decrypt TLS", upstream: "TLS to target" };
+  function listenerTarget(settings) {
+    const tls = TLS_LABELS[settings?.tls];
+    return targetLabel(settings) + (settings?.protocol === "udp" ? " · UDP" : "") + (tls ? " · " + tls : "");
+  }
+  function listenerRoute(listener) {
+    return listenAddress(listener.settings) + " → " + targetLabel(listener.settings);
+  }
+  // A listener that is on runs while its session receives, so in a session
+  // nothing reaches it waits, and has not failed.
+  function listenerState(listener, receiving = true) {
+    const state = listener.running ? "Listening" : !listener.enabled ? "Off" : String(listener.error || (receiving ? "Not running" : "Not receiving"));
+    return listener.refused > 0 ? state + " · " + listener.refused + " refused" : state;
+  }
+  const listenAddress = settings => (settings?.remote ? "*:" : "127.0.0.1:") + settings?.local_port;
+  function createController({ document, sessionId, readPath, writePath, request, openSettings, confirm = (message, run) => run(),
+    download = url => { const link = document.createElement("a"); link.href = url; link.download = ""; link.click?.(); },
+    copy = text => globalThis.navigator?.clipboard?.writeText(text), intercept = false, arrowStep = () => 0, formatTime = clock, formatSize = byteSize,
+    // Whether traffic reaches the session on screen, and what to tell when a
+    // listener change went through: it can have opened the session's port.
+    receiving = () => true, changed = () => {} }) {
+    const replayController = createReplayController({ document, sessionId, writePath, request, onSent: async record => {
+      await refresh(); await select(record.id); interceptController?.showStream();
+    } });
+    const interceptController = intercept ? createInterceptController({ document, sessionId, readPath, writePath, request, formatSize,
+      onChanged: () => refresh(), onReplay: () => replayController.load(detail) }) : null;
     const el = id => document.getElementById(id);
     let epoch = 0, selection = 0, detailRequest = 0, selectedId = null, detail = null, records = [], status = null;
     let reading = null, writing = false, mode = "hex", listKey = "", actionError = null, streamView = null;
+    // The listener being edited: null, "new", or a listener's id.
+    let editing = null, listenerSort = { key: "local_port", direction: "asc" }, shownListeners = [];
+    // What the listener rows were last drawn from.
+    let listenersDrawn = "";
+    // A content search: the ids it found, or null when no search is on.
+    let search = null, searchRequest = 0, searchError = "", lastSearchKey = "";
+    // The search in flight, so that the "change" and "search" one Enter fires ask once.
+    let searching = "";
     let liveOnly = false, sort = { key: "index", direction: "desc" }, shown = [], indexById = new Map();
     const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
     const text = (id, value) => { if (el(id).textContent !== value) el(id).textContent = value; };
@@ -148,48 +261,129 @@
       if (!response.ok) throw new Error(await requestError(response));
       return response.json();
     }
-    function matchesSettings(actual, expected) {
-      if (!actual || typeof actual.target_host !== "string" || actual.local_port !== expected.local_port || actual.target_port !== expected.target_port) return false;
-      // Rust and URL spell IPv4-mapped IPv6 addresses differently. Compare
-      // both hosts using the same syntax-only parser used for the request.
-      try { return validateSettings(actual.local_port, actual.target_host, actual.target_port).target_host === expected.target_host; }
-      catch (_) { return false; }
-    }
+    const listeners = () => Array.isArray(status?.listeners) ? status.listeners : [];
     function renderStatus() {
-      const enabled = Boolean(status?.enabled);
+      const all = listeners(), running = all.filter(listener => listener.running);
       const unavailable = !status || writing;
       // Status and rows are separate snapshots. History only grows within a
       // session, so a newer list at the cap must not still look accepting.
       const count = Math.max(status?.history_count || 0, records.length);
       const full = Boolean(status && status.history_limit > 0 && count >= status.history_limit);
       const storageError = Boolean(status?.load_error || status?.persistence_error);
-      const atLimit = enabled && status.active_limit > 0 && status.active_count >= status.active_limit;
+      const atLimit = running.length > 0 && status.active_limit > 0 && status.active_count >= status.active_limit;
       const blocked = storageError ? "History storage unavailable"
         : full ? "History full (" + count + "/" + status.history_limit + ")"
         : atLimit ? status.active_count + " of " + status.active_limit + " connections; new ones wait" : "";
-      for (const id of ["tcpLocalPort", "tcpTargetHost", "tcpTargetPort"]) el(id).disabled = unavailable || enabled;
-      el("tcpStart").disabled = unavailable || enabled || storageError || full;
-      el("tcpStop").disabled = unavailable || (!enabled && !status?.persistence_error);
-      text("tcpStop", !enabled && status?.persistence_error ? "Retry saving" : "Stop");
-      text("tcpListenerStatus", !status ? "Unavailable" : blocked || (enabled ? "Listening" : "Stopped"));
-      if (enabled && status.settings) {
-        el("tcpLocalPort").value = status.settings.local_port;
-        el("tcpTargetHost").value = status.settings.target_host;
-        el("tcpTargetPort").value = status.settings.target_port;
-      }
-      text("tcpOpenSettings", enabled && status.settings
-        ? "127.0.0.1:" + status.settings.local_port + " → " + status.settings.target_host + ":" + status.settings.target_port
-        : "Listener off");
-      const warning = status?.persistence_error ? "TCP history is not saved. Restore storage, then " + (enabled ? "Stop" : "Retry saving") + "."
+      text("tcpListenerStatus", !status ? "Unavailable"
+        : blocked || (running.length ? running.length + " listening"
+          : !receiving() && all.some(listener => listener.enabled) ? "Not receiving" : all.length ? "Off" : "No listeners"));
+      el("tcpAddListener").disabled = unavailable || all.length >= MAX_LISTENERS;
+      text("tcpOpenSettings", running.length === 1 ? listenerRoute(running[0])
+        : running.length ? running.length + " listeners" : "Listener off");
+      const warning = status?.persistence_error ? "TCP history is not saved. Restore storage, then stop and retry saving."
         : storageError ? "TCP history storage is unavailable."
-        : full ? "History is full. Start a new session to capture more." : "";
+        : full ? "History is full. New connections are relayed but not recorded; clear history to record them." : "";
       text("tcpSettingsError", actionError?.message || warning);
+      el("tcpRetrySaving").hidden = !status?.persistence_error;
+      el("tcpRetrySaving").disabled = unavailable;
+      renderListeners(all, unavailable);
+      el("tcpListenerForm").hidden = editing === null;
+      el("tcpRemoveListener").hidden = editing === null || editing === "new";
+      for (const id of ["tcpLocalPort", "tcpTargetHost", "tcpTargetPort", "tcpListenerProtocol", "tcpListenerTls", "tcpListenerRemote", "tcpListenerAllowed", "tcpSaveListener", "tcpCancelListener", "tcpRemoveListener"]) el(id).disabled = unavailable;
+      // TLS is for TCP; keep the field disabled for UDP after restoring form controls.
+      if (el("tcpListenerProtocol").value === "udp") el("tcpListenerTls").disabled = true;
       // Paused bytes are counted beside the Intercept switch, not here too.
       const live = records.filter(record => LIVE.has(record.status)).length;
+      const unrecorded = Number(status?.unrecorded_count) || 0;
+      const matches = search ? records.filter(record => search.ids.has(record.id)).length : 0;
       text("tcpHistoryStatus", [
         records.length === 1 ? "1 connection" : records.length + " connections",
-        live ? live + " live" : "", blocked
+        live ? live + " live" : "", blocked, unrecorded ? unrecorded + " not recorded" : "",
+        search ? matches + (matches === 1 ? " match" : " matches") : "",
+        search?.truncated ? "search stopped early" : ""
       ].filter(Boolean).join(" · "));
+      el("tcpClearHistory").disabled = unavailable || records.length === live;
+    }
+    const LISTENER_SORT = {
+      local_port: listener => Number(listener.settings?.local_port) || 0,
+      target: listener => targetLabel(listener.settings), status: listener => listenerState(listener, receiving())
+    };
+    function renderListeners(all, unavailable) {
+      const value = LISTENER_SORT[listenerSort.key] || LISTENER_SORT.local_port, factor = listenerSort.direction === "asc" ? 1 : -1;
+      shownListeners = [...all].sort((a, b) => {
+        const x = value(a), y = value(b);
+        return (typeof x === "number" && typeof y === "number" ? x - y : collator.compare(String(x), String(y))) * factor;
+      });
+      const body = el("tcpListenerRows");
+      // The status is read again every second. Rows that would come out the
+      // same are left alone: a new row each time took the keyboard's focus
+      // from the switch it was on.
+      const drawn = JSON.stringify([shownListeners, unavailable, editing, receiving()]);
+      if (drawn === listenersDrawn) return;
+      listenersDrawn = drawn;
+      body.replaceChildren();
+      for (const listener of shownListeners) {
+        const row = document.createElement("tr"), selected = listener.id === editing;
+        row.dataset.listenerId = listener.id;
+        row.classList.toggle("selected", selected);
+        row.setAttribute("aria-selected", String(selected));
+        const toggle = document.createElement("button");
+        toggle.className = "switch"; toggle.type = "button"; toggle.disabled = unavailable;
+        toggle.dataset.listenerToggle = listener.id;
+        toggle.setAttribute("role", "switch");
+        toggle.setAttribute("aria-checked", String(Boolean(listener.enabled)));
+        toggle.setAttribute("aria-label", "Listener on port " + listener.settings.local_port);
+        const on = document.createElement("td");
+        on.className = "tcp-col-on"; on.append(toggle); row.append(on);
+        const fed = receiving(), state = listenerState(listener, fed);
+        for (const [content, className] of [[listenAddress(listener.settings), ""], [listenerTarget(listener.settings), ""],
+          [state, listener.enabled && !listener.running && (fed || listener.error) ? "tcp-listener-error" : ""]]) {
+          const cell = document.createElement("td");
+          cell.textContent = content; cell.title = content;
+          if (className) cell.className = className;
+          row.append(cell);
+        }
+        body.append(row);
+      }
+      if (!shownListeners.length) {
+        const row = document.createElement("tr"), cell = document.createElement("td");
+        cell.colSpan = 4; cell.className = "tcp-empty"; cell.textContent = "No listeners";
+        row.append(cell); body.append(row);
+      }
+    }
+    function nextPort() {
+      const used = new Set(listeners().map(listener => listener.settings?.local_port));
+      let port = 9000;
+      while (used.has(port)) port++;
+      return port;
+    }
+    function openForm(target) {
+      const listener = listeners().find(item => item.id === target);
+      if (target !== "new" && !listener) return;
+      editing = target; actionError = null;
+      el("tcpLocalPort").value = String(listener ? listener.settings.local_port : nextPort());
+      el("tcpTargetHost").value = listener ? listener.settings.target_host : "";
+      el("tcpTargetPort").value = listener ? String(listener.settings.target_port) : "";
+      el("tcpListenerTls").value = listener?.settings?.tls || "off";
+      el("tcpListenerProtocol").value = listener?.settings?.protocol || "tcp";
+      syncProtocol();
+      el("tcpListenerRemote").checked = Boolean(listener?.settings?.remote);
+      el("tcpListenerAllowed").value = (listener?.settings?.allowed_clients || []).join("\n");
+      syncRemote();
+      renderStatus();
+      el("tcpTargetHost").focus?.();
+    }
+    function closeForm() { editing = null; actionError = null; renderStatus(); }
+    function syncProtocol() {
+      const udp = el("tcpListenerProtocol").value === "udp";
+      if (udp) el("tcpListenerTls").value = "off";
+      el("tcpListenerTls").disabled = udp;
+    }
+    // Other devices: the list of who may connect shows once that is on.
+    function syncRemote() {
+      const remote = Boolean(el("tcpListenerRemote").checked);
+      el("tcpListenerAllowedField").hidden = !remote;
+      text("tcpListenAddress", remote ? "Listen on every interface" : "Listen on 127.0.0.1");
     }
     function statusText(record) {
       return [
@@ -201,6 +395,7 @@
     }
     const SORT_VALUES = {
       index: record => indexById.get(record.id) || 0,
+      local_port: record => Number(record.local_port) || 0,
       target: record => record.target, peer: record => record.peer, status: record => statusLabel(record),
       client_bytes: record => Number(record.client_bytes) || 0, server_bytes: record => Number(record.server_bytes) || 0,
       duration: durationMs, started_at: record => Date.parse(record.started_at) || 0
@@ -216,8 +411,8 @@
     function renderList() {
       // The list comes newest first; # counts from the oldest, as in HTTP history.
       indexById = new Map(records.map((record, position) => [record.id, records.length - position]));
-      shown = sortedRecords().filter(record => !liveOnly || LIVE.has(record.status));
-      const key = JSON.stringify([shown, selectedId, sort, liveOnly, shown.some(r => LIVE.has(r.status)) ? Math.floor(Date.now() / 1000) : 0]);
+      shown = sortedRecords().filter(record => (!liveOnly || LIVE.has(record.status)) && (!search || search.ids.has(record.id)));
+      const key = JSON.stringify([shown, selectedId, sort, liveOnly, search ? [...search.ids] : null, shown.some(r => LIVE.has(r.status)) ? Math.floor(Date.now() / 1000) : 0]);
       if (key === listKey) return;
       listKey = key;
       const body = el("tcpHistoryRows");
@@ -227,10 +422,10 @@
         row.dataset.tcpId = record.id;
         row.classList.toggle("selected", record.id === selectedId);
         row.setAttribute("aria-selected", String(record.id === selectedId));
-        const values = [indexById.get(record.id), record.target, record.peer, statusText(record), formatSize(record.client_bytes), formatSize(record.server_bytes), duration(record), formatTime(record.started_at)];
+        const values = [indexById.get(record.id), record.local_port || SOURCE_LABELS.get(record.source) || "—", record.target, record.peer, statusText(record), formatSize(record.client_bytes), formatSize(record.server_bytes), duration(record), formatTime(record.started_at)];
         values.forEach((value, column) => {
           const cell = document.createElement("td");
-          if (column === 3) cell.className = "tcp-status tcp-status-" + record.status;
+          if (column === 4) cell.className = "tcp-status tcp-status-" + record.status;
           cell.textContent = String(value);
           row.append(cell);
         });
@@ -238,8 +433,8 @@
       }
       if (!shown.length) {
         const row = document.createElement("tr"), cell = document.createElement("td");
-        cell.colSpan = 8; cell.className = "tcp-empty";
-        cell.textContent = records.length ? "No live connections" : "No TCP connections";
+        cell.colSpan = 9; cell.className = "tcp-empty";
+        cell.textContent = search ? "No connection contains it" : records.length ? "No live connections" : "No TCP connections";
         row.append(cell); body.append(row);
       }
     }
@@ -248,21 +443,30 @@
       const block = document.createElement("div"), head = document.createElement("div"), bytes = document.createElement("pre");
       block.className = "tcp-chunk " + (outbound ? "tcp-chunk-out" : "tcp-chunk-in");
       head.className = "tcp-chunk-head";
-      head.textContent = (outbound ? "→ " : "← ") + formatSize(part.bytes.length) + (part.at ? " · " + clock(part.at) : "");
+      head.textContent = (outbound ? "→ " : "← ") + formatSize(part.bytes.length) + (part.at ? " · " + clock(part.at) : "") + (part.partial ? " · partial" : "");
       bytes.textContent = mode === "hex" ? formatHex(part.bytes, part.offset) : formatText(part.bytes);
       block.append(head, bytes);
       return block;
     }
-    function streamMeta(record, error) {
+    function streamMeta(record, error, partsNote = "") {
       if (error) return error;
       return [
         formatSize(record.client_bytes) + " sent", formatSize(record.server_bytes) + " received",
         record.capture_truncated ? "Partial capture" : "",
-        !LIVE.has(record.status) && !record.durable ? "Not saved" : ""
+        partsNote,
+        !LIVE.has(record.status) && !record.durable ? "Not saved" : "",
+        record.source === "connect" ? "CONNECT tunnel from the HTTP proxy"
+          : record.source === "passthrough" ? "Passthrough host, not decrypted"
+          : record.source === "replay" ? "Replayed TCP conversation" : "",
+        record.via_proxy ? "Through the upstream proxy" : "",
+        record.client_tls ? "TLS decrypted" : record.server_tls ? "TLS to the target" : "",
+        record.protocol === "udp" ? "UDP, one chunk per datagram" : "",
+        record.failure === "self_target" ? "The target resolves to this listener. If a hosts entry sends the name here, enter the server's IP as the target." : ""
       ].filter(Boolean).join(" · ");
     }
     function renderDetail() {
       interceptController?.setConnection(detail);
+      el("tcpStreamMore").hidden = !detail;
       text("tcpStreamTitle", detail ? detail.target : "");
       const surface = el("tcpStreamBytes");
       if (!detail) {
@@ -272,30 +476,43 @@
         text("tcpStreamMeta", "");
         return;
       }
-      const direction = el("tcpDirection").value;
-      const view = { session: sessionId(), id: selectedId, direction, mode };
+      const direction = el("tcpDirection").value, split = el("tcpSplit").value || "reads";
+      const delimiterInput = split === "delimiter" ? el("tcpSplitDelimiter").value.trim() : "";
+      const view = { session: sessionId(), id: selectedId, direction, mode, split: split + delimiterInput };
       const same = streamView && Object.keys(view).every(name => streamView[name] === view[name]);
       // Counters change on every poll of a live connection, and a capped capture
       // keeps relaying without new chunks: redraw only when the shown chunks did.
       const shownChunks = Array.isArray(detail.chunks) ? detail.chunks.filter(chunk => direction === "both" || chunk?.direction === direction) : null;
       if (same && streamView.chunks && sameChunks(streamView.chunks, shownChunks)) {
-        text("tcpStreamMeta", streamMeta(detail, streamView.error));
+        text("tcpStreamMeta", streamMeta(detail, streamView.error, streamView.partsNote));
         return;
       }
       // A live stream grows at its end: one that was scrolled to the end follows it.
       const atEnd = same && surface.scrollTop + surface.clientHeight >= surface.scrollHeight - 4;
       const scrollTop = surface.scrollTop;
       let parts = [], error = "";
-      try { parts = conversation(detail, direction); } catch (failure) { error = failure.message; }
+      try {
+        parts = split === "reads" ? conversation(detail, direction)
+          : splitMessages(detail, direction, split === "delimiter"
+            ? { kind: "delimiter", delimiter: [...parseHex(delimiterInput || "0a", { limitLabel: "Delimiter is limited to 16 KiB.", emptyHint: "" })] } : SPLITS[split]);
+      } catch (failure) { error = failure.message; }
+      const totalParts = parts.length;
+      // A live connection grows at its end, which is what is being watched, so
+      // its newest are the ones drawn. One that has ended is read from its start.
+      const newest = LIVE.has(detail.status);
+      const renderedParts = totalParts <= MAX_RENDERED_PARTS ? parts
+        : newest ? parts.slice(-MAX_RENDERED_PARTS) : parts.slice(0, MAX_RENDERED_PARTS);
+      const partsNote = totalParts > MAX_RENDERED_PARTS
+        ? "Showing " + (newest ? "last " : "first ") + MAX_RENDERED_PARTS + " of " + totalParts + " messages" : "";
       surface.replaceChildren();
-      surface.textContent = !error && !parts.length ? "No bytes captured" : "";
-      for (const part of parts) surface.append(chunkBlock(part));
+      surface.textContent = !error && !renderedParts.length ? "No bytes captured" : "";
+      for (const part of renderedParts) surface.append(chunkBlock(part));
       if (same) surface.scrollTop = atEnd ? surface.scrollHeight : scrollTop;
       // Only a bounded copy is kept to compare with; a larger capture redraws.
       const cacheable = shownChunks && shownChunks.length <= MAX_CACHED_CHUNKS
         && shownChunks.reduce((sum, chunk) => sum + (typeof chunk?.data_base64 === "string" ? chunk.data_base64.length : Infinity), 0) <= MAX_CACHED_BASE64;
-      streamView = { ...view, error, chunks: cacheable ? shownChunks.map(({ sequence, direction, offset, data_base64 }) => ({ sequence, direction, offset, data_base64 })) : null };
-      text("tcpStreamMeta", streamMeta(detail, error));
+      streamView = { ...view, error, partsNote, chunks: cacheable ? shownChunks.map(({ sequence, direction, offset, data_base64 }) => ({ sequence, direction, offset, data_base64 })) : null };
+      text("tcpStreamMeta", streamMeta(detail, error, partsNote));
     }
     async function loadDetail(stamp) {
       const id = selectedId, intent = selection;
@@ -305,7 +522,7 @@
       try {
         const result = await json(readPath("/api/tcp/connections/" + encodeURIComponent(id), stamp.session));
         if (owns()) {
-          text("tcpHistoryError", "");
+          text("tcpHistoryError", searchError);
           const changed = JSON.stringify(detail) !== JSON.stringify(result);
           detail = result; if (changed) renderDetail();
         }
@@ -327,19 +544,11 @@
           if (!current(stamp)) return;
           status = nextStatus; records = nextRecords;
           interceptController?.reconcileConnections(records);
-          // A different window may recover this operation. Match the failed
-          // request, not the editable form or just any running listener, and
-          // retain validation, session-conflict and unrelated request errors.
-          const attempted = actionError?.action === "start" ? actionError.settings : null;
-          const recoveredBind = attempted && status.enabled === true &&
-            matchesSettings(status.settings, attempted) &&
-            (actionError.message === "Local port " + attempted.local_port + " is already in use. Choose another Local port or stop the listener using it." ||
-              actionError.message === "Could not bind local port " + attempted.local_port + ". Check the port and local permissions.");
-          const recoveredPersistence = actionError?.action === "stop" && status.persistence_error === false &&
-            /^TCP capture stopped, but [0-9]{1,8} connection record\(s\) are not saved\. Keep Sniper open, restore storage, then retry saving\.$/.test(actionError.message);
-          if (recoveredBind || recoveredPersistence) actionError = null;
+          // Saving may be recovered from another window; other errors stay.
+          if (actionError?.action === "stop" && status.persistence_error === false) actionError = null;
+          if (editing !== null && editing !== "new" && !listeners().some(listener => listener.id === editing)) editing = null;
           if (selectedId && !records.some(r => r.id === selectedId)) { selectedId = null; selection++; detail = null; renderDetail(); }
-          renderStatus(); renderList(); text("tcpHistoryError", "");
+          renderStatus(); renderList(); text("tcpHistoryError", searchError);
           await loadDetail(stamp);
         } catch (error) {
           if (current(stamp)) { status = null; renderStatus(); text("tcpHistoryError", error.message); text("tcpSettingsError", error.message); }
@@ -348,28 +557,67 @@
       reading = pending;
       try { await pending; } finally { if (reading === pending) reading = null; }
     }
-    async function mutate(action) {
-      if (writing || !status) return;
-      let body = {};
-      try { if (action === "start") body = validateSettings(el("tcpLocalPort").value, el("tcpTargetHost").value, el("tcpTargetPort").value); }
-      catch (error) { actionError = { message: error.message }; renderStatus(); return; }
+    async function write(action, path, method, body) {
+      if (writing || !status) return false;
       // Invalidate reads already in flight, and do not poll until the write settles.
       epoch++; reading = null; actionError = null; writing = true;
       const stamp = snapshot();
       renderStatus();
+      let done = false;
       try {
-        await json(writePath("/api/tcp/" + action, stamp.session), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+        await json(writePath(path, stamp.session), { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
+        done = true;
+        changed();
       } catch (error) {
-        if (current(stamp)) actionError = { message: error.message, action, settings: body };
+        if (current(stamp)) actionError = { message: error.message, action };
       } finally {
         if (current(stamp)) { writing = false; await refresh(); renderStatus(); }
       }
+      return done;
+    }
+    async function saveListener() {
+      if (editing === null) return;
+      let settings;
+      try { settings = validateSettings(el("tcpLocalPort").value, el("tcpTargetHost").value, el("tcpTargetPort").value); }
+      catch (error) { actionError = { message: error.message }; renderStatus(); return; }
+      const tls = el("tcpListenerTls").value, protocol = el("tcpListenerProtocol").value;
+      if (protocol === "udp") settings.protocol = "udp";
+      else if (tls && tls !== "off") settings.tls = tls;
+      if (el("tcpListenerRemote").checked) {
+        settings.remote = true;
+        settings.allowed_clients = String(el("tcpListenerAllowed").value).split(/[\s,]+/).filter(Boolean);
+      }
+      const existing = listeners().find(listener => listener.id === editing);
+      const saved = editing === "new"
+        ? await write("add", "/api/tcp/listeners", "POST", { enabled: true, settings })
+        : await write("update", "/api/tcp/listeners/" + encodeURIComponent(editing), "PUT", { enabled: existing ? Boolean(existing.enabled) : true, settings });
+      if (saved) closeForm();
+    }
+    async function toggleListener(id) {
+      const listener = listeners().find(item => item.id === id);
+      if (listener) await write("toggle", "/api/tcp/listeners/" + encodeURIComponent(id), "PUT", { enabled: !listener.enabled, settings: listener.settings });
+    }
+    async function removeListener() {
+      if (editing === null || editing === "new") return;
+      if (await write("remove", "/api/tcp/listeners/" + encodeURIComponent(editing), "DELETE")) closeForm();
     }
     function reset() {
       interceptController?.reset();
-      epoch++; selection++; reading = null; writing = false; actionError = null; selectedId = null; detail = null; records = []; status = null; listKey = "";
-      el("tcpTargetHost").value = ""; el("tcpTargetPort").value = ""; el("tcpLocalPort").value = "9000";
+      replayController.reset();
+      epoch++; selection++; reading = null; writing = false; actionError = null; selectedId = null; detail = null; records = []; status = null; listKey = ""; editing = null;
+      search = null; searchRequest++; searchError = ""; lastSearchKey = ""; searching = ""; el("tcpSearch").value = "";
       renderStatus(); renderList(); renderDetail(); text("tcpHistoryError", "");
+    }
+    function sortListenersBy(key) {
+      listenerSort = listenerSort.key === key ? { key, direction: listenerSort.direction === "asc" ? "desc" : "asc" } : { key, direction: "asc" };
+      for (const header of el("tcpListenerHead")?.querySelectorAll?.("[data-sort]") || []) {
+        const active = header.dataset.sort === listenerSort.key;
+        header.classList.toggle("active", active);
+        header.setAttribute("aria-sort", active ? (listenerSort.direction === "asc" ? "ascending" : "descending") : "none");
+        const indicator = header.querySelector(".table-sort-indicator");
+        if (indicator) indicator.textContent = active ? (listenerSort.direction === "asc" ? "↑" : "↓") : "↕";
+      }
+      renderStatus();
     }
     function sortBy(key) {
       sort = sort.key === key ? { key, direction: sort.direction === "asc" ? "desc" : "asc" } : { key, direction: key === "index" || key === "started_at" ? "desc" : "asc" };
@@ -399,8 +647,90 @@
         document.addEventListener("mousemove", onMove); document.addEventListener("mouseup", onUp);
       });
     }
-    el("tcpListenerForm").addEventListener("submit", event => { event.preventDefault(); mutate("start"); });
-    el("tcpStop").addEventListener("click", () => mutate("stop"));
+    el("tcpListenerForm").addEventListener("submit", event => { event.preventDefault(); void saveListener(); });
+    el("tcpAddListener").addEventListener("click", () => openForm("new"));
+    el("tcpListenerRemote").addEventListener("change", syncRemote);
+    el("tcpListenerProtocol").addEventListener("change", syncProtocol);
+    async function runSearch(force = false) {
+      const value = el("tcpSearch").value, kind = el("tcpSearchKind").value || "text";
+      const key = kind + "\0" + value;
+      if (!value) {
+        search = null; searchError = ""; lastSearchKey = ""; searching = ""; searchRequest++;
+        listKey = ""; text("tcpHistoryError", ""); renderStatus(); renderList(); return;
+      }
+      if (key === searching) return;
+      // Leaving the field with the same text is not a new search. Enter is:
+      // traffic has arrived since, or the first try failed.
+      if (!force && key === lastSearchKey && (search || searchError)) return;
+      lastSearchKey = key; searching = key;
+      const token = ++searchRequest;
+      const stamp = snapshot();
+      try {
+        const found = await json(appendQuery(readPath("/api/tcp/search", stamp.session), "contains=" + encodeURIComponent(value) + "&kind=" + encodeURIComponent(kind)));
+        if (!current(stamp) || token !== searchRequest) return;
+        search = { ids: new Set(found.ids || []), truncated: Boolean(found.truncated) };
+        searchError = "";
+        text("tcpHistoryError", "");
+      } catch (error) {
+        if (current(stamp) && token === searchRequest) {
+          searchError = error.message;
+          text("tcpHistoryError", searchError);
+        }
+        return;
+      } finally {
+        if (token === searchRequest) searching = "";
+      }
+      listKey = ""; renderStatus(); renderList();
+    }
+    el("tcpSearch").addEventListener("change", () => void runSearch());
+    el("tcpSearch").addEventListener("search", () => void runSearch(true));
+    el("tcpSearchKind").addEventListener("change", () => { if (el("tcpSearch").value) void runSearch(true); });
+    function saveRaw(direction) {
+      if (!detail) return;
+      download(appendQuery(readPath("/api/tcp/connections/" + encodeURIComponent(detail.id) + "/raw", sessionId()), "direction=" + direction));
+      el("tcpStreamMore").open = false;
+    }
+    el("tcpSaveClient").addEventListener("click", () => saveRaw("client_to_server"));
+    el("tcpSaveServer").addEventListener("click", () => saveRaw("server_to_client"));
+    el("tcpCopyHex").addEventListener("click", () => {
+      if (!detail) return;
+      let parts;
+      try { parts = conversation(detail, el("tcpDirection").value); } catch (error) { text("tcpHistoryError", error.message); return; }
+      Promise.resolve(copy(parts.map(part => (part.direction === "client_to_server" ? "→ " : "← ") + formatHex(part.bytes, part.offset)).join("\n\n")))
+        .catch(() => text("tcpHistoryError", "Could not copy to the clipboard."));
+      el("tcpStreamMore").open = false;
+    });
+    el("tcpClearHistory").addEventListener("click", () => {
+      if (!status || writing) return;
+      confirm("Remove every ended TCP connection in this session? Live connections stay.",
+        () => void write("clear", "/api/tcp/connections", "DELETE"),
+        { title: "Clear TCP history", confirmLabel: "Clear" });
+    });
+    el("tcpCancelListener").addEventListener("click", closeForm);
+    el("tcpRemoveListener").addEventListener("click", () => void removeListener());
+    el("tcpRetrySaving").addEventListener("click", () => void write("stop", "/api/tcp/stop", "POST", {}));
+    el("tcpListenerRows").addEventListener("click", event => {
+      const toggle = event.target.closest?.("[data-listener-toggle]");
+      if (toggle) { void toggleListener(toggle.dataset.listenerToggle); return; }
+      const row = event.target.closest?.("tr[data-listener-id]");
+      if (row) openForm(row.dataset.listenerId);
+    });
+    el("tcpListenerHead")?.addEventListener("click", event => {
+      if (event.target.closest?.(".table-col-resize")) return;
+      const header = event.target.closest?.("[data-sort]");
+      if (header) sortListenersBy(header.dataset.sort);
+    });
+    // ↑/↓ move through the listeners while their list has focus.
+    el("tcpListenerShell")?.addEventListener("keydown", event => {
+      const step = arrowStep(event);
+      if (!step || !shownListeners.length) return;
+      const at = shownListeners.findIndex(listener => listener.id === editing);
+      const next = at < 0 ? (step > 0 ? 0 : shownListeners.length - 1) : at + step;
+      if (next < 0 || next >= shownListeners.length) return;
+      event.preventDefault();
+      openForm(shownListeners[next].id);
+      el("tcpListenerShell").focus?.();
+    });
     el("tcpOpenSettings").addEventListener("click", openSettings);
     el("tcpLiveOnly")?.addEventListener("click", () => {
       liveOnly = !liveOnly;
@@ -432,6 +762,8 @@
       Array.from(el("tcpHistoryRows").children).find(row => row.dataset.tcpId === id)?.scrollIntoView?.({ block: "nearest" });
     });
     el("tcpDirection").addEventListener("change", renderDetail);
+    el("tcpSplit").addEventListener("change", () => { el("tcpSplitDelimiter").hidden = el("tcpSplit").value !== "delimiter"; renderDetail(); });
+    el("tcpSplitDelimiter").addEventListener("change", renderDetail);
     for (const view of ["hex", "text"]) el(view === "hex" ? "tcpHexView" : "tcpTextView").addEventListener("click", () => {
       mode = view;
       for (const [id, value] of [["tcpHexView", "hex"], ["tcpTextView", "text"]]) {
@@ -442,14 +774,59 @@
     bindStackResizer();
     return { refresh, reset, select };
   }
-  function parseHex(value) {
+  function parseHex(value, { maxBytes = 16384, limitLabel = "Pending bytes are limited to 16 KiB.", emptyHint = " Drop removes the bytes." } = {}) {
     const compact = String(value).replace(/\s/g, "");
-    if (!compact || !/^(?:[0-9a-fA-F]{2})+$/.test(compact)) throw new Error("Enter whole hex byte pairs. Drop removes the bytes.");
-    if (compact.length > 32768) throw new Error("Pending bytes are limited to 16 KiB.");
+    if (!compact || !/^(?:[0-9a-fA-F]{2})+$/.test(compact)) throw new Error("Enter whole hex byte pairs." + emptyHint);
+    if (compact.length > maxBytes * 2) throw new Error(limitLabel);
     return Uint8Array.from(compact.match(/../g), pair => parseInt(pair, 16));
   }
+  const ESCAPES = new Map([[0x0d, "\\r"], [0x09, "\\t"], [0x5c, "\\\\"]]);
+  const STRICT_UTF8 = typeof TextDecoder === "function" ? new TextDecoder("utf-8", { fatal: true }) : null;
+  // Held bytes as text to edit: printable text as it is, a real line break for
+  // a line feed, and \r, \t, \\ or \xNN for every other byte, so that the text
+  // reads back as exactly the same bytes.
+  function encodeEditable(bytes) {
+    let out = "";
+    for (let i = 0; i < bytes.length;) {
+      const byte = bytes[i];
+      if (byte === 0x0a || (byte >= 0x20 && byte < 0x7f && byte !== 0x5c)) { out += String.fromCharCode(byte); i++; continue; }
+      if (ESCAPES.has(byte)) { out += ESCAPES.get(byte); i++; continue; }
+      const length = byte >= 0xc2 && byte < 0xe0 ? 2 : byte >= 0xe0 && byte < 0xf0 ? 3 : byte >= 0xf0 && byte < 0xf5 ? 4 : 0;
+      let char = "";
+      if (length && STRICT_UTF8 && i + length <= bytes.length) {
+        try { char = STRICT_UTF8.decode(bytes.subarray(i, i + length)); } catch (_) { char = ""; }
+      }
+      // Characters that look like nothing, or like a broken byte, are escaped.
+      if (char && !/^[\u0080-\u009f\u2028\u2029\ufeff\ufffd]$/.test(char)) { out += char; i += length; continue; }
+      out += "\\x" + byte.toString(16).padStart(2, "0"); i++;
+    }
+    return out;
+  }
+  function decodeEditable(text, { maxBytes = 16384, limitLabel = "Pending bytes are limited to 16 KiB.", emptyHint = " Drop removes the bytes." } = {}) {
+    const out = [], utf8 = new TextEncoder();
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] !== "\\") {
+        const char = String.fromCodePoint(text.codePointAt(i));
+        out.push(...utf8.encode(char));
+        i += char.length - 1;
+      } else {
+        const next = text[i + 1], pair = text.slice(i + 2, i + 4);
+        if (next === "\\") out.push(0x5c);
+        else if (next === "r") out.push(0x0d);
+        else if (next === "t") out.push(0x09);
+        else if (next === "n") out.push(0x0a);
+        else if (next === "x" && /^[0-9a-fA-F]{2}$/.test(pair)) { out.push(parseInt(pair, 16)); i += 2; }
+        else if (next === "x") throw new Error("Write a byte as \\x and two hex digits.");
+        else throw new Error("Unknown escape \\" + (next || "") + ". Write \\\\ for a backslash.");
+        i++;
+      }
+      if (out.length > maxBytes) throw new Error(limitLabel);
+    }
+    if (!out.length) throw new Error("Enter some bytes." + emptyHint);
+    return Uint8Array.from(out);
+  }
   function rawHex(base64) { return Array.from(atob(base64), c => c.charCodeAt(0).toString(16).padStart(2, "0")).join(" "); }
-  function createInterceptController({ document, sessionId, readPath, writePath, request, formatSize = byteSize, onChanged = () => {} }) {
+  function createInterceptController({ document, sessionId, readPath, writePath, request, formatSize = byteSize, onChanged = () => {}, onReplay = () => {} }) {
     const el = id => document.getElementById(id), text = (id, value) => { el(id).textContent = value; };
     let generation = 0, version = 0, connection = null, policy = null, items = [], selected = null;
     let fresh = false, busy = false, tab = "stream", reading = null, historyKey = "", historyOwner = "", pickerKey = "", autoSelect = true;
@@ -461,6 +838,13 @@
     const EDIT_NOT_KEPT = "Edit not kept:";
     const draftKey = (id, pendingId) => JSON.stringify([id, pendingId]);
     const originalText = item => typeof item?.original_base64 === "string" ? rawHex(item.original_base64) : "";
+    // The editor shows bytes as Hex or as Text; a draft remembers which it was typed in.
+    let pendingMode = "hex";
+    const hexOf = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join(" ");
+    const shownAs = (bytes, mode) => mode === "text" ? encodeEditable(bytes) : hexOf(bytes);
+    const readAs = (value, mode) => mode === "text" ? decodeEditable(value) : parseHex(value);
+    const originalIn = item => typeof item?.original_base64 === "string"
+      ? shownAs(Uint8Array.from(atob(item.original_base64), c => c.charCodeAt(0)), pendingMode) : "";
     function selectedText(item) {
       if (typeof item.selected_base64 === "string") return rawHex(item.selected_base64);
       // Unchanged forwarding has no replacement payload. Only reuse complete,
@@ -469,9 +853,29 @@
         && item.original_length === item.selected_length && typeof item.original_base64 === "string"
         && atob(item.original_base64).length === item.original_length ? originalText(item) : "";
     }
-    const editorText = item => !item ? "" : item.state === "pending"
-      ? drafts.get(draftKey(connection?.id, item.pending_id))?.text ?? originalText(item)
-      : item.state === "forwarding" ? selectedText(item) : "";
+    function editorText(item) {
+      if (!item) return "";
+      if (item.state === "pending") return drafts.get(draftKey(connection?.id, item.pending_id))?.text ?? originalIn(item);
+      const forwarded = item.state === "forwarding" ? selectedText(item) : "";
+      return forwarded && pendingMode === "text" ? encodeEditable(parseHex(forwarded)) : forwarded;
+    }
+    // A draft typed in the other mode is shown in this one; one that does not
+    // read as bytes keeps its own mode rather than being lost.
+    function alignDraft(item) {
+      const key = item?.state === "pending" ? draftKey(connection?.id, item.pending_id) : null, draft = key && drafts.get(key);
+      if (!draft || draft.mode === pendingMode) return;
+      try { drafts.set(key, {...draft, text: shownAs(readAs(draft.text, draft.mode), pendingMode), mode: pendingMode}); }
+      catch (_) { pendingMode = draft.mode; }
+    }
+    function setPendingMode(mode) {
+      if (mode === pendingMode) return;
+      const item = chosen(), key = item?.state === "pending" ? draftKey(connection?.id, item.pending_id) : null, draft = key && drafts.get(key);
+      if (draft) {
+        try { drafts.set(key, {...draft, text: shownAs(readAs(draft.text, draft.mode), mode), mode}); }
+        catch (error) { showError(error.message); return; }
+      }
+      pendingMode = mode; showError(""); render();
+    }
     function forgetConnection(id) {
       for (const [key, draft] of drafts) if (draft.connectionId === id) drafts.delete(key);
     }
@@ -484,7 +888,7 @@
       const item = chosen(), editor = el("tcpPendingHex");
       if (!fresh || busy || !LIVE.has(connection?.status) || item?.state !== "pending") return;
       const key = draftKey(connection.id, item.pending_id), value = editor.value;
-      if (value === originalText(item)) { drafts.delete(key); if (actionError.startsWith(EDIT_NOT_KEPT)) showError(""); return; }
+      if (value === originalIn(item)) { drafts.delete(key); if (actionError.startsWith(EDIT_NOT_KEPT)) showError(""); return; }
       if (value.length > maxDraftText || (!drafts.has(key) && drafts.size >= maxDrafts)) {
         editor.value = editorText(item);
         showError(value.length > maxDraftText
@@ -492,7 +896,7 @@
           : EDIT_NOT_KEPT + " too many unsent edits. Forward, drop or reset one first.");
         return;
       }
-      drafts.set(key, {connectionId: connection.id, pendingId: item.pending_id, text: value});
+      drafts.set(key, {connectionId: connection.id, pendingId: item.pending_id, text: value, mode: pendingMode});
       if (actionError.startsWith(EDIT_NOT_KEPT)) showError("");
     }
     let readError = "", actionError = "", closeWait = null, connectionEpoch = 0;
@@ -550,12 +954,24 @@
         text("tcpInterceptNotice", "");
       }
       const item = chosen(), live = connection && LIVE.has(connection.status);
+      alignDraft(item);
+      for (const [id, mode] of [["tcpPendingHexMode", "hex"], ["tcpPendingTextMode", "text"]]) {
+        el(id).classList.toggle("active", pendingMode === mode); el(id).setAttribute("aria-pressed", String(pendingMode === mode));
+      }
       el("tcpInterceptToggle").disabled = busy || !policy;
       el("tcpInterceptToggle").setAttribute("aria-checked", String(Boolean(policy?.enabled)));
       // Which direction to hold matters only while holding.
       el("tcpInterceptDirection").hidden = !policy?.enabled;
       el("tcpInterceptDirection").disabled = busy || !policy;
       el("tcpInterceptDirection").value = policy?.direction || "both";
+      const match = el("tcpInterceptMatch"), matchKind = el("tcpInterceptMatchKind");
+      for (const field of [match, matchKind]) { field.hidden = !policy?.enabled; field.disabled = busy || !policy; }
+      // A poll must not overwrite what is being typed.
+      if (document.activeElement !== match && document.activeElement !== matchKind) {
+        match.value = policy?.filter?.value || "";
+        matchKind.value = policy?.filter?.kind || "text";
+      }
+      for (const id of ["tcpForwardAll", "tcpDropAll"]) el(id).disabled = busy || !(policy?.paused_count > 0);
       // The legacy pending total includes already-approved writes. Do not infer
       // global state from this connection's separately fetched pending items.
       const split = policy && Number.isInteger(policy.paused_count) && Number.isInteger(policy.forwarding_count) && policy.paused_count >= 0 && policy.forwarding_count >= 0 && policy.paused_count + policy.forwarding_count <= policy.pending_count;
@@ -567,12 +983,17 @@
       el("tcpPendingTab").hidden = !(policy?.enabled || items.length);
       if (el("tcpPendingTab").hidden && tab === "pending") tab = "stream";
       text("tcpPendingTab", "Pending" + (items.length ? " " + items.length : ""));
+      // Replay starts from a connection.
+      el("tcpReplayTab").hidden = !connection || connection.protocol === "udp";
+      if (el("tcpReplayTab").hidden && tab === "replay") tab = "stream";
       el("tcpStreamSurface").hidden = tab !== "stream";
       el("tcpPendingSurface").hidden = tab !== "pending";
-      for (const [id, active] of [["tcpStreamTab", tab === "stream"], ["tcpPendingTab", tab === "pending"]]) {
+      el("tcpReplaySurface").hidden = tab !== "replay";
+      for (const [id, active] of [["tcpStreamTab", tab === "stream"], ["tcpPendingTab", tab === "pending"], ["tcpReplayTab", tab === "replay"]]) {
         el(id).classList.toggle("active", active); el(id).setAttribute("aria-pressed", String(active));
       }
-      for (const id of ["tcpDirection", "tcpHexView", "tcpTextView"]) el(id).hidden = tab !== "stream";
+      for (const id of ["tcpDirection", "tcpSplit", "tcpHexView", "tcpTextView"]) el(id).hidden = tab !== "stream";
+      el("tcpSplitDelimiter").hidden = tab !== "stream" || el("tcpSplit").value !== "delimiter";
       const picker = el("tcpPendingPicker");
       const nextPickerKey = JSON.stringify([items.map(entry => [entry.pending_id, entry.sequence, entry.direction, entry.original_length, entry.state]), Boolean(selected)]);
       // Do not rebuild an unchanged native select while the operator is using it.
@@ -596,7 +1017,7 @@
       if (editor.value !== draft) editor.value = draft;
       editor.readOnly = !editable;
       editor.disabled = !editable && !(fresh && live && forwarding && draft && !busy);
-      editor.setAttribute("aria-label", forwarding ? "Bytes being forwarded, as hex" : "Pending bytes as hex");
+      editor.setAttribute("aria-label", (forwarding ? "Bytes being forwarded, as " : "Pending bytes as ") + pendingMode);
       editor.placeholder = !connection ? "Select a connection" : !fresh ? "Pending bytes unavailable"
         : forwarding ? "Preview unavailable" : dropped ? "Dropped"
         : item && item.state !== "pending" ? "Preview unavailable"
@@ -711,7 +1132,11 @@
       const item = chosen(), id = connection?.id;
       let path = "/api/tcp/intercept", method = "PUT", body;
       if (action === "policy" || action === "toggle") {
-        body = { enabled: action === "toggle" ? !policy.enabled : policy.enabled, direction: el("tcpInterceptDirection").value, expected_revision: policy.revision };
+        const value = el("tcpInterceptMatch").value;
+        body = { enabled: action === "toggle" ? !policy.enabled : policy.enabled, direction: el("tcpInterceptDirection").value, expected_revision: policy.revision,
+          filter: value.trim() ? { kind: el("tcpInterceptMatchKind").value || "text", value } : null };
+      } else if (action === "forward-all" || action === "drop-all") {
+        path = "/api/tcp/intercept/" + action; method = "POST"; body = {};
       } else {
         if (!fresh || !connection || !LIVE.has(connection.status)) return;
         path = "/api/tcp/connections/" + encodeURIComponent(id);
@@ -723,7 +1148,7 @@
           body = {action, expected_revision: item.revision};
           if (action === "forward") {
             try {
-              const bytes = parseHex(el("tcpPendingHex").value);
+              const bytes = readAs(el("tcpPendingHex").value, pendingMode);
               const encoded = btoa(String.fromCharCode(...bytes));
               if (encoded !== item.original_base64) body.replacement_base64 = encoded;
             } catch (error) { showError(error.message); return; }
@@ -733,7 +1158,7 @@
       if (action === "forward" || action === "drop") autoSelect = false;
       generation++; version++; reading = null; busy = true; fresh = false;
       const token = stamp(), owner = connectionEpoch;
-      const trigger = el({toggle: "tcpInterceptToggle", policy: "tcpInterceptDirection", forward: "tcpForward", drop: "tcpDrop", close: "tcpCloseConnection"}[action]);
+      const trigger = el({toggle: "tcpInterceptToggle", policy: "tcpInterceptDirection", forward: "tcpForward", drop: "tcpDrop", close: "tcpCloseConnection", "forward-all": "tcpForwardAll", "drop-all": "tcpDropAll"}[action]);
       actionFocus = document.activeElement === trigger ? {element: trigger, action, token, owner, id, pendingId: item?.pending_id} : null;
       closeWait = null; showError(""); text("tcpInterceptNotice", ""); render();
       try {
@@ -749,7 +1174,8 @@
       } catch (error) {
         // Only a conflict says the decision was refused; any other failure may
         // have reached the socket, and the bytes are not sent again.
-        if (current(token) && owner === connectionEpoch && id === connection?.id) showError(error.status === 409 ? error.message : error.message + " Outcome unknown; not retried.");
+        if (current(token) && (action === "policy" || action === "toggle") && error.status === 400) showError("The hold filter was not accepted. Check it.");
+        else if (current(token) && owner === connectionEpoch && id === connection?.id) showError(error.status === 409 ? error.message : error.message + " Outcome unknown; not retried.");
       } finally {
         if (current(token)) { busy = false; render(); await refresh(); onChanged(); }
       }
@@ -760,16 +1186,134 @@
     }
     el("tcpInterceptToggle").addEventListener("click", () => mutate("toggle"));
     el("tcpInterceptDirection").addEventListener("change", () => mutate("policy"));
+    el("tcpInterceptMatch").addEventListener("change", () => mutate("policy"));
+    el("tcpInterceptMatchKind").addEventListener("change", () => { if (el("tcpInterceptMatch").value.trim()) mutate("policy"); });
+    el("tcpForwardAll").addEventListener("click", () => mutate("forward-all"));
+    el("tcpPendingHexMode").addEventListener("click", () => setPendingMode("hex"));
+    el("tcpPendingTextMode").addEventListener("click", () => setPendingMode("text"));
+    el("tcpDropAll").addEventListener("click", () => mutate("drop-all"));
     el("tcpPendingPicker").addEventListener("change", () => { selected = el("tcpPendingPicker").value; autoSelect = false; showError(""); render(); });
     el("tcpPendingHex").addEventListener("input", saveDraft);
     el("tcpPendingReset").addEventListener("click", () => { const item = chosen(); if (item && !busy && fresh) { drafts.delete(draftKey(connection.id, item.pending_id)); showError(""); render(); } });
     for (const [id, action] of [["tcpForward", "forward"], ["tcpDrop", "drop"], ["tcpCloseConnection", "close"]]) el(id).addEventListener("click", () => mutate(action));
     for (const [id, next] of [["tcpStreamTab", "stream"], ["tcpPendingTab", "pending"]]) el(id).addEventListener("click", () => { tab = next; render(); });
+    el("tcpReplayTab").addEventListener("click", () => { if (tab !== "replay") onReplay(); tab = "replay"; render(); });
+    function showStream() { tab = "stream"; render(); }
     reset();
-    return {refresh, reset, setConnection, reconcileConnections};
+    return {refresh, reset, setConnection, reconcileConnections, showStream};
   }
 
-  const api = { statusLabel, requestError, validateSettings, conversation, streamBytes, formatHex, formatText, parseHex, createInterceptController, createController };
+  function splitTarget(target) {
+    const text = String(target || "");
+    const match = /^\[(.*)\]:(\d+)$/.exec(text) || /^(.*):(\d+)$/.exec(text);
+    return match ? { host: match[1], port: match[2] } : { host: text, port: "" };
+  }
+  // TCP Replay: a target, and messages to send it one at a time. It starts from
+  // a connection's client reads; the result is a new connection in the history.
+  function createReplayController({ document, sessionId, writePath, request, onSent = () => {} }) {
+    const el = id => document.getElementById(id);
+    const replayLimits = { maxBytes: MAX_DISPLAY_BYTES, limitLabel: "Messages are limited to 1 MiB.", emptyHint: "" };
+    let messages = [""], mode = "hex", source = null, busy = false, dirty = false, epoch = 0;
+    const view = (bytes, as) => as === "text" ? encodeEditable(bytes) : Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join(" ");
+    const read = (value, as) => as === "text" ? decodeEditable(value, replayLimits) : parseHex(value, replayLimits);
+    const showError = message => { el("tcpReplayError").textContent = message; };
+    function reset() {
+      epoch++; busy = false; dirty = false; source = null; messages = [""];
+      showError(""); render();
+    }
+    function render() {
+      el("tcpReplayMessages").replaceChildren(...messages.map((value, index) => {
+        const block = document.createElement("div"), editor = document.createElement("textarea"), remove = document.createElement("button");
+        block.className = "tcp-replay-message";
+        editor.value = value; editor.spellcheck = false;
+        editor.setAttribute("aria-label", "Message " + (index + 1) + " as " + mode);
+        editor.addEventListener("input", () => { messages[index] = editor.value; dirty = true; });
+        remove.type = "button"; remove.className = "secondary-action"; remove.textContent = "Remove";
+        remove.dataset.replayRemove = String(index); remove.disabled = messages.length < 2;
+        block.append(editor, remove);
+        return block;
+      }));
+      for (const [id, value] of [["tcpReplayHexMode", "hex"], ["tcpReplayTextMode", "text"]]) {
+        el(id).classList.toggle("active", mode === value); el(id).setAttribute("aria-pressed", String(mode === value));
+      }
+      el("tcpReplaySend").disabled = busy;
+    }
+    function load(record) {
+      if (!record) return;
+      // Switching to Stream to inspect bytes and returning to Replay for the
+      // same connection keeps unsent edits rather than overwriting them.
+      if (record.id && record.id === source && dirty) return;
+      const target = splitTarget(record.target);
+      el("tcpReplayHost").value = target.host; el("tcpReplayPort").value = target.port;
+      el("tcpReplayTls").checked = Boolean(record.server_tls || record.client_tls);
+      source = record.id || null;
+      dirty = false;
+      let parts = [];
+      try { parts = conversation(record, "client_to_server"); } catch (_) { parts = []; }
+      messages = parts.length ? parts.map(part => view(part.bytes, mode)) : [""];
+      showError(""); render();
+    }
+    function setMode(next) {
+      if (next === mode) return;
+      try { messages = messages.map(value => value ? view(read(value, mode), next) : ""); }
+      catch (error) { showError(error.message); return; }
+      mode = next; showError(""); render();
+    }
+    async function send() {
+      if (busy) return;
+      let encoded;
+      try {
+        encoded = messages.map((value, index) => {
+          try {
+            let binary = "";
+            for (const byte of read(value, mode)) binary += String.fromCharCode(byte);
+            return btoa(binary);
+          } catch (error) { throw new Error("Message " + (index + 1) + ": " + error.message); }
+        });
+      } catch (error) { showError(error.message); return; }
+      const targetHost = String(el("tcpReplayHost").value).trim();
+      const targetPort = Number(el("tcpReplayPort").value);
+      const waitMs = Number(el("tcpReplayWait").value || 1000);
+      if (!targetHost) { showError("Target host is required."); return; }
+      if (!Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) { showError("Target port must be between 1 and 65535."); return; }
+      if (!Number.isInteger(waitMs) || waitMs < 50 || waitMs > 30000) { showError("The wait is 50 to 30000 ms."); return; }
+      const body = { target_host: targetHost, target_port: targetPort,
+        tls: Boolean(el("tcpReplayTls").checked), wait_ms: waitMs, messages: encoded };
+      if (source) body.from = source;
+      const stamp = { epoch, session: sessionId() };
+      const owns = () => stamp.epoch === epoch && stamp.session === sessionId();
+      busy = true; showError(""); render();
+      try {
+        const response = await request(writePath("/api/tcp/replay", stamp.session), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+        if (!owns()) return;
+        if (!response.ok) {
+          const message = await response.text().catch(() => "");
+          if (!owns()) return;
+          // Only short, fixed server messages are shown, never arbitrary output.
+          throw new Error([400, 409, 413].includes(response.status) && message.length < 200 && !/[<>]/.test(message) ? message : "Replay failed (" + response.status + ").");
+        }
+        const record = await response.json();
+        if (!owns()) return;
+        busy = false; dirty = false; render();
+        await onSent(record);
+      } catch (error) {
+        if (!owns()) return;
+        busy = false; showError(error.message); render();
+      }
+    }
+    el("tcpReplaySend").addEventListener("click", () => void send());
+    el("tcpReplayAdd").addEventListener("click", () => { messages.push(""); dirty = true; render(); });
+    el("tcpReplayHexMode").addEventListener("click", () => setMode("hex"));
+    el("tcpReplayTextMode").addEventListener("click", () => setMode("text"));
+    el("tcpReplayMessages").addEventListener("click", event => {
+      const remove = event.target.closest?.("[data-replay-remove]");
+      if (!remove || messages.length < 2) return;
+      messages.splice(Number(remove.dataset.replayRemove), 1); dirty = true; render();
+    });
+    render();
+    return { load, render, reset };
+  }
+  const api = { statusLabel, requestError, validateSettings, conversation, streamBytes, formatHex, formatText, parseHex, encodeEditable, decodeEditable, splitMessages, createInterceptController, createReplayController, createController };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.SniperTcpCapture = api;
 })(typeof window === "undefined" ? globalThis : window);

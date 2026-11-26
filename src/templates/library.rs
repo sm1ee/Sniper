@@ -831,6 +831,7 @@ impl TemplateLibrary {
             manifest
                 .passive_enabled
                 .retain(|id| ids.contains(id.as_str()));
+            manifest.auto_enabled.retain(|id| ids.contains(id.as_str()));
             crate::session::write_json(&self.manifest_path(), &manifest)?;
             self.compiled.lock().unwrap().clear();
             self.install(manifest, built, helpers);
@@ -2307,6 +2308,26 @@ mod tests {
             .set_auto(&["example-exposure".into()], false)
             .unwrap();
         assert!(ids(&second).is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // The list counts what is on from these: a template a new release drops
+    // is no longer on, for the auto scan as for passive.
+    #[test]
+    fn a_release_that_drops_a_template_turned_on_no_longer_counts_it() {
+        let dir = std::env::temp_dir().join(format!("sniper-templates-{}", uuid::Uuid::new_v4()));
+        let library = library(&dir);
+        library.import_blocking(&release(), Source::Import).unwrap();
+        library
+            .set_auto(&["example-exposure".into()], true)
+            .unwrap();
+        library
+            .set_passive(&["example-detect".into()], true)
+            .unwrap();
+        let without = archive(&[("nuclei-templates-1.0/dns/dns.yaml", DNS.as_bytes())]);
+        library.import_blocking(&without, Source::Import).unwrap();
+        let status = library.status();
+        assert_eq!((status.passive_enabled, status.auto_enabled), (0, 0));
         let _ = fs::remove_dir_all(dir);
     }
 

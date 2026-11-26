@@ -39,15 +39,20 @@ function menuFixture() {
 }
 
 for (const browser of ["aside", "ego"]) {
-  test(`${browser} menu defaults to the saved profile and explains isolation`, async () => {
+  test(`${browser} menu defaults to the saved profile and explains isolation on hover`, async () => {
     const f = menuFixture();
     f.render();
     assert.equal(f.inputs.get("fresh").checked, false);
-    assert.match(f.element.innerHTML, /saved Sniper profile/);
-    assert.match(f.element.innerHTML, /everyday browser profile is separate/);
-    assert.match(f.element.innerHTML, /sites can still expire logins/);
+    // The option is two words. What it means, and what happens without it, is
+    // its tooltip: the menu itself is a list of browsers and two choices.
+    const option = f.element.innerHTML.match(/<label class="browser-menu-option" title="([^"]*)"><input type="checkbox" data-option="fresh"[^>]*> Throwaway profile<\/label>/);
+    assert.ok(option, "the label is only its name");
+    assert.match(option[1], /deleted when the browser quits/);
+    assert.match(option[1], /saved Sniper profile/);
+    assert.match(option[1], /everyday browser profile is separate/);
+    assert.match(option[1], /sites can still expire logins/);
     assert.doesNotMatch(f.element.innerHTML, /Sign in there once/, "the browser account is not required by this hint");
-    assert.match(f.element.innerHTML, /Throwaway profile \(discard logins on quit\)/);
+    assert.doesNotMatch(f.element.innerHTML, /browser-menu-hint|discard logins on quit/, "no paragraph under the choices");
     await f.open(browser);
     assert.deepEqual(f.opened, [{ browser, agent: false, fresh: false }]);
     assert.equal(f.closed, 1);
@@ -69,9 +74,29 @@ for (const browser of ["aside", "ego"]) {
   });
 }
 
+// The browser is for the session on screen: the server opens that session's
+// own port when the proxy listener records into another one.
+test("a launch names the session on screen, and shows the port it may have opened", async () => {
+  for (const feed of ["main", "none"]) {
+    const bodies = [];
+    let refreshed = 0;
+    const context = loadFunctions(["openSniperBrowser"], {
+      fetch: async (url, options) => { bodies.push(JSON.parse(options.body)); return { json: async () => ({}) }; },
+      requireOkResponse: async () => {}, showToast() {}, console: { error() {} },
+      currentSessionId: () => "session-b", sessionFeed: () => ({ kind: feed }),
+      refreshSessionFeeds: async () => { refreshed += 1; },
+    });
+    await context.openSniperBrowser({ browser: "chrome" });
+    assert.deepEqual(bodies, [{ browser: "chrome", session_id: "session-b" }]);
+    assert.equal(refreshed, feed === "main" ? 0 : 1);
+  }
+});
+
 test("button and named launches never request a throwaway profile implicitly", async () => {
   const bodies = [];
   const context = loadFunctions(["openSniperBrowser"], {
+    // No session is on screen yet, so none is named.
+    currentSessionId: () => null,
     fetch: async (url, options) => {
       assert.equal(url, "/api/browser/launch");
       bodies.push(JSON.parse(options.body));

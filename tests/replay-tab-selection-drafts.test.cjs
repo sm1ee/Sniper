@@ -323,6 +323,8 @@ test('ordinary CodeMirror document changes synchronously retain a partial raw dr
     StateEffect: { appendConfig: { of: listener => listener } },
   };
   f.context.cmProgrammaticViews = new WeakSet();
+  // The fake state has no recorded line endings to restore.
+  f.context.lineEndings = { text: state => state.doc.toString() };
   const view = { dispatch: update => { updateListener = Array.isArray(update.effects) ? update.effects[0] : update.effects; } };
   // Production Replay registers its live editor before wiring listeners.
   const originalGetCMView = f.context.getCMView;

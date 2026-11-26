@@ -1,6 +1,6 @@
 ---
 name: sniper-operator
-description: Inspect captured HTTP/HTTPS traffic and debug APIs through a local Sniper proxy with sniper-cli. Covers captured requests and responses, replay with changes, holding and editing live traffic, scope, authorized Recon endpoint discovery, fuzzer runs, WebSocket frames, match-replace rules, tags and notes, session switching, and opening a browser wired to Sniper (ego lite, Aside, BrowserOS neo, Chrome): open it here first, then drive it with ego-browser. Not for routing LLM API calls or hosting a reverse proxy.
+description: Inspect captured HTTP/HTTPS traffic and debug APIs through a local Sniper proxy with sniper-cli. Covers captured requests and responses, replay with changes, holding and editing live traffic, TCP and UDP relay connections, scope, authorized Recon endpoint discovery, fuzzer runs, WebSocket frames, match-replace rules, tags and notes, session switching, and opening a browser wired to Sniper (ego lite, Aside, BrowserOS neo, Chrome): open it here first, then drive it with ego-browser. Not for routing LLM API calls or hosting a reverse proxy.
 ---
 
 # Sniper Operator
@@ -34,6 +34,16 @@ For a browser that sends its traffic through Sniper, run `sniper-cli capture bro
 - Act on the page as a person does (snapshot, click an `@ref`, wait for the URL). Do not jump to URLs.
 - A browser already open on the profile with the same settings gives you another window (`"reused": true`). Different settings are refused with the reason. A DevTools port cannot be added to a running browser: quit it first, or add `--fresh` for a throwaway profile (up to eight).
 - Read every `warnings` entry and any `hint` before you rely on the browser. A browser that could not start still returns 200, and `control` is absent once it has ended.
+
+## TCP and UDP relay
+
+Traffic that is not HTTP is under `sniper-cli tcp`. A listener relays each connection from a local port to one target and records it. CONNECT tunnels through the HTTP proxy that are neither TLS nor HTTP join the same history as `source: "connect"`, and passthrough hosts' tunnels as `source: "passthrough"`.
+
+- `tcp status` shows the listeners and why one is not running. Add one with `tcp listeners add --local-port <port> --target-host <host> --target-port <port>`, then point the app at the local port. `--tls decrypt` answers the client's TLS with Sniper's CA; `--protocol udp` relays datagrams.
+- `tcp list --contains <text>` finds connections by their bytes (`--kind hex|regex`). `tcp get --id <uuid>` returns base64 chunks in read order; `tcp raw` returns one direction's bytes.
+- Intercept holds reads, not messages: `tcp intercept set --enabled true [--filter <text>]`, then `tcp pending --id <uuid>` and `tcp decide --id <uuid> --pending-id <uuid> --action forward|drop`. Turning it off forwards what is held. Passthrough tunnels are never held.
+- `tcp replay` opens a new connection and sends traffic. Use it only on an authorized target, after `--dry-run`.
+- Listeners belong to a session and run while traffic reaches it. In a session of your own pass `--session-id <session-uuid>`: a listener that starts there opens the session's port, and `session port close` stops the session's listeners until it receives again. `session port list` shows the local ports the other sessions' listeners hold (`tcp`); a port another one holds is reported as in use.
 
 ## Recon endpoint discovery
 
@@ -172,7 +182,9 @@ sniper-cli --output compact call saved.v1.operation.get --input '{"operation_id"
 Use these when v1 does not cover the task or the installed Sniper lacks it. They print raw JSON and have no v1 receipts.
 
 - `session create --name "Review"` creates a session and makes it active. `session rename --id <session-uuid> --name "Archive"` changes only the display name.
-- `session switch --id <session-uuid>` respects busy-session checks. `session delete --id <session-uuid>` deletes the session's saved data and refuses the active session; switch away first. Do not bypass live-capture, proxy-work or pending-persistence safeguards.
+- To work beside the user or another agent, do not take the active session. Create your own with `session create --name "<task>" --no-activate`, then `session port open --id <session-uuid>` and send your traffic through the `proxy_addr` it prints. That traffic is recorded into your session whichever session is active. Pass `--session-id <session-uuid>` on every other command. For a browser of your own, `capture browser open --session-id <session-uuid> --agent` opens one through your session's port, opening the port if it is closed, on a profile no other session shares; Aside is refused for it, so name another browser. `session port list` shows each session's port. A session keeps its port number until it is deleted; no port is open after a restart, so open it again. Close it with `session port close --id <session-uuid>` when you finish: a session with an open port is not switched to or deleted. Those two answer 409 and the CLI reports only the status, so on a 409 check `session port list` first.
+- The UI's session list shows who made each session and gathers sessions into groups. A session you make carries your name with no option. When you make several for one target, put them in one group: `session create --name "<task>" --no-activate --group "<target>"`, or `session group set --id <session-uuid> --name "<target>"` afterwards. `session group list` shows each session's group and maker, `session group clear --id <session-uuid>` takes a session out, and `session group rename --from "<old>" --to "<new>"` renames a group for all its sessions. A group is a name on its sessions and changes nothing of what they record.
+- `session switch --id <session-uuid>` moves the proxy listener. It respects busy-session checks for the session it leaves; work started over the API in the session it moves to goes on. `session delete --id <session-uuid>` deletes the session's saved data and refuses the active session; switch away first. Do not bypass live-capture, proxy-work or pending-persistence safeguards.
 - Session writes are sent once, without following redirects. A lost or invalid response, or one naming a different UUID, leaves the outcome uncertain: check `session list` before another write.
 - Delete records by ID with `capture http delete --session-id <session-uuid> --id <record-uuid>`. Repeat `--id` or comma-separate UUIDs; in `call` JSON, use the `ids` array. One missing ID, including one from another session, rejects the whole request.
 - Delete by filter in two steps. Run `capture http select --session-id <session-uuid> --host example.com` and review its `count`, `ids` and `selection_token`. Then pass the same filters and `--selection-token <returned-token>` to `capture http delete`. A changed selection is rejected; select and review again.
@@ -184,6 +196,13 @@ Use these when v1 does not cover the task or the installed Sniper lacks it. They
 sniper-cli --output compact session list
 sniper-cli session create --name "Review" --dry-run
 sniper-cli session create --name "Review" --yes
+sniper-cli session create --name "Agent task" --no-activate --yes
+sniper-cli session port open --id <session-uuid> --yes
+sniper-cli capture browser open --session-id <session-uuid> --agent --yes
+sniper-cli --output compact session port list
+sniper-cli session group set --id <session-uuid> --name "example.com" --yes
+sniper-cli --output compact session group list
+sniper-cli session port close --id <session-uuid> --yes
 sniper-cli session rename --id <session-uuid> --name "Archive" --dry-run
 sniper-cli session rename --id <session-uuid> --name "Archive" --yes
 sniper-cli session delete --id <inactive-session-uuid> --dry-run
@@ -201,7 +220,7 @@ sniper-cli call capture.http.clear --input '{"session_id":"<session-uuid>"}' --y
 
 - `capture.intercept_rule.update` patches a rule by UUID, and `capture.intercept_rule.set_enabled` sets its `enabled` boolean. Both accept `session_id`. Omitted fields keep their values. An empty `host_pattern` or `path_pattern` clears that matcher; `method_filter: []` or `--clear-methods` clears the methods, and repeated `--method` replaces them. A missing rule ID fails without creating a rule. Neither changes the runtime intercept switch or forwards queued traffic.
 - A label-only `replay.update` sets `custom_label` on a saved HTTP or WebSocket tab and changes no other input. `label: ""` clears it; whitespace collapses and the limit is 80 characters. Request and target inputs stay HTTP-only. It sends no traffic.
-- The person sees what you do in Replay. Tabs you open or duplicate sit on a blue row of their own under your name (`opened_by`); a change you make to a tab they opened sets `changed_by`, a blue dot until they select the tab. The name is `SNIPER_ACTOR` when set, `Claude` under Claude Code, else `CLI`; outside Claude Code, run `SNIPER_ACTOR=<your name> sniper-cli ...`, for example `SNIPER_ACTOR=Codex`.
+- The person sees what you do in Replay. Tabs you open or duplicate sit on a blue row of their own under your name (`opened_by`); a change you make to a tab they opened sets `changed_by`, a blue dot until they select the tab. The name is `SNIPER_ACTOR` when set, else `Codex` or `Claude` when either runs the command, else `CLI`; any other agent runs `SNIPER_ACTOR=<its name> sniper-cli ...`.
 - Prefer an explicit session UUID, and reread the saved state after a conflict or uncertain response. They do not use `saved.v1` receipts.
 
 ## Common commands
@@ -228,6 +247,7 @@ sniper-cli replay open --transaction-id <uuid> --dry-run
 sniper-cli replay update --tab-id <tab-id> --label "IDOR: other user's profile" --yes
 sniper-cli replay send --tab-id <tab-id> --dry-run
 sniper-cli fuzzer set-template --transaction-id <uuid> --dry-run
+sniper-cli fuzzer set-template --transaction-id <uuid> --body-position 120:128 --dry-run
 sniper-cli fuzzer set-payloads --file payloads.txt --dry-run
 sniper-cli fuzzer run --attack-type sniper --dry-run
 sniper-cli fuzzer run --delay 200-800 --stop-on-match 'Welcome' --dry-run
@@ -255,6 +275,10 @@ sniper-cli --output compact templates scan get --id <scan-id>
 sniper-cli templates scan stop --id <scan-id> --yes
 sniper-cli --output compact vulndata status
 sniper-cli --output compact vulndata lookup --product jquery --version 3.4.1
+sniper-cli --output compact tcp status
+sniper-cli tcp listeners add --local-port 9000 --target-host db.example.com --target-port 5432 --dry-run
+sniper-cli --output compact tcp list --contains PING
+sniper-cli tcp replay --target-host db.example.com --target-port 5432 --message PING --dry-run
 sniper-cli skills install --codex --dry-run
 ```
 

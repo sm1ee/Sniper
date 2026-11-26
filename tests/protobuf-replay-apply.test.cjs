@@ -1,12 +1,12 @@
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm');
 const {editorFixture,source}=require('./replay-editor-fixture.cjs');
 const {appSource}=require('./frontend-test-helpers.cjs');
-function fixture(auto=false, msgpack=false){
+function fixture(auto=false, msgpack=false, body='CAE='){
  const f=editorFixture();let provider;
  Object.assign(f.context,{btoa:s=>Buffer.from(s,'binary').toString('base64'),atob:s=>Buffer.from(s,'base64').toString('binary'),SniperProtobufFields:{init:p=>provider=p,editBlockReason:require('../web/protobuf-fields.js').editBlockReason,sync(){}}});
  for(const name of ['decodedBase64Length','buildEditableRawRequest','normalizedHeaders','mergeHeaders']) {try{vm.runInContext(source(name),f.context);}catch(e){if(!f.context[name])throw e;}}
  const get=f.document.getElementById;f.document.getElementById=id=>id==='proxySettingAutoContentLength'?{checked:auto}:get(id);
- f.a.baseRequest.body_encoding='base64'; f.a.requestText='POST /a HTTP/1.1\nHost: a.test\nContent-Type: application/protobuf\nContent-Length: 2\n\nCAE=';
+ f.a.baseRequest.body_encoding='base64'; f.a.requestText='POST /a HTTP/1.1\nHost: a.test\nContent-Type: application/protobuf\nContent-Length: 2\n\n'+body;
  if(msgpack)f.a.requestText=f.a.requestText.replace('application/protobuf',msgpack==='cbor'?'application/cbor':'application/msgpack').replace('CAE=','oWE=');
  f.render();
  const start=appSource.indexOf('globalThis.SniperProtobufFields?.init(() => {');const end=appSource.indexOf('\n  bindWsReplayEvents();',start);
@@ -20,10 +20,18 @@ test('real Replay setter preserves body encoding and CodeMirror undo redo; auto 
  assert.equal(f.undo(),true);assert.equal(f.a.requestText,before);assert.equal(f.a.baseRequest.body_encoding,'base64');
  assert.equal(f.redo(),true);assert.match(f.a.requestText,/CIAB$/);
 });
+test('a 0x0D byte comes back with Undo after Fields apply',()=>{
+ // The editor shows the body as bytes, where 0x0D is a line break.
+ const f=fixture(true,false,'CA0='),before=f.a.requestText;
+ f.provider().applyFields(f.snapshot(),Uint8Array.from([8,14]));assert.match(f.a.requestText,/CA4=$/);
+ assert.equal(f.undo(),true);assert.equal(f.a.requestText,before);
+ assert.equal(f.redo(),true);assert.match(f.a.requestText,/CA4=$/);
+});
 test('auto length off rejects size change before state/editor mutation',()=>{
  const f=fixture(false),before=f.a.requestText;
  assert.throws(()=>f.provider().applyFields(f.snapshot(),Uint8Array.from([8,128,1])),/Content-Length/);
- assert.equal(f.a.requestText,before);assert.equal(f.cv().getContent(),before);assert.equal(f.undo(),false);
+ // The editor shows the binary body as bytes; the draft keeps Base64.
+ assert.equal(f.a.requestText,before);assert.equal(f.cv().getText(),f.context.rawRequestWithBinaryBody(before));assert.equal(f.undo(),false);
 });
 test('owner and edit-and-revert revision prevent stale apply',()=>{
  const f=fixture(true),s=f.snapshot();f.edit(f.cv().getContent().length,f.cv().getContent().length,' ');f.undo();
@@ -78,7 +86,7 @@ for (const format of ['protobuf', 'msgpack', 'cbor']) {
    assert.equal(f.cv()._editable,false);assert.equal(f.undo(),false);
    f.render();
    f.state.replayMessageViews.request='raw';f.context.renderReplayViewContent('request');
-   assert.equal(f.cv().getContent(),after);
+   assert.equal(f.cv().getText(),f.context.rawRequestWithBinaryBody(after));
    assert.equal(f.undo(),true);assert.equal(f.a.requestText,before);
    assert.equal(f.a.baseRequest.body_encoding,'base64');
    assert.equal(f.undo(),false);assert.equal(f.redo(),true);assert.equal(f.a.requestText,after);

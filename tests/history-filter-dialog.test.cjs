@@ -88,7 +88,7 @@ function fixture() {
     sanitizeDisplaySettings: value => value, sanitizeActiveTool: value => value || "proxy", sanitizeActiveProxyTab: value => value || "http-history",
     sanitizeHistoryColumnWidths: value => value || {}, sanitizeHistoryColumnOrder: value => value || [],
     sanitizeHttpQuery: value => value || "", sanitizeHttpMethod: value => value || "", sanitizeHttpSortKey: value => value || "index", sanitizeHttpSortDirection: value => value || "desc",
-    sanitizeWorkbenchHeight: () => null, sanitizeWorkbenchPaneWidths: () => null, sanitizeWebsocketPaneWidth: () => null, sanitizeServiceMapDetailWidth: () => null, applyServiceMapDetailWidth() {},
+    sanitizeWorkbenchHeight: () => null, sanitizeWorkbenchPaneWidths: () => null, sanitizeWebsocketPaneWidth: () => null, sanitizeServiceMapDetailWidth: () => null, sanitizeSessionSidebarWidth: () => null, applySessionSidebarWidth() {}, applyServiceMapDetailWidth() {},
     sanitizeWebsocketQuery: () => "", sanitizeWebsocketSortKey: () => "started_at", sanitizeWebsocketSortDirection: () => "desc",
     sanitizeWebsocketStackHeight: () => null, sanitizeWsReplayLeftWidth: () => null, sanitizeWsReplayFrameDetailHeight: () => null,
     serializeWorkbenchPaneWidths: () => ({}), applyDisplaySettingsState() {}, renderHistoryHeader() {}, applyHistoryColumnWidths() {}, applyWsColumnWidths() {},

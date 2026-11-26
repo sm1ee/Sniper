@@ -12,7 +12,7 @@ function setup() {
   f.reloads = []; f.errors = []; f.log = [];
   for (const name of ['handleExternalSessionChanged', 'hasPendingWorkspaceStateSave',
     'expectedActiveSessionIdForWrite', 'retireFindingActionProgress', 'applyWorkspaceState', 'cleanupWsReplayTabsBeforeStateReset',
-    'createSession', 'activateSessionById', 'loadSessions']) vm.runInContext(source(name), f.context);
+    'createSession', 'viewSessionById', 'loadSessions']) vm.runInContext(source(name), f.context);
   for (const name of ['flushSequenceDraftBeforeExternalSessionReload', 'flushTargetScopeDraft',
     'flushMatchReplaceDraft', 'flushSequenceDraft', 'flushAllPendingAnnotations']) {
     f.context[name] = async () => { f.log.push(name); return true; };
@@ -25,7 +25,7 @@ function setup() {
     reconcileSessionsAfterActionError: async () => assert.fail('unexpected mutation failure'),
     cleanupWsReplayTab: async () => {},
   });
-  f.els.dashboardCreateSessionName = { value: 'new session' };
+  f.els.sessionSidebarCreateName = { value: 'new session' };
   f.replace = (id = 'session-b', dirty = true) => {
     f.state.activeSession = { id };
     const snapshot = f.remote([f.b], 20); snapshot.session_id = id;
@@ -138,20 +138,20 @@ for (const dirty of [false, true]) test(`valid same-owner ${dirty ? 'dirty' : 'c
   await pending; assert.equal(f.reloads.length, 1); assert.equal(f.state.activeSession.id, 'session-b');
   assert.equal(f.requests.length, dirty ? 1 : 0); assert.equal(f.errors.length, 0);
 });
-test('manual list refresh after a missed event still flushes the prior owner before reload', async () => {
+// The proxy listener recording into another session is not a change of what
+// the window shows. Its pending save stays its own and nothing reloads.
+test('manual list refresh with the proxy listener on another session leaves the window and its pending save', async () => {
   const f = setup(); f.context.scheduleWorkspaceStateSave();
-  const pending = f.context.loadSessions({ reloadOnActiveChange: true });
-  f.succeed(0, [{ id: 'session-b', name: 'B', active: true }]); await tick();
+  f.state.viewedSessionId = 'session-a';
+  const pending = f.context.loadSessions();
+  f.succeed(0, [{ id: 'session-a', name: 'A', active: false }, { id: 'session-b', name: 'B', active: true }]); await pending;
   assert.equal(f.state.activeSession.id, 'session-a');
-  assert.equal(f.requests.length, 2);
-  const body = JSON.parse(f.requests[1].options.body);
-  assert.equal(body.session_id, 'session-a'); assert.equal(body.expected_active_session_id, null);
-  f.succeed(1, { session_id: 'session-a', revision: 11 }); await pending;
-  assert.equal(f.reloads.length, 1); assert.equal(f.state.activeSession.id, 'session-b');
+  assert.equal(f.requests.length, 1, 'nothing is flushed');
+  assert.equal(f.reloads.length, 0);
 });
-for (const operation of ['create', 'activate']) test(`event preflight cannot retag drafts after explicit ${operation} finishes`, async () => {
+for (const operation of ['create', 'view']) test(`event preflight cannot retag drafts after explicit ${operation} finishes`, async () => {
   const f = setup(), gate = deferred();
-  const action = operation === 'create' ? f.context.createSession() : f.context.activateSessionById('session-b');
+  const action = operation === 'create' ? f.context.createSession() : f.context.viewSessionById('session-b');
   await tick(); assert.equal(f.requests.length, 1);
   f.context.flushSequenceDraftBeforeExternalSessionReload = () => gate.promise;
   const event = f.context.handleExternalSessionChanged('session-a');

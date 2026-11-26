@@ -208,6 +208,12 @@ enum Command {
         #[command(subcommand)]
         command: VulndataCommand,
     },
+    /// The TCP and UDP relay: listeners, recorded connections, intercept and
+    /// replay. CONNECT tunnels that are neither TLS nor HTTP land here too.
+    Tcp {
+        #[command(subcommand)]
+        command: TcpCommand,
+    },
     /// Read stored session event messages.
     #[command(name = "event-log")]
     EventLog {
@@ -699,6 +705,10 @@ struct TemplatesScanArgs {
     /// Requests a second across the scan.
     #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=50))]
     rate: u64,
+    /// Wait between requests, in milliseconds: `500`, or a random time in a
+    /// range such as `200-800`; the rate still holds
+    #[arg(long, alias = "sleep", value_parser = parse_fuzzer_delay)]
+    delay: Option<FuzzerDelay>,
     /// Templates in flight at once.
     #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u64).range(1..=8))]
     concurrency: u64,
@@ -856,6 +866,766 @@ fn vulndata_lookup_path(args: &VulndataLookupArgs) -> String {
         ("version".to_string(), args.version.clone()),
     ];
     format!("/api/vulndata/lookup?{}", encode_query(params))
+}
+
+#[derive(Subcommand, Debug)]
+enum TcpCommand {
+    /// The relay's listeners, whether each runs and why not, history counts,
+    /// and connections relayed without being recorded.
+    Status(TcpSessionArgs),
+    /// Add, change or remove where Sniper listens and what it relays to.
+    Listeners {
+        #[command(subcommand)]
+        command: TcpListenersCommand,
+    },
+    /// Recorded connections, newest first, without their bytes.
+    List(TcpListArgs),
+    /// One connection with its captured bytes as base64 chunks.
+    Get(TcpIdArgs),
+    /// One direction's captured bytes, as base64.
+    Raw(TcpRawArgs),
+    /// Delete every connection that has ended from TCP history.
+    Clear(TcpSessionArgs),
+    /// Hold reads before they are relayed.
+    Intercept {
+        #[command(subcommand)]
+        command: TcpInterceptCommand,
+    },
+    /// The reads one connection has on hold.
+    Pending(TcpIdArgs),
+    /// Forward one held read, as it is or replaced, or drop it.
+    Decide(TcpDecideArgs),
+    /// Forward every held read as it is.
+    ForwardAll(TcpSessionArgs),
+    /// Drop every held read.
+    DropAll(TcpSessionArgs),
+    /// Close a live connection.
+    Close(TcpIdArgs),
+    /// Send messages over a new connection, one at a time, and record the
+    /// replies.
+    Replay(TcpReplayArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum TcpListenersCommand {
+    List(TcpSessionArgs),
+    Add(TcpListenerAddArgs),
+    /// Change the given fields of a listener; the others stay.
+    Set(TcpListenerSetArgs),
+    Remove(TcpIdArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum TcpInterceptCommand {
+    Get(TcpSessionArgs),
+    /// Replace the policy: what is held, in which direction.
+    Set(TcpInterceptSetArgs),
+}
+
+#[derive(Args, Debug)]
+struct TcpSessionArgs {
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpIdArgs {
+    #[arg(long)]
+    id: Uuid,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpListArgs {
+    /// Only connections whose captured bytes contain this.
+    #[arg(long)]
+    contains: Option<String>,
+    #[arg(long, value_parser = TCP_FILTER_KINDS, default_value = "text")]
+    kind: String,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpRawArgs {
+    #[arg(long)]
+    id: Uuid,
+    #[arg(long, value_parser = TCP_DIRECTIONS)]
+    direction: String,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpListenerAddArgs {
+    #[arg(long)]
+    local_port: u16,
+    #[arg(long)]
+    target_host: String,
+    #[arg(long)]
+    target_port: u16,
+    /// decrypt: clients' TLS with Sniper's CA; upstream: TLS to the target only.
+    #[arg(long, value_parser = TCP_TLS_MODES, default_value = "off")]
+    tls: String,
+    #[arg(long, value_parser = TCP_PROTOCOLS, default_value = "tcp")]
+    protocol: String,
+    /// Listen on every interface for the devices given with --allow.
+    #[arg(long, action = ArgAction::Set, default_value_t = false)]
+    remote: bool,
+    /// An address or CIDR network that may connect while --remote is on.
+    #[arg(long = "allow")]
+    allowed_clients: Vec<String>,
+    /// Add it turned off.
+    #[arg(long)]
+    disabled: bool,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpListenerSetArgs {
+    #[arg(long)]
+    id: Uuid,
+    #[arg(long, action = ArgAction::Set)]
+    enabled: Option<bool>,
+    #[arg(long)]
+    local_port: Option<u16>,
+    #[arg(long)]
+    target_host: Option<String>,
+    #[arg(long)]
+    target_port: Option<u16>,
+    #[arg(long, value_parser = TCP_TLS_MODES)]
+    tls: Option<String>,
+    #[arg(long, value_parser = TCP_PROTOCOLS)]
+    protocol: Option<String>,
+    #[arg(long, action = ArgAction::Set)]
+    remote: Option<bool>,
+    /// Replaces the list of who may connect; repeat for more.
+    #[arg(long = "allow")]
+    allowed_clients: Option<Vec<String>>,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpInterceptSetArgs {
+    #[arg(long, action = ArgAction::Set, required = true)]
+    enabled: bool,
+    #[arg(long, value_parser = ["client_to_server", "server_to_client", "both"], default_value = "client_to_server")]
+    direction: String,
+    /// Hold only reads that contain this; every read when left out.
+    #[arg(long)]
+    filter: Option<String>,
+    #[arg(long, value_parser = TCP_FILTER_KINDS, default_value = "text")]
+    filter_kind: String,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpDecideArgs {
+    /// The connection.
+    #[arg(long)]
+    id: Uuid,
+    /// The held read, from `tcp pending`.
+    #[arg(long)]
+    pending_id: Uuid,
+    #[arg(long, value_parser = ["forward", "drop"])]
+    action: String,
+    /// Forward these bytes, as standard base64, instead of the held ones.
+    #[arg(long)]
+    replacement_base64: Option<String>,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+#[derive(Args, Debug)]
+struct TcpReplayArgs {
+    #[arg(long)]
+    target_host: String,
+    #[arg(long)]
+    target_port: u16,
+    /// Reach the target over TLS.
+    #[arg(long, action = ArgAction::Set, default_value_t = false)]
+    tls: bool,
+    /// A message, sent in the order given; repeat for more.
+    #[arg(long = "message", required = true)]
+    messages: Vec<String>,
+    /// The messages are standard base64, for bytes text cannot carry.
+    #[arg(long)]
+    base64: bool,
+    /// How long the target may stay silent before the next message goes.
+    #[arg(long, default_value_t = 1000)]
+    wait_ms: u64,
+    /// The connection this replay was made from.
+    #[arg(long)]
+    from: Option<Uuid>,
+    #[arg(long)]
+    session_id: Option<Uuid>,
+}
+
+const TCP_FILTER_KINDS: [&str; 3] = ["text", "hex", "regex"];
+const TCP_DIRECTIONS: [&str; 2] = ["client_to_server", "server_to_client"];
+const TCP_TLS_MODES: [&str; 3] = ["off", "decrypt", "upstream"];
+const TCP_PROTOCOLS: [&str; 2] = ["tcp", "udp"];
+
+impl TcpCommand {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            Self::Status(_) => "tcp.status",
+            Self::Listeners { command } => match command {
+                TcpListenersCommand::List(_) => "tcp.listeners.list",
+                TcpListenersCommand::Add(_) => "tcp.listeners.add",
+                TcpListenersCommand::Set(_) => "tcp.listeners.set",
+                TcpListenersCommand::Remove(_) => "tcp.listeners.remove",
+            },
+            Self::List(_) => "tcp.list",
+            Self::Get(_) => "tcp.get",
+            Self::Raw(_) => "tcp.raw",
+            Self::Clear(_) => "tcp.clear",
+            Self::Intercept { command } => match command {
+                TcpInterceptCommand::Get(_) => "tcp.intercept.get",
+                TcpInterceptCommand::Set(_) => "tcp.intercept.set",
+            },
+            Self::Pending(_) => "tcp.pending",
+            Self::Decide(_) => "tcp.decide",
+            Self::ForwardAll(_) => "tcp.forward_all",
+            Self::DropAll(_) => "tcp.drop_all",
+            Self::Close(_) => "tcp.close",
+            Self::Replay(_) => "tcp.replay",
+        }
+    }
+
+    fn session_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Status(args)
+            | Self::Clear(args)
+            | Self::ForwardAll(args)
+            | Self::DropAll(args) => args.session_id,
+            Self::Listeners { command } => match command {
+                TcpListenersCommand::List(args) => args.session_id,
+                TcpListenersCommand::Add(args) => args.session_id,
+                TcpListenersCommand::Set(args) => args.session_id,
+                TcpListenersCommand::Remove(args) => args.session_id,
+            },
+            Self::List(args) => args.session_id,
+            Self::Get(args) | Self::Pending(args) | Self::Close(args) => args.session_id,
+            Self::Raw(args) => args.session_id,
+            Self::Intercept { command } => match command {
+                TcpInterceptCommand::Get(args) => args.session_id,
+                TcpInterceptCommand::Set(args) => args.session_id,
+            },
+            Self::Decide(args) => args.session_id,
+            Self::Replay(args) => args.session_id,
+        }
+    }
+
+    /// Refuses what the API would refuse, before anything is sent.
+    fn validate(&self) -> Result<()> {
+        let base64 = |value: &str, what: &str| {
+            STANDARD
+                .decode(value)
+                .map(|_| ())
+                .map_err(|_| anyhow!("{what} must be standard base64"))
+        };
+        match self {
+            Self::Replay(args) => {
+                if args.messages.is_empty() || args.messages.len() > 64 {
+                    bail!("a replay sends 1 to 64 messages");
+                }
+                if args.base64 {
+                    for message in &args.messages {
+                        base64(message, "each message")?;
+                    }
+                }
+            }
+            Self::Decide(args) => {
+                if let Some(replacement) = &args.replacement_base64 {
+                    if args.action != "forward" {
+                        bail!("a replacement is forwarded; it cannot go with drop");
+                    }
+                    base64(replacement, "the replacement")?;
+                }
+            }
+            Self::Listeners {
+                command: TcpListenersCommand::Set(args),
+            } => {
+                if args.enabled.is_none()
+                    && args.local_port.is_none()
+                    && args.target_host.is_none()
+                    && args.target_port.is_none()
+                    && args.tls.is_none()
+                    && args.protocol.is_none()
+                    && args.remote.is_none()
+                    && args.allowed_clients.is_none()
+                {
+                    bail!("give at least one field to change");
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn input_preview(&self) -> Value {
+        match self {
+            Self::Listeners {
+                command: TcpListenersCommand::Add(args),
+            } => tcp_listener_add_body(args),
+            Self::Listeners {
+                command: TcpListenersCommand::Set(args),
+            } => json!({"id": args.id, "changes": tcp_listener_changes(args)}),
+            Self::Intercept {
+                command: TcpInterceptCommand::Set(args),
+            } => tcp_policy_body(args),
+            Self::Replay(args) => tcp_replay_body(args),
+            Self::Decide(args) => json!({
+                "id": args.id, "pending_id": args.pending_id, "action": args.action,
+                "replacement_base64": args.replacement_base64,
+            }),
+            Self::Raw(args) => json!({"id": args.id, "direction": args.direction}),
+            Self::List(args) => json!({"contains": args.contains, "kind": args.kind}),
+            Self::Get(args)
+            | Self::Pending(args)
+            | Self::Close(args)
+            | Self::Listeners {
+                command: TcpListenersCommand::Remove(args),
+            } => json!({"id": args.id}),
+            _ => json!({}),
+        }
+        .as_object()
+        .cloned()
+        .map(|mut input| {
+            input.insert("session_id".into(), json!(self.session_id()));
+            Value::Object(input)
+        })
+        .unwrap_or_default()
+    }
+
+    fn api_preview(&self) -> Value {
+        let path = |path: &str| session_query_path(path, self.session_id());
+        match self {
+            Self::Status(_)
+            | Self::Listeners {
+                command: TcpListenersCommand::List(_),
+            } => api_preview("GET", path("/api/tcp/status"), None),
+            Self::Listeners { command } => match command {
+                TcpListenersCommand::List(_) => unreachable!(),
+                TcpListenersCommand::Add(args) => api_preview(
+                    "POST",
+                    path("/api/tcp/listeners"),
+                    Some(tcp_listener_add_body(args)),
+                ),
+                TcpListenersCommand::Set(args) => api_preview(
+                    "PUT",
+                    path(&format!("/api/tcp/listeners/{}", args.id)),
+                    Some(
+                        json!({"note": "the listener's current settings with these changes", "changes": tcp_listener_changes(args)}),
+                    ),
+                ),
+                TcpListenersCommand::Remove(args) => api_preview(
+                    "DELETE",
+                    path(&format!("/api/tcp/listeners/{}", args.id)),
+                    None,
+                ),
+            },
+            Self::List(args) => match &args.contains {
+                Some(contains) => {
+                    api_preview("GET", path(&tcp_search_path(contains, &args.kind)), None)
+                }
+                None => api_preview("GET", path("/api/tcp/connections"), None),
+            },
+            Self::Get(args) => api_preview(
+                "GET",
+                path(&format!("/api/tcp/connections/{}", args.id)),
+                None,
+            ),
+            Self::Raw(args) => api_preview(
+                "GET",
+                path(&format!(
+                    "/api/tcp/connections/{}/raw?direction={}",
+                    args.id, args.direction
+                )),
+                None,
+            ),
+            Self::Clear(_) => api_preview("DELETE", path("/api/tcp/connections"), None),
+            Self::Intercept { command } => match command {
+                TcpInterceptCommand::Get(_) => api_preview("GET", path("/api/tcp/intercept"), None),
+                TcpInterceptCommand::Set(args) => {
+                    let mut body = tcp_policy_body(args);
+                    body["expected_revision"] = json!("<fetched intercept revision>");
+                    api_preview("PUT", path("/api/tcp/intercept"), Some(body))
+                }
+            },
+            Self::Pending(args) => api_preview(
+                "GET",
+                path(&format!("/api/tcp/connections/{}/pending", args.id)),
+                None,
+            ),
+            Self::Decide(args) => api_preview(
+                "POST",
+                path(&format!(
+                    "/api/tcp/connections/{}/pending/{}/decision",
+                    args.id, args.pending_id
+                )),
+                Some(json!({
+                    "action": args.action,
+                    "replacement_base64": args.replacement_base64,
+                    "expected_revision": "<fetched revision of the held read>",
+                })),
+            ),
+            Self::ForwardAll(_) => api_preview(
+                "POST",
+                path("/api/tcp/intercept/forward-all"),
+                Some(json!({})),
+            ),
+            Self::DropAll(_) => {
+                api_preview("POST", path("/api/tcp/intercept/drop-all"), Some(json!({})))
+            }
+            Self::Close(args) => api_preview(
+                "POST",
+                path(&format!("/api/tcp/connections/{}/close", args.id)),
+                None,
+            ),
+            Self::Replay(args) => {
+                api_preview("POST", path("/api/tcp/replay"), Some(tcp_replay_body(args)))
+            }
+        }
+    }
+}
+
+fn tcp_listener_add_body(args: &TcpListenerAddArgs) -> Value {
+    json!({
+        "enabled": !args.disabled,
+        "settings": {
+            "local_port": args.local_port,
+            "target_host": args.target_host,
+            "target_port": args.target_port,
+            "tls": args.tls,
+            "protocol": args.protocol,
+            "remote": args.remote,
+            "allowed_clients": args.allowed_clients,
+        },
+    })
+}
+
+/// The fields `tcp listeners set` changes, by their settings names.
+fn tcp_listener_changes(args: &TcpListenerSetArgs) -> Value {
+    let mut changes = serde_json::Map::new();
+    let mut put = |key: &str, value: Option<Value>| {
+        if let Some(value) = value {
+            changes.insert(key.into(), value);
+        }
+    };
+    put("local_port", args.local_port.map(Value::from));
+    put("target_host", args.target_host.clone().map(Value::from));
+    put("target_port", args.target_port.map(Value::from));
+    put("tls", args.tls.clone().map(Value::from));
+    put("protocol", args.protocol.clone().map(Value::from));
+    put("remote", args.remote.map(Value::from));
+    put(
+        "allowed_clients",
+        args.allowed_clients.clone().map(Value::from),
+    );
+    Value::Object(changes)
+}
+
+fn tcp_policy_body(args: &TcpInterceptSetArgs) -> Value {
+    json!({
+        "enabled": args.enabled,
+        "direction": args.direction,
+        "filter": args.filter.as_ref().map(|value| json!({"kind": args.filter_kind, "value": value})),
+    })
+}
+
+fn tcp_replay_body(args: &TcpReplayArgs) -> Value {
+    let messages: Vec<String> = if args.base64 {
+        args.messages.clone()
+    } else {
+        args.messages
+            .iter()
+            .map(|message| STANDARD.encode(message))
+            .collect()
+    };
+    json!({
+        "target_host": args.target_host,
+        "target_port": args.target_port,
+        "tls": args.tls,
+        "messages": messages,
+        "wait_ms": args.wait_ms,
+        "from": args.from,
+    })
+}
+
+fn tcp_search_path(contains: &str, kind: &str) -> String {
+    let params = vec![
+        ("contains".to_string(), contains.to_string()),
+        ("kind".to_string(), kind.to_string()),
+    ];
+    format!("/api/tcp/search?{}", encode_query(params))
+}
+
+fn tcp_manifest_operations() -> Vec<CliOperationSpec> {
+    use CliSideEffect::{Read, Write};
+    let id = "22222222-2222-2222-2222-222222222222";
+    vec![
+        op("tcp.status", "tcp status", "Read the TCP and UDP relay: each listener with its settings, whether it runs and why not, connections refused to other devices; history count and limit, connections relayed unrecorded because history was full, and storage errors. Local; contacts nothing.", Read, false, &[], vec![json!({})]),
+        op("tcp.listeners.list", "tcp listeners list", "Read the session's listeners: id, on or off, settings (local_port, target_host, target_port, tls, protocol, remote, allowed_clients), whether each runs, and its error. Local; contacts nothing.", Read, false, &[], vec![json!({})]),
+        op("tcp.listeners.add", "tcp listeners add --local-port <port> --target-host <host> --target-port <port>", "Add a listener that relays each connection to the target and records it. tls decrypt answers clients' TLS with Sniper's CA and reaches the target over TLS; upstream adds TLS towards the target only. protocol udp relays datagrams, one flow per client. remote listens on every interface for the addresses in allowed_clients; Sniper's own ports stay out of reach. Saved with the session and started again with it. With session_id it runs in that session, whose own port it opens when nothing reaches the session.", Write, true, &["local_port", "target_host", "target_port"], vec![json!({"local_port":9000,"target_host":"db.example.com","target_port":5432}), json!({"local_port":9443,"target_host":"api.example.com","target_port":443,"tls":"decrypt"}), json!({"local_port":9053,"target_host":"127.0.0.1","target_port":53,"protocol":"udp","enabled":false})]),
+        op("tcp.listeners.set", "tcp listeners set --id <uuid>", "Change the given fields of one listener; the others stay as tcp status shows them. enabled false stops it and keeps its settings. Reads the listener first, then replaces it.", Write, true, &["id"], vec![json!({"id":id,"enabled":false}), json!({"id":id,"target_port":5433})]),
+        op("tcp.listeners.remove", "tcp listeners remove --id <uuid>", "Stop and delete one listener. Its recorded connections stay in history.", Write, true, &["id"], vec![json!({"id":id})]),
+        op("tcp.list", "tcp list [--contains <text>]", "List recorded connections newest first without their bytes: target, client, listener port or source (replay, connect for a CONNECT tunnel that was neither TLS nor HTTP, passthrough), status, failure, bytes each way. contains keeps the connections whose captured bytes hold it, as text, hex or a regex; truncated says the search stopped at its read limit. Local; contacts nothing.", Read, false, &[], vec![json!({}), json!({"contains":"PING"}), json!({"contains":"16 03","kind":"hex"})]),
+        op("tcp.get", "tcp get --id <uuid>", "Read one connection with its captured bytes as base64 chunks in the order they were read, each with its direction and offset, and the reads intercept held. Bytes are captured traffic and can hold credentials. Local; contacts nothing.", Read, false, &["id"], vec![json!({"id":id})]),
+        op("tcp.raw", "tcp raw --id <uuid> --direction <client_to_server|server_to_client>", "Read one direction's captured bytes exactly as relayed, as base64 with their length: up to 1 MiB per connection. Local; contacts nothing.", Read, false, &["id", "direction"], vec![json!({"id":id,"direction":"client_to_server"})]),
+        op("tcp.clear", "tcp clear", "Delete every connection that has ended from TCP history and reset the unrecorded count. Live connections stay. Cannot be undone.", Write, true, &[], vec![json!({})]),
+        op("tcp.intercept.get", "tcp intercept get", "Read the intercept policy: on or off, direction, filter, revision, and how many reads are held. Local; contacts nothing.", Read, false, &[], vec![json!({})]),
+        op("tcp.intercept.set", "tcp intercept set --enabled <true|false>", "Replace the intercept policy. While on, reads in the direction (client_to_server by default) that match the filter, or every read without one, wait for a decision before they are relayed. Turning it off forwards what is held. Passthrough tunnels are never held.", Write, true, &["enabled"], vec![json!({"enabled":true}), json!({"enabled":true,"direction":"both","filter":"PING"}), json!({"enabled":false})]),
+        op("tcp.pending", "tcp pending --id <uuid>", "Read the reads one connection has on hold: pending_id, direction, revision, the bytes as base64 and whether they were edited. Local; contacts nothing.", Read, false, &["id"], vec![json!({"id":id})]),
+        op("tcp.decide", "tcp decide --id <uuid> --pending-id <uuid> --action <forward|drop>", "Forward one held read, as it is or replaced by replacement_base64, or drop it. Reads the held read's revision first, so a read already decided elsewhere is refused.", Write, true, &["id", "pending_id", "action"], vec![json!({"id":id,"pending_id":id,"action":"forward"}), json!({"id":id,"pending_id":id,"action":"forward","replacement_base64":"UElORw=="}), json!({"id":id,"pending_id":id,"action":"drop"})]),
+        op("tcp.forward_all", "tcp forward-all", "Forward every held read as it is.", Write, true, &[], vec![json!({})]),
+        op("tcp.drop_all", "tcp drop-all", "Drop every held read.", Write, true, &[], vec![json!({})]),
+        op("tcp.close", "tcp close --id <uuid>", "Close one live connection, as its client and target both see it closed. Held reads are dropped.", Write, true, &["id"], vec![json!({"id":id})]),
+        op("tcp.replay", "tcp replay --target-host <host> --target-port <port> --message <text>", "Open a new connection to the target, through the upstream proxy when that applies, and send each message in order; after each, replies are read until the target stays silent for wait_ms (default 1000) or closes. Records the exchange as a replay connection and returns it. messages are text, or base64 with base64 true; 1 to 64 of them, 1 MiB in all.", Write, true, &["target_host", "target_port", "messages"], vec![json!({"target_host":"db.example.com","target_port":5432,"messages":["PING"]}), json!({"target_host":"api.example.com","target_port":443,"tls":true,"messages":["AAEC"],"base64":true,"wait_ms":500})]),
+    ]
+}
+
+fn tcp_call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
+    Some(match operation {
+        "tcp.status" | "tcp.listeners.list" | "tcp.clear" | "tcp.intercept.get"
+        | "tcp.forward_all" | "tcp.drop_all" => &["session_id"],
+        "tcp.listeners.add" => &[
+            "local_port",
+            "target_host",
+            "target_port",
+            "tls",
+            "protocol",
+            "remote",
+            "allowed_clients",
+            "enabled",
+            "session_id",
+        ],
+        "tcp.listeners.set" => &[
+            "id",
+            "enabled",
+            "local_port",
+            "target_host",
+            "target_port",
+            "tls",
+            "protocol",
+            "remote",
+            "allowed_clients",
+            "session_id",
+        ],
+        "tcp.listeners.remove" | "tcp.get" | "tcp.pending" | "tcp.close" => &["id", "session_id"],
+        "tcp.list" => &["contains", "kind", "session_id"],
+        "tcp.raw" => &["id", "direction", "session_id"],
+        "tcp.intercept.set" => &[
+            "enabled",
+            "direction",
+            "filter",
+            "filter_kind",
+            "session_id",
+        ],
+        "tcp.decide" => &[
+            "id",
+            "pending_id",
+            "action",
+            "replacement_base64",
+            "session_id",
+        ],
+        "tcp.replay" => &[
+            "target_host",
+            "target_port",
+            "tls",
+            "messages",
+            "base64",
+            "wait_ms",
+            "from",
+            "session_id",
+        ],
+        _ => return None,
+    })
+}
+
+fn tcp_input_schema(operation: &str, required: &[&str]) -> Option<Value> {
+    let fields = tcp_call_allowed_fields(operation)?;
+    let uuid =
+        |description: &str| json!({"type":"string","format":"uuid","description":description});
+    let port = json!({"type":"integer","minimum":1,"maximum":65535});
+    let mut properties = serde_json::Map::new();
+    for field in fields {
+        let schema = match *field {
+            "session_id" => {
+                json!({"type":["string","null"],"format":"uuid","description":"Explicit session; omission uses the active session, pinned once."})
+            }
+            "id" if operation.starts_with("tcp.listeners.") => {
+                uuid("The listener, from tcp status.")
+            }
+            "id" => uuid("The connection, from tcp list."),
+            "pending_id" => uuid("The held read, from tcp pending."),
+            "from" => uuid("The connection this replay was made from."),
+            "local_port" | "target_port" => port.clone(),
+            "target_host" => {
+                json!({"type":"string","minLength":1,"maxLength":253,"description":"A host name or IP address, without a port."})
+            }
+            "tls" if operation == "tcp.replay" => {
+                json!({"type":"boolean","description":"Reach the target over TLS."})
+            }
+            "tls" => json!({"type":"string","enum":TCP_TLS_MODES}),
+            "protocol" => json!({"type":"string","enum":TCP_PROTOCOLS}),
+            "remote" | "enabled" | "base64" => json!({"type":"boolean"}),
+            "allowed_clients" => {
+                json!({"type":"array","items":{"type":"string","minLength":1},"description":"Addresses or CIDR networks that may connect while remote is on."})
+            }
+            "contains" | "filter" => json!({"type":"string","minLength":1}),
+            "kind" | "filter_kind" => {
+                json!({"type":"string","enum":TCP_FILTER_KINDS,"default":"text"})
+            }
+            "direction" if operation == "tcp.intercept.set" => {
+                json!({"type":"string","enum":["client_to_server","server_to_client","both"],"default":"client_to_server"})
+            }
+            "direction" => json!({"type":"string","enum":TCP_DIRECTIONS}),
+            "action" => json!({"type":"string","enum":["forward","drop"]}),
+            "replacement_base64" => {
+                json!({"type":"string","description":"Standard base64; only with forward."})
+            }
+            "messages" => {
+                json!({"type":"array","minItems":1,"maxItems":64,"items":{"type":"string","minLength":1}})
+            }
+            "wait_ms" => json!({"type":"integer","minimum":50,"maximum":30000,"default":1000}),
+            _ => json!({}),
+        };
+        properties.insert((*field).to_string(), schema);
+    }
+    Some(json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": required,
+        "properties": properties,
+    }))
+}
+
+/// Maps `call` input to a TCP command; `None` for operations it does not own.
+fn tcp_command_from_input(operation: &str, input: &Value) -> Result<Option<Command>> {
+    let session_id = || call_optional::<Uuid>(operation, input, "session_id");
+    let session = || -> Result<TcpSessionArgs> {
+        Ok(TcpSessionArgs {
+            session_id: session_id()?,
+        })
+    };
+    let by_id = || -> Result<TcpIdArgs> {
+        Ok(TcpIdArgs {
+            id: call_required(operation, input, "id")?,
+            session_id: session_id()?,
+        })
+    };
+    let one_of = |field: &str, allowed: &[&str], default: Option<&str>| -> Result<String> {
+        let value: String = match default {
+            Some(default) => {
+                call_optional(operation, input, field)?.unwrap_or_else(|| default.to_string())
+            }
+            None => call_required(operation, input, field)?,
+        };
+        if !allowed.contains(&value.as_str()) {
+            bail!("invalid field `{field}` for `{operation}`; expected one of {allowed:?}");
+        }
+        Ok(value)
+    };
+    let optional_one_of = |field: &str, allowed: &[&str]| -> Result<Option<String>> {
+        match call_optional::<String>(operation, input, field)? {
+            Some(_) => one_of(field, allowed, None).map(Some),
+            None => Ok(None),
+        }
+    };
+    let command = match operation {
+        "tcp.status" => TcpCommand::Status(session()?),
+        "tcp.listeners.list" => TcpCommand::Listeners {
+            command: TcpListenersCommand::List(session()?),
+        },
+        "tcp.listeners.add" => TcpCommand::Listeners {
+            command: TcpListenersCommand::Add(TcpListenerAddArgs {
+                local_port: call_required(operation, input, "local_port")?,
+                target_host: call_required(operation, input, "target_host")?,
+                target_port: call_required(operation, input, "target_port")?,
+                tls: one_of("tls", &TCP_TLS_MODES, Some("off"))?,
+                protocol: one_of("protocol", &TCP_PROTOCOLS, Some("tcp"))?,
+                remote: call_bool(operation, input, "remote")?,
+                allowed_clients: call_optional(operation, input, "allowed_clients")?
+                    .unwrap_or_default(),
+                disabled: !call_optional(operation, input, "enabled")?.unwrap_or(true),
+                session_id: session_id()?,
+            }),
+        },
+        "tcp.listeners.set" => TcpCommand::Listeners {
+            command: TcpListenersCommand::Set(TcpListenerSetArgs {
+                id: call_required(operation, input, "id")?,
+                enabled: call_optional(operation, input, "enabled")?,
+                local_port: call_optional(operation, input, "local_port")?,
+                target_host: call_optional(operation, input, "target_host")?,
+                target_port: call_optional(operation, input, "target_port")?,
+                tls: optional_one_of("tls", &TCP_TLS_MODES)?,
+                protocol: optional_one_of("protocol", &TCP_PROTOCOLS)?,
+                remote: call_optional(operation, input, "remote")?,
+                allowed_clients: call_optional(operation, input, "allowed_clients")?,
+                session_id: session_id()?,
+            }),
+        },
+        "tcp.listeners.remove" => TcpCommand::Listeners {
+            command: TcpListenersCommand::Remove(by_id()?),
+        },
+        "tcp.list" => TcpCommand::List(TcpListArgs {
+            contains: call_optional(operation, input, "contains")?,
+            kind: one_of("kind", &TCP_FILTER_KINDS, Some("text"))?,
+            session_id: session_id()?,
+        }),
+        "tcp.get" => TcpCommand::Get(by_id()?),
+        "tcp.raw" => TcpCommand::Raw(TcpRawArgs {
+            id: call_required(operation, input, "id")?,
+            direction: one_of("direction", &TCP_DIRECTIONS, None)?,
+            session_id: session_id()?,
+        }),
+        "tcp.clear" => TcpCommand::Clear(session()?),
+        "tcp.intercept.get" => TcpCommand::Intercept {
+            command: TcpInterceptCommand::Get(session()?),
+        },
+        "tcp.intercept.set" => TcpCommand::Intercept {
+            command: TcpInterceptCommand::Set(TcpInterceptSetArgs {
+                enabled: call_required(operation, input, "enabled")?,
+                direction: one_of(
+                    "direction",
+                    &["client_to_server", "server_to_client", "both"],
+                    Some("client_to_server"),
+                )?,
+                filter: call_optional(operation, input, "filter")?,
+                filter_kind: one_of("filter_kind", &TCP_FILTER_KINDS, Some("text"))?,
+                session_id: session_id()?,
+            }),
+        },
+        "tcp.pending" => TcpCommand::Pending(by_id()?),
+        "tcp.decide" => TcpCommand::Decide(TcpDecideArgs {
+            id: call_required(operation, input, "id")?,
+            pending_id: call_required(operation, input, "pending_id")?,
+            action: one_of("action", &["forward", "drop"], None)?,
+            replacement_base64: call_optional(operation, input, "replacement_base64")?,
+            session_id: session_id()?,
+        }),
+        "tcp.forward_all" => TcpCommand::ForwardAll(session()?),
+        "tcp.drop_all" => TcpCommand::DropAll(session()?),
+        "tcp.close" => TcpCommand::Close(by_id()?),
+        "tcp.replay" => TcpCommand::Replay(TcpReplayArgs {
+            target_host: call_required(operation, input, "target_host")?,
+            target_port: call_required(operation, input, "target_port")?,
+            tls: call_bool(operation, input, "tls")?,
+            messages: call_required(operation, input, "messages")?,
+            base64: call_bool(operation, input, "base64")?,
+            wait_ms: call_optional(operation, input, "wait_ms")?.unwrap_or(1000),
+            from: call_optional(operation, input, "from")?,
+            session_id: session_id()?,
+        }),
+        _ => return Ok(None),
+    };
+    Ok(Some(Command::Tcp { command }))
 }
 
 #[derive(Args, Debug, Default, Clone)]
@@ -1089,6 +1859,9 @@ fn templates_scan_body(
         "apply_match_replace": args.apply_match_replace,
         "history": args.history,
     });
+    if let Some(delay) = args.delay {
+        body["delay"] = json!(delay);
+    }
     if args.on {
         body["filter"] = json!({"enabled": true});
     } else if args.ids.is_empty() {
@@ -1108,6 +1881,7 @@ fn templates_scan_input(args: &TemplatesScanArgs) -> Value {
         ("ids", json!(args.ids)),
         ("allow_risks", json!(args.allow_risks)),
         ("rate", json!(args.rate)),
+        ("delay", json!(args.delay)),
         ("concurrency", json!(args.concurrency)),
         ("max_requests", json!(args.max_requests)),
         ("apply_match_replace", json!(args.apply_match_replace)),
@@ -1299,6 +2073,11 @@ struct BrowserOpenArgs {
     /// `control`, so this changes nothing for them.
     #[arg(long)]
     agent: bool,
+    /// Open the browser for this session. A session the proxy listener does not
+    /// record into gets its own port, opened if it is closed, and a browser
+    /// profile of its own.
+    #[arg(long)]
+    session_id: Option<Uuid>,
 }
 
 impl BrowserCommand {
@@ -1324,12 +2103,75 @@ struct ProxyChainArgs {
 #[derive(Subcommand, Debug)]
 enum SessionCommand {
     List,
-    /// Create and activate a new Sniper session.
+    /// Create and activate a new Sniper session; `--no-activate` only creates it.
     Create(CreateSessionArgs),
     Switch(SessionSwitchArgs),
     Delete(SessionDeleteArgs),
     Rename(SessionRenameArgs),
     Reveal(SessionRevealArgs),
+    /// A proxy port that records into one session, whichever is active.
+    Port {
+        #[command(subcommand)]
+        command: SessionPortCommand,
+    },
+    /// Groups of the session list. A group is the sessions that carry its name.
+    Group {
+        #[command(subcommand)]
+        command: SessionGroupCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionGroupCommand {
+    /// Put a session in a group. The first session in makes the group.
+    Set(SessionGroupSetArgs),
+    /// Take a session out of its group. The last one out ends the group.
+    Clear(SessionGroupClearArgs),
+    /// Rename a group for all its sessions.
+    Rename(SessionGroupRenameArgs),
+    /// List each session's group and who made the session.
+    List,
+}
+
+#[derive(Args, Debug)]
+struct SessionGroupSetArgs {
+    #[arg(long)]
+    id: Uuid,
+    /// The group's name.
+    #[arg(long)]
+    name: String,
+}
+
+#[derive(Args, Debug)]
+struct SessionGroupClearArgs {
+    #[arg(long)]
+    id: Uuid,
+}
+
+#[derive(Args, Debug)]
+struct SessionGroupRenameArgs {
+    /// The group's name now.
+    #[arg(long)]
+    from: String,
+    /// Its new name. A group that has this name already takes the sessions in.
+    #[arg(long)]
+    to: String,
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionPortCommand {
+    /// Open the session's own proxy port and print its address.
+    Open(SessionPortArgs),
+    /// Close the session's port. The session keeps the number.
+    Close(SessionPortArgs),
+    /// List each session's port and whether it is open.
+    List,
+}
+
+#[derive(Args, Debug)]
+struct SessionPortArgs {
+    #[arg(long)]
+    id: Uuid,
 }
 
 #[derive(Args, Debug)]
@@ -1337,6 +2179,28 @@ struct CreateSessionArgs {
     /// Optional name for the new session.
     #[arg(long)]
     name: Option<String>,
+    /// Create the session and leave the proxy recording where it is.
+    #[arg(long)]
+    no_activate: bool,
+    /// The group the session list shows the session under.
+    #[arg(long)]
+    group: Option<String>,
+}
+
+impl CreateSessionArgs {
+    /// What the API is sent: `activate` only when it is turned off and
+    /// `group` only when one is named, so the plain form stays what older
+    /// tools expect.
+    fn body(&self) -> Value {
+        let mut body = json!({ "name": self.name });
+        if self.no_activate {
+            body["activate"] = json!(false);
+        }
+        if let Some(group) = &self.group {
+            body["group"] = json!(group);
+        }
+        body
+    }
 }
 
 #[derive(Args, Debug)]
@@ -2431,6 +3295,11 @@ struct FuzzerSetTemplateArgs {
     host: Option<String>,
     #[arg(long)]
     port: Option<String>,
+    /// Mark bytes START to END of the request body as a position; repeat for
+    /// more. A binary body is marked without writing `§` into its bytes.
+    #[arg(long = "body-position", value_name = "START:END", action = ArgAction::Append,
+        value_parser = parse_body_position)]
+    body_positions: Vec<(usize, usize)>,
 }
 
 #[derive(Args, Debug, Default)]
@@ -3068,12 +3937,27 @@ fn api_failure_detail(status: StatusCode, message: String) -> String {
 }
 
 /// Every request says who drives the CLI, so Replay can name it on the tabs
-/// it opens or changes: SNIPER_ACTOR when set, else Claude when Claude Code
-/// runs the command (it sets CLAUDECODE=1 for the commands it runs). With
-/// neither, the server says the CLI did it.
+/// it opens or changes: SNIPER_ACTOR when set, else the agent running the
+/// command. Codex sets CODEX_THREAD_ID on its commands, CODEX_SANDBOX when it
+/// sandboxes them, and its npm launcher CODEX_MANAGED_PACKAGE_ROOT; Claude
+/// Code sets CLAUDECODE=1. Codex is checked first because Codex started from
+/// Claude Code, as Claude Code's Codex plugin starts it, inherits CLAUDECODE.
+/// With none, the server says the CLI did it.
 fn api_client_builder() -> reqwest::ClientBuilder {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
     let actor = std::env::var("SNIPER_ACTOR").ok().or_else(|| {
-        (std::env::var("CLAUDECODE").as_deref() == Ok("1")).then(|| "Claude".to_string())
+        if [
+            "CODEX_THREAD_ID",
+            "CODEX_SANDBOX",
+            "CODEX_MANAGED_PACKAGE_ROOT",
+        ]
+        .into_iter()
+        .any(set)
+        {
+            Some("Codex".to_string())
+        } else {
+            (std::env::var("CLAUDECODE").as_deref() == Ok("1")).then(|| "Claude".to_string())
+        }
     });
     let mut headers = reqwest::header::HeaderMap::new();
     if let Some(value) =
@@ -3221,6 +4105,26 @@ impl ApiClient {
             bail!("request to {} failed ({}): {}", path, status, detail);
         }
         Ok(status)
+    }
+
+    /// A GET whose answer is bytes, not JSON.
+    async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let response = self
+            .client
+            .get(self.url(path))
+            .send()
+            .await
+            .map_err(|error| {
+                api_request_error(error, &Method::GET, format!("failed to GET {path}"))
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ReadHttpStatusError { status }.into());
+        }
+        let bytes = response.bytes().await.map_err(|error| {
+            api_request_error(error, &Method::GET, format!("failed to read {path}"))
+        })?;
+        Ok(bytes.to_vec())
     }
 
     async fn delete_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -3463,11 +4367,6 @@ struct RuntimeUpdatePayload {
 }
 
 #[derive(Serialize)]
-struct CreateSessionPayload {
-    name: Option<String>,
-}
-
-#[derive(Serialize)]
 struct ReplaySendPayload {
     session_id: Option<Uuid>,
     expected_active_session_id: Option<Uuid>,
@@ -3564,6 +4463,7 @@ impl Command {
             Command::Scanner { command } => command.operation_name(),
             Command::Templates { command } => command.operation_name(),
             Command::Vulndata { command } => command.operation_name(),
+            Command::Tcp { command } => command.operation_name(),
             Command::EventLog { command } => command.operation_name(),
             Command::Scope { command } => command.operation_name(),
             Command::Replay { command } => command.operation_name(),
@@ -3678,6 +4578,17 @@ impl SessionCommand {
             SessionCommand::Delete(_) => "session.delete",
             SessionCommand::Rename(_) => "session.rename",
             SessionCommand::Reveal(_) => "session.reveal",
+            SessionCommand::Port { command } => match command {
+                SessionPortCommand::Open(_) => "session.port.open",
+                SessionPortCommand::Close(_) => "session.port.close",
+                SessionPortCommand::List => "session.port.list",
+            },
+            SessionCommand::Group { command } => match command {
+                SessionGroupCommand::Set(_) => "session.group.set",
+                SessionGroupCommand::Clear(_) => "session.group.clear",
+                SessionGroupCommand::Rename(_) => "session.group.rename",
+                SessionGroupCommand::List => "session.group.list",
+            },
         }
     }
 }
@@ -3940,11 +4851,14 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "session.create",
             "session create",
-            "Create and activate a new Sniper session.",
+            "Create and activate a new Sniper session; `activate: false` creates it and leaves the proxy recording where it is.",
             Write,
             false,
             &[],
-            vec![json!({"name":"test session"})],
+            vec![
+                json!({"name":"test session"}),
+                json!({"name":"agent session","activate":false}),
+            ],
         ),
         op(
             "session.switch",
@@ -3979,6 +4893,69 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
             vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
         ),
         op(
+            "session.port.open",
+            "session port open --id <uuid>",
+            "Open the session's own proxy port on 127.0.0.1 and return its address. Traffic through it is recorded into that session whichever session is active, so several sessions capture at once. The session keeps its port number until it is deleted; asking again returns the open port. Refused for the active session, which the main proxy listener records into.",
+            Write,
+            false,
+            &["id"],
+            vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
+        ),
+        op(
+            "session.port.close",
+            "session port close --id <uuid>",
+            "Close the session's own proxy port and end what it carried. The session keeps the port number. A session is closed this way before it is switched to or deleted.",
+            Write,
+            false,
+            &["id"],
+            vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
+        ),
+        op(
+            "session.port.list",
+            "session port list",
+            "List each session's own proxy port, whether it is open, whether a browser Sniper opened is sending to the session, and the TCP and UDP relay listeners it has on. No port is open after Sniper restarts.",
+            Read,
+            false,
+            &[],
+            vec![json!({})],
+        ),
+        op(
+            "session.group.set",
+            "session group set --id <uuid> --name <group>",
+            "Put a session in a group of the UI's session list. A group is the sessions that carry its name, so the first session in makes it. Changes nothing else of the session.",
+            Write,
+            false,
+            &["id", "name"],
+            vec![json!({"id":"00000000-0000-0000-0000-000000000000","name":"acme"})],
+        ),
+        op(
+            "session.group.clear",
+            "session group clear --id <uuid>",
+            "Take a session out of its group. The last session out ends the group.",
+            Write,
+            false,
+            &["id"],
+            vec![json!({"id":"00000000-0000-0000-0000-000000000000"})],
+        ),
+        op(
+            "session.group.rename",
+            "session group rename --from <group> --to <group>",
+            "Rename a group for all its sessions at once. A group that has the new name already takes the sessions in.",
+            Write,
+            false,
+            &["from", "to"],
+            vec![json!({"from":"acme","to":"acme prod"})],
+        ),
+        op(
+            "session.group.list",
+            "session group list",
+            "List each session's group and who made the session: the agent that drove sniper-cli, or null for a session a person made.",
+            Read,
+            false,
+            &[],
+            vec![json!({})],
+        ),
+        op(
             "findings.list", "findings list",
             "List newest stored finding summaries without detail, evidence or captured bodies. Each issue is stored once: a missing header, CORS policy or cookie flag per host, an exposed endpoint or open redirect per endpoint, a leaked value per value, linked to the first request that showed it. Defaults to 100; limit-only, not cursor pagination. Omitted session_id pins the active session.",
             Read, false, &[], vec![json!({"limit":20})],
@@ -4010,7 +4987,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
         op(
             "capture.browser.open",
             "capture browser open",
-            "Open a browser already wired to this Sniper: proxy set, CA trusted, persistent Sniper profile. With no browser named it opens the saved default, else ego, Aside or BrowserOS neo when installed, else Chrome or another Chromium-family browser, so read `control` rather than assume a DevTools endpoint. Pass agent to get a `control` an agent can drive it with.",
+            "Open a browser already wired to this Sniper: proxy set, CA trusted, persistent Sniper profile. With no browser named it opens the saved default, else ego, Aside or BrowserOS neo when installed, else Chrome or another Chromium-family browser, so read `control` rather than assume a DevTools endpoint. Pass agent to get a `control` an agent can drive it with. Pass session_id to open it for a session of your own: it goes through that session's own port, opened if it is closed, and has a browser profile of its own; Aside is not opened that way.",
             Write,
             false,
             &[],
@@ -4785,6 +5762,7 @@ fn manifest_operations() -> Vec<CliOperationSpec> {
     ];
     operations.extend(service_map_manifest_operations());
     operations.extend(recon_manifest_operations());
+    operations.extend(tcp_manifest_operations());
     operations.extend(scanner_manifest_operations());
     operations.extend(saved_manifest_operations());
     operations
@@ -6761,6 +7739,7 @@ fn templates_input_schema(operation: &str) -> Option<Value> {
             properties["ids"] = json!({"type":["array","null"],"items":{"type":"string","pattern":"^([a-zA-Z0-9]+[-_])*[a-zA-Z0-9]+$"},"maxItems":30000,"description":"Template ids. Exactly one of ids or a filter (search, severity, tag)."});
             properties["allow_risks"] = json!({"type":["array","null"],"items":{"type":"string","enum":["intrusive","default-login","bruteforce","token-spray","credential-stuffing","fuzz","fuzzing","dast","osint","method:put","method:delete","method:patch"]},"description":"Risks to allow by name; templates with any other risk are left out. dos never runs."});
             properties["rate"] = json!({"type":["integer","null"],"minimum":1,"maximum":50,"default":10,"description":"Requests a second across the scan. Null uses 10."});
+            properties["delay"] = json!({"type":["integer","string","null"],"description":"Wait between requests in milliseconds, up to 60000: 500, or a random time in a range such as \"200-800\". The rate still holds. Null waits only for the rate."});
             properties["concurrency"] = json!({"type":["integer","null"],"minimum":1,"maximum":8,"default":4,"description":"Templates in flight at once. Null uses 4."});
             properties["max_requests"] = json!({"type":["integer","null"],"minimum":1,"maximum":50000,"default":10000,"description":"The most requests the scan sends, redirects included. Null uses 10000."});
             properties["apply_match_replace"] = json!({"type":["boolean","null"],"default":false,"description":"Apply the session's Match & Replace rules; a request a rule would send elsewhere is not sent."});
@@ -7136,6 +8115,9 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
     if let Some(schema) = vulndata_input_schema(operation) {
         return schema;
     }
+    if let Some(schema) = tcp_input_schema(operation, required_fields) {
+        return schema;
+    }
     let mut properties = serde_json::Map::new();
     let fields = call_allowed_fields(operation).unwrap_or(required_fields);
     for field in fields {
@@ -7177,10 +8159,42 @@ fn input_schema(operation: &str, required_fields: &[&'static str]) -> Value {
             "type":["string","null"],
             "description":"The server trims the name and limits it to 256 UTF-8 bytes after trimming. Omitted, null, empty or whitespace-only names use the server's timestamp-based default."
         }));
+        properties.insert("activate".into(), json!({
+            "type":"boolean",
+            "default":true,
+            "description":"False creates the session and leaves the proxy recording into the session it records into now. Give the new session a port with session.port.open."
+        }));
+        properties.insert("group".into(), json!({
+            "type":["string","null"],
+            "description":"The group the UI's session list shows the session under. Omitted or null: no group."
+        }));
+    }
+    if operation == "session.group.set" {
+        properties.insert("name".into(), json!({
+            "type":"string",
+            "description":"The group's name: at most 256 UTF-8 bytes after trimming, with no control characters."
+        }));
+    }
+    if operation == "session.group.rename" {
+        properties.insert(
+            "from".into(),
+            json!({
+                "type":"string","description":"The group's name now."
+            }),
+        );
+        properties.insert("to".into(), json!({
+            "type":"string","description":"Its new name, held to the rules of session.group.set."
+        }));
     }
     if matches!(
         operation,
-        "session.switch" | "session.delete" | "session.reveal"
+        "session.switch"
+            | "session.delete"
+            | "session.reveal"
+            | "session.port.open"
+            | "session.port.close"
+            | "session.group.set"
+            | "session.group.clear"
     ) {
         properties.insert(
             "id".into(),
@@ -7285,14 +8299,19 @@ fn operation_spec(operation: &str) -> Option<CliOperationSpec> {
 }
 
 fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
+    if let Some(fields) = tcp_call_allowed_fields(operation) {
+        return Some(fields);
+    }
     Some(match operation {
-        "manifest" | "session.list" => &[],
+        "manifest" | "session.list" | "session.port.list" | "session.group.list" => &[],
         "schema" => &["kind", "operation"],
         "examples" => &["operation"],
         "skills.install" | "skills.status" => {
             &["codex", "claude", "all", "codex_dir", "claude_dir"]
         }
-        "session.create" => &["name"],
+        "session.create" => &["name", "activate", "group"],
+        "session.group.set" => &["id", "name"],
+        "session.group.rename" => &["from", "to"],
         "session.rename" => &["id", "name"],
         "findings.list" | "event_log.list" => &["session_id", "limit"],
         "findings.get" => &["id", "session_id"],
@@ -7335,7 +8354,12 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "mime",
             "selection_token",
         ],
-        "session.switch" | "session.delete" | "session.reveal" => &["id"],
+        "session.switch"
+        | "session.delete"
+        | "session.reveal"
+        | "session.port.open"
+        | "session.port.close"
+        | "session.group.clear" => &["id"],
         "capture.http.list" => &[
             "session_id",
             "query",
@@ -7383,6 +8407,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "tag",
             "allow_risks",
             "rate",
+            "delay",
             "concurrency",
             "max_requests",
             "apply_match_replace",
@@ -7402,7 +8427,7 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
         "templates.auto.set_templates" => &["enabled", "ids", "search", "severity", "tag"],
         "templates.scan.get" | "templates.scan.stop" => &["session_id", "id"],
         "capture.browser.list" => &[],
-        "capture.browser.open" => &["browser", "url", "fresh", "agent"],
+        "capture.browser.open" => &["browser", "url", "fresh", "agent", "session_id"],
         "capture.browser.prefer" => &["browser"],
         "capture.http.get" => &["id", "session_id"],
         "capture.http.search" => &[
@@ -7492,6 +8517,8 @@ fn call_allowed_fields(operation: &str) -> Option<&'static [&'static str]> {
             "scheme",
             "host",
             "port",
+            "body_positions",
+            "body_position",
         ],
         "replay.update" => &[
             "tab_id",
@@ -7620,11 +8647,23 @@ fn command_input_preview(command: &Command) -> Value {
         Command::Call(args) => json!({ "operation": args.operation, "input": args.input }),
         Command::Session { command } => match command {
             SessionCommand::List => json!({}),
-            SessionCommand::Create(args) => json!({ "name": args.name }),
+            SessionCommand::Create(args) => args.body(),
             SessionCommand::Switch(args) => json!({ "id": args.id }),
             SessionCommand::Delete(args) => json!({ "id": args.id }),
             SessionCommand::Rename(args) => json!({ "id": args.id, "name": args.name }),
             SessionCommand::Reveal(args) => json!({ "id": args.id }),
+            SessionCommand::Port { command } => match command {
+                SessionPortCommand::Open(args) | SessionPortCommand::Close(args) => {
+                    json!({ "id": args.id })
+                }
+                SessionPortCommand::List => json!({}),
+            },
+            SessionCommand::Group { command } => match command {
+                SessionGroupCommand::Set(args) => json!({ "id": args.id, "name": args.name }),
+                SessionGroupCommand::Clear(args) => json!({ "id": args.id }),
+                SessionGroupCommand::Rename(args) => json!({ "from": args.from, "to": args.to }),
+                SessionGroupCommand::List => json!({}),
+            },
         },
         Command::Capture { command } => match command {
             CaptureCommand::Http { command } => history_input_preview(command),
@@ -7647,6 +8686,7 @@ fn command_input_preview(command: &Command) -> Value {
         Command::Scanner { command } => scanner_input_preview(command),
         Command::Templates { command } => templates_input_preview(command),
         Command::Vulndata { command } => command.input_preview(),
+        Command::Tcp { command } => command.input_preview(),
         Command::Findings { command } => match command {
             FindingsCommand::List(args) => json!({"session_id":args.session_id,"limit":args.limit}),
             FindingsCommand::Get(args) => json!({"session_id":args.session_id,"id":args.id}),
@@ -7876,6 +8916,8 @@ fn fuzzer_input_preview(command: &FuzzerCommand) -> Value {
             "scheme": args.scheme,
             "host": args.host,
             "port": args.port,
+            "body_positions": args.body_positions.iter()
+                .map(|(start, end)| format!("{start}:{end}")).collect::<Vec<_>>(),
         }),
         FuzzerCommand::SetPayloads(args) => json!({
             "session_id": args.session_id,
@@ -8054,9 +9096,7 @@ fn command_api_preview(command: &Command) -> Result<Value> {
         Command::Skills { .. } => json!({ "local": true }),
         Command::Session { command } => match command {
             SessionCommand::List => api_preview("GET", "/api/sessions", None),
-            SessionCommand::Create(args) => {
-                api_preview("POST", "/api/sessions", Some(json!({ "name": args.name })))
-            }
+            SessionCommand::Create(args) => api_preview("POST", "/api/sessions", Some(args.body())),
             SessionCommand::Switch(args) => api_preview(
                 "POST",
                 format!("/api/sessions/{}/activate", args.id),
@@ -8075,11 +9115,43 @@ fn command_api_preview(command: &Command) -> Result<Value> {
                 format!("/api/sessions/{}/reveal", args.id),
                 Some(json!({})),
             ),
+            SessionCommand::Port { command } => match command {
+                SessionPortCommand::Open(args) => api_preview(
+                    "POST",
+                    format!("/api/sessions/{}/proxy-port", args.id),
+                    Some(json!({})),
+                ),
+                SessionPortCommand::Close(args) => api_preview(
+                    "DELETE",
+                    format!("/api/sessions/{}/proxy-port", args.id),
+                    None,
+                ),
+                SessionPortCommand::List => api_preview("GET", "/api/sessions/activity", None),
+            },
+            SessionCommand::Group { command } => match command {
+                SessionGroupCommand::Set(args) => api_preview(
+                    "POST",
+                    format!("/api/sessions/{}/group", args.id),
+                    Some(json!({ "group": args.name })),
+                ),
+                SessionGroupCommand::Clear(args) => api_preview(
+                    "POST",
+                    format!("/api/sessions/{}/group", args.id),
+                    Some(json!({ "group": null })),
+                ),
+                SessionGroupCommand::Rename(args) => api_preview(
+                    "POST",
+                    "/api/session-groups/rename",
+                    Some(json!({ "from": args.from, "to": args.to })),
+                ),
+                SessionGroupCommand::List => api_preview("GET", "/api/sessions", None),
+            },
         },
         Command::Recon { command } => recon_api_preview(command),
         Command::Scanner { command } => scanner_api_preview(command),
         Command::Templates { command } => templates_api_preview(command),
         Command::Vulndata { command } => command.api_preview(),
+        Command::Tcp { command } => command.api_preview(),
         Command::Findings { command } => findings_api_preview(command),
         Command::EventLog {
             command: EventLogCommand::List(args),
@@ -8685,7 +9757,10 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
     if matches!(
         command,
         Command::Session {
-            command: SessionCommand::Create(_)
+            command: SessionCommand::Create(CreateSessionArgs {
+                no_activate: false,
+                ..
+            })
         }
     ) {
         notes.push("On success, the new session becomes the active session; this preview does not create or activate a session.");
@@ -8747,7 +9822,7 @@ fn dry_run_notes(command: &Command) -> Vec<&'static str> {
     }
     if matches!(
         command.operation_name(),
-        "replay.send" | "fuzzer.run" | "sequence.run"
+        "replay.send" | "fuzzer.run" | "sequence.run" | "tcp.replay"
     ) {
         notes.push("This operation may send traffic; failed sends should not be retried blindly.");
     }
@@ -8825,6 +9900,9 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
         bail!("unknown operation `{operation}`");
     };
     validate_call_known_fields(operation, input)?;
+    if let Some(command) = tcp_command_from_input(operation, input)? {
+        return Ok(command);
+    }
     Ok(match operation {
         "manifest" => Command::Manifest,
         "schema" => Command::Schema {
@@ -8858,6 +9936,8 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
         "session.create" => Command::Session {
             command: SessionCommand::Create(CreateSessionArgs {
                 name: call_optional(operation, input, "name")?,
+                no_activate: call_optional::<bool>(operation, input, "activate")? == Some(false),
+                group: call_optional(operation, input, "group")?,
             }),
         },
         "session.switch" => Command::Session {
@@ -8927,6 +10007,53 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
             command: SessionCommand::Reveal(SessionRevealArgs {
                 id: call_required(operation, input, "id")?,
             }),
+        },
+        "session.port.open" => Command::Session {
+            command: SessionCommand::Port {
+                command: SessionPortCommand::Open(SessionPortArgs {
+                    id: call_required(operation, input, "id")?,
+                }),
+            },
+        },
+        "session.port.close" => Command::Session {
+            command: SessionCommand::Port {
+                command: SessionPortCommand::Close(SessionPortArgs {
+                    id: call_required(operation, input, "id")?,
+                }),
+            },
+        },
+        "session.port.list" => Command::Session {
+            command: SessionCommand::Port {
+                command: SessionPortCommand::List,
+            },
+        },
+        "session.group.set" => Command::Session {
+            command: SessionCommand::Group {
+                command: SessionGroupCommand::Set(SessionGroupSetArgs {
+                    id: call_required(operation, input, "id")?,
+                    name: call_required(operation, input, "name")?,
+                }),
+            },
+        },
+        "session.group.clear" => Command::Session {
+            command: SessionCommand::Group {
+                command: SessionGroupCommand::Clear(SessionGroupClearArgs {
+                    id: call_required(operation, input, "id")?,
+                }),
+            },
+        },
+        "session.group.rename" => Command::Session {
+            command: SessionCommand::Group {
+                command: SessionGroupCommand::Rename(SessionGroupRenameArgs {
+                    from: call_required(operation, input, "from")?,
+                    to: call_required(operation, input, "to")?,
+                }),
+            },
+        },
+        "session.group.list" => Command::Session {
+            command: SessionCommand::Group {
+                command: SessionGroupCommand::List,
+            },
         },
         "capture.http.list" => {
             let offset = call_optional(operation, input, "offset")?;
@@ -9006,6 +10133,7 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                     url: call_optional(operation, input, "url")?,
                     fresh: call_bool(operation, input, "fresh")?,
                     agent: call_bool(operation, input, "agent")?,
+                    session_id: call_optional(operation, input, "session_id")?,
                 }),
             },
         },
@@ -9207,6 +10335,7 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                 filter: call_templates_filter(operation, input)?,
                 allow_risks: call_optional(operation, input, "allow_risks")?.unwrap_or_default(),
                 rate: bounded("rate", 10, 50)?,
+                delay: call_delay(operation, input)?,
                 concurrency: bounded("concurrency", 4, 8)?,
                 max_requests: bounded("max_requests", 10_000, 50_000)?,
                 apply_match_replace: call_bool(operation, input, "apply_match_replace")?,
@@ -9772,6 +10901,15 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
                     scheme: call_optional(operation, input, "scheme")?,
                     host: call_optional(operation, input, "host")?,
                     port: call_optional(operation, input, "port")?,
+                    body_positions: call_string_list(
+                        operation,
+                        input,
+                        "body_positions",
+                        "body_position",
+                    )?
+                    .iter()
+                    .map(|value| parse_body_position(value).map_err(|error| anyhow!(error)))
+                    .collect::<Result<_>>()?,
                 }),
             }
         }
@@ -9808,15 +10946,7 @@ fn command_from_operation_input(operation: &str, input: &Value) -> Result<Comman
             if !(1..=16).contains(&concurrency) {
                 bail!("invalid field `concurrency` for `{operation}`; expected 1-16");
             }
-            // Milliseconds as a number, or the flag's `500` / `200-800` text.
-            let delay = match call_optional::<Value>(operation, input, "delay")? {
-                None => None,
-                Some(Value::Number(ms)) => Some(parse_fuzzer_delay(&ms.to_string())),
-                Some(Value::String(text)) => Some(parse_fuzzer_delay(&text)),
-                Some(_) => Some(Err("expected milliseconds or a range".to_string())),
-            }
-            .transpose()
-            .map_err(|error| anyhow!("invalid field `delay` for `{operation}`; {error}"))?;
+            let delay = call_delay(operation, input)?;
             let stop_on_match = call_optional::<String>(operation, input, "stop_on_match")?;
             let stop_on_regex = call_optional::<String>(operation, input, "stop_on_regex")?;
             if stop_on_match.is_some() && stop_on_regex.is_some() {
@@ -10347,6 +11477,18 @@ fn call_bool(operation: &str, input: &Value, field: &str) -> Result<bool> {
     Ok(call_optional::<bool>(operation, input, field)?.unwrap_or(false))
 }
 
+/// `delay` as milliseconds, or the flag's `500` / `200-800` text.
+fn call_delay(operation: &str, input: &Value) -> Result<Option<FuzzerDelay>> {
+    match call_optional::<Value>(operation, input, "delay")? {
+        None => None,
+        Some(Value::Number(ms)) => Some(parse_fuzzer_delay(&ms.to_string())),
+        Some(Value::String(text)) => Some(parse_fuzzer_delay(&text)),
+        Some(_) => Some(Err("expected milliseconds or a range".to_string())),
+    }
+    .transpose()
+    .map_err(|error| anyhow!("invalid field `delay` for `{operation}`; {error}"))
+}
+
 fn call_service_map_tokens(
     operation: &str,
     input: &Value,
@@ -10821,6 +11963,7 @@ async fn run(cli: Cli) -> Result<()> {
                 Command::Scanner { command } => handle_scanner(api, command).await,
                 Command::Templates { command } => handle_templates(api, command).await,
                 Command::Vulndata { command } => handle_vulndata(api, command).await,
+                Command::Tcp { command } => handle_tcp(api, command).await,
                 Command::Findings { command } => handle_findings(api, command).await,
                 Command::EventLog { command } => handle_event_log(api, command).await,
                 Command::Scope { command } => handle_target(api, command).await,
@@ -10859,6 +12002,9 @@ fn validate_skill_root_selection(
 }
 
 fn validate_command_preflight(command: &Command) -> Result<()> {
+    if let Command::Tcp { command } = command {
+        command.validate()?;
+    }
     if let Command::Recon {
         command: ReconCommand::Start(args),
     } = command
@@ -11027,12 +12173,19 @@ fn browser_choices() -> Vec<&'static str> {
 }
 
 fn browser_open_body(args: &BrowserOpenArgs) -> Value {
-    json!({
+    let mut body = json!({
         "browser": args.browser,
         "url": args.url,
         "fresh": args.fresh,
         "agent": args.agent,
-    })
+    });
+    // Only when it is named: a Sniper that does not know the field refuses it,
+    // which is right for a caller who asked for a session and wrong for one who
+    // did not.
+    if let Some(session_id) = args.session_id {
+        body["session_id"] = json!(session_id);
+    }
+    body
 }
 
 /// How long a download or import may take before the CLI stops waiting; the
@@ -11121,6 +12274,192 @@ async fn handle_vulndata(api: ApiClient, command: VulndataCommand) -> Result<()>
             print_json(&api.get_json::<Value>(&vulndata_lookup_path(&args)).await?)
         }
     }
+}
+
+async fn handle_tcp(api: ApiClient, command: TcpCommand) -> Result<()> {
+    let explicit = command.session_id();
+    // Reads pin the active session once; writes also guard that it is still
+    // the active one, as the relay runs only there.
+    let (session_id, expected) = if command_is_tcp_write(&command) {
+        runtime_write_session_ids(&api, explicit).await?
+    } else {
+        (resolve_session_id_arg(&api, explicit).await?, None)
+    };
+    let read = |path: String| session_query_path(&path, session_id);
+    let write = |path: String| session_query_path_with_expected_active(&path, session_id, expected);
+    let read_in_write = |path: String| session_query_path(&path, session_id);
+    match command {
+        TcpCommand::Status(_) => print_json(
+            &api.get_json::<Value>(&read("/api/tcp/status".into()))
+                .await?,
+        ),
+        TcpCommand::Listeners { command } => match command {
+            TcpListenersCommand::List(_) => {
+                let status: Value = api.get_json(&read("/api/tcp/status".into())).await?;
+                print_json(&json!({ "listeners": status["listeners"] }))
+            }
+            TcpListenersCommand::Add(args) => print_json(
+                &api.post_json::<_, Value>(
+                    &write("/api/tcp/listeners".into()),
+                    &tcp_listener_add_body(&args),
+                )
+                .await?,
+            ),
+            TcpListenersCommand::Set(args) => {
+                let status: Value = api
+                    .get_json(&read_in_write("/api/tcp/status".into()))
+                    .await?;
+                let listener = status["listeners"]
+                    .as_array()
+                    .and_then(|listeners| listeners.iter().find(|l| l["id"] == json!(args.id)))
+                    .ok_or_else(|| anyhow!("no listener {} in this session", args.id))?;
+                let mut settings = listener["settings"].clone();
+                if let (Value::Object(settings), Value::Object(changes)) =
+                    (&mut settings, tcp_listener_changes(&args))
+                {
+                    settings.extend(changes);
+                }
+                let body = json!({
+                    "enabled": args.enabled.unwrap_or(listener["enabled"] == json!(true)),
+                    "settings": settings,
+                });
+                print_json(
+                    &api.request_json::<_, Value>(
+                        Method::PUT,
+                        &write(format!("/api/tcp/listeners/{}", args.id)),
+                        Some(&body),
+                    )
+                    .await?,
+                )
+            }
+            TcpListenersCommand::Remove(args) => print_json(
+                &api.delete_json::<Value>(&write(format!("/api/tcp/listeners/{}", args.id)))
+                    .await?,
+            ),
+        },
+        TcpCommand::List(args) => {
+            let mut connections: Vec<Value> =
+                api.get_json(&read("/api/tcp/connections".into())).await?;
+            let mut truncated = false;
+            if let Some(contains) = &args.contains {
+                let found: Value = api
+                    .get_json(&read(tcp_search_path(contains, &args.kind)))
+                    .await?;
+                let ids = found["ids"].as_array().cloned().unwrap_or_default();
+                connections.retain(|connection| ids.contains(&connection["id"]));
+                truncated = found["truncated"] == json!(true);
+            }
+            print_json(&json!({ "connections": connections, "truncated": truncated }))
+        }
+        TcpCommand::Get(args) => print_json(
+            &api.get_json::<Value>(&read(format!("/api/tcp/connections/{}", args.id)))
+                .await?,
+        ),
+        TcpCommand::Raw(args) => {
+            let bytes = api
+                .get_bytes(&read(format!(
+                    "/api/tcp/connections/{}/raw?direction={}",
+                    args.id, args.direction
+                )))
+                .await?;
+            print_json(&json!({
+                "id": args.id,
+                "direction": args.direction,
+                "length": bytes.len(),
+                "data_base64": STANDARD.encode(&bytes),
+            }))
+        }
+        TcpCommand::Clear(_) => print_json(
+            &api.delete_json::<Value>(&write("/api/tcp/connections".into()))
+                .await?,
+        ),
+        TcpCommand::Intercept { command } => match command {
+            TcpInterceptCommand::Get(_) => print_json(
+                &api.get_json::<Value>(&read("/api/tcp/intercept".into()))
+                    .await?,
+            ),
+            TcpInterceptCommand::Set(args) => {
+                let current: Value = api
+                    .get_json(&read_in_write("/api/tcp/intercept".into()))
+                    .await?;
+                let mut body = tcp_policy_body(&args);
+                body["expected_revision"] = current["revision"].clone();
+                print_json(
+                    &api.request_json::<_, Value>(
+                        Method::PUT,
+                        &write("/api/tcp/intercept".into()),
+                        Some(&body),
+                    )
+                    .await?,
+                )
+            }
+        },
+        TcpCommand::Pending(args) => print_json(
+            &api.get_json::<Value>(&read(format!("/api/tcp/connections/{}/pending", args.id)))
+                .await?,
+        ),
+        TcpCommand::Decide(args) => {
+            let pending: Value = api
+                .get_json(&read_in_write(format!(
+                    "/api/tcp/connections/{}/pending",
+                    args.id
+                )))
+                .await?;
+            let held = pending["items"]
+                .as_array()
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|item| item["pending_id"] == json!(args.pending_id))
+                })
+                .ok_or_else(|| {
+                    anyhow!("connection {} holds no read {}", args.id, args.pending_id)
+                })?;
+            let body = json!({
+                "action": args.action,
+                "replacement_base64": args.replacement_base64,
+                "expected_revision": held["revision"],
+            });
+            print_json(
+                &api.post_json::<_, Value>(
+                    &write(format!(
+                        "/api/tcp/connections/{}/pending/{}/decision",
+                        args.id, args.pending_id
+                    )),
+                    &body,
+                )
+                .await?,
+            )
+        }
+        TcpCommand::ForwardAll(_) => print_json(
+            &api.post_json::<_, Value>(&write("/api/tcp/intercept/forward-all".into()), &json!({}))
+                .await?,
+        ),
+        TcpCommand::DropAll(_) => print_json(
+            &api.post_json::<_, Value>(&write("/api/tcp/intercept/drop-all".into()), &json!({}))
+                .await?,
+        ),
+        TcpCommand::Close(args) => {
+            api.post_status(
+                &write(format!("/api/tcp/connections/{}/close", args.id)),
+                &json!({}),
+            )
+            .await?;
+            print_json(&json!({ "closed": args.id }))
+        }
+        TcpCommand::Replay(args) => print_json(
+            &api.post_json_long::<_, Value>(
+                &write("/api/tcp/replay".into()),
+                &tcp_replay_body(&args),
+            )
+            .await?,
+        ),
+    }
+}
+
+fn command_is_tcp_write(command: &TcpCommand) -> bool {
+    operation_spec(command.operation_name())
+        .is_some_and(|spec| spec.side_effect == CliSideEffect::Write)
 }
 
 async fn handle_templates(api: ApiClient, command: TemplatesCommand) -> Result<()> {
@@ -11370,9 +12709,8 @@ async fn handle_session(mut api: ApiClient, command: SessionCommand) -> Result<(
             print_json(&sessions)
         }
         SessionCommand::Create(args) => {
-            let session: SessionSummary = api
-                .post_json("/api/sessions", &CreateSessionPayload { name: args.name })
-                .await?;
+            let session: SessionSummary = api.post_json("/api/sessions", &args.body()).await?;
+            ensure_left_inactive(args.no_activate, &session)?;
             print_json(&session)
         }
         SessionCommand::Switch(args) => {
@@ -11407,7 +12745,104 @@ async fn handle_session(mut api: ApiClient, command: SessionCommand) -> Result<(
                 .await?;
             print_json(&result)
         }
+        SessionCommand::Port { command } => match command {
+            SessionPortCommand::Open(args) => {
+                let port: serde_json::Value = api
+                    .post_json(&format!("/api/sessions/{}/proxy-port", args.id), &json!({}))
+                    .await?;
+                print_json(&port)
+            }
+            SessionPortCommand::Close(args) => {
+                let port: serde_json::Value = api
+                    .delete_json(&format!("/api/sessions/{}/proxy-port", args.id))
+                    .await?;
+                print_json(&port)
+            }
+            SessionPortCommand::List => {
+                let sessions: Vec<SessionPortEntry> =
+                    api.get_json("/api/sessions/activity").await?;
+                print_json(&sessions)
+            }
+        },
+        SessionCommand::Group { command } => match command {
+            SessionGroupCommand::Set(args) => {
+                let group: serde_json::Value = api
+                    .post_json(
+                        &format!("/api/sessions/{}/group", args.id),
+                        &json!({ "group": args.name }),
+                    )
+                    .await?;
+                print_json(&group)
+            }
+            SessionGroupCommand::Clear(args) => {
+                let group: serde_json::Value = api
+                    .post_json(
+                        &format!("/api/sessions/{}/group", args.id),
+                        &json!({ "group": null }),
+                    )
+                    .await?;
+                print_json(&group)
+            }
+            SessionGroupCommand::Rename(args) => {
+                let renamed: serde_json::Value = api
+                    .post_json(
+                        "/api/session-groups/rename",
+                        &json!({ "from": args.from, "to": args.to }),
+                    )
+                    .await?;
+                print_json(&renamed)
+            }
+            SessionGroupCommand::List => {
+                let sessions: Vec<SessionGroupEntry> = api.get_json("/api/sessions").await?;
+                print_json(&sessions)
+            }
+        },
     }
+}
+
+/// A session's group and maker, as `session group list` prints them.
+#[derive(Deserialize, Serialize)]
+struct SessionGroupEntry {
+    id: Uuid,
+    name: String,
+    /// None for a session in no group.
+    #[serde(default)]
+    group: Option<String>,
+    /// Who made the session, when its maker said so.
+    #[serde(default)]
+    created_by: Option<String>,
+}
+
+/// `--no-activate` is a promise not to move the proxy. A Sniper that does not
+/// know the option creates the session and activates it all the same, and the
+/// caller must hear that rather than a plain success.
+fn ensure_left_inactive(no_activate: bool, session: &SessionSummary) -> Result<()> {
+    if no_activate && session.active {
+        bail!(
+            "this Sniper does not know --no-activate: session {} was created and is now the active session",
+            session.id
+        );
+    }
+    Ok(())
+}
+
+/// A session's own proxy port, as `session port list` prints it.
+#[derive(Deserialize, Serialize)]
+struct SessionPortEntry {
+    id: Uuid,
+    name: String,
+    /// The number the session keeps until it is deleted.
+    #[serde(default)]
+    proxy_port: Option<u16>,
+    #[serde(default)]
+    proxy_port_open: bool,
+    /// Whether a browser Sniper opened sends to the session and still runs.
+    #[serde(default)]
+    browser: bool,
+    /// The relay listeners the session has on: `local_port`, `target`, `udp`
+    /// and whether each is `running`. Printed as the server gives them.
+    #[serde(default)]
+    tcp: Vec<Value>,
 }
 
 fn validate_session_metadata_response_id(
@@ -14192,6 +15627,11 @@ async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
                 .as_ref()
                 .and(base_request.as_ref())
                 .map(fuzzer_target_request_authority_for_request);
+            let request_text = if args.body_positions.is_empty() {
+                request_text
+            } else {
+                mark_body_positions(&request_text, base_request.as_ref(), &args.body_positions)?
+            };
             workspace.fuzzer.base_request = base_request;
             workspace.fuzzer.source_transaction_id = source_transaction_id;
             workspace.fuzzer.target = target;
@@ -14213,7 +15653,7 @@ async fn handle_fuzzer(api: ApiClient, command: FuzzerCommand) -> Result<()> {
         }
         FuzzerCommand::Run(args) => {
             let mut workspace = load_workspace_state(&api, args.session_id).await?;
-            let parsed_template = parse_editable_raw_request_with_version(
+            let parsed_template = parse_fuzzer_template(
                 &workspace.fuzzer.request_text,
                 workspace.fuzzer.base_request.as_ref(),
             )?;
@@ -18101,6 +19541,124 @@ fn parse_editable_raw_request_with_version(
     parse_editable_raw_request_parts(head, RawRequestBody::Text(body), fallback)
 }
 
+/// The Fuzzer's request with its positions, read as the Fuzzer editor reads it.
+/// Content-Length is set to the length the parser checks, since the server
+/// works it out again after each payload; a binary body keeps its positions
+/// between Base64 pieces and is checked with every position at its original.
+fn parse_fuzzer_template(
+    text: &str,
+    base: Option<&EditableRequest>,
+) -> Result<ParsedEditableRequest> {
+    let (head, body) = split_raw_http_message(text);
+    let binary = base.is_some_and(|request| request.body_encoding == BodyEncoding::Base64);
+    let positions = binary && (body.contains('\u{a7}') || body.contains("$payload$"));
+    let (checked, length) = if positions {
+        let originals = sniper::fuzzer::base64_body_originals(&body)?;
+        (STANDARD.encode(&originals), Some(originals.len()))
+    } else if binary {
+        // The parser says what is wrong with a body that is not Base64.
+        let length = STANDARD.decode(&body).ok().map(|bytes| bytes.len());
+        (body.clone(), length)
+    } else {
+        (body.clone(), Some(body.len()))
+    };
+    let head = match length {
+        Some(length) => with_content_length(&head, length)?,
+        None => head,
+    };
+    let mut parsed = parse_editable_raw_request_parts(head, RawRequestBody::Text(checked), base)?;
+    if positions {
+        parsed.request.body = body;
+    }
+    Ok(parsed)
+}
+
+/// `head` with every Content-Length set to `length`, which must agree first.
+fn with_content_length(head: &str, length: usize) -> Result<String> {
+    let mut declared = Vec::new();
+    let lines: Vec<String> = head
+        .lines()
+        .map(|line| match line.split_once(':') {
+            Some((name, value)) if name.trim().eq_ignore_ascii_case("content-length") => {
+                declared.push(value.trim().parse::<u64>().ok());
+                format!("{name}: {length}")
+            }
+            _ => line.to_string(),
+        })
+        .collect();
+    if declared
+        .iter()
+        .any(|value| value.is_none() || *value != declared[0])
+    {
+        bail!("Invalid or conflicting Content-Length headers in the request template.");
+    }
+    Ok(lines.join("\n"))
+}
+
+/// Marks byte ranges of the request body as positions, so a binary body is
+/// marked without `§` written into its bytes: a binary body keeps them between
+/// Base64 pieces, as the Fuzzer editor stores it, and a text body as `§original§`.
+fn mark_body_positions(
+    text: &str,
+    base: Option<&EditableRequest>,
+    ranges: &[(usize, usize)],
+) -> Result<String> {
+    let start = raw_blank_line(text.as_bytes())
+        .map(|(index, length)| index + length)
+        .ok_or_else(|| anyhow!("--body-position needs a request with a body"))?;
+    let body = &text[start..];
+    let binary = base.is_some_and(|request| request.body_encoding == BodyEncoding::Base64);
+    let bytes = if binary {
+        STANDARD
+            .decode(body)
+            .context("the request body is not valid Base64")?
+    } else if body.contains('\u{a7}') || body.contains("$payload$") {
+        bail!("the body already has § or $payload$; write its positions in the request instead");
+    } else {
+        body.as_bytes().to_vec()
+    };
+    let mut ranges = ranges.to_vec();
+    ranges.sort_unstable();
+    let mut marked = text[..start].to_string();
+    let mut cursor = 0;
+    for (from, to) in ranges {
+        if from < cursor || to > bytes.len() {
+            bail!(
+                "body position {from}:{to} overlaps another or ends past the {}-byte body",
+                bytes.len()
+            );
+        }
+        marked.push_str(&body_piece(&bytes[cursor..from], binary)?);
+        marked.push('\u{a7}');
+        marked.push_str(&body_piece(&bytes[from..to], binary)?);
+        marked.push('\u{a7}');
+        cursor = to;
+    }
+    marked.push_str(&body_piece(&bytes[cursor..], binary)?);
+    Ok(marked)
+}
+
+fn body_piece(piece: &[u8], binary: bool) -> Result<String> {
+    if binary {
+        return Ok(STANDARD.encode(piece));
+    }
+    std::str::from_utf8(piece)
+        .map(str::to_string)
+        .map_err(|_| anyhow!("a body position splits a character of the text body"))
+}
+
+fn parse_body_position(value: &str) -> std::result::Result<(usize, usize), String> {
+    match value
+        .split_once(':')
+        .and_then(|(start, end)| Some((start.parse().ok()?, end.parse().ok()?)))
+    {
+        Some((start, end)) if start <= end => Ok((start, end)),
+        _ => Err(format!(
+            "`{value}` is not START:END, two byte offsets into the body with START no larger than END"
+        )),
+    }
+}
+
 fn parse_editable_raw_request_bytes_with_version(
     bytes: &[u8],
     fallback: Option<&EditableRequest>,
@@ -18417,31 +19975,33 @@ fn declared_content_length(headers: &[HeaderRecord]) -> Result<Option<usize>> {
     Ok(content_length)
 }
 
+/// Where the head ends, as the editor finds it: the first blank line, whose
+/// breaks may be CRLF or LF. A multipart body keeps CRLF under an LF head, so
+/// its own blank lines must not be taken for the head's.
+fn raw_blank_line(bytes: &[u8]) -> Option<(usize, usize)> {
+    (0..bytes.len()).find_map(|index| {
+        [&b"\r\n\r\n"[..], b"\r\n\n", b"\n\r\n", b"\n\n"]
+            .into_iter()
+            .find(|blank| bytes[index..].starts_with(blank))
+            .map(|blank| (index, blank.len()))
+    })
+}
+
 fn split_raw_http_message(text: &str) -> (String, String) {
-    if let Some(index) = text.find("\r\n\r\n") {
-        return (
+    match raw_blank_line(text.as_bytes()) {
+        Some((index, length)) => (
             text[..index].replace("\r\n", "\n"),
-            text[index + 4..].to_string(),
-        );
+            text[index + length..].to_string(),
+        ),
+        None => (text.replace("\r\n", "\n"), String::new()),
     }
-    if let Some(index) = text.find("\n\n") {
-        return (
-            text[..index].replace("\r\n", "\n"),
-            text[index + 2..].to_string(),
-        );
-    }
-    (text.replace("\r\n", "\n"), String::new())
 }
 
 fn split_raw_http_message_bytes(bytes: &[u8]) -> Result<(String, Vec<u8>)> {
-    let (head, body) =
-        if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
-            (&bytes[..index], bytes[index + 4..].to_vec())
-        } else if let Some(index) = bytes.windows(2).position(|window| window == b"\n\n") {
-            (&bytes[..index], bytes[index + 2..].to_vec())
-        } else {
-            (bytes, Vec::new())
-        };
+    let (head, body) = match raw_blank_line(bytes) {
+        Some((index, length)) => (&bytes[..index], bytes[index + length..].to_vec()),
+        None => (bytes, Vec::new()),
+    };
     let head = std::str::from_utf8(head)
         .context("request headers are not valid UTF-8")?
         .replace("\r\n", "\n");
@@ -20034,7 +21594,9 @@ mod tests {
         data_dir_strings_match, process_path_strings_match, validate_sniper_settings_probe,
         SniperApiProbeExpectation,
     };
+    use super::{mark_body_positions, parse_fuzzer_template, split_raw_http_message};
     use super::{validate_service_map_packet_response, ServiceMapPacketArgs};
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use chrono::Utc;
     use clap::Parser;
     use serde_json::{json, Value};
@@ -22213,6 +23775,174 @@ mod tests {
         assert_eq!(args.id, reveal_id);
     }
 
+    fn fuzzer_base(body: &str, body_encoding: BodyEncoding) -> EditableRequest {
+        EditableRequest {
+            scheme: "https".to_string(),
+            host: "example.com".to_string(),
+            method: "POST".to_string(),
+            path: "/upload".to_string(),
+            headers: vec![HeaderRecord {
+                name: "Host".to_string(),
+                value: "example.com".to_string(),
+            }],
+            body: body.to_string(),
+            body_encoding,
+            preview_truncated: false,
+        }
+    }
+
+    fn content_length(request: &EditableRequest) -> &str {
+        &request
+            .headers
+            .iter()
+            .find(|header| header.name.eq_ignore_ascii_case("content-length"))
+            .unwrap()
+            .value
+    }
+
+    #[test]
+    fn the_fuzzer_template_keeps_its_positions_and_sets_content_length_as_the_editor_does() {
+        let binary = fuzzer_base(&STANDARD.encode(b"\x89\xa7AB"), BodyEncoding::Base64);
+        let body = format!(
+            "{}\u{a7}{}\u{a7}",
+            STANDARD.encode(b"\x89\xa7"),
+            STANDARD.encode(b"AB")
+        );
+        let text = format!(
+            "POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: 99\r\n\r\n{body}"
+        );
+        let parsed = parse_fuzzer_template(&text, Some(&binary)).unwrap();
+        assert_eq!(parsed.request.body, body);
+        assert_eq!(parsed.request.body_encoding, BodyEncoding::Base64);
+        assert_eq!(content_length(&parsed.request), "4");
+
+        // The editor leaves Content-Length as it was when it marks a text body.
+        let form = fuzzer_base("a=1", BodyEncoding::Utf8);
+        let parsed = parse_fuzzer_template(
+            "POST /upload HTTP/1.1\nHost: example.com\nContent-Length: 3\n\na=\u{a7}1\u{a7}",
+            Some(&form),
+        )
+        .unwrap();
+        assert_eq!(parsed.request.body, "a=\u{a7}1\u{a7}");
+
+        // An LF head with a CRLF multipart body ends at its first blank line.
+        let multipart =
+            "--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n\u{a7}v\u{a7}\r\n--b--\r\n";
+        let parsed = parse_fuzzer_template(
+            &format!("POST /upload HTTP/1.1\nHost: example.com\n\n{multipart}"),
+            Some(&form),
+        )
+        .unwrap();
+        assert_eq!(parsed.request.body, multipart);
+
+        for (text, base) in [
+            (format!("POST /upload HTTP/1.1\nHost: example.com\n\nQUJ\u{a7}QQ==\u{a7}"), &binary),
+            (
+                "POST /upload HTTP/1.1\nHost: example.com\nContent-Length: 3\nContent-Length: 4\n\na=\u{a7}1\u{a7}"
+                    .to_string(),
+                &form,
+            ),
+        ] {
+            assert!(parse_fuzzer_template(&text, Some(base)).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn body_positions_mark_byte_ranges_of_a_binary_or_text_body() {
+        let binary = fuzzer_base(&STANDARD.encode(b"\x89\xa7ABC"), BodyEncoding::Base64);
+        let text = build_editable_raw_request(&binary);
+        let marked = mark_body_positions(&text, Some(&binary), &[(5, 5), (1, 3)]).unwrap();
+        let (_, body) = split_raw_http_message(&marked);
+        assert_eq!(
+            body,
+            format!(
+                "{}\u{a7}{}\u{a7}{}\u{a7}\u{a7}",
+                STANDARD.encode(b"\x89"),
+                STANDARD.encode(b"\xa7A"),
+                STANDARD.encode(b"BC")
+            )
+        );
+        let parsed = parse_fuzzer_template(&marked, Some(&binary)).unwrap();
+        assert_eq!(parsed.request.body, body);
+
+        let form = fuzzer_base("a=1&b=\u{e9}", BodyEncoding::Utf8);
+        let text = build_editable_raw_request(&form);
+        let marked = mark_body_positions(&text, Some(&form), &[(2, 3)]).unwrap();
+        assert!(marked.ends_with("a=\u{a7}1\u{a7}&b=\u{e9}"), "{marked}");
+
+        for ranges in [&[(5, 9)][..], &[(0, 2), (1, 3)], &[(7, 8)]] {
+            assert!(
+                mark_body_positions(&text, Some(&form), ranges).is_err(),
+                "{ranges:?}"
+            );
+        }
+        let marked_already = text.replace("a=1", "a=\u{a7}1\u{a7}");
+        assert!(mark_body_positions(&marked_already, Some(&form), &[(0, 1)]).is_err());
+        assert!(
+            mark_body_positions(&text, Some(&binary), &[(0, 1)]).is_err(),
+            "a text body read as Base64"
+        );
+    }
+
+    #[test]
+    fn fuzzer_set_template_takes_body_positions_from_flags_and_calls() {
+        let id = "00000000-0000-0000-0000-000000000000";
+        let Cli {
+            command:
+                Command::Fuzzer {
+                    command: FuzzerCommand::SetTemplate(args),
+                },
+            ..
+        } = Cli::try_parse_from([
+            "sniper-cli",
+            "fuzzer",
+            "set-template",
+            "--transaction-id",
+            id,
+            "--body-position",
+            "1:3",
+            "--body-position",
+            "5:5",
+        ])
+        .unwrap()
+        else {
+            panic!("expected fuzzer set-template");
+        };
+        assert_eq!(args.body_positions, vec![(1, 3), (5, 5)]);
+        for value in ["3:1", "1", "a:b", "-1:2"] {
+            assert!(
+                Cli::try_parse_from([
+                    "sniper-cli",
+                    "fuzzer",
+                    "set-template",
+                    "--transaction-id",
+                    id,
+                    "--body-position",
+                    value,
+                ])
+                .is_err(),
+                "{value}"
+            );
+        }
+
+        let Command::Fuzzer {
+            command: FuzzerCommand::SetTemplate(args),
+        } = command_from_operation_input(
+            "fuzzer.set_template",
+            &json!({"transaction_id": id, "body_positions": ["1:3"]}),
+        )
+        .unwrap()
+        else {
+            panic!("expected fuzzer set-template");
+        };
+        assert_eq!(args.body_positions, vec![(1, 3)]);
+        assert!(command_from_operation_input(
+            "fuzzer.set_template",
+            &json!({"transaction_id": id, "body_position": "3:1"}),
+        )
+        .is_err());
+    }
+
     #[test]
     fn fuzzer_run_and_stop_take_the_attack_options_from_flags_and_calls() {
         let Cli {
@@ -22396,6 +24126,319 @@ mod tests {
         }
     }
 
+    // An agent that creates a session of its own must be able to leave the
+    // main listener where it is, and the plain form must stay what it was.
+    #[test]
+    fn session_create_can_leave_the_main_listener_alone() {
+        let plain = Cli::try_parse_from(["sniper-cli", "session", "create", "--name", "a"])
+            .unwrap()
+            .command;
+        assert_eq!(command_input_preview(&plain), json!({ "name": "a" }));
+        assert_eq!(
+            super::command_api_preview(&plain).unwrap()["body"],
+            json!({ "name": "a" })
+        );
+
+        let direct = Cli::try_parse_from([
+            "sniper-cli",
+            "session",
+            "create",
+            "--name",
+            "a",
+            "--no-activate",
+        ])
+        .unwrap()
+        .command;
+        let call =
+            command_from_operation_input("session.create", &json!({"name":"a","activate":false}))
+                .unwrap();
+        assert_eq!(command_input_preview(&direct), command_input_preview(&call));
+        assert_eq!(
+            command_input_preview(&direct),
+            json!({ "name": "a", "activate": false })
+        );
+        let preview = super::command_api_preview(&direct).unwrap();
+        assert_eq!(preview["path"], "/api/sessions");
+        assert_eq!(preview["body"], json!({ "name": "a", "activate": false }));
+        let plan = dry_run_command(&direct).unwrap();
+        assert!(!plan.to_string().contains("becomes the active session"));
+        assert!(dry_run_command(&plain)
+            .unwrap()
+            .to_string()
+            .contains("becomes the active session"));
+
+        let activating =
+            command_from_operation_input("session.create", &json!({"name":"a","activate":true}))
+                .unwrap();
+        assert_eq!(command_input_preview(&activating), json!({ "name": "a" }));
+        assert_eq!(
+            operation_spec("session.create").unwrap().input_schema["properties"]["activate"]
+                ["type"],
+            "boolean"
+        );
+    }
+
+    // A browser for a session with its own port. The plain body must stay what
+    // older Snipers accept: they refuse a field they do not know.
+    #[test]
+    fn capture_browser_open_names_the_session_only_when_asked() {
+        let id = "11111111-1111-1111-1111-111111111111";
+        let direct = Cli::try_parse_from([
+            "sniper-cli",
+            "capture",
+            "browser",
+            "open",
+            "--browser",
+            "chrome",
+            "--session-id",
+            id,
+        ])
+        .unwrap()
+        .command;
+        let call = command_from_operation_input(
+            "capture.browser.open",
+            &json!({ "browser": "chrome", "session_id": id }),
+        )
+        .unwrap();
+        assert_eq!(command_input_preview(&direct), command_input_preview(&call));
+        let preview = super::command_api_preview(&direct).unwrap();
+        assert_eq!(preview["path"], "/api/browser/launch");
+        assert_eq!(preview["body"]["session_id"], id);
+
+        let plain = Cli::try_parse_from(["sniper-cli", "capture", "browser", "open"])
+            .unwrap()
+            .command;
+        assert!(super::command_api_preview(&plain).unwrap()["body"]
+            .get("session_id")
+            .is_none());
+        assert!(
+            operation_spec("capture.browser.open").unwrap().input_schema["properties"]
+                .get("session_id")
+                .is_some()
+        );
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "capture",
+            "browser",
+            "open",
+            "--session-id",
+            "not-a-uuid",
+        ])
+        .is_err());
+    }
+
+    // `--no-activate` is a promise not to move the proxy. A Sniper that does
+    // not know the option, such as one still running from before an update,
+    // creates the session and activates it all the same.
+    #[test]
+    fn no_activate_says_so_when_the_server_activated_the_session_anyway() {
+        let id = Uuid::new_v4();
+        use super::ensure_left_inactive;
+        assert!(ensure_left_inactive(true, &test_session_summary(id, false)).is_ok());
+        assert!(ensure_left_inactive(false, &test_session_summary(id, true)).is_ok());
+
+        let error = ensure_left_inactive(true, &test_session_summary(id, true)).unwrap_err();
+        assert!(error.to_string().contains(&id.to_string()), "{error}");
+        assert!(error.to_string().contains("active session"), "{error}");
+    }
+
+    // An agent gives its session a port of its own, and finds the commands
+    // in the manifest like any other.
+    #[test]
+    fn session_ports_are_opened_closed_and_listed_from_the_cli() {
+        let id = "11111111-1111-1111-1111-111111111111";
+        for (operation, args, input, method, path, writes) in [
+            (
+                "session.port.open",
+                vec!["session", "port", "open", "--id", id],
+                json!({ "id": id }),
+                "POST",
+                format!("/api/sessions/{id}/proxy-port"),
+                true,
+            ),
+            (
+                "session.port.close",
+                vec!["session", "port", "close", "--id", id],
+                json!({ "id": id }),
+                "DELETE",
+                format!("/api/sessions/{id}/proxy-port"),
+                true,
+            ),
+            (
+                "session.port.list",
+                vec!["session", "port", "list"],
+                json!({}),
+                "GET",
+                "/api/sessions/activity".to_string(),
+                false,
+            ),
+        ] {
+            let mut argv = vec!["sniper-cli"];
+            argv.extend(args);
+            let direct = Cli::try_parse_from(argv).unwrap().command;
+            let call = command_from_operation_input(operation, &input).unwrap();
+            assert_eq!(direct.operation_name(), operation);
+            assert_eq!(call.operation_name(), operation);
+            assert_eq!(command_input_preview(&direct), input);
+            assert_eq!(command_input_preview(&call), input);
+            assert_eq!(direct.requires_confirmation(), writes);
+            let plan = dry_run_command(&direct).unwrap();
+            assert_eq!(plan["side_effect"], if writes { "write" } else { "read" });
+            assert_eq!(plan["api"]["method"], method);
+            assert_eq!(plan["api"]["path"], path);
+            let spec = operation_spec(operation).unwrap();
+            assert_eq!(spec.input_schema["additionalProperties"], false);
+            assert!(spec.description.contains("port"), "{operation}");
+        }
+        assert!(Cli::try_parse_from(["sniper-cli", "session", "port", "open"]).is_err());
+        assert!(command_from_operation_input("session.port.close", &json!({})).is_err());
+        assert!(command_from_operation_input("session.port.list", &json!({ "id": id })).is_err());
+    }
+
+    // Before it opens a browser for a session, an agent can see that one
+    // Sniper opened is sending there already.
+    #[test]
+    fn session_port_list_says_whether_a_browser_sends_to_each_session() {
+        let rows: Vec<super::SessionPortEntry> = serde_json::from_value(json!([
+            {"id": "00000000-0000-0000-0000-000000000001", "name": "a", "active": true,
+             "running": [], "held": 0, "proxy_port": null, "proxy_port_open": false, "browser": true},
+            // A Sniper from before the field says nothing of browsers.
+            {"id": "00000000-0000-0000-0000-000000000002", "name": "b",
+             "proxy_port": 18081, "proxy_port_open": true},
+        ]))
+        .unwrap();
+        let printed = serde_json::to_value(&rows).unwrap();
+        assert_eq!(printed[0]["browser"], true);
+        assert_eq!(printed[1]["browser"], false);
+        assert_eq!(printed[1]["proxy_port"], 18081);
+    }
+
+    // Before it starts a relay listener in its session, an agent can see the
+    // local ports the other sessions' listeners hold.
+    #[test]
+    fn session_port_list_says_which_relay_listeners_each_session_runs() {
+        let rows: Vec<super::SessionPortEntry> = serde_json::from_value(json!([
+            {"id": "00000000-0000-0000-0000-000000000001", "name": "a",
+             "tcp": [{"local_port": 9000, "target": "example.com:7000", "udp": false, "running": true}]},
+            // A Sniper from before the field says nothing of listeners.
+            {"id": "00000000-0000-0000-0000-000000000002", "name": "b"},
+        ]))
+        .unwrap();
+        let printed = serde_json::to_value(&rows).unwrap();
+        assert_eq!(printed[0]["tcp"][0]["local_port"], 9000);
+        assert_eq!(printed[0]["tcp"][0]["target"], "example.com:7000");
+        assert_eq!(printed[1]["tcp"], json!([]));
+        let description = super::manifest_operations()
+            .into_iter()
+            .find(|operation| operation.operation == "session.port.list")
+            .map(|operation| operation.description)
+            .unwrap_or_default();
+        assert!(description.contains("relay listeners"), "{description}");
+    }
+
+    // An agent puts the sessions of one target in a group, and finds the
+    // commands in the manifest like any other.
+    #[test]
+    fn session_groups_are_set_cleared_renamed_and_listed_from_the_cli() {
+        let id = "11111111-1111-1111-1111-111111111111";
+        for (operation, args, input, method, path, body, writes) in [
+            (
+                "session.group.set",
+                vec!["session", "group", "set", "--id", id, "--name", "acme"],
+                json!({ "id": id, "name": "acme" }),
+                "POST",
+                format!("/api/sessions/{id}/group"),
+                json!({ "group": "acme" }),
+                true,
+            ),
+            (
+                "session.group.clear",
+                vec!["session", "group", "clear", "--id", id],
+                json!({ "id": id }),
+                "POST",
+                format!("/api/sessions/{id}/group"),
+                json!({ "group": null }),
+                true,
+            ),
+            (
+                "session.group.rename",
+                vec![
+                    "session", "group", "rename", "--from", "acme", "--to", "lab",
+                ],
+                json!({ "from": "acme", "to": "lab" }),
+                "POST",
+                "/api/session-groups/rename".to_string(),
+                json!({ "from": "acme", "to": "lab" }),
+                true,
+            ),
+            (
+                "session.group.list",
+                vec!["session", "group", "list"],
+                json!({}),
+                "GET",
+                "/api/sessions".to_string(),
+                Value::Null,
+                false,
+            ),
+        ] {
+            let mut argv = vec!["sniper-cli"];
+            argv.extend(args);
+            let direct = Cli::try_parse_from(argv).unwrap().command;
+            let call = command_from_operation_input(operation, &input).unwrap();
+            assert_eq!(direct.operation_name(), operation);
+            assert_eq!(call.operation_name(), operation);
+            assert_eq!(command_input_preview(&direct), input);
+            assert_eq!(command_input_preview(&call), input);
+            assert_eq!(direct.requires_confirmation(), writes);
+            let plan = dry_run_command(&direct).unwrap();
+            assert_eq!(plan["side_effect"], if writes { "write" } else { "read" });
+            assert_eq!(plan["api"]["method"], method);
+            assert_eq!(plan["api"]["path"], path);
+            if writes {
+                assert_eq!(plan["api"]["body"], body);
+            }
+            let spec = operation_spec(operation).unwrap();
+            assert_eq!(spec.input_schema["additionalProperties"], false);
+            assert!(spec.description.contains("group"), "{operation}");
+        }
+        assert!(
+            Cli::try_parse_from(["sniper-cli", "session", "group", "set", "--id", id]).is_err()
+        );
+        assert!(
+            command_from_operation_input("session.group.rename", &json!({ "from": "a" })).is_err()
+        );
+        assert!(command_from_operation_input("session.group.list", &json!({ "id": id })).is_err());
+
+        // A session starts in a group only when one is named: the plain body
+        // stays what an older Sniper accepts.
+        let grouped = Cli::try_parse_from([
+            "sniper-cli",
+            "session",
+            "create",
+            "--name",
+            "a",
+            "--group",
+            "acme",
+        ])
+        .unwrap()
+        .command;
+        let call =
+            command_from_operation_input("session.create", &json!({"name":"a","group":"acme"}))
+                .unwrap();
+        assert_eq!(
+            command_input_preview(&grouped),
+            json!({ "name": "a", "group": "acme" })
+        );
+        assert_eq!(
+            command_input_preview(&call),
+            command_input_preview(&grouped)
+        );
+        let plain = Cli::try_parse_from(["sniper-cli", "session", "create", "--name", "a"])
+            .unwrap()
+            .command;
+        assert_eq!(command_input_preview(&plain), json!({ "name": "a" }));
+    }
+
     // Turning the daily update off is how an agent stops Sniper asking GitHub
     // once a day, so the switch must name its value.
     #[test]
@@ -22421,6 +24464,108 @@ mod tests {
         assert!(
             Cli::try_parse_from(["sniper-cli", "templates", "library", "auto-update"]).is_err()
         );
+    }
+
+    #[test]
+    fn tcp_commands_build_the_requests_the_relay_api_takes() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(["sniper-cli", "tcp"].iter().chain(args))
+                .unwrap()
+                .command
+        };
+        let add = parse(&[
+            "listeners",
+            "add",
+            "--local-port",
+            "9000",
+            "--target-host",
+            "db.example.com",
+            "--target-port",
+            "5432",
+            "--tls",
+            "decrypt",
+        ]);
+        assert_eq!(add.operation_name(), "tcp.listeners.add");
+        assert!(add.requires_confirmation());
+        let preview = super::command_api_preview(&add).unwrap();
+        assert_eq!(preview["method"], "POST");
+        assert_eq!(preview["path"], "/api/tcp/listeners");
+        assert_eq!(
+            preview["body"],
+            json!({"enabled":true,"settings":{"local_port":9000,"target_host":"db.example.com","target_port":5432,"tls":"decrypt","protocol":"tcp","remote":false,"allowed_clients":[]}})
+        );
+
+        let udp = command_from_operation_input(
+            "tcp.listeners.add",
+            &json!({"local_port":9053,"target_host":"127.0.0.1","target_port":53,"protocol":"udp","enabled":false}),
+        )
+        .unwrap();
+        let body = super::command_api_preview(&udp).unwrap()["body"].clone();
+        assert_eq!(body["enabled"], false);
+        assert_eq!(body["settings"]["protocol"], "udp");
+
+        let id = "22222222-2222-2222-2222-222222222222";
+        let raw = parse(&["raw", "--id", id, "--direction", "server_to_client"]);
+        assert!(!raw.requires_confirmation());
+        assert_eq!(
+            super::command_api_preview(&raw).unwrap()["path"],
+            format!("/api/tcp/connections/{id}/raw?direction=server_to_client")
+        );
+
+        let search = parse(&["list", "--contains", "50 49", "--kind", "hex"]);
+        assert_eq!(
+            super::command_api_preview(&search).unwrap()["path"],
+            "/api/tcp/search?contains=50+49&kind=hex"
+        );
+
+        let replay = command_from_operation_input(
+            "tcp.replay",
+            &json!({"target_host":"db.example.com","target_port":5432,"messages":["PING","PONG"]}),
+        )
+        .unwrap();
+        assert!(replay.requires_confirmation());
+        let body = super::command_api_preview(&replay).unwrap()["body"].clone();
+        assert_eq!(body["messages"], json!(["UElORw==", "UE9ORw=="]));
+        assert_eq!(body["wait_ms"], 1000);
+        assert_eq!(body["tls"], false);
+
+        let decide = parse(&[
+            "decide",
+            "--id",
+            id,
+            "--pending-id",
+            id,
+            "--action",
+            "forward",
+            "--replacement-base64",
+            "UElORw==",
+        ]);
+        assert_eq!(
+            super::command_api_preview(&decide).unwrap()["path"],
+            format!("/api/tcp/connections/{id}/pending/{id}/decision")
+        );
+
+        for (operation, input) in [
+            (
+                "tcp.replay",
+                json!({"target_host":"db.example.com","target_port":5432}),
+            ),
+            (
+                "tcp.replay",
+                json!({"target_host":"db.example.com","target_port":5432,"messages":["%%"],"base64":true}),
+            ),
+            (
+                "tcp.decide",
+                json!({"id":id,"pending_id":id,"action":"drop","replacement_base64":"UElORw=="}),
+            ),
+            ("tcp.listeners.set", json!({"id":id})),
+            ("tcp.raw", json!({"id":id,"direction":"sideways"})),
+            ("tcp.status", json!({"verbose":true})),
+        ] {
+            let refused = command_from_operation_input(operation, &input)
+                .and_then(|command| validate_command_preflight(&command));
+            assert!(refused.is_err(), "{operation} {input}");
+        }
     }
 
     #[test]
@@ -22617,6 +24762,33 @@ mod tests {
             json!({"targets":target,"on":true,"history":"some"})
         )
         .is_err());
+        // A wait between requests, as Fuzzer takes it.
+        let paced = scan(
+            "templates.scan.start",
+            json!({"targets":target,"on":true,"delay":"200-800"}),
+        )
+        .unwrap();
+        assert_eq!(
+            super::command_api_preview(&paced).unwrap()["body"]["delay"],
+            json!({"min_ms":200,"max_ms":800})
+        );
+        assert!(scan(
+            "templates.scan.start",
+            json!({"targets":target,"on":true,"delay":"9-1"})
+        )
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "sniper-cli",
+            "templates",
+            "scan",
+            "start",
+            "--target",
+            "https://app.example.com",
+            "--on",
+            "--sleep",
+            "500",
+        ])
+        .is_ok());
         assert!(Cli::try_parse_from([
             "sniper-cli",
             "templates",

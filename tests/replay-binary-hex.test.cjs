@@ -81,13 +81,17 @@ for (const mode of ['raw', 'pretty']) test(`${mode}: decoded Hex keeps bytes, se
     assert.equal(f.undo(), false); assert.equal(f.redo(), true); assert.equal(f.a.requestText, draft);
   }
 });
-test('invalid Base64 Hex preserves draft and undo, without stale decoded bytes', () => {
-  const f = fixture(), original = f.a.requestText, n = f.cv().getContent().length;
-  f.edit(n - 4, n, '???');
+// The editor shows a binary body as bytes, so an edit always leaves valid
+// Base64. A draft saved by an older Sniper or a script can still hold invalid
+// Base64: it shows as it is, Hex names the problem, and the draft is kept.
+test('a draft with invalid Base64 shows as it is, Hex names it, and the draft is kept', () => {
+  const f = fixture(), invalid = f.a.requestText.replace(/\n\n[^]*$/, '\n\n???');
+  f.a.requestText = invalid; f.render();
+  assert.equal(f.cv().getText(), invalid);
   f.state.replayMessageViews.request = 'hex'; f.context.renderReplayViewContent('request');
-  assert.match(f.cv().getContent(), /Invalid Base64 body/); assert.equal(f.a.requestText, original.slice(0, -4) + '???');
+  assert.match(f.cv().getContent(), /Invalid Base64 body/); assert.equal(f.a.requestText, invalid);
   f.state.replayMessageViews.request = 'raw'; f.context.renderReplayViewContent('request');
-  assert.equal(f.undo(), true); assert.equal(f.a.requestText, original);
+  assert.equal(f.cv().getText(), invalid); assert.equal(f.a.requestText, invalid);
 });
 for (const render of ['renderReplay', 'renderReplayViewContent']) test(`legacy binary ${render} is read-only decoded Hex; text editing is retained`, () => {
   const f = fixture(); delete f.els.replayRequestCM;

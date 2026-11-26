@@ -53,7 +53,7 @@ function fixture() {
   });
   for (const name of ['renderFuzzer', 'renderFuzzerPayloadsEditor', 'updateFuzzerRequestText',
     'updateFuzzerPayloadsText', 'markFuzzerDraftChanged', 'loadWorkspaceState',
-    'applyWorkspaceState', 'reloadSessionWorkspace', 'resetSessionScopedUiState']) {
+    'applyWorkspaceState', 'reloadSessionWorkspace', 'resetSessionScopedUiState', 'fuzzerBodyIsBinary', 'fuzzerShownText', 'fuzzerStoredText', 'fuzzerDraftShowsBytes']) {
     vm.runInContext(source(name), f.context);
   }
   vm.runInContext(appSource.match(/^class WorkspaceSessionMismatchError[^]*?^\}/m)[0], f.context);
@@ -247,7 +247,7 @@ for (const phase of ['sessions', 'settings']) test(`late decoded B ${phase} cann
     vm.runInContext(source('_applySettings'), f.context);
   }
   const { pending } = await f.begin();
-  assert.equal(f.requests[0].url, phase === 'sessions' ? '/api/sessions' : '/api/settings');
+  assert.match(f.requests[0].url, phase === 'sessions' ? /^\/api\/sessions$/ : /^\/api\/settings\?session_id=/);
   let decode;
   f.requests[0].resolve({ ok: true, json: () => new Promise(resolve => { decode = resolve; }) });
   await tick(); assert.equal(typeof decode, 'function');
@@ -438,4 +438,40 @@ for (const path of ['startup', 'full reload']) test(`${path} HTTP failure never 
   assert.equal(f.context.workspaceLoaded, false);
   assert.doesNotMatch(f.els.fuzzerMeta.textContent, /malicious-marker|secret-fixture-marker|Authorization/);
   assert.match(f.els.fuzzerMeta.textContent, /Could not load session/);
+});
+
+// The session a click asked for can be deleted while the window loads it, by
+// sniper-cli or by an agent, and its reads then answer 404. The settings read
+// asked six times over four seconds, and either read left the window empty on
+// a session that is gone.
+for (const phase of ['settings', 'workspace']) test(`a session deleted before its ${phase} read gives way to the one the list names`, async () => {
+  const f = fixture();
+  let lists = 0;
+  f.context.loadSessions = async () => {
+    // The session the click asked for, then the list without it.
+    f.state.activeSession = { id: lists++ ? 'session-a' : 'session-b' };
+    f.state.viewedSessionId = f.state.activeSession.id;
+  };
+  if (phase === 'settings') {
+    vm.runInContext(source('loadSettings'), f.context);
+    f.context._applySettings = async () => true;
+  }
+  const { pending } = await f.begin();
+  const settled = pending.then(() => null, error => error);
+  assert.match(f.requests[0].url, new RegExp(`^/api/${phase === 'settings' ? 'settings' : 'workspace-state'}\\?session_id=session-b`));
+  f.requests[0].resolve({ ok: false, status: 404, text: async () => '' });
+  await tick(); await tick();
+  assert.equal(lists, 2, 'the list is read again at once');
+  if (phase === 'settings') {
+    assert.match(f.requests[1].url, /^\/api\/settings\?session_id=session-a/);
+    f.requests[1].resolve({ ok: true, status: 200, json: async () => ({}) });
+    await tick();
+  }
+  assert.equal(f.requests.length, phase === 'settings' ? 3 : 2);
+  assert.match(f.requests.at(-1).url, /^\/api\/workspace-state\?session_id=session-a/);
+  const snapshot = f.snapshot('GET /a HTTP/1.1'); snapshot.session_id = 'session-a';
+  f.succeed(f.requests.length - 1, snapshot);
+  assert.equal(await settled, null);
+  assert.equal(f.state.activeSession.id, 'session-a'); assert.equal(f.context.workspaceLoaded, true);
+  assert.equal(f.state.workspaceLoadError, '');
 });

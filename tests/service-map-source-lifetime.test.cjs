@@ -361,10 +361,10 @@ test('an exact row never inherits its origin products, whether its own were omit
     assert.doesNotMatch(f.els.detail.innerHTML, /nginx|1\.26\.2|Header-reported technologies/, 'exact source never inherits its origin aggregate');
   }
 });
-test('production activation and external session changes use the existing workspace reset chain', () => {
+test('showing another session and external session changes use the existing workspace reset chain', () => {
   const { loadFunctions } = require('./frontend-test-helpers.cjs');
-  const app = loadFunctions(['activateSessionById', 'handleExternalSessionChanged', 'reloadSessionWorkspace', 'resetSessionScopedUiState']);
-  assert.match(String(app.activateSessionById), /await reloadSessionWorkspace\(/);
+  const app = loadFunctions(['viewSessionById', 'handleExternalSessionChanged', 'reloadSessionWorkspace', 'resetSessionScopedUiState']);
+  assert.match(String(app.viewSessionById), /await reloadSessionWorkspace\(/);
   assert.match(String(app.handleExternalSessionChanged), /await reloadSessionWorkspace\(/);
   assert.match(String(app.reloadSessionWorkspace), /resetSessionScopedUiState\(\)/);
   assert.match(String(app.resetSessionScopedUiState), /targetServiceMapController\?\.reset\(\)/);

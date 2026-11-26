@@ -44,10 +44,10 @@ test('unchanged forward omits replacement, drop never sends editor content',asyn
     f.requests[2].resolve({});await tick();await resolveRefresh(f);
   }
 });
-test('Off only changes policy, retains pending, and does not forward bytes',async()=>{
+test('Off is one policy change; the client sends no forwards of its own',async()=>{
   const f=fixture();await ready(f);f.get('tcpInterceptToggle').listeners.click();
   assert.match(f.requests[2].path,/\/api\/tcp\/intercept\?/);
-  assert.deepEqual(JSON.parse(f.requests[2].options.body),{enabled:false,direction:'both',expected_revision:7});
+  assert.deepEqual(JSON.parse(f.requests[2].options.body),{enabled:false,direction:'both',expected_revision:7,filter:null});
   f.requests[2].resolve({...policy,enabled:false,revision:8});await tick();
   await resolveRefresh(f,[pending],{...policy,enabled:false,revision:8});
   assert.equal(f.get('tcpPendingHex').value,'00 ff');assert.equal(f.get('tcpForward').disabled,false);
@@ -152,11 +152,11 @@ test('TCP table scrolls sideways inside a keyboard-accessible area and keeps all
   const fs = require('node:fs'), path = require('node:path');
   const css = fs.readFileSync(path.join(__dirname, '../web/styles.css'), 'utf8');
   const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
-  assert.match(css, /\.tcp-table \{ table-layout: fixed; min-width: 760px; \}/);
+  assert.match(css, /\.tcp-table \{ table-layout: fixed; min-width: 856px; \}/);
   assert.match(css, /\.tcp-history \.history-table-shell \{ flex: 1; min-height: 0; overflow: auto; \}/);
   const panel = html.slice(html.indexOf('id="tcpPanel"'), html.indexOf('id="websocketPanel"'));
   assert.match(panel, /class="history-table-shell" tabindex="0" aria-label="TCP connections"/);
-  assert.equal((panel.match(/<th\b/g) || []).length, 8, 'all columns remain');
+  assert.equal((panel.match(/<th\b/g) || []).length, 9, 'all columns remain');
 });
 
 test('truncated intercept history discloses missing events as well as missing byte previews', async () => {
@@ -453,3 +453,78 @@ test('draft capacity rejects a new edit visibly and never evicts unsent edits; r
   f.session('new'); f.controller.reset();
   await selectDraftConnection(f, 'overflow'); assert.equal(f.get('tcpPendingHex').value, '00 ff');
 });
+
+test('Forward all and Drop all act on every held read, and only while something is held', async () => {
+  const f = fixture(); await ready(f);
+  assert.equal(f.get('tcpForwardAll').disabled, false);
+  f.get('tcpForwardAll').listeners.click();
+  assert.match(f.requests[2].path, /^\/api\/tcp\/intercept\/forward-all\?session_id=a&expected_active_session_id=a$/);
+  assert.equal(f.requests[2].options.method, 'POST');
+  f.requests[2].resolve({count:1}); await tick();
+  await resolveRefresh(f, [], {...policy, pending_count:0, paused_count:0});
+  assert.equal(f.get('tcpForwardAll').disabled, true);
+  assert.equal(f.get('tcpDropAll').disabled, true);
+  await resolveRefresh(f, [pending], policy);
+  f.get('tcpDropAll').listeners.click();
+  assert.match(f.requests.at(-1).path, /^\/api\/tcp\/intercept\/drop-all\?/);
+});
+test('a hold filter goes with the policy, shows only while holding, and clears to none', async () => {
+  const f = fixture(); await ready(f);
+  assert.equal(f.get('tcpInterceptMatch').hidden, false);
+  f.get('tcpInterceptMatch').value = 'PING'; f.get('tcpInterceptMatchKind').value = 'text';
+  f.get('tcpInterceptMatch').listeners.change();
+  assert.deepEqual(JSON.parse(f.requests[2].options.body), {enabled:true, direction:'both', expected_revision:7, filter:{kind:'text', value:'PING'}});
+  f.requests[2].resolve({...policy, revision:8, filter:{kind:'text', value:'PING'}}); await tick();
+  await resolveRefresh(f, [pending], {...policy, revision:8, filter:{kind:'text', value:'PING'}});
+  f.get('tcpInterceptMatch').value = '';
+  f.get('tcpInterceptMatch').listeners.change();
+  assert.equal(JSON.parse(f.requests.at(-1).options.body).filter, null);
+  f.requests.at(-1).resolve({...policy, enabled:false}); await tick();
+  await resolveRefresh(f, [], {...policy, enabled:false, pending_count:0, paused_count:0});
+  assert.equal(f.get('tcpInterceptMatch').hidden, true);
+  assert.equal(f.get('tcpInterceptMatchKind').hidden, true);
+});
+
+test('text editing round-trips every byte, shows lines, and refuses unknown escapes', () => {
+  const every = Uint8Array.from({length: 256}, (_, i) => i);
+  assert.deepEqual([...tcp.decodeEditable(tcp.encodeEditable(every))], [...every]);
+  for (let i = 0; i < 256; i++) assert.deepEqual([...tcp.decodeEditable(tcp.encodeEditable(Uint8Array.of(i)))], [i]);
+  // Valid UTF-8 shows as text; a broken sequence shows as escapes and comes back the same.
+  for (const bytes of [[0xc3, 0xa9], [0xe2, 0x82, 0xac], [0xc3], [0xe2, 0x28, 0xa1], [0xef, 0xbf, 0xbd], [0xf0, 0x9f, 0x98, 0x80]]) {
+    assert.deepEqual([...tcp.decodeEditable(tcp.encodeEditable(Uint8Array.from(bytes)))], bytes);
+  }
+  assert.equal(tcp.encodeEditable(Uint8Array.from(Buffer.from('a\r\nb\\'))), 'a\\r\nb\\\\');
+  assert.equal(tcp.encodeEditable(Uint8Array.from([0xc3, 0xa9, 0x00])), 'é\\x00');
+  assert.throws(() => tcp.decodeEditable('a\\q'), /\\\\/);
+  assert.throws(() => tcp.decodeEditable('a\\x4'), /\\x/);
+});
+test('the pending editor switches between Hex and Text and keeps an unsent edit', async () => {
+  const f = fixture(); await ready(f);
+  f.get('tcpPendingHex').value = '41 0d 0a'; f.get('tcpPendingHex').listeners.input();
+  f.get('tcpPendingTextMode').listeners.click();
+  assert.equal(f.get('tcpPendingHex').value, 'A\\r\n');
+  assert.equal(f.get('tcpPendingHex').attributes['aria-label'], 'Pending bytes as text');
+  f.get('tcpPendingHex').value = 'B\\x00'; f.get('tcpPendingHex').listeners.input();
+  f.get('tcpPendingHexMode').listeners.click();
+  assert.equal(f.get('tcpPendingHex').value, '42 00');
+  f.get('tcpPendingTextMode').listeners.click();
+  f.get('tcpForward').listeners.click();
+  assert.deepEqual(JSON.parse(f.requests[2].options.body), {action:'forward', expected_revision:0, replacement_base64:'QgA='});
+});
+test('a text edit that does not parse stays put and says why', async () => {
+  const f = fixture(); await ready(f);
+  f.get('tcpPendingTextMode').listeners.click();
+  f.get('tcpPendingHex').value = 'x\\q'; f.get('tcpPendingHex').listeners.input();
+  f.get('tcpPendingHexMode').listeners.click();
+  assert.equal(f.get('tcpPendingHex').value, 'x\\q', 'the edit is not converted or lost');
+  assert.match(f.get('tcpInterceptError').textContent, /\\\\/);
+  f.get('tcpForward').listeners.click();
+  assert.equal(f.requests.length, 2, 'nothing is sent');
+});
+test("Replay is offered for TCP connections and not for UDP flows", async () => {
+  const f = fixture(); await ready(f);
+  assert.equal(f.get('tcpReplayTab').hidden, false);
+  f.controller.setConnection({...connection, protocol:'udp'});
+  assert.equal(f.get('tcpReplayTab').hidden, true);
+});
+

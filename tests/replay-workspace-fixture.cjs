@@ -119,6 +119,6 @@ function fixture() {
   const succeed = (index, snapshot) => requests[index].resolve({ ok: true, status: 200, json: async () => plain(snapshot) });
   const adopt = async snapshot => { const index = requests.length; const pending = context.adoptExternalWorkspace(); if (requests.length > index) succeed(index, snapshot); await pending; };
   return { context, state, els, document, versionSelect, requests, toasts, notices, renders, beacons, timers, tab, seed, remote, succeed, adopt, syncDom,
-    setEditor: value => { editor = { getContent: () => value }; }, plain };
+    setEditor: value => { editor = { getContent: () => value, getText: () => value }; }, plain };
 }
 module.exports = { fixture, functions, plain, deferred };

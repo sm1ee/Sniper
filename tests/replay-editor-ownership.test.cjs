@@ -37,17 +37,18 @@ test("switching Replay tabs cannot undo another tab's request into the active mo
 
 for (const query of ["", "Host"]) test(`same-tab redraw keeps real history, selection and focus with search ${JSON.stringify(query)}`, () => {
   const f = editorFixture(); f.state.replayMessageSearch.request = query; f.render();
-  const original = lf(f.a.requestText), cv = f.cv();
+  // An edit keeps the request's CRLF; CodeMirror's document shows LF.
+  const original = f.a.requestText, cv = f.cv();
   editPath(f); const edited = f.a.requestText;
   cv.view.dispatch({ selection: { anchor: 3, head: 8 } }); cv.view.focus();
   const selection = f.selection(), focus = f.document.activeElement;
   for (let i = 0; i < 3; i++) f.render();
   assert.equal(f.cv(), cv); assert.deepEqual(f.selection(), selection);
   assert.equal(f.document.activeElement, focus);
-  assert.equal(f.undo(), true); assert.equal(f.cv().getContent(), original);
+  assert.equal(f.undo(), true); assert.equal(f.cv().getContent(), lf(original));
   assert.equal(f.a.requestText, original);
   f.render();
-  assert.equal(f.redo(), true); assert.equal(f.cv().getContent(), edited);
+  assert.equal(f.redo(), true); assert.equal(f.cv().getContent(), lf(edited));
   assert.equal(f.a.requestText, edited);
   assert.equal(f.undo(), true); assert.equal(f.undo(), false);
 });
@@ -104,7 +105,7 @@ function switchView(f, mode) {
 }
 
 for (const mode of ["raw", "pretty"]) test(`${mode} and Hex round-trips preserve same-owner undo and redo`, () => {
-  const f = editorFixture(); f.render(); const original = lf(f.a.requestText);
+  const f = editorFixture(); f.render(); const original = f.a.requestText;
   editPath(f); const edited = f.a.requestText, cv = f.cv();
   switchView(f, mode);
   assert.equal(f.cv(), cv); assert.equal(f.undo(), true); assert.equal(f.redo(), true);
@@ -116,7 +117,7 @@ for (const mode of ["raw", "pretty"]) test(`${mode} and Hex round-trips preserve
     assert.equal(f.cv()._editable, false); assert.equal(f.undo(), false);
     f.render(); f.render(); // Read-only redraws must keep the suspended state.
     switchView(f, mode);
-    assert.equal(f.cv()._editable, true); assert.equal(f.cv().getContent(), edited);
+    assert.equal(f.cv()._editable, true); assert.equal(f.cv().getContent(), lf(edited));
     assert.deepEqual(f.selection(), selection);
     assert.equal(f.undo(), true); assert.equal(f.a.requestText, original);
     assert.equal(f.undo(), false); assert.equal(f.redo(), true); assert.equal(f.a.requestText, edited);

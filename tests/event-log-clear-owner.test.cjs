@@ -98,6 +98,8 @@ function fixture() {
     assert.equal(c.workspaceLoaded, true);
     const previous = c.currentSessionId(), generation = c.workspaceStateGeneration;
     serverSession = { id, name: `Active ${id}`, active: true };
+    // As a click does: the session the next load shows.
+    state.viewedSessionId = id;
     await c.handleExternalSessionChanged(previous);
     assert.equal(c.currentSessionId(), id);
     assert.equal(c.workspaceLoaded, true);
@@ -177,7 +179,7 @@ test("current Clear targets its captured session once, advances counters, and re
   assert.equal(f.button.disabled, true);
   [...f.timers.values()][0](); assert.equal(f.button.classes.has("is-working-shown"), true);
   await f.click(); assert.equal(f.requests.length, 1, "progress prevents double dispatch");
-  assert.equal(f.requests[0].path, "/api/event-log?session_id=session-a&expected_active_session_id=session-a");
+  assert.equal(f.requests[0].path, "/api/event-log?session_id=session-a");
   f.requests[0].resolve({ ok: true }); await pending;
   assert.equal(f.state.eventLog.length, 0); assert.notEqual(f.state.eventLog, before.events);
   assert.equal(f.c._eventLogMutationGeneration, before.mutation + 1);

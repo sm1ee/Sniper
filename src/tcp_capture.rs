@@ -1,5 +1,5 @@
-//! Opt-in, fixed-destination TCP capture. Read chunks are not protocol messages.
-//! Interception is opt-in; read ranges are not application messages. No TLS termination.
+//! Opt-in, fixed-destination TCP and UDP capture. Read chunks are not protocol
+//! messages. Interception is opt-in; TLS decryption and upstream TLS are per listener.
 mod history_io;
 use history_io::HistoryDirectory;
 
@@ -11,7 +11,7 @@ use std::{
     net::{Ipv4Addr, Ipv6Addr},
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -25,10 +25,16 @@ use tokio::{
 use uuid::Uuid;
 
 pub const MAX_CONNECTIONS: usize = 256;
+/// How much of the history passthrough tunnels may hold. A browser opens many
+/// to the hosts left alone, and they must not crowd out listeners' connections.
+pub const MAX_PASSTHROUGH_RECORDS: usize = MAX_CONNECTIONS / 4;
 pub const MAX_ACTIVE: usize = 32;
-pub const MAX_CAPTURE_BYTES: usize = 256 * 1024;
-pub const MAX_CHUNKS: usize = 1024;
-const MAX_RECORD_FILE_BYTES: u64 = 3 * 1024 * 1024;
+pub const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+pub const MAX_CHUNKS: usize = 4096;
+// Base64 of a full capture, chunk metadata, and intercept previews, with room.
+const MAX_RECORD_FILE_BYTES: u64 = 6 * 1024 * 1024;
+/// Saved records a search may read, in bytes of record files.
+pub const SEARCH_READ_BUDGET: u64 = 64 * 1024 * 1024;
 // Leave room for crash leftovers without allowing an unbounded directory scan.
 const MAX_HISTORY_DIRECTORY_ENTRIES: usize = 4 * MAX_CONNECTIONS;
 pub const MAX_PENDING_BYTES: usize = 16 * 1024;
@@ -356,6 +362,9 @@ pub struct InterceptPolicy {
     pub pending_count: usize,
     pub paused_count: usize,
     pub forwarding_count: usize,
+    /// Only reads that match are held. A match across two reads is not found:
+    /// reads are not messages.
+    pub filter: Option<InterceptFilter>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -363,6 +372,75 @@ pub struct PolicyUpdate {
     pub enabled: bool,
     pub direction: PolicyDirection,
     pub expected_revision: u64,
+    #[serde(default)]
+    pub filter: Option<InterceptFilter>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InterceptFilter {
+    pub kind: FilterKind,
+    pub value: String,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterKind {
+    Text,
+    Hex,
+    Regex,
+}
+#[derive(Clone)]
+pub enum Matcher {
+    Bytes(Vec<u8>),
+    Pattern(regex::bytes::Regex),
+}
+impl Matcher {
+    pub fn compile(filter: &InterceptFilter) -> Result<Self, InterceptError> {
+        let bad = |message: &str| InterceptError::BadRequest(message.into());
+        if filter.value.is_empty() || filter.value.len() > 1024 {
+            return Err(bad("A pattern is 1 to 1024 characters."));
+        }
+        Ok(match filter.kind {
+            FilterKind::Text => Self::Bytes(filter.value.as_bytes().to_vec()),
+            FilterKind::Hex => {
+                let compact: Vec<u8> = filter
+                    .value
+                    .bytes()
+                    .filter(|byte| !byte.is_ascii_whitespace())
+                    .collect();
+                // Spaces alone leave nothing to look for, and an empty needle
+                // would panic while the intercept and history locks are held.
+                if compact.is_empty()
+                    || compact.len() % 2 != 0
+                    || !compact.iter().all(u8::is_ascii_hexdigit)
+                {
+                    return Err(bad("Enter whole hex byte pairs."));
+                }
+                Self::Bytes(
+                    compact
+                        .chunks(2)
+                        .map(|pair| {
+                            u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap()
+                        })
+                        .collect(),
+                )
+            }
+            FilterKind::Regex => Self::Pattern(
+                regex::bytes::RegexBuilder::new(&filter.value)
+                    // Match raw byte patterns (e.g. \x80-\xff and `.`) rather
+                    // than UTF-8 code points on arbitrary binary streams.
+                    .unicode(false)
+                    .size_limit(1 << 20)
+                    .build()
+                    .map_err(|_| bad("The pattern is not a valid regular expression."))?,
+            ),
+        })
+    }
+    fn matches(&self, bytes: &[u8]) -> bool {
+        match self {
+            Self::Bytes(needle) => bytes.windows(needle.len()).any(|window| window == needle),
+            Self::Pattern(pattern) => pattern.is_match(bytes),
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -447,6 +525,7 @@ struct PendingRange {
 }
 struct InterceptRuntime {
     policy: InterceptPolicy,
+    matcher: Option<Matcher>,
     pending: BTreeMap<Uuid, PendingRange>,
     connections: BTreeMap<Uuid, watch::Sender<bool>>,
 }
@@ -478,19 +557,352 @@ impl Default for InterceptRuntime {
                 pending_count: 0,
                 paused_count: 0,
                 forwarding_count: 0,
+                filter: None,
             },
+            matcher: None,
             pending: BTreeMap::new(),
             connections: BTreeMap::new(),
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TcpSettings {
     pub local_port: u16,
     pub target_host: String,
     pub target_port: u16,
+    /// Left out when off, so a plain listener reads the same to an older Sniper.
+    #[serde(default, skip_serializing_if = "TlsMode::is_off")]
+    pub tls: TlsMode,
+    /// Other devices may connect, from the addresses in `allowed_clients`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remote: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_clients: Vec<String>,
+    #[serde(default, skip_serializing_if = "Protocol::is_tcp")]
+    pub protocol: Protocol,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Protocol {
+    #[default]
+    Tcp,
+    /// One flow per client address; each datagram is one chunk.
+    Udp,
+}
+
+impl Protocol {
+    fn is_tcp(&self) -> bool {
+        *self == Self::Tcp
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// An address or network: `192.0.2.7`, `192.0.2.0/24`, `2001:db8::/32`.
+fn parse_network(entry: &str) -> Option<(std::net::IpAddr, u8)> {
+    let entry = entry.trim();
+    let (address, prefix) = match entry.split_once('/') {
+        Some((address, prefix)) => (address, Some(prefix.parse::<u8>().ok()?)),
+        None => (entry, None),
+    };
+    let ip = address.parse::<std::net::IpAddr>().ok()?.to_canonical();
+    let bits = if ip.is_ipv4() { 32 } else { 128 };
+    let prefix = prefix.unwrap_or(bits);
+    (prefix <= bits).then_some((ip, prefix))
+}
+
+fn in_network(ip: std::net::IpAddr, network: std::net::IpAddr, prefix: u8) -> bool {
+    use std::net::IpAddr::{V4, V6};
+    match (ip, network) {
+        (V4(ip), V4(network)) => {
+            let mask = u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0);
+            u32::from(ip) & mask == u32::from(network) & mask
+        }
+        (V6(ip), V6(network)) => {
+            let mask = u128::MAX.checked_shl(128 - u32::from(prefix)).unwrap_or(0);
+            u128::from(ip) & mask == u128::from(network) & mask
+        }
+        _ => false,
+    }
+}
+
+/// This machine, or a listed device. IPv4 arrives v4-mapped on a dual-stack socket.
+fn client_allowed(peer: std::net::IpAddr, allowed: &[String]) -> bool {
+    let peer = peer.to_canonical();
+    peer.is_loopback()
+        || allowed
+            .iter()
+            .filter_map(|entry| parse_network(entry))
+            .any(|(network, prefix)| in_network(peer, network, prefix))
+}
+
+/// Whether any of `addresses` is one of Sniper's own guarded listeners.
+/// Whether a target is one of Sniper's guarded ports on this machine. Any
+/// address of the machine counts: a UI on every interface is announced as
+/// 127.0.0.1, and it trusts a connection that comes from this machine.
+fn reaches_guarded(addresses: &[std::net::SocketAddr], guarded: &[std::net::SocketAddr]) -> bool {
+    addresses.iter().any(|address| {
+        guarded
+            .iter()
+            .any(|listener| listener.port() == address.port())
+            && crate::proxy::ip_belongs_to_this_machine(
+                address.ip().to_canonical(),
+                Ipv4Addr::UNSPECIFIED.into(),
+            )
+    })
+}
+
+/// Whether `address` resolves back to the listener described by `settings`.
+/// A remote listener binds every interface, so any address of this machine on
+/// `local_port` loops back into it.
+fn targets_self_listener(address: std::net::SocketAddr, settings: &TcpSettings) -> bool {
+    if settings.local_port == 0 || address.port() != settings.local_port {
+        return false;
+    }
+    let ip = address.ip().to_canonical();
+    if settings.remote {
+        crate::proxy::ip_belongs_to_this_machine(ip, Ipv4Addr::UNSPECIFIED.into())
+    } else {
+        is_loopback(ip)
+    }
+}
+
+/// The socket a UDP flow reaches its target from. A target that resolves to
+/// the listener itself or a guarded Sniper port is refused. Tries every
+/// resolved address so IPv6-first DNS falls back to IPv4 when needed.
+async fn open_udp_upstream(
+    settings: &TcpSettings,
+    guarded: &[std::net::SocketAddr],
+) -> Result<tokio::net::UdpSocket, TcpFailure> {
+    let addresses: Vec<_> = connection_stage(
+        tokio::net::lookup_host((settings.target_host.as_str(), settings.target_port)),
+        Duration::from_secs(10),
+        true,
+    )
+    .await?
+    .collect();
+    if addresses.is_empty() {
+        return Err(TcpFailure::ResolutionFailed);
+    }
+    if addresses
+        .iter()
+        .any(|address| targets_self_listener(*address, settings))
+    {
+        return Err(TcpFailure::SelfTarget);
+    }
+    if reaches_guarded(&addresses, guarded) {
+        return Err(TcpFailure::GuardedTarget);
+    }
+    for target in addresses {
+        let local = if target.is_ipv6() {
+            std::net::SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
+        } else {
+            std::net::SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
+        };
+        let Ok(socket) = tokio::net::UdpSocket::bind(local).await else {
+            continue;
+        };
+        if socket.connect(target).await.is_ok() {
+            return Ok(socket);
+        }
+    }
+    Err(TcpFailure::ConnectFailed)
+}
+
+/// Every interface for a UDP listener, IPv6 and IPv4 on one socket (falling
+/// back to IPv4 when IPv6 is unavailable on the host).
+fn bind_udp_every_interface(port: u16) -> std::io::Result<tokio::net::UdpSocket> {
+    let dual_stack = (|| -> std::io::Result<tokio::net::UdpSocket> {
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV6,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+        socket.set_only_v6(false)?;
+        socket.bind(&std::net::SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+        socket.set_nonblocking(true)?;
+        tokio::net::UdpSocket::from_std(socket.into())
+    })();
+    if dual_stack.is_ok() {
+        return dual_stack;
+    }
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    socket.bind(&std::net::SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
+    socket.set_nonblocking(true)?;
+    tokio::net::UdpSocket::from_std(socket.into())
+}
+
+/// Every interface, IPv6 and IPv4 on one socket (falling back to IPv4 when
+/// IPv6 is unavailable on the host).
+fn bind_every_interface(port: u16) -> std::io::Result<TcpListener> {
+    let dual_stack = (|| -> std::io::Result<TcpListener> {
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV6,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )?;
+        socket.set_only_v6(false)?;
+        #[cfg(unix)]
+        socket.set_reuse_address(true)?;
+        socket.bind(&std::net::SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+        socket.listen(1024)?;
+        socket.set_nonblocking(true)?;
+        TcpListener::from_std(socket.into())
+    })();
+    if dual_stack.is_ok() {
+        return dual_stack;
+    }
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    #[cfg(unix)]
+    socket.set_reuse_address(true)?;
+    socket.bind(&std::net::SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
+    socket.listen(1024)?;
+    socket.set_nonblocking(true)?;
+    TcpListener::from_std(socket.into())
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsMode {
+    /// Bytes are relayed as they are.
+    #[default]
+    Off,
+    /// A client that starts TLS is answered with a certificate from Sniper's CA
+    /// and the target is reached over TLS; both sides are captured in plain
+    /// text. A client that does not start TLS, or a server that speaks first,
+    /// is relayed as it is.
+    Decrypt,
+    /// The client speaks plain text and Sniper adds TLS towards the target.
+    Upstream,
+}
+
+impl TlsMode {
+    fn is_off(&self) -> bool {
+        *self == Self::Off
+    }
+}
+
+pub const MAX_LISTENERS: usize = 16;
+pub const UNKNOWN_LISTENER: &str = "unknown TCP listener";
+
+/// A listener the session keeps. One that is on starts again when its session
+/// is opened, as the proxy listener does.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TcpListenerConfig {
+    pub id: Uuid,
+    pub enabled: bool,
+    pub settings: TcpSettings,
+}
+
+/// What adding or changing a listener takes.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TcpListenerInput {
+    pub enabled: bool,
+    pub settings: TcpSettings,
+}
+
+/// Where a recorded connection came from.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TcpSource {
+    /// A client of one of the session's listeners.
+    #[default]
+    Listener,
+    /// Sent by TCP Replay.
+    Replay,
+    /// A CONNECT tunnel through the HTTP proxy that carried neither TLS nor HTTP.
+    Connect,
+    /// A passthrough host's tunnel through the HTTP proxy, relayed undecrypted.
+    Passthrough,
+    #[serde(other)]
+    Unknown,
+}
+
+impl TcpSource {
+    fn is_listener(&self) -> bool {
+        *self == Self::Listener
+    }
+}
+
+pub const MAX_REPLAY_MESSAGES: usize = 64;
+/// However much the target keeps talking, a replay ends after this.
+const REPLAY_LIMIT: Duration = Duration::from_secs(120);
+
+/// `POST /api/tcp/replay`: messages to send, one at a time, to a target.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayRequest {
+    pub target_host: String,
+    pub target_port: u16,
+    #[serde(default)]
+    pub tls: bool,
+    /// Each message as standard base64.
+    pub messages: Vec<String>,
+    /// How long the target may stay silent before the next message goes.
+    #[serde(default = "default_replay_wait")]
+    pub wait_ms: u64,
+    #[serde(default)]
+    pub from: Option<Uuid>,
+}
+
+fn default_replay_wait() -> u64 {
+    1000
+}
+
+pub enum ListenerChange {
+    Add(TcpListenerInput),
+    Update(Uuid, TcpListenerInput),
+    Remove(Uuid),
+    /// `POST /api/tcp/start`: turns on the listener on this port, or adds one.
+    Start(TcpSettings),
+    /// `POST /api/tcp/stop`: turns every listener off.
+    StopAll,
+}
+
+impl ListenerChange {
+    pub fn starts(&self) -> bool {
+        match self {
+            Self::Add(input) | Self::Update(_, input) => input.enabled,
+            Self::Start(_) => true,
+            Self::Remove(_) | Self::StopAll => false,
+        }
+    }
+    /// Whether the settings a change carries can be used at all, which needs
+    /// no session. Asked before a session's port is opened for a listener.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        match self {
+            Self::Add(input) | Self::Update(_, input) => input.settings.validate(),
+            Self::Start(settings) => settings.validate(),
+            Self::Remove(_) | Self::StopAll => Ok(()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TcpListenerStatus {
+    #[serde(flatten)]
+    pub config: TcpListenerConfig,
+    pub running: bool,
+    /// Clients refused because they are not on the listener's list.
+    pub refused: u64,
+    /// Why a listener that is on is not running, such as a port in use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 impl TcpSettings {
     fn validate(&self) -> anyhow::Result<()> {
@@ -508,6 +920,24 @@ impl TcpSettings {
             "invalid target host"
         );
         self.normalized_host()?;
+        anyhow::ensure!(
+            self.protocol == Protocol::Tcp || self.tls == TlsMode::Off,
+            "TLS is for TCP listeners."
+        );
+        if self.remote {
+            anyhow::ensure!(
+                !self.allowed_clients.is_empty(),
+                "Name the devices that may connect: IP addresses or networks such as 192.0.2.0/24."
+            );
+            anyhow::ensure!(
+                self.allowed_clients.len() <= 32
+                    && self
+                        .allowed_clients
+                        .iter()
+                        .all(|entry| entry.len() <= 64 && parse_network(entry).is_some()),
+                "Each device is an IP address or a network such as 192.0.2.0/24, at most 32 of them."
+            );
+        }
         Ok(())
     }
     fn normalized_host(&self) -> anyhow::Result<String> {
@@ -526,7 +956,7 @@ impl TcpSettings {
         }
         Ok(host.to_owned())
     }
-    fn target_label(&self) -> String {
+    pub(crate) fn target_label(&self) -> String {
         if self.target_host.contains(':') {
             format!("[{}]:{}", self.target_host, self.target_port)
         } else {
@@ -567,6 +997,11 @@ pub enum TcpFailure {
     SelfTarget,
     RelayFailed,
     StorageFailed,
+    ProxyFailed,
+    TlsFailed,
+    /// A client on another device aimed at Sniper's own UI, proxy or a browser
+    /// it drives, which trust connections from this machine.
+    GuardedTarget,
     #[serde(other)]
     Unknown,
 }
@@ -621,6 +1056,25 @@ pub struct TcpConnection {
     pub peer: String,
     #[serde(deserialize_with = "bounded_string::<_, MAX_TARGET_BYTES>")]
     pub target: String,
+    /// The listener's port; 0 in records saved before there could be several.
+    #[serde(default)]
+    pub local_port: u16,
+    /// Opened through the session's upstream proxy.
+    #[serde(default)]
+    pub via_proxy: bool,
+    /// The client's TLS was decrypted with a certificate from Sniper's CA.
+    #[serde(default)]
+    pub client_tls: bool,
+    /// The target was reached over TLS.
+    #[serde(default)]
+    pub server_tls: bool,
+    #[serde(default, skip_serializing_if = "TcpSource::is_listener")]
+    pub source: TcpSource,
+    #[serde(default, skip_serializing_if = "Protocol::is_tcp")]
+    pub protocol: Protocol,
+    /// The connection a replay was made from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replayed_from: Option<Uuid>,
     #[serde(deserialize_with = "bounded_string::<_, MAX_STATUS_BYTES>")]
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -902,14 +1356,18 @@ fn read_stored_connection_in(
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TcpStatus {
+    /// Whether any listener is running.
     pub enabled: bool,
-    pub settings: Option<TcpSettings>,
+    pub listeners: Vec<TcpListenerStatus>,
     pub history_count: usize,
     pub history_limit: usize,
     pub active_count: usize,
     pub active_limit: usize,
     pub load_error: bool,
     pub persistence_error: bool,
+    /// Connections relayed but not recorded because the history was full,
+    /// since it was last cleared.
+    pub unrecorded_count: u64,
 }
 /// Captures remain owned in memory until an explicit retry saves every record.
 #[derive(Debug)]
@@ -930,15 +1388,42 @@ struct History {
     persistence_error: bool,
 }
 struct Running {
-    settings: TcpSettings,
+    refused: Arc<AtomicU64>,
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
+}
+enum Bound {
+    Tcp(TcpListener),
+    Udp(tokio::net::UdpSocket),
+}
+
+/// What a listener does with a connection it accepted.
+enum Admission {
+    Refused,
+    Unrecorded,
+    Recorded(Box<TcpConnection>, watch::Receiver<bool>),
 }
 pub struct TcpCapture {
     directory: PathBuf,
     history: Arc<std::sync::Mutex<History>>,
-    running: Mutex<Option<Running>>,
+    /// The session's listeners, in the order they were added.
+    listeners: std::sync::Mutex<Vec<TcpListenerConfig>>,
+    /// Running listeners by id. Starting and stopping happen under this lock.
+    running: Mutex<BTreeMap<Uuid, Running>>,
+    errors: std::sync::Mutex<BTreeMap<Uuid, String>>,
+    /// The listeners' own live connections, which is what their limit is
+    /// compared with. Tunnels through the HTTP proxy and replays are not here.
     active_count: AtomicUsize,
+    unrecorded: AtomicU64,
+    /// The session's settings, for its upstream proxy; absent in unit tests.
+    runtime: std::sync::OnceLock<Arc<crate::runtime::RuntimeSettings>>,
+    /// Sniper's CA, for listeners that decrypt TLS.
+    certificates: std::sync::OnceLock<Arc<crate::certificate::CertificateAuthority>>,
+    /// How long a UDP flow may go without a datagram before it ends.
+    udp_idle: std::sync::Mutex<Duration>,
+    /// Completion signals for detached `relay_tunnel` tasks so `stop()` can
+    /// await their final `finish()` persistence before shutdown or session switch.
+    tunnel_done: std::sync::Mutex<BTreeMap<Uuid, watch::Receiver<bool>>>,
     intercept: std::sync::Mutex<InterceptRuntime>,
 }
 impl TcpCapture {
@@ -956,6 +1441,7 @@ impl TcpCapture {
             .revision
             .checked_add(1)
             .ok_or_else(|| InterceptError::Conflict("policy revision exhausted".into()))?;
+        let matcher = update.filter.as_ref().map(Matcher::compile).transpose()?;
         runtime.policy = InterceptPolicy {
             enabled: update.enabled,
             direction: update.direction,
@@ -963,8 +1449,47 @@ impl TcpCapture {
             pending_count: 0,
             paused_count: 0,
             forwarding_count: 0,
+            filter: update.filter,
         };
+        runtime.matcher = matcher;
         Ok(runtime.policy_snapshot())
+    }
+    /// Turning intercept off lets go of what it held, as HTTP intercept does.
+    pub async fn update_policy(
+        &self,
+        update: PolicyUpdate,
+    ) -> Result<InterceptPolicy, InterceptError> {
+        let off = !update.enabled;
+        self.set_policy(update)?;
+        if off {
+            self.release_all(DecisionAction::Forward).await;
+        }
+        Ok(self.policy())
+    }
+    /// Forwards unchanged, or drops, every read held in this session.
+    pub async fn release_all(&self, action: DecisionAction) -> usize {
+        let held: Vec<(Uuid, Uuid, u64)> = self
+            .intercept
+            .lock()
+            .unwrap()
+            .pending
+            .iter()
+            .filter(|(_, range)| range.event.state == "pending")
+            .map(|(id, range)| (range.connection_id, *id, range.event.revision))
+            .collect();
+        let mut released = 0;
+        for (connection, pending, expected_revision) in held {
+            let request = DecisionRequest {
+                action,
+                replacement_base64: None,
+                expected_revision,
+            };
+            // One that ended or was decided meanwhile is not counted.
+            if self.decide(connection, pending, request).await.is_ok() {
+                released += 1;
+            }
+        }
+        released
     }
     pub fn pending(&self, id: Uuid) -> Result<PendingResponse, InterceptError> {
         let runtime = self.intercept.lock().unwrap();
@@ -1088,12 +1613,18 @@ impl TcpCapture {
         let original_offset = *received;
         *received += bytes.len() as u64;
         if !runtime.policy.enabled
+            // A passthrough host was chosen to be left alone: recorded, never held.
+            || record.source == TcpSource::Passthrough
             || !matches!(
                 (runtime.policy.direction, direction),
                 (PolicyDirection::Both, _)
                     | (PolicyDirection::ClientToServer, Direction::ClientToServer)
                     | (PolicyDirection::ServerToClient, Direction::ServerToClient)
             )
+            || runtime
+                .matcher
+                .as_ref()
+                .is_some_and(|matcher| !matcher.matches(bytes))
         {
             return None;
         }
@@ -1226,26 +1757,56 @@ impl TcpCapture {
         Self {
             directory,
             history: Arc::new(std::sync::Mutex::new(history)),
-            running: Mutex::new(None),
+            listeners: std::sync::Mutex::new(Vec::new()),
+            running: Mutex::new(BTreeMap::new()),
+            errors: std::sync::Mutex::new(BTreeMap::new()),
             active_count: AtomicUsize::new(0),
+            unrecorded: AtomicU64::new(0),
+            runtime: std::sync::OnceLock::new(),
+            certificates: std::sync::OnceLock::new(),
+            udp_idle: std::sync::Mutex::new(Duration::from_secs(60)),
+            tunnel_done: std::sync::Mutex::new(BTreeMap::new()),
             intercept: std::sync::Mutex::new(InterceptRuntime::default()),
         }
     }
     pub async fn status(&self) -> TcpStatus {
         let running = self.running.lock().await;
+        let errors = self.errors.lock().unwrap().clone();
+        let listeners: Vec<_> = self
+            .listener_configs()
+            .into_iter()
+            .map(|config| {
+                let alive = running
+                    .get(&config.id)
+                    .is_some_and(|worker| !worker.task.is_finished());
+                TcpListenerStatus {
+                    refused: running
+                        .get(&config.id)
+                        .map_or(0, |worker| worker.refused.load(Ordering::Relaxed)),
+                    running: alive,
+                    error: (!alive && config.enabled)
+                        .then(|| errors.get(&config.id).cloned())
+                        .flatten(),
+                    config,
+                }
+            })
+            .collect();
+        let live = running
+            .values()
+            .filter(|worker| !worker.task.is_finished())
+            .count();
         let history = self.history.lock().unwrap();
         TcpStatus {
-            enabled: running
-                .as_ref()
-                .map(|r| !r.task.is_finished())
-                .unwrap_or(false),
-            settings: running.as_ref().map(|r| r.settings.clone()),
+            enabled: live > 0,
+            listeners,
             history_count: history.records.len(),
             history_limit: MAX_CONNECTIONS,
             active_count: self.active_count.load(Ordering::Relaxed),
-            active_limit: MAX_ACTIVE,
+            // Each running listener admits its own MAX_ACTIVE.
+            active_limit: MAX_ACTIVE * live.max(1),
             load_error: history.load_error,
             persistence_error: history.persistence_error,
+            unrecorded_count: self.unrecorded.load(Ordering::Relaxed),
         }
     }
     #[cfg(test)]
@@ -1284,6 +1845,13 @@ impl TcpCapture {
                 ended_at: r.ended_at,
                 peer: r.peer.clone(),
                 target: r.target.clone(),
+                local_port: r.local_port,
+                via_proxy: r.via_proxy,
+                client_tls: r.client_tls,
+                server_tls: r.server_tls,
+                source: r.source,
+                protocol: r.protocol,
+                replayed_from: r.replayed_from,
                 status: r.status.clone(),
                 failure: r.failure,
                 client_bytes: r.client_bytes,
@@ -1353,39 +1921,338 @@ impl TcpCapture {
         .await;
         match result {
             Ok(Ok(record)) => Ok(Some(record)),
-            _ => {
-                self.history.lock().unwrap().load_error = true;
-                anyhow::bail!("Saved TCP detail could not be read. History requires recovery.")
+            _ => self.unreadable(id),
+        }
+    }
+    /// A saved detail that could not be read. One cleared while it was being
+    /// read is gone, not damaged: only a record still in history needs recovery.
+    fn unreadable(&self, id: Uuid) -> anyhow::Result<Option<TcpConnection>> {
+        let mut history = self.history.lock().unwrap();
+        if !history.records.contains_key(&id) {
+            return Ok(None);
+        }
+        history.load_error = true;
+        anyhow::bail!("Saved TCP detail could not be read. History requires recovery.")
+    }
+    pub async fn apply(self: &Arc<Self>, change: ListenerChange) -> anyhow::Result<()> {
+        match change {
+            ListenerChange::Add(input) => self.add_listener(input).await.map(drop),
+            ListenerChange::Update(id, input) => self.update_listener(id, input).await,
+            ListenerChange::Remove(id) => self.remove_listener(id).await,
+            ListenerChange::Start(settings) => {
+                let port = settings.local_port;
+                let input = TcpListenerInput {
+                    enabled: true,
+                    settings,
+                };
+                match self
+                    .listener_configs()
+                    .into_iter()
+                    .find(|listener| listener.settings.local_port == port)
+                {
+                    Some(listener) => self.update_listener(listener.id, input).await,
+                    None => self.add_listener(input).await.map(drop),
+                }
+            }
+            ListenerChange::StopAll => {
+                for listener in self.listeners.lock().unwrap().iter_mut() {
+                    listener.enabled = false;
+                }
+                Ok(self.stop().await?)
             }
         }
     }
-    pub async fn start(self: &Arc<Self>, mut settings: TcpSettings) -> anyhow::Result<()> {
+    /// Removes every ended, saved record from memory and disk. Live records and
+    /// ones still waiting to be saved stay.
+    pub async fn clear(&self) -> anyhow::Result<usize> {
+        let removed: Vec<Uuid> = {
+            let mut history = self.history.lock().unwrap();
+            let ids: Vec<_> = history
+                .records
+                .values()
+                .filter(|record| record.ended_at.is_some() && record.durable)
+                .map(|record| record.id)
+                .collect();
+            for id in &ids {
+                history.records.remove(id);
+            }
+            ids
+        };
+        self.unrecorded.store(0, Ordering::Relaxed);
+        let directory = self.directory.clone();
+        let names: Vec<String> = removed.iter().map(|id| format!("{id}.json")).collect();
+        let deleted = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let root = match HistoryDirectory::open(&directory) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                root => root?,
+            };
+            for name in names {
+                match root.remove_file(std::ffi::OsStr::new(&name)) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(error)
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        })
+        .await;
+        if !matches!(deleted, Ok(Ok(()))) {
+            // Files left behind would come back at the next load.
+            self.history.lock().unwrap().load_error = true;
+            anyhow::bail!("Some TCP records could not be deleted. History requires recovery.");
+        }
+        Ok(removed.len())
+    }
+    pub fn use_runtime(&self, runtime: Arc<crate::runtime::RuntimeSettings>) {
+        let _ = self.runtime.set(runtime);
+    }
+    #[cfg(test)]
+    fn set_udp_idle(&self, idle: Duration) {
+        *self.udp_idle.lock().unwrap() = idle;
+    }
+
+    /// What a client at `peer` may not be relayed to: nothing for this machine.
+    fn guarded_for_peer(&self, peer: std::net::IpAddr) -> Vec<std::net::SocketAddr> {
+        if peer.to_canonical().is_loopback() {
+            Vec::new()
+        } else {
+            self.guarded()
+        }
+    }
+    /// What `client` may not be relayed to: nothing for this machine.
+    fn guarded_for(&self, client: &TcpStream) -> Vec<std::net::SocketAddr> {
+        match client.peer_addr() {
+            Ok(peer) => self.guarded_for_peer(peer.ip()),
+            Err(_) => self.guarded(),
+        }
+    }
+    /// What a client on another device may not be relayed to: Sniper's UI and
+    /// proxy listeners as they are now, a session port opened since included,
+    /// and the driver ports of the browsers it opened.
+    fn guarded(&self) -> Vec<std::net::SocketAddr> {
+        let mut guarded = match self.runtime.get() {
+            Some(runtime) => runtime.own_listeners().refused_to_remote(),
+            None => Vec::new(),
+        };
+        guarded.extend(
+            crate::browser::driver_ports()
+                .into_iter()
+                .map(|port| std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, port))),
+        );
+        guarded
+    }
+    pub fn use_certificates(&self, certificates: Arc<crate::certificate::CertificateAuthority>) {
+        let _ = self.certificates.set(certificates);
+    }
+    /// Whether the target's certificate goes unchecked, as for HTTP.
+    async fn upstream_insecure(&self) -> bool {
+        match self.runtime.get() {
+            Some(runtime) => runtime.upstream_insecure().await,
+            None => true,
+        }
+    }
+    async fn upstream_proxy(&self) -> Option<crate::upstream_proxy::UpstreamProxy> {
+        match self.runtime.get() {
+            Some(runtime) => Some(runtime.upstream_proxy().await),
+            None => None,
+        }
+    }
+    /// The records whose bytes in either direction match, even across reads,
+    /// and whether the search stopped early: saved records are read from disk
+    /// within `SEARCH_READ_BUDGET`.
+    pub async fn search(&self, matcher: &Matcher) -> (Vec<Uuid>, bool) {
+        let mut records: Vec<_> = self
+            .history
+            .lock()
+            .unwrap()
+            .records
+            .values()
+            .map(|record| (record.started_at, record.id))
+            .collect();
+        records.sort_by(|a, b| b.cmp(a));
+        let (mut found, mut budget) = (Vec::new(), SEARCH_READ_BUDGET);
+        for (_, id) in records {
+            let size = tokio::fs::metadata(self.directory.join(format!("{id}.json")))
+                .await
+                .map_or(0, |metadata| metadata.len());
+            if size > budget {
+                return (found, true);
+            }
+            budget -= size;
+            let Ok(Some(record)) = self.detail(id).await else {
+                continue;
+            };
+            let matcher = matcher.clone();
+            let matched = tokio::task::spawn_blocking(move || {
+                [Direction::ClientToServer, Direction::ServerToClient]
+                    .into_iter()
+                    .any(|direction| matcher.matches(&stream_of(&record, direction)))
+            })
+            .await
+            .unwrap_or(false);
+            if matched {
+                found.push(id);
+            }
+        }
+        (found, false)
+    }
+    /// One direction's captured bytes, joined in the order they were read.
+    pub async fn raw(&self, id: Uuid, direction: Direction) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self
+            .detail(id)
+            .await?
+            .map(|record| stream_of(&record, direction)))
+    }
+    /// Restores the listeners a session saved, without starting them.
+    pub fn restore_listeners(&self, listeners: Vec<TcpListenerConfig>) {
+        *self.listeners.lock().unwrap() = listeners;
+    }
+    pub fn listener_configs(&self) -> Vec<TcpListenerConfig> {
+        self.listeners.lock().unwrap().clone()
+    }
+    /// Starts every listener that is on and not running. One that cannot start
+    /// keeps its reason for the status and leaves the others running.
+    pub async fn start_saved(self: &Arc<Self>) {
+        for listener in self.listener_configs() {
+            if !listener.enabled || self.running.lock().await.contains_key(&listener.id) {
+                continue;
+            }
+            if let Err(error) = self.start_listener(listener.id, listener.settings).await {
+                self.errors
+                    .lock()
+                    .unwrap()
+                    .insert(listener.id, error.to_string());
+            }
+        }
+    }
+    /// A listener that is on is started first, and kept only if it starts.
+    pub async fn add_listener(self: &Arc<Self>, input: TcpListenerInput) -> anyhow::Result<Uuid> {
+        let settings = self.checked_settings(None, input.settings)?;
+        anyhow::ensure!(
+            self.listeners.lock().unwrap().len() < MAX_LISTENERS,
+            "A session keeps at most {MAX_LISTENERS} TCP listeners."
+        );
+        let id = Uuid::new_v4();
+        if input.enabled {
+            self.start_listener(id, settings.clone()).await?;
+        }
+        self.listeners.lock().unwrap().push(TcpListenerConfig {
+            id,
+            enabled: input.enabled,
+            settings,
+        });
+        Ok(id)
+    }
+    /// A running listener is restarted with the new settings; if they cannot
+    /// start, the old ones are put back and the change is not kept.
+    pub async fn update_listener(
+        self: &Arc<Self>,
+        id: Uuid,
+        input: TcpListenerInput,
+    ) -> anyhow::Result<()> {
+        let settings = self.checked_settings(Some(id), input.settings)?;
+        let old = self
+            .listener_configs()
+            .into_iter()
+            .find(|listener| listener.id == id)
+            .ok_or_else(|| anyhow::anyhow!(UNKNOWN_LISTENER))?;
+        let was_running = self.running.lock().await.contains_key(&id);
+        if was_running {
+            self.stop_listener(id).await?;
+        }
+        if input.enabled {
+            if let Err(error) = self.start_listener(id, settings.clone()).await {
+                if was_running {
+                    let _ = self.start_listener(id, old.settings).await;
+                }
+                return Err(error);
+            }
+        }
+        if let Some(listener) = self
+            .listeners
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|listener| listener.id == id)
+        {
+            listener.enabled = input.enabled;
+            listener.settings = settings;
+        }
+        self.errors.lock().unwrap().remove(&id);
+        Ok(())
+    }
+    pub async fn remove_listener(&self, id: Uuid) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.listeners
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|listener| listener.id == id),
+            UNKNOWN_LISTENER
+        );
+        let stopped = self.stop_listener(id).await;
+        self.listeners
+            .lock()
+            .unwrap()
+            .retain(|listener| listener.id != id);
+        self.errors.lock().unwrap().remove(&id);
+        Ok(stopped?)
+    }
+    /// Valid settings with a normalized host, on a port no other listener of
+    /// this session uses.
+    fn checked_settings(
+        &self,
+        id: Option<Uuid>,
+        mut settings: TcpSettings,
+    ) -> anyhow::Result<TcpSettings> {
         settings.validate()?;
         settings.target_host = settings.normalized_host()?;
+        anyhow::ensure!(
+            !self.listeners.lock().unwrap().iter().any(|listener| {
+                Some(listener.id) != id && listener.settings.local_port == settings.local_port
+            }),
+            "Another listener already uses local port {}.",
+            settings.local_port
+        );
+        Ok(settings)
+    }
+    #[cfg(test)]
+    pub async fn start(self: &Arc<Self>, settings: TcpSettings) -> anyhow::Result<()> {
+        self.start_listener(Uuid::new_v4(), settings).await
+    }
+    async fn start_listener(
+        self: &Arc<Self>,
+        id: Uuid,
+        mut settings: TcpSettings,
+    ) -> anyhow::Result<()> {
+        settings.validate()?;
+        settings.target_host = settings.normalized_host()?;
+        // A client left pointing at a session's proxy port must reach that
+        // session or nothing. UDP takes nothing from a TCP port.
+        anyhow::ensure!(
+            settings.protocol == Protocol::Udp
+                || !self
+                    .runtime
+                    .get()
+                    .is_some_and(|runtime| runtime.own_listeners().keeps(settings.local_port)),
+            "Local port {} is kept for a session's own proxy port. Choose another Local port.",
+            settings.local_port
+        );
         let mut running = self.running.lock().await;
         // A listener can exit on accept failure without an explicit stop. Reap
-        // only a completed owner, under the same lock used for start/stop, so
+        // only completed owners, under the same lock used for start/stop, so
         // concurrent starts cannot overlap or detach an in-flight shutdown.
-        if running
-            .as_ref()
-            .map(|worker| worker.task.is_finished())
-            .unwrap_or(false)
-        {
-            *running = None;
-        }
+        running.retain(|_, worker| !worker.task.is_finished());
         anyhow::ensure!(
-            running.is_none(),
-            "disable TCP capture before changing its listener"
+            !running.contains_key(&id),
+            "stop this TCP listener before starting it again"
         );
         {
             let history = self.history.lock().unwrap();
             anyhow::ensure!(
                 !history.load_error && !history.persistence_error,
                 "TCP history requires recovery before capture can start"
-            );
-            anyhow::ensure!(
-                history.records.len() < MAX_CONNECTIONS,
-                "TCP history is full; use a new session"
             );
         }
         if let Err(error) = HistoryDirectory::open(&self.directory) {
@@ -1394,7 +2261,21 @@ impl TcpCapture {
                 anyhow::bail!("TCP history requires recovery before capture can start");
             }
         }
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, settings.local_port)).await.map_err(|error| {
+        let bound = if settings.protocol == Protocol::Udp {
+            if settings.remote {
+                bind_udp_every_interface(settings.local_port)
+            } else {
+                tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, settings.local_port)).await
+            }
+            .map(Bound::Udp)
+        } else if settings.remote {
+            bind_every_interface(settings.local_port).map(Bound::Tcp)
+        } else {
+            TcpListener::bind((Ipv4Addr::LOCALHOST, settings.local_port))
+                .await
+                .map(Bound::Tcp)
+        };
+        let listener = bound.map_err(|error| {
             if error.kind() == std::io::ErrorKind::AddrInUse {
                 anyhow::anyhow!("Local port {} is already in use. Choose another Local port or stop the listener using it.", settings.local_port)
             } else {
@@ -1403,27 +2284,69 @@ impl TcpCapture {
         })?;
         let (stop, receiver) = watch::channel(false);
         let capture = self.clone();
-        let worker_settings = settings.clone();
+        let refused = Arc::new(AtomicU64::new(0));
+        let counted = refused.clone();
         let task = tokio::spawn(async move {
-            capture.serve(listener, worker_settings, receiver).await;
+            match listener {
+                Bound::Tcp(listener) => capture.serve(listener, settings, counted, receiver).await,
+                Bound::Udp(socket) => capture.serve_udp(socket, settings, counted, receiver).await,
+            }
         });
-        *running = Some(Running {
-            settings,
-            stop,
-            task,
-        });
+        running.insert(
+            id,
+            Running {
+                refused,
+                stop,
+                task,
+            },
+        );
+        self.errors.lock().unwrap().remove(&id);
         Ok(())
     }
-    /// Stops admission, cancels both directions, and waits for final persistence.
+    /// Stops admission on every listener, cancels both directions, and waits for
+    /// final persistence. No listener is turned off: a session switch or
+    /// shutdown stops them, and they start again with the session.
     pub async fn stop(&self) -> Result<(), TcpPersistenceError> {
         let mut running = self.running.lock().await;
-        if let Some(worker) = running.as_mut() {
+        for worker in running.values() {
             let _ = worker.stop.send(true);
+        }
+        for worker in running.values_mut() {
             // Preserve ownership if this caller is cancelled while joining. A
             // subsequent stop/session switch must still await the same worker.
             let _ = (&mut worker.task).await;
         }
-        *running = None;
+        running.clear();
+        // Close any non-listener connections (CONNECT/passthrough tunnels and
+        // in-flight replays) and wait for detached tunnel tasks to finish
+        // persisting their terminal records before the final retry.
+        let active_connections: Vec<_> = self
+            .intercept
+            .lock()
+            .unwrap()
+            .connections
+            .values()
+            .cloned()
+            .collect();
+        for close in active_connections {
+            let _ = close.send(true);
+        }
+        let tunnels: Vec<_> = self.tunnel_done.lock().unwrap().values().cloned().collect();
+        for mut done in tunnels {
+            let _ = done.wait_for(|finished| *finished).await;
+        }
+        // Keep start/stop serialized through the retry. Terminal records are
+        // immutable, so cancellation can only cause the same bytes to be saved
+        // again, never an older snapshot to overwrite a newer one.
+        self.retry_terminal_records().await
+    }
+    async fn stop_listener(&self, id: Uuid) -> Result<(), TcpPersistenceError> {
+        let mut running = self.running.lock().await;
+        if let Some(worker) = running.get_mut(&id) {
+            let _ = worker.stop.send(true);
+            let _ = (&mut worker.task).await;
+        }
+        running.remove(&id);
         // Keep start/stop serialized through the retry. Terminal records are
         // immutable, so cancellation can only cause the same bytes to be saved
         // again, never an older snapshot to overwrite a newer one.
@@ -1486,32 +2409,63 @@ impl TcpCapture {
         self: Arc<Self>,
         listener: TcpListener,
         settings: TcpSettings,
+        refused: Arc<AtomicU64>,
         mut stop: watch::Receiver<bool>,
     ) {
         let mut tasks = JoinSet::new();
         let (children_stop, children_receiver) = watch::channel(false);
+        // Occupied admission slots of every listener, including tasks finishing
+        // persistence; each listener admits at most MAX_ACTIVE of its own.
         loop {
-            // Count occupied admission slots, including tasks finishing persistence.
-            self.active_count.store(tasks.len(), Ordering::Relaxed);
             tokio::select! {
                 biased;
                 _ = stop.changed() => break,
-                Some(_) = tasks.join_next(), if !tasks.is_empty() => {},
+                Some(_) = tasks.join_next(), if !tasks.is_empty() => {
+                    self.active_count.fetch_sub(1, Ordering::Relaxed);
+                },
                 accepted = listener.accept(), if tasks.len() < MAX_ACTIVE => {
                     let Ok((client, peer)) = accepted else { break; };
-                    let mut runtime = self.intercept.lock().unwrap();
-                    let mut history = self.history.lock().unwrap();
-                    if history.records.len() >= MAX_CONNECTIONS || history.persistence_error || history.load_error { drop(client); continue; }
-                    let record = TcpConnection { id: Uuid::new_v4(), started_at: Utc::now(), ended_at: None, peer: peer.to_string(), target: settings.target_label(), status: "connecting".into(), failure: None, client_bytes: 0, server_bytes: 0, captured_bytes: 0, capture_truncated: false, durable: false, chunks: vec![], client_received_bytes:0, server_received_bytes:0, intercept_events:vec![], intercept_captured_bytes:0, intercept_truncated:false, intercept_event_count:0, intercept_schema_version:1, pending_count:0,pending_directions:vec![] };
-                    let (close, closed)=watch::channel(false);
-                    runtime.connections.insert(record.id,close);
-                    history.records.insert(record.id, record.clone());
-                    drop(history);
-                    drop(runtime);
-                    let capture = self.clone();
+                    // IPv4 on a dual-stack socket arrives v4-mapped; record it as IPv4.
+                    let peer = std::net::SocketAddr::new(peer.ip().to_canonical(), peer.port());
+                    if settings.remote && !client_allowed(peer.ip(), &settings.allowed_clients) {
+                        refused.fetch_add(1, Ordering::Relaxed);
+                        drop(client);
+                        continue;
+                    }
+                    // The locks end with this block, before anything awaits.
+                    let admitted = {
+                        let mut runtime = self.intercept.lock().unwrap();
+                        let mut history = self.history.lock().unwrap();
+                        if history.persistence_error || history.load_error {
+                            Admission::Refused
+                        } else if history.records.len() >= MAX_CONNECTIONS {
+                            // A full history must not break the app under test:
+                            // relay on, record nothing, and count it until cleared.
+                            Admission::Unrecorded
+                        } else {
+                            let record = self.new_record(Uuid::new_v4(), peer.to_string(), &settings);
+                            let (close, closed) = watch::channel(false);
+                            runtime.connections.insert(record.id, close);
+                            history.records.insert(record.id, record.clone());
+                            Admission::Recorded(Box::new(record), closed)
+                        }
+                    };
                     let settings = settings.clone();
                     let stop = children_receiver.clone();
-                    tasks.spawn(async move { capture.connection(client, record, settings, stop, closed).await; });
+                    match admitted {
+                        Admission::Refused => { drop(client); continue; }
+                        Admission::Unrecorded => {
+                            self.unrecorded.fetch_add(1, Ordering::Relaxed);
+                            let proxy = self.upstream_proxy().await;
+                            let guarded = self.guarded_for(&client);
+                            tasks.spawn(relay_unrecorded(self.clone(), client, settings, proxy, guarded, stop));
+                        }
+                        Admission::Recorded(record, closed) => {
+                            let capture = self.clone();
+                            tasks.spawn(async move { capture.connection(client, *record, settings, stop, closed).await; });
+                        }
+                    }
+                    self.active_count.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -1519,9 +2473,202 @@ impl TcpCapture {
         let _ = children_stop.send(true);
         // Dropping the sender is also cancellation; no detached relay tasks remain.
         while tasks.join_next().await.is_some() {
-            self.active_count.store(tasks.len(), Ordering::Relaxed);
+            self.active_count.fetch_sub(1, Ordering::Relaxed);
         }
-        self.active_count.store(0, Ordering::Relaxed);
+    }
+    /// A UDP listener: datagrams from each client address go to that client's
+    /// flow, which has its own socket towards the target.
+    async fn serve_udp(
+        self: Arc<Self>,
+        socket: tokio::net::UdpSocket,
+        settings: TcpSettings,
+        refused: Arc<AtomicU64>,
+        mut stop: watch::Receiver<bool>,
+    ) {
+        use tokio::sync::mpsc::error::TrySendError;
+        let socket = Arc::new(socket);
+        let mut flows: std::collections::HashMap<
+            std::net::SocketAddr,
+            (u64, tokio::sync::mpsc::Sender<Vec<u8>>),
+        > = std::collections::HashMap::new();
+        let mut next_flow_id = 0u64;
+        let mut tasks = JoinSet::new();
+        let (children_stop, children_receiver) = watch::channel(false);
+        let mut buffer = vec![0u8; 65536];
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop.changed() => break,
+                Some(done) = tasks.join_next(), if !tasks.is_empty() => {
+                    self.active_count.fetch_sub(1, Ordering::Relaxed);
+                    if let Ok((peer, flow_id)) = done {
+                        if flows.get(&peer).is_some_and(|(id, _)| *id == flow_id) {
+                            flows.remove(&peer);
+                        }
+                    }
+                },
+                received = socket.recv_from(&mut buffer) => {
+                    // A target's "port unreachable" can surface here; it is not ours.
+                    let Ok((length, peer)) = received else { continue; };
+                    if settings.remote && !client_allowed(peer.ip(), &settings.allowed_clients) {
+                        refused.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    let mut datagram = buffer[..length].to_vec();
+                    if let Some((_, flow)) = flows.get(&peer) {
+                        match flow.try_send(datagram) {
+                            // A flow that cannot keep up loses the datagram, as UDP may.
+                            Ok(()) | Err(TrySendError::Full(_)) => continue,
+                            Err(TrySendError::Closed(back)) => {
+                                flows.remove(&peer);
+                                datagram = back;
+                            }
+                        }
+                    }
+                    if tasks.len() >= MAX_ACTIVE {
+                        continue;
+                    }
+                    next_flow_id = next_flow_id.wrapping_add(1);
+                    let flow_id = next_flow_id;
+                    let (sender, receiver) = tokio::sync::mpsc::channel(256);
+                    let _ = sender.try_send(datagram);
+                    flows.insert(peer, (flow_id, sender));
+                    let flow = self.clone();
+                    let (socket, settings, stop) = (socket.clone(), settings.clone(), children_receiver.clone());
+                    tasks.spawn(async move {
+                        flow.udp_flow(socket, peer, settings, receiver, stop).await;
+                        (peer, flow_id)
+                    });
+                    self.active_count.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        let _ = children_stop.send(true);
+        while tasks.join_next().await.is_some() {
+            self.active_count.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+    /// One client's datagrams to the target and its replies back, until the
+    /// flow is idle for `udp_idle`, closed, or its listener stops.
+    async fn udp_flow(
+        self: Arc<Self>,
+        listener: Arc<tokio::net::UdpSocket>,
+        reply_to: std::net::SocketAddr,
+        settings: TcpSettings,
+        mut datagrams: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        mut stop: watch::Receiver<bool>,
+    ) {
+        let peer = std::net::SocketAddr::new(reply_to.ip().to_canonical(), reply_to.port());
+        let admitted = {
+            let mut runtime = self.intercept.lock().unwrap();
+            let mut history = self.history.lock().unwrap();
+            if history.persistence_error || history.load_error {
+                Admission::Refused
+            } else if history.records.len() >= MAX_CONNECTIONS {
+                Admission::Unrecorded
+            } else {
+                let record = self.new_record(Uuid::new_v4(), peer.to_string(), &settings);
+                let (close, closed) = watch::channel(false);
+                runtime.connections.insert(record.id, close);
+                history.records.insert(record.id, record.clone());
+                Admission::Recorded(Box::new(record), closed)
+            }
+        };
+        let (id, mut closed, _unrecorded) = match admitted {
+            Admission::Refused => return,
+            Admission::Unrecorded => {
+                self.unrecorded.fetch_add(1, Ordering::Relaxed);
+                let (keep, closed) = watch::channel(false);
+                (None, closed, Some(keep))
+            }
+            Admission::Recorded(record, closed) => {
+                if !self.persist(&record).await {
+                    self.finish(record.id, "failed", Some(TcpFailure::StorageFailed))
+                        .await;
+                    return;
+                }
+                (Some(record.id), closed, None)
+            }
+        };
+        let idle = *self.udp_idle.lock().unwrap();
+        let guarded = self.guarded_for_peer(peer.ip());
+        let relay = async {
+            let upstream = open_udp_upstream(&settings, &guarded).await?;
+            if let Some(id) = id {
+                if let Some(r) = self.history.lock().unwrap().records.get_mut(&id) {
+                    r.status = "open".into();
+                }
+            }
+            let mut buffer = vec![0u8; 65536];
+            loop {
+                tokio::select! {
+                    datagram = datagrams.recv() => {
+                        let Some(datagram) = datagram else { return Ok(()) };
+                        let Some((ticket, selected)) = self.hold(id, Direction::ClientToServer, &datagram).await? else { continue };
+                        let bytes = selected.as_deref().unwrap_or(&datagram);
+                        upstream.send(bytes).await.map_err(|_| TcpFailure::RelayFailed)?;
+                        self.sent(id, Direction::ClientToServer, bytes, ticket);
+                    }
+                    received = upstream.recv(&mut buffer) => {
+                        let length = match received {
+                            Ok(length) => length,
+                            // ICMP port unreachable surfaces as ConnectionRefused
+                            // on a connected UDP socket; keep waiting for a later
+                            // reply, but bail out on persistent socket errors so we
+                            // never busy-spin.
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::ConnectionRefused
+                                        | std::io::ErrorKind::WouldBlock
+                                        | std::io::ErrorKind::Interrupted
+                                ) =>
+                            {
+                                continue;
+                            }
+                            Err(_) => return Err(TcpFailure::RelayFailed),
+                        };
+                        let reply = buffer[..length].to_vec();
+                        let Some((ticket, selected)) = self.hold(id, Direction::ServerToClient, &reply).await? else { continue };
+                        let bytes = selected.as_deref().unwrap_or(&reply);
+                        listener.send_to(bytes, reply_to).await.map_err(|_| TcpFailure::RelayFailed)?;
+                        self.sent(id, Direction::ServerToClient, bytes, ticket);
+                    }
+                    _ = tokio::time::sleep(idle) => return Ok::<(), TcpFailure>(()),
+                }
+            }
+        };
+        let result = connection_outcome(relay, &mut stop, &mut closed).await;
+        if let Some(id) = id {
+            self.finish(id, result.0, result.1).await;
+        }
+    }
+    /// `decide_read` for a flow that may have no record.
+    async fn hold(
+        &self,
+        id: Option<Uuid>,
+        direction: Direction,
+        datagram: &[u8],
+    ) -> Result<Option<(Option<Uuid>, Option<Arc<[u8]>>)>, TcpFailure> {
+        match id {
+            Some(id) => self
+                .decide_read(id, direction, datagram)
+                .await
+                .map_err(|_| TcpFailure::RelayFailed),
+            None => Ok(Some((None, None))),
+        }
+    }
+    /// Records a datagram that went out and closes its held range.
+    fn sent(&self, id: Option<Uuid>, direction: Direction, bytes: &[u8], ticket: Option<Uuid>) {
+        if let Some(id) = id {
+            self.capture(id, direction, bytes);
+        }
+        if let Some(ticket) = ticket {
+            if let Some(range) = self.intercept.lock().unwrap().pending.get_mut(&ticket) {
+                range.event.written_bytes += bytes.len();
+            }
+            self.end_range(ticket, "forwarded");
+        }
     }
     async fn connection(
         self: Arc<Self>,
@@ -1540,54 +2687,423 @@ impl TcpCapture {
         }
         let result = connection_outcome(
             async {
-                let addresses: Vec<_> = connection_stage(
-                    tokio::net::lookup_host((settings.target_host.as_str(), settings.target_port)),
-                    Duration::from_secs(10),
-                    true,
-                )
-                .await?
-                .collect();
-                if addresses.is_empty() {
-                    return Err(TcpFailure::ResolutionFailed);
-                }
-                if addresses
-                    .iter()
-                    .any(|a| is_loopback(a.ip()) && a.port() == settings.local_port)
-                {
-                    return Err(TcpFailure::SelfTarget);
-                }
-                let upstream = connection_stage(
-                    TcpStream::connect(addresses.as_slice()),
-                    Duration::from_secs(10),
-                    false,
-                )
-                .await?;
-                // A self-target would recursively fill the connection budget.
                 let local = client.local_addr().map_err(|_| TcpFailure::ConnectFailed)?;
-                if upstream
-                    .peer_addr()
-                    .map_err(|_| TcpFailure::ConnectFailed)?
-                    == local
-                {
-                    return Err(TcpFailure::SelfTarget);
-                }
+                let proxy = self.upstream_proxy().await;
+                let guarded = self.guarded_for(&client);
+                let (upstream, via_proxy) =
+                    open_upstream(&settings, local, proxy.as_ref(), &guarded).await?;
+                let (client, upstream, client_tls, server_tls) =
+                    self.secure(&settings, client, upstream).await?;
                 if let Some(r) = self.history.lock().unwrap().records.get_mut(&id) {
                     r.status = "open".into();
+                    r.via_proxy = via_proxy;
+                    r.client_tls = client_tls;
+                    r.server_tls = server_tls;
                 }
-                let (client_read, client_write) = client.into_split();
-                let (server_read, server_write) = upstream.into_split();
-                tokio::try_join!(
-                    self.pump(id, Direction::ClientToServer, client_read, server_write),
-                    self.pump(id, Direction::ServerToClient, server_read, client_write)
-                )
-                .map_err(|_| TcpFailure::RelayFailed)?;
-                Ok::<(), TcpFailure>(())
+                self.relay_pair(id, client, upstream).await
             },
             &mut stop,
             &mut closed,
         )
         .await;
         self.finish(id, result.0, result.1).await;
+    }
+    /// Pumps both directions of an opened pair until both have ended.
+    async fn relay_pair(
+        &self,
+        id: Uuid,
+        client: Box<dyn Io>,
+        upstream: Box<dyn Io>,
+    ) -> Result<(), TcpFailure> {
+        let (client_read, client_write) = tokio::io::split(client);
+        let (server_read, server_write) = tokio::io::split(upstream);
+        tokio::try_join!(
+            self.pump(id, Direction::ClientToServer, client_read, server_write),
+            self.pump(id, Direction::ServerToClient, server_read, client_write)
+        )
+        .map_err(|_| TcpFailure::RelayFailed)?;
+        Ok(())
+    }
+    /// Relays a tunnel the HTTP proxy opened and records it like a listener's
+    /// connection. A tunnel the history cannot take is relayed unrecorded: it
+    /// carries the app's traffic, which must not break because history is
+    /// full. Dropping this future, as the proxy does to its tunnels on a
+    /// session switch, closes the relay, which then records how it ended.
+    /// Returns the bytes sent each way, as `copy_bidirectional` does.
+    pub(crate) async fn relay_tunnel(
+        self: &Arc<Self>,
+        mut client: Box<dyn Io>,
+        mut upstream: Box<dyn Io>,
+        peer: String,
+        target: String,
+        source: TcpSource,
+        via_proxy: bool,
+    ) -> std::io::Result<(u64, u64)> {
+        let admitted = {
+            let mut runtime = self.intercept.lock().unwrap();
+            let mut history = self.history.lock().unwrap();
+            let passthrough_full = source == TcpSource::Passthrough
+                && history
+                    .records
+                    .values()
+                    .filter(|record| record.source == TcpSource::Passthrough)
+                    .count()
+                    >= MAX_PASSTHROUGH_RECORDS;
+            if history.persistence_error || history.load_error {
+                None
+            } else if target.len() > MAX_TARGET_BYTES
+                || peer.len() > MAX_PEER_BYTES
+                || history.records.len() >= MAX_CONNECTIONS
+                || passthrough_full
+            {
+                self.unrecorded.fetch_add(1, Ordering::Relaxed);
+                None
+            } else {
+                let mut record = self.new_record(Uuid::new_v4(), peer, &TcpSettings::default());
+                record.target = target;
+                record.source = source;
+                record.via_proxy = via_proxy;
+                record.status = "open".into();
+                let (close, closed) = watch::channel(false);
+                runtime.connections.insert(record.id, close);
+                history.records.insert(record.id, record.clone());
+                Some((record, closed))
+            }
+        };
+        let Some((record, closed)) = admitted else {
+            return tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+        };
+        let id = record.id;
+        let (done_tx, done_rx) = watch::channel(false);
+        self.tunnel_done.lock().unwrap().insert(id, done_rx);
+        let finished = TunnelFinishGuard(self.clone(), id, done_tx);
+        let relay = tokio::spawn(
+            self.clone()
+                .tunnel(record, client, upstream, closed, finished),
+        );
+        let _close = CloseOnDrop(self.clone(), id);
+        relay.await.map_err(std::io::Error::other)?
+    }
+    async fn tunnel(
+        self: Arc<Self>,
+        record: TcpConnection,
+        mut client: Box<dyn Io>,
+        mut upstream: Box<dyn Io>,
+        mut closed: watch::Receiver<bool>,
+        _finished: TunnelFinishGuard,
+    ) -> std::io::Result<(u64, u64)> {
+        let id = record.id;
+        if !self.persist(&record).await {
+            // Relayed although it is not recorded, and ended like any tunnel
+            // when it is closed. Finished only then: finishing drops the
+            // channel that closes it, and a stop waits for every tunnel, so
+            // one finished first held a session switch and a quit until its
+            // two sides hung up.
+            let copied = tokio::select! {
+                copied = tokio::io::copy_bidirectional(&mut client, &mut upstream) => copied,
+                _ = closed.wait_for(|closed| *closed) => Ok((0, 0)),
+            };
+            self.finish(id, "failed", Some(TcpFailure::StorageFailed))
+                .await;
+            return copied;
+        }
+        // No listener stops a tunnel: it ends with its sides, or when closed.
+        let mut stop = closed.clone();
+        let (status, failure) = connection_outcome(
+            self.relay_pair(id, client, upstream),
+            &mut stop,
+            &mut closed,
+        )
+        .await;
+        self.finish(id, status, failure).await;
+        if failure.is_some() {
+            return Err(std::io::Error::other("TCP relay failed"));
+        }
+        Ok(self
+            .history
+            .lock()
+            .unwrap()
+            .records
+            .get(&id)
+            .map(|record| (record.client_bytes, record.server_bytes))
+            .unwrap_or_default())
+    }
+    /// Sends a request's messages to its target over a new connection, one at a
+    /// time, and records the exchange like a listener's: after each message the
+    /// replies are read until `wait_ms` passes without any, or the target closes.
+    pub async fn replay(
+        self: &Arc<Self>,
+        request: ReplayRequest,
+    ) -> Result<TcpConnection, InterceptError> {
+        let bad = |message: &str| InterceptError::BadRequest(message.into());
+        if request.messages.is_empty() || request.messages.len() > MAX_REPLAY_MESSAGES {
+            return Err(bad("A replay sends 1 to 64 messages."));
+        }
+        if !(50..=30_000).contains(&request.wait_ms) {
+            return Err(bad("The wait is 50 to 30000 ms."));
+        }
+        let messages = request
+            .messages
+            .iter()
+            .map(|message| STANDARD.decode(message))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| bad("Each message is standard base64."))?;
+        if messages.iter().any(Vec::is_empty) {
+            return Err(bad("A message cannot be empty."));
+        }
+        if messages.iter().map(Vec::len).sum::<usize>() > MAX_CAPTURE_BYTES {
+            return Err(InterceptError::TooLarge(
+                "A replay sends at most what one connection records.".into(),
+            ));
+        }
+        let mut settings = TcpSettings {
+            // Validation wants a port; a replay has no listener.
+            local_port: 1,
+            target_host: request.target_host,
+            target_port: request.target_port,
+            tls: if request.tls {
+                TlsMode::Upstream
+            } else {
+                TlsMode::Off
+            },
+            ..Default::default()
+        };
+        settings
+            .validate()
+            .map_err(|error| bad(&error.to_string()))?;
+        settings.target_host = settings
+            .normalized_host()
+            .map_err(|error| bad(&error.to_string()))?;
+        settings.local_port = 0;
+        let id = Uuid::new_v4();
+        let mut record = self.new_record(id, "replay".into(), &settings);
+        record.source = TcpSource::Replay;
+        record.replayed_from = request.from;
+        let closed = {
+            let mut runtime = self.intercept.lock().unwrap();
+            let mut history = self.history.lock().unwrap();
+            if history.load_error || history.persistence_error {
+                return Err(InterceptError::Conflict(
+                    "TCP history requires recovery before a replay.".into(),
+                ));
+            }
+            if history.records.len() >= MAX_CONNECTIONS {
+                return Err(InterceptError::Conflict(
+                    "TCP history is full. Clear it to replay.".into(),
+                ));
+            }
+            let (close, closed) = watch::channel(false);
+            runtime.connections.insert(id, close);
+            history.records.insert(id, record.clone());
+            closed
+        };
+        let (done_tx, done_rx) = watch::channel(false);
+        self.tunnel_done.lock().unwrap().insert(id, done_rx);
+        let finished = TunnelFinishGuard(self.clone(), id, done_tx);
+        let capture = self.clone();
+        let wait = Duration::from_millis(request.wait_ms);
+        let tls = request.tls;
+        // Run the replay in a tracked task with CloseOnDrop + TunnelFinishGuard
+        // so HTTP client aborts or session switches still finish and persist
+        // the record instead of leaving a stuck live entry.
+        let task = tokio::spawn(async move {
+            let _finished = finished;
+            if !capture.persist(&record).await {
+                capture
+                    .finish(id, "failed", Some(TcpFailure::StorageFailed))
+                    .await;
+                return;
+            }
+            // A replay is stopped by closing it, not by a listener.
+            let (_running, mut stop) = watch::channel(false);
+            let mut closed = closed;
+            let result = connection_outcome(
+                async {
+                    tokio::time::timeout(REPLAY_LIMIT, async {
+                        let proxy = capture.upstream_proxy().await;
+                        let unspecified = std::net::SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
+                        let (upstream, via_proxy) =
+                            open_upstream(&settings, unspecified, proxy.as_ref(), &[]).await?;
+                        let stream: Box<dyn Io> = if tls {
+                            let insecure = capture.upstream_insecure().await;
+                            Box::new(
+                                connect_tls(upstream, &settings.target_host, insecure, Vec::new())
+                                    .await?,
+                            )
+                        } else {
+                            Box::new(upstream)
+                        };
+                        if let Some(r) = capture.history.lock().unwrap().records.get_mut(&id) {
+                            r.status = "open".into();
+                            r.via_proxy = via_proxy;
+                            r.server_tls = tls;
+                        }
+                        capture.exchange(id, stream, messages, wait).await
+                    })
+                    .await
+                    .unwrap_or(Ok(()))
+                },
+                &mut stop,
+                &mut closed,
+            )
+            .await;
+            capture.finish(id, result.0, result.1).await;
+        });
+        let _close = CloseOnDrop(self.clone(), id);
+        let _ = task.await;
+        self.detail(id)
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(|| InterceptError::Conflict("The replay record could not be read.".into()))
+    }
+    async fn exchange(
+        &self,
+        id: Uuid,
+        mut stream: Box<dyn Io>,
+        messages: Vec<Vec<u8>>,
+        wait: Duration,
+    ) -> Result<(), TcpFailure> {
+        let mut buffer = vec![0u8; 16 * 1024];
+        for message in messages {
+            stream
+                .write_all(&message)
+                .await
+                .map_err(|_| TcpFailure::RelayFailed)?;
+            // Out before the replies are awaited, TLS included.
+            stream.flush().await.map_err(|_| TcpFailure::RelayFailed)?;
+            self.capture(id, Direction::ClientToServer, &message);
+            loop {
+                match tokio::time::timeout(wait, stream.read(&mut buffer)).await {
+                    // Silence: the target has said what it will for now.
+                    Err(_) => break,
+                    Ok(Ok(0)) => return Ok(()),
+                    Ok(Ok(read)) => self.capture(id, Direction::ServerToClient, &buffer[..read]),
+                    Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        return Ok(())
+                    }
+                    Ok(Err(_)) => return Err(TcpFailure::RelayFailed),
+                }
+            }
+        }
+        let _ = stream.shutdown().await;
+        Ok(())
+    }
+    fn new_record(&self, id: Uuid, peer: String, settings: &TcpSettings) -> TcpConnection {
+        TcpConnection {
+            id,
+            started_at: Utc::now(),
+            ended_at: None,
+            peer,
+            target: settings.target_label(),
+            local_port: settings.local_port,
+            via_proxy: false,
+            client_tls: false,
+            server_tls: false,
+            source: TcpSource::Listener,
+            protocol: settings.protocol,
+            replayed_from: None,
+            status: "connecting".into(),
+            failure: None,
+            client_bytes: 0,
+            server_bytes: 0,
+            captured_bytes: 0,
+            capture_truncated: false,
+            durable: false,
+            chunks: vec![],
+            client_received_bytes: 0,
+            server_received_bytes: 0,
+            intercept_events: vec![],
+            intercept_captured_bytes: 0,
+            intercept_truncated: false,
+            intercept_event_count: 0,
+            intercept_schema_version: 1,
+            pending_count: 0,
+            pending_directions: vec![],
+        }
+    }
+    /// Applies the listener's TLS mode to an opened connection pair, and says
+    /// which side ended up in TLS.
+    async fn secure(
+        &self,
+        settings: &TcpSettings,
+        client: TcpStream,
+        upstream: TcpStream,
+    ) -> Result<(Box<dyn Io>, Box<dyn Io>, bool, bool), TcpFailure> {
+        let insecure = self.upstream_insecure().await;
+        match settings.tls {
+            TlsMode::Off => Ok((Box::new(client), Box::new(upstream), false, false)),
+            TlsMode::Upstream => {
+                let server =
+                    connect_tls(upstream, &settings.target_host, insecure, Vec::new()).await?;
+                Ok((Box::new(client), Box::new(server), false, true))
+            }
+            TlsMode::Decrypt => {
+                if !client_starts_tls(&client, &upstream).await {
+                    return Ok((Box::new(client), Box::new(upstream), false, false));
+                }
+                let certificates = self.certificates.get().ok_or(TcpFailure::TlsFailed)?;
+                let start = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    tokio_rustls::LazyConfigAcceptor::new(
+                        rustls::server::Acceptor::default(),
+                        client,
+                    ),
+                )
+                .await
+                .map_err(|_| TcpFailure::TlsFailed)?
+                .map_err(|_| TcpFailure::TlsFailed)?;
+                let hello = start.client_hello();
+                let client_sni = hello.server_name().map(str::to_owned);
+                let client_cert_name = client_sni
+                    .clone()
+                    .unwrap_or_else(|| settings.target_host.clone());
+                // When forwarding localhost:<port> -> real.example.com:443 without
+                // /etc/hosts, the client sends SNI="localhost". Use target_host
+                // toward upstream when target_host is a hostname and client SNI
+                // is only a local/loopback name.
+                let upstream_sni = match &client_sni {
+                    Some(sni)
+                        if sni.trim_end_matches('.').eq_ignore_ascii_case("localhost")
+                            && settings
+                                .target_host
+                                .trim_matches(['[', ']'])
+                                .parse::<std::net::IpAddr>()
+                                .is_err() =>
+                    {
+                        settings.target_host.clone()
+                    }
+                    _ => client_cert_name.clone(),
+                };
+                // So do the application protocols: the target is offered the
+                // client's, and the client gets the one the target chose.
+                // gRPC, PostgreSQL and MQTT clients refuse anything else.
+                let offered = hello
+                    .alpn()
+                    .map(|protocols| protocols.map(<[u8]>::to_vec).collect())
+                    .unwrap_or_default();
+                let server = connect_tls(upstream, &upstream_sni, insecure, offered).await?;
+                let mut config = (*certificates
+                    .server_config_for_host(&client_cert_name)
+                    .map_err(|_| TcpFailure::TlsFailed)?)
+                .clone();
+                config.alpn_protocols = server
+                    .get_ref()
+                    .1
+                    .alpn_protocol()
+                    .map(<[u8]>::to_vec)
+                    .into_iter()
+                    .collect();
+                let client = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    start.into_stream(Arc::new(config)),
+                )
+                .await
+                .map_err(|_| TcpFailure::TlsFailed)?
+                .map_err(|_| TcpFailure::TlsFailed)?;
+                Ok((Box::new(client), Box::new(server), true, true))
+            }
+        }
     }
     async fn finish(&self, id: Uuid, status: &str, failure: Option<TcpFailure>) {
         let tickets: Vec<_> = {
@@ -1633,6 +3149,74 @@ impl TcpCapture {
             record.release_durable_payload();
         }
     }
+    /// Holds a read when intercept says so and waits for its decision: the
+    /// range it is accounted to, if held, and its replacement, if one was made;
+    /// `None` when it was dropped. A connection that goes before the decision
+    /// is an error. A held range is at most 16 KiB, so a larger datagram passes.
+    async fn decide_read(
+        &self,
+        id: Uuid,
+        direction: Direction,
+        read: &[u8],
+    ) -> std::io::Result<Option<(Option<Uuid>, Option<Arc<[u8]>>)>> {
+        // Empty UDP datagrams have no bytes to hold and would violate stored
+        // intercept event invariants (`original_length > 0`).
+        let admitted = if read.is_empty() || read.len() > MAX_PENDING_BYTES {
+            self.count_received(id, direction, read.len());
+            None
+        } else {
+            self.admit(id, direction, read)
+        };
+        let Some((pending_id, mut decisions)) = admitted else {
+            return Ok(Some((None, None)));
+        };
+        let mut selected: Option<Arc<[u8]>> = None;
+        let Some(decision) = decisions.recv().await else {
+            return Err(std::io::ErrorKind::ConnectionAborted.into());
+        };
+        let receipt = {
+            let mut runtime = self.intercept.lock().unwrap();
+            let pending = runtime
+                .pending
+                .get_mut(&pending_id)
+                .expect("owner retains admitted range");
+            pending.event.decided_at = Some(Utc::now());
+            pending.event.revision += 1;
+            match decision.request.action {
+                DecisionAction::Drop => {
+                    pending.event.state = "dropped".into();
+                    pending.event.selected_length = 0;
+                }
+                DecisionAction::Forward => {
+                    pending.event.state = "forwarding".into();
+                    pending.selected = decision.selected.map(Arc::from);
+                    pending.event.edited = pending.selected.is_some();
+                    if let Some(bytes) = &pending.selected {
+                        pending.event.selected_length = bytes.len();
+                    }
+                    selected = pending.selected.clone();
+                }
+            }
+            DecisionReceipt {
+                pending_id,
+                state: pending.event.state.clone(),
+            }
+        };
+        let _ = decision.ack.send(Ok(receipt));
+        if matches!(decision.request.action, DecisionAction::Drop) {
+            self.end_range(pending_id, "dropped");
+            return Ok(None);
+        }
+        Ok(Some((Some(pending_id), selected)))
+    }
+    fn count_received(&self, id: Uuid, direction: Direction, length: usize) {
+        if let Some(record) = self.history.lock().unwrap().records.get_mut(&id) {
+            match direction {
+                Direction::ClientToServer => record.client_received_bytes += length as u64,
+                Direction::ServerToClient => record.server_received_bytes += length as u64,
+            }
+        }
+    }
     async fn pump<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         &self,
         id: Uuid,
@@ -1642,53 +3226,21 @@ impl TcpCapture {
     ) -> std::io::Result<()> {
         let mut buffer = [0u8; 16 * 1024];
         loop {
-            let count = reader.read(&mut buffer).await?;
+            let count = match reader.read(&mut buffer).await {
+                // A TLS peer that closes without close_notify, as many clients
+                // do, has ended its side all the same. Plain TCP never says this.
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => 0,
+                read => read?,
+            };
             if count == 0 {
                 writer.shutdown().await?;
                 return Ok(());
             }
-            let admitted = self.admit(id, direction, &buffer[..count]);
-            let mut selected: Option<Arc<[u8]>> = None;
-            let mut ticket = None;
-            if let Some((pending_id, mut decisions)) = admitted {
-                ticket = Some(pending_id);
-                let Some(decision) = decisions.recv().await else {
-                    return Err(std::io::ErrorKind::ConnectionAborted.into());
-                };
-                let receipt = {
-                    let mut runtime = self.intercept.lock().unwrap();
-                    let pending = runtime
-                        .pending
-                        .get_mut(&pending_id)
-                        .expect("owner retains admitted range");
-                    pending.event.decided_at = Some(Utc::now());
-                    pending.event.revision += 1;
-                    match decision.request.action {
-                        DecisionAction::Drop => {
-                            pending.event.state = "dropped".into();
-                            pending.event.selected_length = 0;
-                        }
-                        DecisionAction::Forward => {
-                            pending.event.state = "forwarding".into();
-                            pending.selected = decision.selected.map(Arc::from);
-                            pending.event.edited = pending.selected.is_some();
-                            if let Some(bytes) = &pending.selected {
-                                pending.event.selected_length = bytes.len();
-                            }
-                            selected = pending.selected.clone();
-                        }
-                    }
-                    DecisionReceipt {
-                        pending_id,
-                        state: pending.event.state.clone(),
-                    }
-                };
-                let _ = decision.ack.send(Ok(receipt));
-                if matches!(decision.request.action, DecisionAction::Drop) {
-                    self.end_range(pending_id, "dropped");
-                    continue;
-                }
-            }
+            let Some((ticket, selected)) =
+                self.decide_read(id, direction, &buffer[..count]).await?
+            else {
+                continue;
+            };
             let bytes = selected.as_deref().unwrap_or(&buffer[..count]);
             let mut offset = 0;
             while offset < bytes.len() {
@@ -1704,6 +3256,9 @@ impl TcpCapture {
                 }
                 offset += written;
             }
+            // TLS takes plain bytes while its socket is full and sends them
+            // only on a later write or a flush; the next read may never come.
+            writer.flush().await?;
             if let Some(ticket) = ticket {
                 self.end_range(ticket, "forwarded");
             }
@@ -1746,6 +3301,203 @@ impl TcpCapture {
         }
     }
 }
+fn stream_of(record: &TcpConnection, direction: Direction) -> Vec<u8> {
+    let mut chunks: Vec<_> = record
+        .chunks
+        .iter()
+        .filter(|chunk| chunk.direction == direction)
+        .collect();
+    chunks.sort_by_key(|chunk| chunk.sequence);
+    chunks
+        .into_iter()
+        .flat_map(|chunk| STANDARD.decode(&chunk.data_base64).unwrap_or_default())
+        .collect()
+}
+
+/// A relayed stream, plain or in TLS.
+pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+
+/// Closes a recorded tunnel when the proxy task carrying it is cut.
+struct CloseOnDrop(Arc<TcpCapture>, Uuid);
+impl Drop for CloseOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.close(self.1);
+    }
+}
+
+/// Signals `TcpCapture::stop` once a detached `relay_tunnel` or `replay` task
+/// has finished persisting its terminal record, even if it exits early or panics.
+struct TunnelFinishGuard(Arc<TcpCapture>, Uuid, watch::Sender<bool>);
+impl Drop for TunnelFinishGuard {
+    fn drop(&mut self) {
+        self.0.tunnel_done.lock().unwrap().remove(&self.1);
+        let _ = self.2.send(true);
+    }
+}
+
+/// Whether the client's first bytes are a TLS handshake record (16 03 0x). A
+/// server that speaks first, as SMTP or MySQL do, decides it: not TLS.
+async fn client_starts_tls(client: &TcpStream, upstream: &TcpStream) -> bool {
+    let first = async {
+        let mut head = [0u8; 3];
+        // Set once a record header has begun. A client that has sent nothing
+        // is waited for: a pool opens its connections ahead of time and starts
+        // TLS later, and with both ends silent there is nothing to relay yet.
+        let mut deadline = None;
+        loop {
+            let read = client.peek(&mut head).await.unwrap_or(0);
+            if read == 0 || head[0] != 0x16 {
+                return false;
+            }
+            if read >= 2 && head[1] != 0x03 {
+                return false;
+            }
+            if read >= 3 {
+                return head[2] <= 0x04;
+            }
+            // The rest of the record header is still on its way.
+            let deadline = *deadline
+                .get_or_insert_with(|| tokio::time::Instant::now() + Duration::from_secs(2));
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    let upstream_speaks = async {
+        let mut byte = [0u8; 1];
+        if !matches!(upstream.peek(&mut byte).await, Ok(read) if read > 0) {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        biased;
+        starts = first => starts,
+        _ = upstream_speaks => false,
+    }
+}
+
+/// TLS towards the target, named by SNI where the name is a host name, offering
+/// the application protocols in `alpn`.
+async fn connect_tls(
+    upstream: TcpStream,
+    name: &str,
+    insecure: bool,
+    alpn: Vec<Vec<u8>>,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>, TcpFailure> {
+    let name = rustls::pki_types::ServerName::try_from(name.trim_matches(['[', ']']).to_owned())
+        .map_err(|_| TcpFailure::TlsFailed)?;
+    let mut config = (*crate::ws_tls::client_config(insecure)).clone();
+    config.alpn_protocols = alpn;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, upstream),
+    )
+    .await
+    .map_err(|_| TcpFailure::TlsFailed)?
+    .map_err(|_| TcpFailure::TlsFailed)
+}
+
+/// Whether a target goes through the upstream proxy: only while it is on, and
+/// never for a bypassed host or this machine, which a proxy elsewhere cannot
+/// reach.
+fn routes_through(proxy: &crate::upstream_proxy::UpstreamProxy, host: &str) -> bool {
+    let bare = host.trim_matches(['[', ']']).trim_end_matches('.');
+    let local = bare.eq_ignore_ascii_case("localhost")
+        || bare
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.to_canonical())
+            .is_ok_and(|ip| {
+                is_loopback(ip)
+                    || crate::proxy::ip_belongs_to_this_machine(ip, Ipv4Addr::UNSPECIFIED.into())
+            });
+    proxy.enabled && !local && !proxy.bypasses(host)
+}
+
+/// Opens the connection to a listener's target, through the upstream proxy when
+/// it applies, and says whether it did. A direct connection that comes back to
+/// the listener is refused: it would recursively fill the connection budget.
+async fn open_upstream(
+    settings: &TcpSettings,
+    listener: std::net::SocketAddr,
+    proxy: Option<&crate::upstream_proxy::UpstreamProxy>,
+    guarded: &[std::net::SocketAddr],
+) -> Result<(TcpStream, bool), TcpFailure> {
+    if let Some(proxy) = proxy.filter(|proxy| routes_through(proxy, &settings.target_host)) {
+        // The proxy's own errors can name hosts; only the code is kept.
+        return proxy
+            .connect(&settings.target_host, settings.target_port)
+            .await
+            .map(|stream| (stream, true))
+            .map_err(|_| TcpFailure::ProxyFailed);
+    }
+    let addresses: Vec<_> = connection_stage(
+        tokio::net::lookup_host((settings.target_host.as_str(), settings.target_port)),
+        Duration::from_secs(10),
+        true,
+    )
+    .await?
+    .collect();
+    if addresses.is_empty() {
+        return Err(TcpFailure::ResolutionFailed);
+    }
+    if addresses
+        .iter()
+        .any(|address| targets_self_listener(*address, settings))
+    {
+        return Err(TcpFailure::SelfTarget);
+    }
+    if reaches_guarded(&addresses, guarded) {
+        return Err(TcpFailure::GuardedTarget);
+    }
+    let upstream = connection_stage(
+        TcpStream::connect(addresses.as_slice()),
+        Duration::from_secs(10),
+        false,
+    )
+    .await?;
+    let peer = upstream
+        .peer_addr()
+        .map_err(|_| TcpFailure::ConnectFailed)?;
+    if same_address(peer, listener) || targets_self_listener(peer, settings) {
+        return Err(TcpFailure::SelfTarget);
+    }
+    Ok((upstream, false))
+}
+
+/// A connection past the history cap: relayed with the listener's TLS, but not
+/// recorded or held.
+async fn relay_unrecorded(
+    capture: Arc<TcpCapture>,
+    client: TcpStream,
+    settings: TcpSettings,
+    proxy: Option<crate::upstream_proxy::UpstreamProxy>,
+    guarded: Vec<std::net::SocketAddr>,
+    mut stop: watch::Receiver<bool>,
+) {
+    let relay = async {
+        let local = client.local_addr().ok()?;
+        let (upstream, _) = open_upstream(&settings, local, proxy.as_ref(), &guarded)
+            .await
+            .ok()?;
+        let (mut client, mut upstream, _, _) =
+            capture.secure(&settings, client, upstream).await.ok()?;
+        tokio::io::copy_bidirectional(&mut client, &mut upstream)
+            .await
+            .ok()
+    };
+    tokio::select! {
+        _ = wait_stop(&mut stop) => {}
+        _ = relay => {}
+    }
+}
+
+/// A dual-stack socket names an IPv4 peer in its v4-mapped form.
+fn same_address(a: std::net::SocketAddr, b: std::net::SocketAddr) -> bool {
+    a.ip().to_canonical() == b.ip().to_canonical() && a.port() == b.port()
+}
+
 fn is_loopback(ip: std::net::IpAddr) -> bool {
     ip.is_loopback()
         || match ip {
@@ -1779,6 +3531,13 @@ mod tests {
             ended_at: None,
             peer: "127.0.0.1:1".into(),
             target: "127.0.0.1:2".into(),
+            local_port: 0,
+            via_proxy: false,
+            client_tls: false,
+            server_tls: false,
+            source: TcpSource::Listener,
+            protocol: Protocol::Tcp,
+            replayed_from: None,
             status: "open".into(),
             failure: None,
             client_bytes: 0,
@@ -1883,6 +3642,7 @@ mod tests {
                 local_port,
                 target_host: "127.0.0.1".into(),
                 target_port: 9,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1956,6 +3716,7 @@ mod tests {
                 local_port: 12345,
                 target_host: "127.0.0.1".into(),
                 target_port: 9,
+                ..Default::default()
             })
             .await
             .unwrap_err()
@@ -2397,10 +4158,13 @@ mod tests {
                 } else {
                     address.port()
                 },
+                ..Default::default()
             };
             let (stop, rx) = watch::channel(false);
             let copy = capture.clone();
-            let relay = tokio::spawn(async move { copy.serve(listener, settings, rx).await });
+            let relay = tokio::spawn(async move {
+                copy.serve(listener, settings, Default::default(), rx).await
+            });
             let mut client = TcpStream::connect(address).await.unwrap();
             let mut bytes = vec![];
             let _ = tokio::time::timeout(Duration::from_secs(3), client.read_to_end(&mut bytes))
@@ -2843,13 +4607,10 @@ mod tests {
                 .records
                 .insert(record.id, record);
         }
-        let settings = TcpSettings {
-            local_port: 19999,
-            target_host: "127.0.0.1".into(),
-            target_port: 19998,
-        };
-        assert!(capture.start(settings).await.is_err());
+        // A full history still starts: it relays without recording.
+        capture.start(loopback(free_port(), 1)).await.unwrap();
         assert_eq!(capture.records().await.len(), MAX_CONNECTIONS);
+        capture.stop().await.unwrap();
     }
     #[tokio::test]
     async fn stopped_receiver_is_immediately_observed() {
@@ -2870,11 +4631,13 @@ mod tests {
             local_port: address.port(),
             target_host: "127.0.0.1".into(),
             target_port,
+            ..Default::default()
         };
         let (stop, receiver) = watch::channel(false);
         let copy = capture.clone();
         let relay = tokio::spawn(async move {
-            copy.serve(listener, settings, receiver).await;
+            copy.serve(listener, settings, Default::default(), receiver)
+                .await;
         });
         let server = tokio::spawn(async move {
             let (mut socket, _) = upstream.accept().await.unwrap();
@@ -2929,33 +4692,34 @@ mod tests {
     #[tokio::test]
     async fn cancelled_stop_retains_the_join_owner() {
         let capture = temporary();
+        let id = Uuid::new_v4();
         let (release, blocked) = tokio::sync::oneshot::channel::<()>();
         let (stop, _receiver) = watch::channel(false);
         let task = tokio::spawn(async move {
             let _ = blocked.await;
         });
-        *capture.running.lock().await = Some(Running {
-            settings: TcpSettings {
-                local_port: 19999,
-                target_host: "127.0.0.1".into(),
-                target_port: 19998,
+        capture.running.lock().await.insert(
+            id,
+            Running {
+                refused: Default::default(),
+                stop,
+                task,
             },
-            stop,
-            task,
-        });
+        );
         assert!(
             tokio::time::timeout(Duration::from_millis(20), capture.stop())
                 .await
                 .is_err()
         );
-        assert!(capture.running.lock().await.is_some());
+        assert!(capture.running.lock().await.contains_key(&id));
         release.send(()).unwrap();
         capture.stop().await.unwrap();
-        assert!(capture.running.lock().await.is_none());
+        assert!(capture.running.lock().await.is_empty());
     }
     #[tokio::test]
     async fn completed_listener_can_restart_but_concurrent_starts_cannot_overlap() {
         let capture = temporary();
+        let id = Uuid::new_v4();
         let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
@@ -2963,6 +4727,7 @@ mod tests {
             local_port: port,
             target_host: "127.0.0.1".into(),
             target_port: 1,
+            ..Default::default()
         };
         let (stop, _receiver) = watch::channel(false);
         // Model the completed owner left behind when serve exits on accept failure.
@@ -2974,47 +4739,57 @@ mod tests {
         })
         .await
         .unwrap();
-        *capture.running.lock().await = Some(Running {
-            settings: settings.clone(),
-            stop,
-            task,
-        });
+        capture.running.lock().await.insert(
+            id,
+            Running {
+                refused: Default::default(),
+                stop,
+                task,
+            },
+        );
         assert!(!capture.status().await.enabled);
-        let (first, second) =
-            tokio::join!(capture.start(settings.clone()), capture.start(settings));
+        let (first, second) = tokio::join!(
+            capture.start_listener(id, settings.clone()),
+            capture.start_listener(id, settings)
+        );
         assert_ne!(first.is_ok(), second.is_ok());
         assert!(capture.status().await.enabled);
         capture.stop().await.unwrap();
-        assert!(capture.running.lock().await.is_none());
+        assert!(capture.running.lock().await.is_empty());
     }
     #[tokio::test]
     async fn start_does_not_reap_an_unfinished_worker_after_cancelled_stop() {
         let capture = temporary();
+        let id = Uuid::new_v4();
         let settings = TcpSettings {
             local_port: 19999,
             target_host: "127.0.0.1".into(),
             target_port: 19998,
+            ..Default::default()
         };
         let (release, blocked) = tokio::sync::oneshot::channel::<()>();
         let (stop, _receiver) = watch::channel(false);
         let task = tokio::spawn(async move {
             let _ = blocked.await;
         });
-        *capture.running.lock().await = Some(Running {
-            settings: settings.clone(),
-            stop,
-            task,
-        });
+        capture.running.lock().await.insert(
+            id,
+            Running {
+                refused: Default::default(),
+                stop,
+                task,
+            },
+        );
         assert!(
             tokio::time::timeout(Duration::from_millis(20), capture.stop())
                 .await
                 .is_err()
         );
-        assert!(capture.start(settings).await.is_err());
-        assert!(capture.running.lock().await.is_some());
+        assert!(capture.start_listener(id, settings).await.is_err());
+        assert!(capture.running.lock().await.contains_key(&id));
         release.send(()).unwrap();
         capture.stop().await.unwrap();
-        assert!(capture.running.lock().await.is_none());
+        assert!(capture.running.lock().await.is_empty());
     }
     #[test]
     fn listener_host_syntax_and_labels() {
@@ -3023,6 +4798,7 @@ mod tests {
                 local_port: 9000,
                 target_host: host.into(),
                 target_port: 9100,
+                ..Default::default()
             };
             settings.validate().unwrap();
             settings.target_host = settings.normalized_host().unwrap();
@@ -3043,6 +4819,7 @@ mod tests {
                 local_port: 9000,
                 target_host: host.into(),
                 target_port: 9100,
+                ..Default::default()
             };
             assert!(settings.validate().is_err(), "{host}");
         }
@@ -3062,6 +4839,7 @@ mod tests {
                 local_port,
                 target_host: "127.0.0.1".into(),
                 target_port,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -3139,11 +4917,12 @@ mod tests {
                 local_port,
                 target_host: "127.0.0.1".into(),
                 target_port: 1,
+                ..Default::default()
             })
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), format!("Local port {local_port} is already in use. Choose another Local port or stop the listener using it."));
-        assert!(capture.running.lock().await.is_none());
+        assert!(capture.running.lock().await.is_empty());
     }
     #[tokio::test]
     async fn bracketed_ipv6_start_relays_actual_loopback_bytes() {
@@ -3154,24 +4933,18 @@ mod tests {
         drop(probe);
         let capture = temporary();
         capture
-            .start(TcpSettings {
-                local_port,
-                target_host: "[::1]".into(),
-                target_port,
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: TcpSettings {
+                    local_port,
+                    target_host: "[::1]".into(),
+                    target_port,
+                    ..Default::default()
+                },
             })
             .await
             .unwrap();
-        assert_eq!(
-            capture
-                .running
-                .lock()
-                .await
-                .as_ref()
-                .unwrap()
-                .settings
-                .target_host,
-            "::1"
-        );
+        assert_eq!(capture.listener_configs()[0].settings.target_host, "::1");
         let server = tokio::spawn(async move {
             let (mut socket, _) = upstream.accept().await.unwrap();
             let mut bytes = [0; 3];
@@ -3200,14 +4973,16 @@ mod tests {
         assert!(TcpSettings {
             local_port: 0,
             target_host: "127.0.0.1".into(),
-            target_port: 12
+            target_port: 12,
+            ..Default::default()
         }
         .validate()
         .is_err());
         assert!(TcpSettings {
             local_port: 12,
             target_host: "http://example.com".into(),
-            target_port: 12
+            target_port: 12,
+            ..Default::default()
         }
         .validate()
         .is_err());
@@ -3218,6 +4993,7 @@ mod tests {
                 enabled: true,
                 direction: PolicyDirection::Both,
                 expected_revision: 0,
+                filter: None,
             })
             .unwrap();
     }
@@ -3354,6 +5130,7 @@ mod tests {
                 enabled: false,
                 direction: PolicyDirection::Both,
                 expected_revision: 1,
+                filter: None,
             })
             .unwrap();
         assert_eq!(capture.policy().pending_count, 1);
@@ -3419,6 +5196,7 @@ mod tests {
                 enabled: false,
                 direction: PolicyDirection::Both,
                 expected_revision: 1,
+                filter: None,
             })
             .unwrap();
         assert_eq!(
@@ -3499,7 +5277,8 @@ mod tests {
             .set_policy(PolicyUpdate {
                 enabled: false,
                 direction: PolicyDirection::Both,
-                expected_revision: 0
+                expected_revision: 0,
+                filter: None,
             })
             .is_err());
         for (action, replacement, revision) in [
@@ -3567,10 +5346,14 @@ mod tests {
             local_port: address.port(),
             target_host: "127.0.0.1".into(),
             target_port: upstream.local_addr().unwrap().port(),
+            ..Default::default()
         };
         let (stop, rx) = watch::channel(false);
         let copy = capture.clone();
-        let relay = tokio::spawn(async move { copy.serve(listener, settings, rx).await });
+        let relay =
+            tokio::spawn(
+                async move { copy.serve(listener, settings, Default::default(), rx).await },
+            );
         let mut client = TcpStream::connect(address).await.unwrap();
         let (mut server, _) = upstream.accept().await.unwrap();
         client.write_all(b"client").await.unwrap();
@@ -3584,6 +5367,7 @@ mod tests {
                 enabled: true,
                 direction: PolicyDirection::ServerToClient,
                 expected_revision: 1,
+                filter: None,
             })
             .unwrap();
         // Direction changes cannot release either already-held range.
@@ -3655,10 +5439,13 @@ mod tests {
                 local_port: address.port(),
                 target_host: "127.0.0.1".into(),
                 target_port: upstream.local_addr().unwrap().port(),
+                ..Default::default()
             };
             let (stop, rx) = watch::channel(false);
             let copy = capture.clone();
-            let relay = tokio::spawn(async move { copy.serve(listener, settings, rx).await });
+            let relay = tokio::spawn(async move {
+                copy.serve(listener, settings, Default::default(), rx).await
+            });
             let mut client = TcpStream::connect(address).await.unwrap();
             let (mut server, _) = upstream.accept().await.unwrap();
             client.write_all(b"held").await.unwrap();
@@ -3790,6 +5577,1696 @@ mod tests {
         assert_eq!(record.intercept_events[0].written_bytes, 3);
         assert_eq!(record.intercept_events[0].state, "failed");
         assert_eq!(record.intercept_events[0].selected_length, 6);
+    }
+
+    async fn echo_server() -> u16 {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buffer = [0; 1024];
+                    while let Ok(read @ 1..) = socket.read(&mut buffer).await {
+                        if socket.write_all(&buffer[..read]).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+    fn loopback(local_port: u16, target_port: u16) -> TcpSettings {
+        TcpSettings {
+            local_port,
+            target_host: "127.0.0.1".into(),
+            target_port,
+            ..Default::default()
+        }
+    }
+    async fn echo_through(local_port: u16, bytes: &[u8]) -> Vec<u8> {
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, local_port))
+            .await
+            .unwrap();
+        client.write_all(bytes).await.unwrap();
+        let mut back = vec![0; bytes.len()];
+        tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut back))
+            .await
+            .unwrap()
+            .unwrap();
+        back
+    }
+    #[tokio::test]
+    async fn two_listeners_relay_at_once_and_name_their_port() {
+        let (first_target, second_target) = (echo_server().await, echo_server().await);
+        let (first, second) = (free_port(), free_port());
+        let capture = temporary();
+        for (local, target) in [(first, first_target), (second, second_target)] {
+            capture
+                .add_listener(TcpListenerInput {
+                    enabled: true,
+                    settings: loopback(local, target),
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(echo_through(first, b"one").await, b"one");
+        assert_eq!(echo_through(second, b"two").await, b"two");
+        assert!(capture.status().await.listeners.iter().all(|l| l.running));
+        capture.stop().await.unwrap();
+        let mut seen: Vec<_> = capture
+            .records()
+            .await
+            .into_iter()
+            .map(|record| (record.local_port, record.target))
+            .collect();
+        seen.sort();
+        let mut expected = vec![
+            (first, format!("127.0.0.1:{first_target}")),
+            (second, format!("127.0.0.1:{second_target}")),
+        ];
+        expected.sort();
+        assert_eq!(seen, expected);
+        assert!(capture.status().await.listeners.iter().all(|l| !l.running));
+    }
+    #[tokio::test]
+    async fn saved_listeners_start_again_and_a_taken_port_keeps_its_error() {
+        let target = echo_server().await;
+        let taken = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let taken_port = taken.local_addr().unwrap().port();
+        let open_port = free_port();
+        let saved = |local_port, enabled| TcpListenerConfig {
+            id: Uuid::new_v4(),
+            enabled,
+            settings: loopback(local_port, target),
+        };
+        let (blocked, open, off) = (
+            saved(taken_port, true),
+            saved(open_port, true),
+            saved(free_port(), false),
+        );
+        let capture = temporary();
+        capture.restore_listeners(vec![blocked.clone(), open.clone(), off.clone()]);
+        capture.start_saved().await;
+        assert_eq!(echo_through(open_port, b"back").await, b"back");
+        let status = capture.status().await;
+        let find = |id| status.listeners.iter().find(|l| l.config.id == id).unwrap();
+        assert!(!find(blocked.id).running);
+        assert_eq!(
+            find(blocked.id).error.as_deref(),
+            Some(format!("Local port {taken_port} is already in use. Choose another Local port or stop the listener using it.").as_str())
+        );
+        assert!(find(open.id).running && find(open.id).error.is_none());
+        assert!(!find(off.id).running && find(off.id).error.is_none());
+        assert_eq!(capture.listener_configs(), vec![blocked, open, off]);
+        capture.stop().await.unwrap();
+        drop(taken);
+    }
+    #[tokio::test]
+    async fn listeners_are_checked_changed_and_removed() {
+        let capture = temporary();
+        let port = free_port();
+        let off = |local_port, target_port| TcpListenerInput {
+            enabled: false,
+            settings: loopback(local_port, target_port),
+        };
+        let id = capture.add_listener(off(port, 1)).await.unwrap();
+        let error = capture.add_listener(off(port, 2)).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("Another listener already uses local port {port}.")
+        );
+        for extra in 1..MAX_LISTENERS {
+            capture
+                .add_listener(off(20000 + extra as u16, 1))
+                .await
+                .unwrap();
+        }
+        let error = capture.add_listener(off(30000, 1)).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("A session keeps at most {MAX_LISTENERS} TCP listeners.")
+        );
+        let target = echo_server().await;
+        capture
+            .update_listener(
+                id,
+                TcpListenerInput {
+                    enabled: true,
+                    settings: loopback(port, target),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(echo_through(port, b"changed").await, b"changed");
+        let saved = capture.listener_configs();
+        assert!(saved[0].enabled && saved[0].settings.target_port == target);
+        capture.remove_listener(id).await.unwrap();
+        assert!(!capture.listener_configs().iter().any(|l| l.id == id));
+        assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .is_err());
+        let error = capture.remove_listener(id).await.unwrap_err();
+        assert_eq!(error.to_string(), UNKNOWN_LISTENER);
+    }
+    #[test]
+    fn a_record_saved_before_listeners_had_ports_still_loads() {
+        let mut value = serde_json::to_value(record()).unwrap();
+        value.as_object_mut().unwrap().remove("local_port");
+        let loaded: TcpConnection = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.local_port, 0);
+    }
+    async fn wait_saved(capture: &TcpCapture, count: usize) -> Vec<TcpConnection> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let saved: Vec<_> = capture
+                    .summaries()
+                    .await
+                    .into_iter()
+                    .filter(|record| record.ended_at.is_some() && record.durable)
+                    .collect();
+                if saved.len() >= count {
+                    return saved;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    #[tokio::test]
+    async fn a_full_history_still_relays_and_counts_what_it_did_not_record() {
+        let target = echo_server().await;
+        let capture = temporary();
+        {
+            let mut history = capture.history.lock().unwrap();
+            for _ in 0..MAX_CONNECTIONS {
+                let mut saved = record();
+                saved.status = "closed".into();
+                saved.ended_at = Some(Utc::now());
+                saved.durable = true;
+                history.records.insert(saved.id, saved);
+            }
+        }
+        let port = free_port();
+        capture
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: loopback(port, target),
+            })
+            .await
+            .unwrap();
+        assert_eq!(echo_through(port, b"still relayed").await, b"still relayed");
+        let status = capture.status().await;
+        assert_eq!(status.history_count, MAX_CONNECTIONS);
+        assert_eq!(status.unrecorded_count, 1);
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn clearing_history_removes_ended_records_and_keeps_live_ones() {
+        let target = echo_server().await;
+        let capture = temporary();
+        let port = free_port();
+        capture
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: loopback(port, target),
+            })
+            .await
+            .unwrap();
+        assert_eq!(echo_through(port, b"ended").await, b"ended");
+        let ended = wait_saved(&capture, 1).await.remove(0);
+        let mut live = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        live.write_all(b"live").await.unwrap();
+        let mut back = [0; 4];
+        live.read_exact(&mut back).await.unwrap();
+        capture.unrecorded.store(3, Ordering::Relaxed);
+        assert_eq!(capture.clear().await.unwrap(), 1);
+        let left = capture.summaries().await;
+        assert_eq!(left.len(), 1);
+        assert!(left[0].ended_at.is_none());
+        assert!(!capture
+            .directory
+            .join(format!("{}.json", ended.id))
+            .exists());
+        assert_eq!(capture.status().await.unrecorded_count, 0);
+        assert_eq!(
+            TcpCapture::load(capture.directory.clone()).connection_count(),
+            Some(1)
+        );
+        drop(live);
+        capture.stop().await.unwrap();
+    }
+    fn holding(capture: &TcpCapture, filter: Option<InterceptFilter>) {
+        let expected_revision = capture.policy().revision;
+        capture
+            .set_policy(PolicyUpdate {
+                enabled: true,
+                direction: PolicyDirection::ClientToServer,
+                expected_revision,
+                filter,
+            })
+            .unwrap();
+    }
+    async fn wait_paused(capture: &TcpCapture, count: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while capture.policy().paused_count < count {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    async fn send_to(port: u16, bytes: &[u8]) -> TcpStream {
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        client.write_all(bytes).await.unwrap();
+        client
+    }
+    async fn read_back(client: &mut TcpStream, length: usize) -> Vec<u8> {
+        let mut back = vec![0; length];
+        tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut back))
+            .await
+            .unwrap()
+            .unwrap();
+        back
+    }
+    async fn relaying() -> (Arc<TcpCapture>, u16) {
+        let target = echo_server().await;
+        let capture = temporary();
+        let port = free_port();
+        capture
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: loopback(port, target),
+            })
+            .await
+            .unwrap();
+        (capture, port)
+    }
+    async fn turn_off(capture: &TcpCapture) {
+        let expected_revision = capture.policy().revision;
+        capture
+            .update_policy(PolicyUpdate {
+                enabled: false,
+                direction: PolicyDirection::Both,
+                expected_revision,
+                filter: None,
+            })
+            .await
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn forward_all_and_turning_off_release_every_held_read() {
+        let (capture, port) = relaying().await;
+        holding(&capture, None);
+        let (mut first, mut second) = (send_to(port, b"one").await, send_to(port, b"two").await);
+        wait_paused(&capture, 2).await;
+        assert_eq!(capture.release_all(DecisionAction::Forward).await, 2);
+        assert_eq!(read_back(&mut first, 3).await, b"one");
+        assert_eq!(read_back(&mut second, 3).await, b"two");
+        let mut third = send_to(port, b"off").await;
+        wait_paused(&capture, 1).await;
+        turn_off(&capture).await;
+        assert_eq!(read_back(&mut third, 3).await, b"off");
+        assert_eq!(capture.policy().pending_count, 0);
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn drop_all_discards_every_held_read() {
+        let (capture, port) = relaying().await;
+        holding(&capture, None);
+        let mut client = send_to(port, b"gone").await;
+        wait_paused(&capture, 1).await;
+        assert_eq!(capture.release_all(DecisionAction::Drop).await, 1);
+        turn_off(&capture).await;
+        client.write_all(b"kept").await.unwrap();
+        assert_eq!(read_back(&mut client, 4).await, b"kept");
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn a_filter_holds_only_the_reads_that_match() {
+        let (capture, port) = relaying().await;
+        holding(
+            &capture,
+            Some(InterceptFilter {
+                kind: FilterKind::Text,
+                value: "PING".into(),
+            }),
+        );
+        assert_eq!(capture.policy().filter.as_ref().unwrap().value, "PING");
+        let mut passing = send_to(port, b"PONG").await;
+        assert_eq!(read_back(&mut passing, 4).await, b"PONG");
+        let _held = send_to(port, b"xPINGx").await;
+        wait_paused(&capture, 1).await;
+        capture.stop().await.unwrap();
+    }
+    #[test]
+    fn filters_match_text_hex_and_patterns_and_refuse_bad_ones() {
+        let compile = |kind, value: &str| {
+            Matcher::compile(&InterceptFilter {
+                kind,
+                value: value.into(),
+            })
+        };
+        assert!(compile(FilterKind::Hex, "50 49 4e 47")
+            .unwrap()
+            .matches(b"xPINGx"));
+        assert!(!compile(FilterKind::Hex, "50494e47")
+            .unwrap()
+            .matches(b"PONG"));
+        assert!(compile(FilterKind::Regex, "^P.NG$")
+            .unwrap()
+            .matches(b"PANG"));
+        assert!(compile(FilterKind::Text, "ING").unwrap().matches(b"PING"));
+        for (kind, value) in [
+            (FilterKind::Hex, "5"),
+            (FilterKind::Hex, "zz"),
+            // Spaces alone leave no bytes to look for.
+            (FilterKind::Hex, " "),
+            (FilterKind::Hex, " \t\n"),
+            (FilterKind::Regex, "("),
+            (FilterKind::Text, ""),
+        ] {
+            assert!(matches!(
+                compile(kind, value),
+                Err(InterceptError::BadRequest(_))
+            ));
+        }
+    }
+    /// A CONNECT proxy that sends every tunnel to `target` and reports the
+    /// authority each CONNECT asked for.
+    async fn connect_proxy(target: u16) -> (u16, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (asked, seen) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut client, _)) = listener.accept().await {
+                let asked = asked.clone();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    while !head.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0; 1];
+                        if client.read_exact(&mut byte).await.is_err() {
+                            return;
+                        }
+                        head.push(byte[0]);
+                    }
+                    let line = String::from_utf8_lossy(&head)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
+                    let _ = asked.send(line);
+                    let mut upstream = TcpStream::connect((Ipv4Addr::LOCALHOST, target))
+                        .await
+                        .unwrap();
+                    client
+                        .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                        .await
+                        .unwrap();
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                });
+            }
+        });
+        (port, seen)
+    }
+    fn proxied(proxy_port: u16, bypass: &[&str]) -> Arc<crate::runtime::RuntimeSettings> {
+        Arc::new(crate::runtime::RuntimeSettings::from_snapshot(
+            crate::runtime::RuntimeSettingsSnapshot {
+                upstream_proxy: crate::upstream_proxy::UpstreamProxy {
+                    enabled: true,
+                    url: format!("http://127.0.0.1:{proxy_port}"),
+                    ..Default::default()
+                },
+                upstream_bypass_hosts: bypass.iter().map(|host| host.to_string()).collect(),
+                ..Default::default()
+            },
+        ))
+    }
+    #[tokio::test]
+    async fn a_connection_goes_through_the_upstream_proxy_when_it_is_on() {
+        let target = echo_server().await;
+        let (proxy_port, mut seen) = connect_proxy(target).await;
+        let capture = temporary();
+        capture.use_runtime(proxied(proxy_port, &[]));
+        let port = free_port();
+        capture
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: TcpSettings {
+                    local_port: port,
+                    target_host: "relay.example.com".into(),
+                    target_port: 5432,
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(echo_through(port, b"through").await, b"through");
+        assert_eq!(
+            seen.recv().await.unwrap(),
+            "CONNECT relay.example.com:5432 HTTP/1.1"
+        );
+        let record = wait_saved(&capture, 1).await.remove(0);
+        assert!(record.via_proxy);
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn this_machine_and_bypassed_hosts_go_direct() {
+        let target = echo_server().await;
+        let (proxy_port, mut seen) = connect_proxy(target).await;
+        let capture = temporary();
+        let runtime = proxied(proxy_port, &["*.internal.example.com"]);
+        capture.use_runtime(runtime.clone());
+        let port = free_port();
+        capture
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: loopback(port, target),
+            })
+            .await
+            .unwrap();
+        assert_eq!(echo_through(port, b"direct").await, b"direct");
+        let record = wait_saved(&capture, 1).await.remove(0);
+        assert!(!record.via_proxy);
+        assert!(seen.try_recv().is_err(), "the proxy saw nothing");
+        let proxy = runtime.upstream_proxy().await;
+        assert!(!routes_through(&proxy, "db.internal.example.com"));
+        assert!(!routes_through(&proxy, "localhost"));
+        assert!(!routes_through(&proxy, "::1"));
+        assert!(routes_through(&proxy, "relay.example.com"));
+        capture.stop().await.unwrap();
+    }
+    fn test_ca() -> Arc<crate::certificate::CertificateAuthority> {
+        let dir = std::env::temp_dir().join(format!("sniper-tcp-ca-{}", Uuid::new_v4()));
+        Arc::new(crate::certificate::CertificateAuthority::load_or_create(&dir).unwrap())
+    }
+    /// A TLS server with a certificate from `ca`: says `banner` first when it is
+    /// not empty, then echoes.
+    async fn tls_server(
+        ca: &crate::certificate::CertificateAuthority,
+        banner: &'static [u8],
+    ) -> u16 {
+        let acceptor = ca.tls_acceptor_for_host("db.example.com").unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(mut tls) = acceptor.accept(socket).await else {
+                        return;
+                    };
+                    if !banner.is_empty() && tls.write_all(banner).await.is_err() {
+                        return;
+                    }
+                    let mut buffer = [0; 1024];
+                    while let Ok(read @ 1..) = tls.read(&mut buffer).await {
+                        if tls.write_all(&buffer[..read]).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+    fn trusting(ca: &crate::certificate::CertificateAuthority) -> tokio_rustls::TlsConnector {
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(rustls::pki_types::CertificateDer::from(
+                ca.root_der_bytes().to_vec(),
+            ))
+            .unwrap();
+        let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        tokio_rustls::TlsConnector::from(Arc::new(config))
+    }
+    async fn tls_listener(
+        ca: &Arc<crate::certificate::CertificateAuthority>,
+        target_port: u16,
+        tls: TlsMode,
+    ) -> (Arc<TcpCapture>, u16) {
+        let capture = temporary();
+        capture.use_certificates(ca.clone());
+        let port = free_port();
+        capture
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: TcpSettings {
+                    local_port: port,
+                    target_host: "127.0.0.1".into(),
+                    target_port,
+                    tls,
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+        (capture, port)
+    }
+    fn sent(record: &TcpConnection) -> Vec<u8> {
+        record
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.direction == Direction::ClientToServer)
+            .flat_map(|chunk| STANDARD.decode(&chunk.data_base64).unwrap())
+            .collect()
+    }
+    #[tokio::test]
+    async fn a_tls_client_is_decrypted_and_the_target_reached_over_tls() {
+        let ca = test_ca();
+        let server = tls_server(&ca, b"").await;
+        let (capture, port) = tls_listener(&ca, server, TlsMode::Decrypt).await;
+        let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        let name = rustls::pki_types::ServerName::try_from("db.example.com").unwrap();
+        let mut tls = trusting(&ca).connect(name, stream).await.unwrap();
+        tls.write_all(b"secret").await.unwrap();
+        let mut back = [0; 6];
+        tokio::time::timeout(Duration::from_secs(5), tls.read_exact(&mut back))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&back, b"secret");
+        drop(tls);
+        let record = wait_saved(&capture, 1).await.remove(0);
+        assert!(record.client_tls && record.server_tls);
+        // Dropped without close_notify, as many clients close: still a clean end.
+        assert_eq!((record.status.as_str(), record.failure), ("closed", None));
+        let detail = capture.detail(record.id).await.unwrap().unwrap();
+        assert_eq!(sent(&detail), b"secret", "captured in plain text");
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn a_server_that_speaks_first_is_relayed_as_it_is() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let server = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(b"220 ready\r\n").await.unwrap();
+            let mut hold = [0; 1];
+            let _ = socket.read(&mut hold).await;
+        });
+        let (capture, port) = tls_listener(&test_ca(), server, TlsMode::Decrypt).await;
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        assert_eq!(read_back(&mut client, 11).await, b"220 ready\r\n");
+        drop(client);
+        let record = wait_saved(&capture, 1).await.remove(0);
+        assert!(!record.client_tls && !record.server_tls);
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn a_plain_client_on_a_decrypting_listener_is_relayed_as_it_is() {
+        let (capture, port) = tls_listener(&test_ca(), echo_server().await, TlsMode::Decrypt).await;
+        assert_eq!(echo_through(port, b"plain").await, b"plain");
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn upstream_mode_adds_tls_towards_the_target_only() {
+        let ca = test_ca();
+        let server = tls_server(&ca, b"").await;
+        let (capture, port) = tls_listener(&ca, server, TlsMode::Upstream).await;
+        assert_eq!(echo_through(port, b"wrapped").await, b"wrapped");
+        let record = wait_saved(&capture, 1).await.remove(0);
+        assert!(!record.client_tls && record.server_tls);
+        capture.stop().await.unwrap();
+    }
+    fn replay_of(target_port: u16, messages: &[&[u8]]) -> ReplayRequest {
+        ReplayRequest {
+            target_host: "127.0.0.1".into(),
+            target_port,
+            tls: false,
+            messages: messages
+                .iter()
+                .map(|message| STANDARD.encode(message))
+                .collect(),
+            wait_ms: 200,
+            from: None,
+        }
+    }
+    fn exchange_of(record: &TcpConnection) -> Vec<(Direction, Vec<u8>)> {
+        record
+            .chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    chunk.direction,
+                    STANDARD.decode(&chunk.data_base64).unwrap(),
+                )
+            })
+            .collect()
+    }
+    #[tokio::test]
+    async fn a_replay_sends_each_message_and_records_the_replies_in_order() {
+        let capture = temporary();
+        let from = Uuid::new_v4();
+        let record = capture
+            .replay(ReplayRequest {
+                from: Some(from),
+                ..replay_of(echo_server().await, &[b"one", b"two"])
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            exchange_of(&record),
+            vec![
+                (Direction::ClientToServer, b"one".to_vec()),
+                (Direction::ServerToClient, b"one".to_vec()),
+                (Direction::ClientToServer, b"two".to_vec()),
+                (Direction::ServerToClient, b"two".to_vec()),
+            ]
+        );
+        assert_eq!(record.source, TcpSource::Replay);
+        assert_eq!(record.replayed_from, Some(from));
+        assert_eq!((record.status.as_str(), record.durable), ("closed", true));
+        assert_eq!(capture.summaries().await.len(), 1, "kept in the history");
+    }
+    #[tokio::test]
+    async fn a_replay_ends_when_the_target_closes() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut first = [0; 3];
+            socket.read_exact(&mut first).await.unwrap();
+            socket.write_all(b"bye").await.unwrap();
+        });
+        let record = temporary()
+            .replay(replay_of(port, &[b"one", b"two"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            exchange_of(&record),
+            vec![
+                (Direction::ClientToServer, b"one".to_vec()),
+                (Direction::ServerToClient, b"bye".to_vec()),
+            ]
+        );
+        assert_eq!(record.status, "closed");
+    }
+    // The status compares the active count with what the listeners admit, so
+    // only their own connections are in it. A replay or a tunnel through the
+    // HTTP proxy took a place there, and thirty-two of them read as "new
+    // ones wait" beside a listener with no client at all.
+    #[tokio::test]
+    async fn a_replay_in_flight_takes_no_place_among_the_listeners_connections() {
+        let silent = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = silent.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = silent.accept().await {
+                held.push(socket);
+            }
+        });
+        let capture = temporary();
+        let replaying = capture.clone();
+        let replay = tokio::spawn(async move {
+            let mut request = replay_of(port, &[b"one"]);
+            request.wait_ms = 400;
+            replaying.replay(request).await
+        });
+        for _ in 0..100 {
+            if capture.connection_count() == Some(1) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(capture.connection_count(), Some(1));
+
+        assert_eq!(capture.status().await.active_count, 0);
+        replay.await.unwrap().unwrap();
+        assert_eq!(capture.status().await.active_count, 0);
+    }
+
+    #[tokio::test]
+    async fn replays_are_checked_before_anything_is_sent() {
+        let capture = temporary();
+        let refused = |request| {
+            let capture = capture.clone();
+            async move { capture.replay(request).await.unwrap_err() }
+        };
+        for request in [
+            replay_of(9, &[]),
+            replay_of(9, &[b"x".as_slice(); MAX_REPLAY_MESSAGES + 1]),
+            ReplayRequest {
+                wait_ms: 10,
+                ..replay_of(9, &[b"x"])
+            },
+            ReplayRequest {
+                messages: vec!["%%".into()],
+                ..replay_of(9, &[b"x"])
+            },
+            ReplayRequest {
+                target_host: "http://example.com".into(),
+                ..replay_of(9, &[b"x"])
+            },
+        ] {
+            assert!(matches!(
+                refused(request).await,
+                InterceptError::BadRequest(_)
+            ));
+        }
+        {
+            let mut history = capture.history.lock().unwrap();
+            for _ in 0..MAX_CONNECTIONS {
+                let saved = record();
+                history.records.insert(saved.id, saved);
+            }
+        }
+        assert!(matches!(
+            refused(replay_of(9, &[b"x"])).await,
+            InterceptError::Conflict(_)
+        ));
+    }
+    #[tokio::test]
+    async fn a_large_exchange_is_kept_whole() {
+        let (capture, port) = relaying().await;
+        let big = vec![b'x'; 400 * 1024];
+        assert_eq!(echo_through(port, &big).await, big);
+        let record = wait_saved(&capture, 1).await.remove(0);
+        assert_eq!(record.captured_bytes, 2 * big.len());
+        assert!(!record.capture_truncated);
+        capture.stop().await.unwrap();
+    }
+    fn needle(kind: FilterKind, value: &str) -> Matcher {
+        Matcher::compile(&InterceptFilter {
+            kind,
+            value: value.into(),
+        })
+        .unwrap()
+    }
+    #[tokio::test]
+    async fn search_finds_records_by_their_bytes_even_across_reads() {
+        let (capture, port) = relaying().await;
+        let mut split = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        split.write_all(b"ab").await.unwrap();
+        assert_eq!(read_back(&mut split, 2).await, b"ab");
+        split.write_all(b"cd").await.unwrap();
+        assert_eq!(read_back(&mut split, 2).await, b"cd");
+        drop(split);
+        assert_eq!(echo_through(port, b"other").await, b"other");
+        let saved = wait_saved(&capture, 2).await;
+        let split_id = saved
+            .iter()
+            .find(|record| record.client_bytes == 4)
+            .unwrap()
+            .id;
+        assert_eq!(
+            capture.search(&needle(FilterKind::Text, "bc")).await,
+            (vec![split_id], false)
+        );
+        assert_eq!(
+            capture.search(&needle(FilterKind::Hex, "62 63")).await,
+            (vec![split_id], false)
+        );
+        assert_eq!(
+            capture
+                .search(&needle(FilterKind::Regex, "^oth"))
+                .await
+                .0
+                .len(),
+            1
+        );
+        assert_eq!(
+            capture.search(&needle(FilterKind::Text, "zz")).await,
+            (vec![], false)
+        );
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn raw_bytes_come_back_exactly_one_direction_at_a_time() {
+        let capture = temporary();
+        let record = capture
+            .replay(replay_of(echo_server().await, &[b"\x00\xffab"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            capture
+                .raw(record.id, Direction::ClientToServer)
+                .await
+                .unwrap(),
+            Some(b"\x00\xffab".to_vec())
+        );
+        assert_eq!(
+            capture
+                .raw(record.id, Direction::ServerToClient)
+                .await
+                .unwrap(),
+            Some(b"\x00\xffab".to_vec())
+        );
+        assert_eq!(
+            capture
+                .raw(Uuid::new_v4(), Direction::ClientToServer)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+    fn remote(local_port: u16, target_port: u16, allowed: &[&str]) -> TcpSettings {
+        TcpSettings {
+            remote: true,
+            allowed_clients: allowed.iter().map(|entry| entry.to_string()).collect(),
+            ..loopback(local_port, target_port)
+        }
+    }
+    #[tokio::test]
+    async fn a_listener_open_to_other_devices_names_them() {
+        let capture = temporary();
+        let add = |settings| {
+            let capture = capture.clone();
+            async move {
+                capture
+                    .add_listener(TcpListenerInput {
+                        enabled: false,
+                        settings,
+                    })
+                    .await
+            }
+        };
+        let error = add(remote(free_port(), 1, &[])).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Name the devices that may connect: IP addresses or networks such as 192.0.2.0/24."
+        );
+        assert!(add(remote(free_port(), 1, &["nope"])).await.is_err());
+        assert!(add(remote(free_port(), 1, &["192.0.2.0/33"]))
+            .await
+            .is_err());
+        assert!(add(remote(free_port(), 1, &["192.0.2.7", "2001:db8::/32"]))
+            .await
+            .is_ok());
+    }
+    #[test]
+    fn listed_devices_and_this_machine_are_let_in() {
+        let allowed: Vec<String> = ["192.0.2.0/24", "2001:db8::1"].map(String::from).to_vec();
+        let ip = |text: &str| text.parse::<std::net::IpAddr>().unwrap();
+        assert!(client_allowed(ip("192.0.2.200"), &allowed));
+        assert!(
+            client_allowed(ip("::ffff:192.0.2.9"), &allowed),
+            "IPv4 on a dual-stack socket"
+        );
+        assert!(client_allowed(ip("2001:db8::1"), &allowed));
+        assert!(client_allowed(ip("127.0.0.1"), &allowed), "this machine");
+        assert!(!client_allowed(ip("198.51.100.1"), &allowed));
+        assert!(!client_allowed(ip("2001:db8::2"), &allowed));
+    }
+    #[test]
+    fn a_target_on_a_guarded_port_of_this_machine_is_recognised() {
+        let guarded = [std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 23001))];
+        let at = |text: &str| text.parse::<std::net::SocketAddr>().unwrap();
+        assert!(reaches_guarded(&[at("127.0.0.1:23001")], &guarded));
+        assert!(reaches_guarded(&[at("[::ffff:127.0.0.1]:23001")], &guarded));
+        assert!(!reaches_guarded(&[at("127.0.0.1:23002")], &guarded));
+        assert!(!reaches_guarded(&[at("192.0.2.1:23001")], &guarded));
+        // A UI on every interface is announced as 127.0.0.1, and it trusts a
+        // connection from this machine: every address of the machine counts.
+        let addresses = crate::proxy::local_interface_ips();
+        assert!(addresses.iter().any(|ip| !ip.is_loopback()));
+        for ip in addresses {
+            assert!(
+                reaches_guarded(&[std::net::SocketAddr::new(ip, 23001)], &guarded),
+                "{ip}"
+            );
+        }
+    }
+    #[test]
+    fn a_dual_stack_listener_knows_its_own_address_in_either_form() {
+        let at = |text: &str| text.parse::<std::net::SocketAddr>().unwrap();
+        assert!(same_address(
+            at("[::ffff:192.0.2.7]:9000"),
+            at("192.0.2.7:9000")
+        ));
+        assert!(same_address(at("192.0.2.7:9000"), at("192.0.2.7:9000")));
+        assert!(!same_address(at("192.0.2.7:9000"), at("192.0.2.7:9001")));
+        assert!(!same_address(
+            at("[::ffff:192.0.2.7]:9000"),
+            at("192.0.2.8:9000")
+        ));
+    }
+    /// macOS gives lo0 the link-local fe80::1: a client bound to it reaches the
+    /// listener from an address that is not loopback, as another device would.
+    #[cfg(target_os = "macos")]
+    async fn from_another_device(port: u16) -> std::io::Result<TcpStream> {
+        let device = std::net::SocketAddrV6::new("fe80::1".parse().unwrap(), 0, 0, 1);
+        let socket = tokio::net::TcpSocket::new_v6()?;
+        socket.bind(device.into())?;
+        socket
+            .connect(std::net::SocketAddrV6::new("fe80::1".parse().unwrap(), port, 0, 1).into())
+            .await
+    }
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn only_listed_devices_reach_a_remote_listener_and_never_sniper_itself() {
+        let target = echo_server().await;
+        let capture = temporary();
+        let guarded = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let guarded_port = guarded.local_addr().unwrap().port();
+        let own = crate::session_ports::OwnListeners::default();
+        own.set_main(guarded.local_addr().unwrap());
+        // Also while that listener is down: what it accepted outlives it.
+        own.set_main_listening(false);
+        let runtime = Arc::new(crate::runtime::RuntimeSettings::new());
+        runtime.use_own_listeners(own);
+        capture.use_runtime(runtime);
+        let (open, closed, onto_sniper) = (free_port(), free_port(), free_port());
+        for settings in [
+            remote(open, target, &["fe80::1"]),
+            remote(closed, target, &["192.0.2.0/24"]),
+            remote(onto_sniper, guarded_port, &["fe80::1"]),
+        ] {
+            capture
+                .add_listener(TcpListenerInput {
+                    enabled: true,
+                    settings,
+                })
+                .await
+                .unwrap();
+        }
+        let mut client = from_another_device(open).await.unwrap();
+        client.write_all(b"device").await.unwrap();
+        assert_eq!(read_back(&mut client, 6).await, b"device");
+        drop(client);
+        // This machine on a dual-stack socket is recorded as plain IPv4.
+        assert_eq!(echo_through(open, b"here").await, b"here");
+        let local = wait_saved(&capture, 2).await;
+        assert!(
+            local
+                .iter()
+                .any(|record| record.peer.starts_with("127.0.0.1:")),
+            "{local:?}"
+        );
+        let mut refused = from_another_device(closed).await.unwrap();
+        let mut nothing = [0; 1];
+        assert_eq!(
+            refused.read(&mut nothing).await.unwrap_or(0),
+            0,
+            "closed at once"
+        );
+        let status = capture.status().await;
+        let of = |port: u16| {
+            status
+                .listeners
+                .iter()
+                .find(|l| l.config.settings.local_port == port)
+                .unwrap()
+        };
+        assert_eq!(of(closed).refused, 1);
+        let mut looping = from_another_device(onto_sniper).await.unwrap();
+        // Refused, it is closed at once. Relayed, it would wait for ever.
+        let _ = tokio::time::timeout(Duration::from_secs(5), looping.read(&mut nothing)).await;
+        let failed = wait_saved(&capture, 3).await;
+        assert!(failed
+            .iter()
+            .any(|record| record.failure == Some(TcpFailure::GuardedTarget)));
+        drop(guarded);
+        capture.stop().await.unwrap();
+    }
+    async fn udp_echo() -> u16 {
+        let socket = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = socket.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut buffer = [0; 2048];
+            while let Ok((read, from)) = socket.recv_from(&mut buffer).await {
+                let _ = socket.send_to(&buffer[..read], from).await;
+            }
+        });
+        port
+    }
+    fn free_udp_port() -> u16 {
+        std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+    async fn udp_listener(capture: &Arc<TcpCapture>, target: u16) -> u16 {
+        let port = free_udp_port();
+        capture
+            .add_listener(TcpListenerInput {
+                enabled: true,
+                settings: TcpSettings {
+                    protocol: Protocol::Udp,
+                    ..loopback(port, target)
+                },
+            })
+            .await
+            .unwrap();
+        port
+    }
+    async fn udp_client(port: u16) -> tokio::net::UdpSocket {
+        let socket = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        socket.connect((Ipv4Addr::LOCALHOST, port)).await.unwrap();
+        socket
+    }
+    async fn reply(socket: &tokio::net::UdpSocket) -> Option<Vec<u8>> {
+        let mut buffer = [0; 2048];
+        let read = tokio::time::timeout(Duration::from_millis(1500), socket.recv(&mut buffer))
+            .await
+            .ok()?
+            .ok()?;
+        Some(buffer[..read].to_vec())
+    }
+    #[tokio::test]
+    async fn udp_clients_get_their_own_flows_and_datagrams_keep_their_bounds() {
+        let capture = temporary();
+        capture.set_udp_idle(Duration::from_millis(300));
+        let port = udp_listener(&capture, udp_echo().await).await;
+        let (first, second) = (udp_client(port).await, udp_client(port).await);
+        first.send(b"ab").await.unwrap();
+        assert_eq!(reply(&first).await.unwrap(), b"ab");
+        first.send(b"cd").await.unwrap();
+        assert_eq!(reply(&first).await.unwrap(), b"cd");
+        second.send(b"other").await.unwrap();
+        assert_eq!(reply(&second).await.unwrap(), b"other");
+        let flows = wait_saved(&capture, 2).await;
+        assert!(flows
+            .iter()
+            .all(|flow| flow.protocol == Protocol::Udp && flow.status == "closed"));
+        let first_flow = flows.iter().find(|flow| flow.client_bytes == 4).unwrap();
+        let detail = capture.detail(first_flow.id).await.unwrap().unwrap();
+        assert_eq!(
+            exchange_of(&detail),
+            vec![
+                (Direction::ClientToServer, b"ab".to_vec()),
+                (Direction::ServerToClient, b"ab".to_vec()),
+                (Direction::ClientToServer, b"cd".to_vec()),
+                (Direction::ServerToClient, b"cd".to_vec()),
+            ]
+        );
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn a_held_udp_datagram_can_be_dropped() {
+        let capture = temporary();
+        let port = udp_listener(&capture, udp_echo().await).await;
+        holding(&capture, None);
+        let client = udp_client(port).await;
+        client.send(b"gone").await.unwrap();
+        wait_paused(&capture, 1).await;
+        assert_eq!(capture.release_all(DecisionAction::Drop).await, 1);
+        assert_eq!(reply(&client).await, None, "nothing came back");
+        turn_off(&capture).await;
+        client.send(b"kept").await.unwrap();
+        assert_eq!(reply(&client).await.unwrap(), b"kept");
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn udp_listeners_refuse_tls() {
+        let capture = temporary();
+        let error = capture
+            .add_listener(TcpListenerInput {
+                enabled: false,
+                settings: TcpSettings {
+                    protocol: Protocol::Udp,
+                    tls: TlsMode::Decrypt,
+                    ..loopback(free_udp_port(), 1)
+                },
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "TLS is for TCP listeners.");
+    }
+
+    /// A tunnel as the HTTP proxy hands it over: the app's end and the
+    /// target's end of an in-memory pair.
+    fn tunnel_ends() -> (
+        Box<dyn Io>,
+        Box<dyn Io>,
+        tokio::io::DuplexStream,
+        tokio::io::DuplexStream,
+    ) {
+        let (client, app) = tokio::io::duplex(1024);
+        let (upstream, target) = tokio::io::duplex(1024);
+        (Box::new(client), Box::new(upstream), app, target)
+    }
+    async fn tunnel_record(capture: &TcpCapture, status: &str) -> TcpConnection {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(record) = capture
+                    .summaries()
+                    .await
+                    .into_iter()
+                    .find(|record| record.status == status)
+                {
+                    return record;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    #[tokio::test]
+    async fn a_tunnel_cut_by_the_proxy_is_recorded_as_stopped() {
+        let capture = temporary();
+        let (client, upstream, _app, _target) = tunnel_ends();
+        let relay = capture.relay_tunnel(
+            client,
+            upstream,
+            "127.0.0.1:50000".into(),
+            "db.example.com:5432".into(),
+            TcpSource::Connect,
+            false,
+        );
+        // A session switch drops the proxy task that carries the tunnel.
+        assert!(tokio::time::timeout(Duration::from_millis(100), relay)
+            .await
+            .is_err());
+        let record = tunnel_record(&capture, "stopped").await;
+        assert_eq!(record.source, TcpSource::Connect);
+        assert_eq!(record.target, "db.example.com:5432");
+        assert_eq!(record.local_port, 0);
+    }
+    // A tunnel that could not be recorded is relayed all the same. It must
+    // still end when it is closed: a stop, which a session switch and a quit
+    // both wait on, waited for it until its two sides hung up.
+    #[tokio::test]
+    async fn a_tunnel_that_could_not_be_recorded_does_not_hold_up_a_stop() {
+        let capture = temporary();
+        std::fs::write(&capture.directory, b"not a directory").unwrap();
+        // Both ends stay open for the whole test.
+        let (client, upstream, _app, _target) = tunnel_ends();
+        let relay = tokio::spawn({
+            let capture = capture.clone();
+            async move {
+                capture
+                    .relay_tunnel(
+                        client,
+                        upstream,
+                        "127.0.0.1:50000".into(),
+                        "db.example.com:5432".into(),
+                        TcpSource::Connect,
+                        false,
+                    )
+                    .await
+            }
+        });
+        for _ in 0..100 {
+            if capture.status().await.persistence_error {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(capture.status().await.persistence_error);
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), capture.stop())
+                .await
+                .is_ok(),
+            "a stop does not wait for the tunnel's sides"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), relay)
+                .await
+                .is_ok(),
+            "the stop ends the relay"
+        );
+        std::fs::remove_file(&capture.directory).unwrap();
+    }
+    #[tokio::test]
+    async fn passthrough_tunnels_are_recorded_but_never_held() {
+        let capture = temporary();
+        holding(&capture, None);
+        let (client, upstream, mut app, mut target) = tunnel_ends();
+        let relay = tokio::spawn({
+            let capture = capture.clone();
+            async move {
+                capture
+                    .relay_tunnel(
+                        client,
+                        upstream,
+                        "127.0.0.1:50000".into(),
+                        "pinned.example.com:443".into(),
+                        TcpSource::Passthrough,
+                        false,
+                    )
+                    .await
+            }
+        });
+        app.write_all(b"\x16\x03\x01hello").await.unwrap();
+        let mut passed = [0u8; 8];
+        tokio::time::timeout(Duration::from_secs(5), target.read_exact(&mut passed))
+            .await
+            .expect("a passthrough tunnel is never held")
+            .unwrap();
+        assert_eq!(&passed, b"\x16\x03\x01hello");
+        drop((app, target));
+        assert_eq!(relay.await.unwrap().unwrap(), (8, 0));
+        let record = tunnel_record(&capture, "closed").await;
+        assert_eq!(record.source, TcpSource::Passthrough);
+        assert_eq!(record.client_bytes, 8);
+    }
+    #[tokio::test]
+    async fn a_connect_tunnel_is_held_like_a_listener_connection() {
+        let capture = temporary();
+        holding(&capture, None);
+        let (client, upstream, mut app, mut target) = tunnel_ends();
+        tokio::spawn({
+            let capture = capture.clone();
+            async move {
+                capture
+                    .relay_tunnel(
+                        client,
+                        upstream,
+                        "127.0.0.1:50000".into(),
+                        "db.example.com:5432".into(),
+                        TcpSource::Connect,
+                        false,
+                    )
+                    .await
+            }
+        });
+        app.write_all(b"PING").await.unwrap();
+        wait_paused(&capture, 1).await;
+        assert_eq!(capture.release_all(DecisionAction::Forward).await, 1);
+        let mut passed = [0u8; 4];
+        tokio::time::timeout(Duration::from_secs(5), target.read_exact(&mut passed))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&passed, b"PING");
+    }
+    #[tokio::test]
+    async fn a_tunnel_past_a_full_history_is_relayed_unrecorded() {
+        let capture = temporary();
+        {
+            let mut history = capture.history.lock().unwrap();
+            for _ in 0..MAX_CONNECTIONS {
+                let mut saved = record();
+                saved.status = "closed".into();
+                saved.ended_at = Some(Utc::now());
+                saved.durable = true;
+                history.records.insert(saved.id, saved);
+            }
+        }
+        let (client, upstream, mut app, mut target) = tunnel_ends();
+        let relay = tokio::spawn({
+            let capture = capture.clone();
+            async move {
+                capture
+                    .relay_tunnel(
+                        client,
+                        upstream,
+                        "127.0.0.1:50000".into(),
+                        "db.example.com:5432".into(),
+                        TcpSource::Connect,
+                        false,
+                    )
+                    .await
+            }
+        });
+        app.write_all(b"still relayed").await.unwrap();
+        let mut passed = [0u8; 13];
+        target.read_exact(&mut passed).await.unwrap();
+        assert_eq!(&passed, b"still relayed");
+        drop((app, target));
+        relay.await.unwrap().unwrap();
+        let status = capture.status().await;
+        assert_eq!(status.history_count, MAX_CONNECTIONS);
+        assert_eq!(status.unrecorded_count, 1);
+    }
+
+    /// Ended, saved records from `source`, as a session collects them.
+    fn fill_history(capture: &TcpCapture, count: usize, source: TcpSource) {
+        let mut history = capture.history.lock().unwrap();
+        for _ in 0..count {
+            let mut saved = record();
+            saved.source = source;
+            saved.status = "closed".into();
+            saved.ended_at = Some(Utc::now());
+            saved.durable = true;
+            history.records.insert(saved.id, saved);
+        }
+    }
+    async fn relay_and_end(capture: &Arc<TcpCapture>, source: TcpSource) {
+        let (client, upstream, app, target) = tunnel_ends();
+        drop((app, target));
+        capture
+            .relay_tunnel(
+                client,
+                upstream,
+                "127.0.0.1:50000".into(),
+                "pinned.example.com:443".into(),
+                source,
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn passthrough_tunnels_leave_room_in_history_for_the_rest() {
+        let capture = temporary();
+        fill_history(&capture, MAX_PASSTHROUGH_RECORDS, TcpSource::Passthrough);
+        relay_and_end(&capture, TcpSource::Passthrough).await;
+        let status = capture.status().await;
+        assert_eq!(status.history_count, MAX_PASSTHROUGH_RECORDS);
+        assert_eq!(status.unrecorded_count, 1);
+        relay_and_end(&capture, TcpSource::Connect).await;
+        assert_eq!(
+            capture.status().await.history_count,
+            MAX_PASSTHROUGH_RECORDS + 1
+        );
+    }
+    #[test]
+    fn a_detail_cleared_while_it_was_read_is_gone_not_damaged() {
+        let capture = temporary();
+        assert!(capture.unreadable(Uuid::new_v4()).unwrap().is_none());
+        assert!(!capture.history.lock().unwrap().load_error);
+        let saved = record();
+        let id = saved.id;
+        capture.history.lock().unwrap().records.insert(id, saved);
+        assert!(capture.unreadable(id).is_err());
+        assert!(capture.history.lock().unwrap().load_error);
+    }
+    #[tokio::test]
+    async fn a_full_history_still_applies_the_listeners_tls() {
+        let ca = test_ca();
+        let server = tls_server(&ca, b"").await;
+        let (capture, port) = tls_listener(&ca, server, TlsMode::Upstream).await;
+        fill_history(&capture, MAX_CONNECTIONS, TcpSource::Listener);
+        assert_eq!(
+            echo_through(port, b"plain in, TLS out").await,
+            b"plain in, TLS out"
+        );
+        assert_eq!(capture.status().await.unrecorded_count, 1);
+        capture.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn a_relayed_read_reaches_a_writer_that_holds_bytes_until_flushed() {
+        let capture = temporary();
+        let (mut app, client_end) = tokio::io::duplex(1024);
+        let (target_end, mut target) = tokio::io::duplex(1024);
+        // Holds what it is given until flushed, as TLS does when its socket is full.
+        let writer = tokio::io::BufWriter::new(target_end);
+        let pumping = tokio::spawn(async move {
+            capture
+                .pump(
+                    Uuid::new_v4(),
+                    Direction::ClientToServer,
+                    client_end,
+                    writer,
+                )
+                .await
+        });
+        app.write_all(b"PING").await.unwrap();
+        let mut got = [0; 4];
+        tokio::time::timeout(Duration::from_secs(5), target.read_exact(&mut got))
+            .await
+            .expect("the read reaches the target while the client stays open")
+            .unwrap();
+        assert_eq!(&got, b"PING");
+        drop(app);
+        pumping.await.unwrap().unwrap();
+    }
+    #[tokio::test]
+    async fn a_replayed_message_is_flushed_before_its_replies_are_awaited() {
+        let capture = temporary();
+        let saved = record();
+        let id = saved.id;
+        capture.history.lock().unwrap().records.insert(id, saved);
+        let (ours, mut target) = tokio::io::duplex(1024);
+        let (read, write) = tokio::io::split(ours);
+        let stream: Box<dyn Io> = Box::new(tokio::io::join(read, tokio::io::BufWriter::new(write)));
+        let answering = tokio::spawn(async move {
+            let mut got = [0; 4];
+            target.read_exact(&mut got).await.unwrap();
+            target.write_all(b"PONG").await.unwrap();
+            target
+        });
+        capture
+            .exchange(
+                id,
+                stream,
+                vec![b"PING".to_vec()],
+                Duration::from_millis(500),
+            )
+            .await
+            .unwrap();
+        let replies = stream_of(
+            &capture.history.lock().unwrap().records[&id],
+            Direction::ServerToClient,
+        );
+        assert_eq!(replies, b"PONG");
+        drop(answering.await.unwrap());
+    }
+    /// A TLS server with a certificate from `ca` that speaks only `protocol`.
+    async fn alpn_server(ca: &crate::certificate::CertificateAuthority, protocol: &[u8]) -> u16 {
+        let mut config = (*ca.server_config_for_host("db.example.com").unwrap()).clone();
+        config.alpn_protocols = vec![protocol.to_vec()];
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(mut tls) = acceptor.accept(socket).await else {
+                        return;
+                    };
+                    let mut buffer = [0; 1024];
+                    while let Ok(read @ 1..) = tls.read(&mut buffer).await {
+                        if tls.write_all(&buffer[..read]).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+    #[tokio::test]
+    async fn a_decrypted_client_gets_the_protocol_its_target_chose() {
+        let ca = test_ca();
+        let server = alpn_server(&ca, b"postgresql").await;
+        let (capture, port) = tls_listener(&ca, server, TlsMode::Decrypt).await;
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(rustls::pki_types::CertificateDer::from(
+                ca.root_der_bytes().to_vec(),
+            ))
+            .unwrap();
+        let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        config.alpn_protocols = vec![b"postgresql".to_vec()];
+        let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        let name = rustls::pki_types::ServerName::try_from("db.example.com").unwrap();
+        let mut tls = tokio_rustls::TlsConnector::from(Arc::new(config))
+            .connect(name, stream)
+            .await
+            .expect("an ALPN-only client completes its handshake");
+        assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"postgresql"[..]));
+        tls.write_all(b"startup").await.unwrap();
+        let mut back = [0; 7];
+        tokio::time::timeout(Duration::from_secs(5), tls.read_exact(&mut back))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&back, b"startup");
+        capture.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn zero_byte_udp_datagram_with_intercept_does_not_corrupt_history() {
+        let capture = temporary();
+        capture.set_udp_idle(Duration::from_millis(120));
+        let policy = capture.policy();
+        capture
+            .set_policy(PolicyUpdate {
+                enabled: true,
+                direction: PolicyDirection::Both,
+                expected_revision: policy.revision,
+                filter: None,
+            })
+            .unwrap();
+        let local_port = udp_listener(&capture, udp_echo().await).await;
+        let client = udp_client(local_port).await;
+        client.send(&[]).await.unwrap();
+        assert_eq!(reply(&client).await, Some(Vec::new()));
+        capture.stop().await.unwrap();
+        let reloaded = TcpCapture::load(capture.directory.clone());
+        assert!(!reloaded.status().await.load_error);
+        assert_eq!(reloaded.summaries().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stop_closes_and_persists_active_connect_tunnel() {
+        let capture = temporary();
+        let (client_end, _client_peer) = tokio::io::duplex(256);
+        let (upstream_end, _upstream_peer) = tokio::io::duplex(256);
+        let copy = capture.clone();
+        let relaying = tokio::spawn(async move {
+            copy.relay_tunnel(
+                Box::new(client_end),
+                Box::new(upstream_end),
+                "127.0.0.1:40000".into(),
+                "example.com:9000".into(),
+                TcpSource::Connect,
+                false,
+            )
+            .await
+        });
+        for _ in 0..50 {
+            if !capture.summaries().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(capture.summaries().await.len(), 1);
+        capture.stop().await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(2), relaying)
+            .await
+            .expect("stop closes active relay_tunnel");
+        let reloaded = TcpCapture::load(capture.directory.clone());
+        assert!(!reloaded.status().await.load_error);
+        let records = reloaded.summaries().await;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, "stopped");
+    }
+
+    #[tokio::test]
+    async fn oversized_tunnel_target_relays_unrecorded_without_corrupting_history() {
+        let capture = temporary();
+        let (mut client_peer, client_end) = tokio::io::duplex(256);
+        let (upstream_end, mut upstream_peer) = tokio::io::duplex(256);
+        let oversized = format!("{}.example.com:443", "a".repeat(260));
+        let copy = capture.clone();
+        let relaying = tokio::spawn(async move {
+            copy.relay_tunnel(
+                Box::new(client_end),
+                Box::new(upstream_end),
+                "127.0.0.1:40001".into(),
+                oversized,
+                TcpSource::Passthrough,
+                false,
+            )
+            .await
+        });
+        client_peer.write_all(b"hi").await.unwrap();
+        drop(client_peer);
+        let mut got = [0u8; 2];
+        upstream_peer.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"hi");
+        drop(upstream_peer);
+        relaying.await.unwrap().unwrap();
+        assert_eq!(capture.summaries().await.len(), 0);
+        assert_eq!(capture.status().await.unrecorded_count, 1);
+        assert!(
+            !TcpCapture::load(capture.directory.clone())
+                .status()
+                .await
+                .load_error
+        );
+    }
+
+    #[test]
+    fn remote_self_target_and_local_routes_through_guards() {
+        let remote_settings = TcpSettings {
+            local_port: 9000,
+            remote: true,
+            ..Default::default()
+        };
+        assert!(targets_self_listener(
+            "0.0.0.0:9000".parse().unwrap(),
+            &remote_settings
+        ));
+        assert!(targets_self_listener(
+            "127.0.0.1:9000".parse().unwrap(),
+            &remote_settings
+        ));
+        assert!(!targets_self_listener(
+            "127.0.0.1:9001".parse().unwrap(),
+            &remote_settings
+        ));
+        let proxy = crate::upstream_proxy::UpstreamProxy {
+            enabled: true,
+            url: "http://127.0.0.1:8080".into(),
+            ..Default::default()
+        };
+        assert!(!routes_through(&proxy, "localhost."));
+        assert!(!routes_through(&proxy, "0.0.0.0"));
+        assert!(!routes_through(&proxy, "::"));
+        assert!(routes_through(&proxy, "example.com"));
+    }
+
+    // A client can connect first and start TLS later, as a pool that opens its
+    // connections ahead of time does. The wait is for the rest of a record
+    // header that has begun, not for the first byte.
+    #[tokio::test]
+    async fn a_client_that_starts_tls_late_is_still_a_tls_client() {
+        use tokio::io::AsyncWriteExt as _;
+        async fn pair() -> (TcpStream, TcpStream) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let near = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (far, _) = listener.accept().await.unwrap();
+            (near, far)
+        }
+        let (mut client, accepted) = pair().await;
+        let (upstream, _target) = pair().await;
+        let late = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(2300)).await;
+            client
+                .write_all(&[0x16, 0x03, 0x01, 0x00, 0x05])
+                .await
+                .unwrap();
+            client
+        });
+
+        assert!(client_starts_tls(&accepted, &upstream).await);
+        drop(late.await.unwrap());
+
+        // A header that begins and does not go on is still given up on.
+        let (mut client, accepted) = pair().await;
+        let (upstream, _target) = pair().await;
+        client.write_all(&[0x16]).await.unwrap();
+        let started = tokio::time::Instant::now();
+        assert!(!client_starts_tls(&accepted, &upstream).await);
+        assert!(started.elapsed() >= Duration::from_secs(2));
+    }
+
+    #[test]
+    fn regex_matcher_matches_raw_high_bytes() {
+        let matcher = Matcher::compile(&InterceptFilter {
+            kind: FilterKind::Regex,
+            value: r"A\xffB".into(),
+        })
+        .unwrap();
+        assert!(matcher.matches(b"xxA\xffByy"));
+        assert!(!matcher.matches("A\u{00ff}B".as_bytes()));
     }
 }
 

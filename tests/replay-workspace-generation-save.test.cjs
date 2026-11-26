@@ -56,7 +56,7 @@ async function finishReload(f, pending, snapshot = f.sessionB) {
   assert.equal(f.requests[index].url, '/api/sessions');
   f.succeed(index, [{ id: snapshot.session_id, name: snapshot.session_id, active: true }]);
   await settled();
-  assert.equal(f.requests[index + 1].url, '/api/workspace-state');
+  assert.equal(f.requests[index + 1].url, `/api/workspace-state?session_id=${snapshot.session_id}`);
   f.succeed(index + 1, snapshot); await pending.reloading;
   assert.equal(f.state.activeSession.id, snapshot.session_id);
 }

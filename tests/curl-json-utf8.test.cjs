@@ -118,10 +118,10 @@ test("unrepresentable bytes and Unicode escapes fail explicitly instead of repla
   }
 });
 
-test("file, multipart and binary-control limitations remain explicit", () => {
+test("file and binary-control limitations remain explicit", () => {
   for (const options of [
     "--json @fixture.txt", "--json=@-", "--data @fixture.txt", "--data-binary @fixture.txt",
-    "--data-urlencode @fixture.txt", "--form field=value", "--form-string field=value", "--http3",
+    "--data-urlencode @fixture.txt", "--http3",
     "--data-binary $'\\x01'", "--data-binary $'\\401'",
   ]) {
     assert.ok(c.parseCurlCommand(`curl https://example.com ${options}`).error);

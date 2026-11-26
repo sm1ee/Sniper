@@ -3228,7 +3228,7 @@ test('API docs close on Escape and name an inactive session, and only API origin
   await f.load(snapshot([items()])); f.controller.selectOrigin(originB);
   f.els.panel.dispatch('click', { target: { closest: () => ({ dataset: { serviceApiDocs: originB } }) } });
   f.requests.at(-1).resolve(response({}, 409)); await new Promise(resolve => setImmediate(resolve));
-  assert.match(f.els.apiDocs.innerHTML, /API docs are read from the active session only\./);
+  assert.match(f.els.apiDocs.innerHTML, /API docs are read only in the session the proxy records into\./);
   assert.match(f.els.apiDocs.innerHTML, /data-api-docs-copy disabled/);
   f.els.apiDocs.dispatch('keydown', { key: 'Escape' });
   assert.equal(f.els.apiDocs.classList.contains('hidden'), true);

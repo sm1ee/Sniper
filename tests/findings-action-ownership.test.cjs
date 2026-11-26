@@ -79,7 +79,7 @@ function wireSettingsSnapshot(f) {
     "updateUiSettingsServerRevision", "sanitizeDisplaySettings", "sanitizeHistoryColumnWidths",
     "sanitizeHistoryColumnOrder", "sanitizeHttpQuery", "sanitizeHttpMethod", "sanitizeHttpSortKey",
     "sanitizeHttpSortDirection", "sanitizeHttpFilterSettings", "sanitizeWorkbenchHeight",
-    "sanitizeWorkbenchPaneWidths", "sanitizeWebsocketPaneWidth", "sanitizeServiceMapDetailWidth",
+    "sanitizeWorkbenchPaneWidths", "sanitizeWebsocketPaneWidth", "sanitizeServiceMapDetailWidth", "sanitizeSessionSidebarWidth", "applySessionSidebarWidth",
     "applyServiceMapDetailWidth", "sanitizeWebsocketQuery", "sanitizeWebsocketSortKey",
     "sanitizeWebsocketSortDirection", "sanitizeWebsocketStackHeight", "sanitizeWsReplayLeftWidth",
     "sanitizeWsReplayFrameDetailHeight", "hydrateFilterForm", "syncColorTagFilterUI",

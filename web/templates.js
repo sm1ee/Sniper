@@ -258,6 +258,18 @@
     return targets;
   }
 
+  // Milliseconds as Fuzzer's Delay reads them: 500, or a random time in a
+  // range such as 200-800. Nothing, or 0, waits only for the rate.
+  function parseDelay(text) {
+    const value = String(text ?? "").trim();
+    if (!value) return null;
+    const range = /^(\d{1,5})(?:\s*-\s*(\d{1,5}))?$/.exec(value);
+    const min = range ? Number(range[1]) : 0;
+    const max = range?.[2] !== undefined ? Number(range[2]) : min;
+    if (!range || min > max || max > 60000) throw new Error("Delay is milliseconds up to 60000: 500, or a range such as 200-800.");
+    return max ? { min_ms: min, max_ms: max } : null;
+  }
+
   function boundedInteger(value, min, max, label) {
     const number = Number(value);
     if (String(value).trim() === "" || !Number.isInteger(number) || number < min || number > max) {
@@ -279,6 +291,8 @@
       max_requests: boundedInteger(values.maxRequests, 1, 50000, "Request limit"),
       apply_match_replace: !!values.applyMatchReplace,
     };
+    const delay = parseDelay(values.delay);
+    if (delay) body.delay = delay;
     if (values.selection === "selected") {
       if (!selectedId) throw new Error("Select a template row first.");
       body.ids = [selectedId];
@@ -341,6 +355,13 @@
     return `${job.status} · ${jobCounts(job)}`;
   }
 
+  function paceLine(job) {
+    const delay = job.delay
+      ? [`${job.delay.min_ms === job.delay.max_ms ? count(job.delay.min_ms) : `${count(job.delay.min_ms)}–${count(job.delay.max_ms)}`} ms apart`]
+      : [];
+    return [`${count(job.rate)} a second`, ...delay, `${count(job.concurrency)} templates at once`, `limit ${count(job.max_requests)}`].join(" · ");
+  }
+
   // A scan with one target says its origin once; its rows show the path.
   function originOf(job) {
     return (job?.targets || []).length === 1 ? String(job.targets[0]).replace(/^(https?:\/\/[^/]+).*$/, "$1") : null;
@@ -371,10 +392,10 @@
     const unschedule = options.clearTimeout || root.clearTimeout.bind(root);
     const ids = ["Version", "Status", "Progress", "ProgressBar", "Download", "Check", "Import", "ImportFile", "Notice", "ScopeNote",
       "More", "Switch", "ImportMenu", "Update", "UpdateNote", "AutoUpdate",
-      "Search", "Severity", "Support", "EnableShown", "DisableShown", "Meta", "Head", "Rows", "Detail",
+      "Search", "Severity", "Support", "OnCount", "EnableShown", "DisableShown", "Meta", "Head", "Rows", "Detail",
       "Views", "ListControls", "ListActions", "Table", "ResultsTable", "ResultsHead", "ResultsRows", "ResultsTitle",
       "ResultsMatched", "ResultsStop", "Pagination",
-      "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanConcurrency",
+      "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanDelay", "ScanConcurrency",
       "ScanMaxRequests", "ScanMatchReplace", "ScanKeepAll", "ScanPlan", "ScanStart",
       "ScanNotice", "ScanJobs", "AutoSummary", "AutoHosts", "AutoRate", "AutoToggle", "AutoNotice"];
     const els = Object.fromEntries(ids.map((id) => [id, shell.querySelector(`#templates${id}`)]));
@@ -511,13 +532,24 @@
       renderScan();
     }
 
-    // Turning on all the list shows is offered once it shows less than all.
+    // Turning on all the list shows is offered once it shows less than all,
+    // and says how many it shows: what is on elsewhere stays as it is.
     function renderBulk() {
-      const bulk = !!status?.library && view === "templates" && narrowed(filters());
+      const listing = !!status?.library && view === "templates";
+      const bulk = listing && narrowed(filters());
+      els.EnableShown.textContent = `Turn on all ${count(total)}`;
+      els.DisableShown.textContent = `Turn off all ${count(total)}`;
       for (const button of [els.EnableShown, els.DisableShown]) {
         button.classList.toggle("hidden", !bulk);
         button.disabled = busy;
       }
+      // What is on, whatever the search; a click lists it.
+      const on = (Number(status?.passive_enabled) || 0) + (Number(status?.auto_enabled) || 0);
+      const showingOn = els.Support.value === "on";
+      els.OnCount.textContent = `${count(on)} on`;
+      els.OnCount.classList.toggle("hidden", !listing || !(on || showingOn));
+      els.OnCount.setAttribute("aria-pressed", String(showingOn));
+      els.OnCount.classList.toggle("active", showingOn);
     }
 
     function renderList() {
@@ -534,6 +566,8 @@
         row.dataset.templateId = meta.id;
         const toggleCell = element("td");
         if (meta.passive_supported || meta.active_supported) {
+          toggleCell.className = "templates-on-cell";
+          toggleCell.dataset.templateOn = meta.id;
           // One that can judge captured traffic does so; one that must send
           // its own requests goes out with the auto scan.
           const toggle = element("input");
@@ -542,11 +576,11 @@
           toggle.disabled = busy;
           if (meta.passive_supported) {
             toggle.dataset.templateToggle = meta.id;
-            toggle.title = "Checks captured traffic while Passive Scan is on";
+            toggle.title = "Checks captured traffic while Passive Scan is on. Shift-click sets a range.";
             toggle.setAttribute("aria-label", `Run ${meta.name || meta.id} on captured traffic`);
           } else {
             toggle.dataset.templateAuto = meta.id;
-            toggle.title = "Sent to each new host while the auto scan is on";
+            toggle.title = "Sent to each new host while the auto scan is on. Shift-click sets a range.";
             toggle.setAttribute("aria-label", `Send ${meta.name || meta.id} with the auto scan`);
           }
           toggleCell.append(toggle);
@@ -570,6 +604,7 @@
       els.Previous.disabled = page === 0;
       els.Next.disabled = (page + 1) * PAGE_SIZE >= total;
       els.Meta.textContent = status?.library ? `${total.toLocaleString()} ${total === 1 ? "template" : "templates"}` : "";
+      renderBulk();
       renderViews();
     }
 
@@ -726,6 +761,7 @@
         selection: els.ScanSelection.value,
         risks: Array.from(els.ScanRisks.querySelectorAll("input[data-risk]")).filter((box) => box.checked).map((box) => box.dataset.risk),
         rate: els.ScanRate.value,
+        delay: els.ScanDelay.value,
         concurrency: els.ScanConcurrency.value,
         maxRequests: els.ScanMaxRequests.value,
         applyMatchReplace: els.ScanMatchReplace.checked,
@@ -982,7 +1018,7 @@
       field(fields, "Redirects not followed", job.redirects_not_followed ? count(job.redirects_not_followed) : "");
       field(fields, "Not sent to", job.skipped_targets);
       field(fields, "Allowed risks", job.allow_risks);
-      field(fields, "Pace", `${count(job.rate)} a second · ${count(job.concurrency)} templates at once · limit ${count(job.max_requests)}`);
+      field(fields, "Pace", paceLine(job));
       if (job.apply_match_replace) field(fields, "Match & Replace", "Applied");
       field(fields, "History", job.history === "all" ? "Every request" : "Matched requests");
       els.Detail.append(fields);
@@ -1322,6 +1358,12 @@
     for (const control of [els.Severity, els.Support]) {
       on(control, "change", () => { page = 0; renderStatus(); void loadList(); });
     }
+    on(els.OnCount, "click", () => {
+      els.Support.value = els.Support.value === "on" ? "" : "on";
+      page = 0;
+      renderStatus();
+      void loadList();
+    });
     on(els.Previous, "click", () => { page = Math.max(0, page - 1); void loadList(); });
     on(els.Next, "click", () => { page += 1; void loadList(); });
     on(els.EnableShown, "click", () => setMany(bulkRequest(filters(), true), bulkRequest(filters(), true)));
@@ -1340,7 +1382,7 @@
         scanNotice("");
       });
     });
-    for (const control of [els.ScanTargets, els.ScanRate, els.ScanConcurrency, els.ScanMaxRequests]) on(control, "input", schedulePlan);
+    for (const control of [els.ScanTargets, els.ScanRate, els.ScanDelay, els.ScanConcurrency, els.ScanMaxRequests]) on(control, "input", schedulePlan);
     for (const control of [els.ScanSelection, els.ScanMatchReplace, els.ScanRisks, els.ScanKeepAll]) on(control, "change", schedulePlan);
     // The search and severity choose what a scan sends.
     on(els.Search, "input", () => { if (els.ScanSelection.value === "filter") schedulePlan(); });
@@ -1399,7 +1441,14 @@
       if (record) options.openRecord?.(record.dataset.recordId);
     });
     on(els.Rows, "click", (event) => {
-      const box = event.target.closest("[data-template-toggle]") || event.target.closest("[data-template-auto]");
+      let box = event.target.closest("[data-template-toggle]") || event.target.closest("[data-template-auto]");
+      // A click beside the box, in its cell, ticks it as well.
+      const cell = !box && event.target.closest("[data-template-on]");
+      if (cell) {
+        box = cell.querySelector("input");
+        if (!box || box.disabled) return;
+        box.checked = !box.checked;
+      }
       if (box) {
         const id = box.dataset.templateToggle || box.dataset.templateAuto;
         const from = items.findIndex((meta) => meta.id === rangeAnchor);
@@ -1504,7 +1553,7 @@
   }
 
   const api = { createController, listQuery, nextSort, shownSortDirection, bulkRequest, narrowed, librarySummary, checkLine, progressOf, supportLabel, scanRequest, parseTargets,
-    previewLine, jobLine, autoRequest, autoLine, yamlLines, RISKS, PAGE_SIZE };
+    previewLine, jobLine, paceLine, autoRequest, autoLine, yamlLines, RISKS, PAGE_SIZE };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.SniperTemplates = api;
 })(typeof window !== "undefined" ? window : globalThis);

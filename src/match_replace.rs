@@ -700,7 +700,9 @@ pub(crate) fn apply_response_rules_with_bodyless(
         }
     }
 
-    if body_changed || headers_changed {
+    // Preserve representation Content-Length on bodyless responses (HEAD, 304)
+    // when only headers changed.
+    if body_changed || (headers_changed && !known_bodyless) {
         normalize_content_length_records(&mut headers, body.len());
     }
 
@@ -1786,5 +1788,30 @@ mod tests {
             compressed.len().to_string().as_str()
         );
         assert!(applied.notes.is_empty());
+    }
+
+    #[test]
+    fn response_header_rule_preserves_representation_content_length_on_head_and_304() {
+        let rules = vec![MatchReplaceRule {
+            annotation_only_enabled: None,
+            annotation_note: None,
+            annotation_color: None,
+            id: Uuid::new_v4(),
+            enabled: true,
+            description: "tag header".to_string(),
+            scope: MatchReplaceScope::Response,
+            target: MatchReplaceTarget::HeaderValue,
+            search: "orig-one".to_string(),
+            replace: "orig-two".to_string(),
+            regex: false,
+            case_sensitive: true,
+        }];
+        let mut headers = HeaderMap::new();
+        headers.insert("x-orig", "orig-one".parse().unwrap());
+        headers.insert("content-length", "12345".parse().unwrap());
+
+        let applied = apply_response_rules_with_bodyless(headers, Bytes::new(), rules, true);
+        assert_eq!(applied.headers.get("x-orig").unwrap(), "orig-two");
+        assert_eq!(applied.headers.get("content-length").unwrap(), "12345");
     }
 }

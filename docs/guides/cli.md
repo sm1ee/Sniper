@@ -31,7 +31,90 @@ sniper-cli findings list --limit 20
 sniper-cli findings get --id <finding-uuid>
 sniper-cli findings count
 sniper-cli event-log list --limit 20
+sniper-cli --output compact tcp list --contains PING
 ```
+
+The TCP and UDP relay is under `sniper-cli tcp`; see the
+[TCP and UDP relay guide](tcp-relay.md).
+
+## A proxy port for each session
+
+The proxy listener records into one session, the active one. To capture into
+several sessions at once, such as one for each agent or account, give each
+session a port of its own.
+
+```bash
+sniper-cli session create --name 'agent-a' --no-activate --yes
+sniper-cli session port open --id <session-uuid> --yes
+curl -x http://127.0.0.1:18081 https://example.com/
+sniper-cli capture browser open --session-id <session-uuid> --agent --yes
+sniper-cli --output compact capture http list --session-id <session-uuid> --limit 10
+sniper-cli session port list
+sniper-cli session port close --id <session-uuid> --yes
+```
+
+- `--no-activate` creates the session and leaves the proxy listener recording
+  where it is.
+- `session port open` prints `proxy_addr`. Everything sent through that address
+  is recorded into the session, whichever session is active.
+- A session keeps its port number until it is deleted, and no other session
+  gets it. Numbers start at 18081. A port is on `127.0.0.1` only.
+- No port is open after Sniper restarts. Open it again and it has the same
+  number. At most 16 are open at once.
+- The active session has the proxy listener and gets no port. A session with an
+  open port is not switched to or deleted: close its port first. `session
+  switch` and `session delete` then answer 409, and the CLI reports only that
+  status, so check `session port list`.
+- `capture browser open --session-id` opens a browser for the session: through
+  its port, which it opens if it is closed, and on a browser profile no other
+  session shares. Aside is not opened that way, because its command cannot be
+  pointed at one window.
+- `session port list` says for each session whether a browser Sniper opened
+  is sending to it and still runs (`browser`). That is a browser wired to the
+  port the session receives from: the proxy listener's for the active session,
+  or the session's own. The UI's session list shows it as a globe before the
+  port. A browser a person pointed at the proxy by hand is not known.
+- `session port list` also lists the TCP and UDP relay listeners each session
+  has on (`tcp`): the local port, the target, and whether it runs. A session
+  runs its listeners while it receives. `tcp listeners add --session-id
+  <session-uuid>` opens the session's port when it is closed, and closing the
+  port stops the session's listeners.
+- Name the session on every command with `--session-id <session-uuid>`.
+- A session is written while work runs in it. A Replay in flight no longer
+  makes a note, a workspace save or a second Replay in the same session answer
+  409, whether or not the session is active.
+- `session switch` moves the proxy listener and nothing else. It waits for, and
+  with `--force` cuts, the work of the session it leaves. Work started over the
+  API in the session it moves to goes on.
+- The UI shows a session without switching to it. Its "Record :8080 here" is
+  `session switch`, and its "Open a port" is `session port open`.
+- A session says who made it. The CLI names the agent that runs it (Claude
+  Code, Codex, or `SNIPER_ACTOR`), and the UI's session list shows that before
+  the session's name: a glyph for Claude and for Codex, the name for any
+  other. A session made with no agent shows nothing.
+- The session list gathers sessions into groups: from a session's menu ("Move
+  to …", "New group…"), from "New group" above the list, or by dragging a
+  session onto a group. A group's `+` makes a session in it. A session in no
+  group is listed under "Default", which is the list's name for none and
+  nothing the CLI sets. For the CLI a group is the sessions that carry its
+  name, so the last one out ends it. The list also keeps a group that was
+  made or dragged there while no session is in it.
+- The order of sessions and of groups, the pinned sessions, the list's sort,
+  what a row shows under its name and the list's width are kept for the UI
+  and are nothing the CLI reads.
+
+```bash
+sniper-cli session create --name 'agent-a' --no-activate --group 'example.com' --yes
+sniper-cli session group set --id <session-uuid> --name 'example.com' --yes
+sniper-cli session group clear --id <session-uuid> --yes
+sniper-cli session group rename --from 'example.com' --to 'example.com prod' --yes
+sniper-cli --output compact session group list
+```
+
+- `session group list` prints each session's `group` and `created_by`.
+  `session list` keeps the fields it had.
+- `session group rename` moves every session of the group in one write. A
+  group that has the new name already takes them in.
 
 ## Reads, writes and the manifest
 

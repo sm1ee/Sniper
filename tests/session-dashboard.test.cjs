@@ -13,6 +13,8 @@ function fixture() {
   const context = loadFunctions(["loadSessions", "jsonArray"], {
     state, currentSessionId: () => state.activeSession?.id,
     sessionsLoadGeneration: 0, sessionsAppliedLoadGeneration: 0, resetFindingsUiState() {},
+    // No workspace is loaded, as at start-up, unless a test says otherwise.
+    workspaceLoaded: false,
     fetch: async () => response([]),
     requireOkResponse: async res => { if (!res.ok) throw new Error("Failed to load sessions."); },
     renderDashboard: () => rendered.push([...state.sessions]),
@@ -45,7 +47,7 @@ for (const failure of ["HTTP", "network", "JSON"]) {
     f.context.els = { dashboardReloadSessionsButton: {} };
     f.context.onClickWithProgress = (_, handler) => { f.context.reload = handler; };
     const start = appSource.indexOf("  onClickWithProgress(els.dashboardReloadSessionsButton,");
-    const end = appSource.indexOf("  onClickWithProgress(els.dashboardCreateSessionButton,", start);
+    const end = appSource.indexOf("  els.sessionPageButton.addEventListener(", start);
     assert.ok(start !== -1 && end > start);
     vm.runInContext(appSource.slice(start, end), f.context);
     await f.context.reload();
@@ -109,34 +111,11 @@ test("only the sessions not in use offer Open and Delete", () => {
   assert.equal(f.els.dashboardCurrentSessionStorage.hidden, false);
 });
 
-// New session swaps itself for a name field; Escape puts the button back.
-test("New session opens a name field in its place and closes back to the button", () => {
-  const classes = () => {
-    const names = new Set(["hidden"]);
-    return { add: (n) => names.add(n), remove: (n) => names.delete(n), contains: (n) => names.has(n) };
-  };
-  const focused = [];
-  const els = {
-    dashboardNewSessionButton: { classList: classes() },
-    dashboardCreateSessionForm: { classList: classes() },
-    dashboardCreateSessionName: { focus: () => focused.push("name") },
-  };
-  els.dashboardNewSessionButton.classList.remove("hidden");
-  const c = loadFunctions(["openSessionCreateForm", "closeSessionCreateForm"], { els });
-  c.openSessionCreateForm();
-  assert.equal(els.dashboardNewSessionButton.classList.contains("hidden"), true);
-  assert.equal(els.dashboardCreateSessionForm.classList.contains("hidden"), false);
-  assert.deepEqual(focused, ["name"]);
-  c.closeSessionCreateForm();
-  assert.equal(els.dashboardNewSessionButton.classList.contains("hidden"), false);
-  assert.equal(els.dashboardCreateSessionForm.classList.contains("hidden"), true);
-});
-
-test("the Session screen is one list with its actions in the header", () => {
+// A session is made with the list's +, so the page has no New session of its own.
+test("All sessions is one list with its actions in the header", () => {
   const html = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/index.html"), "utf8");
-  const shell = html.slice(html.indexOf('id="dashboardShell"'), html.indexOf('id="proxyShell"'));
+  const shell = html.slice(html.indexOf('id="sessionAllPanel"'), html.indexOf('id="proxyShell"'));
   assert.match(shell, /<h2>Sessions<\/h2>/);
-  assert.match(shell, /id="dashboardNewSessionButton"[^>]*>New session<\/button>/);
   // Reload stays reachable: the recovery messages tell people to use it.
   assert.match(shell, /<details class="more-menu"[^]*id="dashboardReloadSessionsButton"[^>]*>Reload sessions<\/button>/);
   for (const gone of ["Status", "Requests", "Websockets", "Events", "Fuzzer", "Rules", "Created", "Opened"]) {
@@ -154,13 +133,20 @@ test("a refreshed dashboard never restores a removed selection from a stale work
   assert.equal(f.state.activeSession.id, "fixture-old-active", "render must not change workspace write ownership");
 });
 
-test("a refreshed dashboard does not label the previous workspace session as still active", () => {
+// The mark is the session on screen. Where the proxy listener records is the
+// port beside a name, and the two can be different sessions.
+test("the dashboard marks the session on screen and names the port where the proxy records", () => {
   const f = dashboardFixture([session("fixture-new-active", true), session("fixture-old-active")], "fixture-old-active");
-  f.state.activeSession = session("fixture-old-active", true);
+  f.state.activeSession = session("fixture-old-active");
+  f.state.settings = { proxy_addr: "127.0.0.1:8080" };
   f.context.renderDashboard();
   assert.equal(f.state.selectedSessionId, "fixture-old-active");
-  assert.match(f.els.dashboardSessionsBody.innerHTML, /class="history-row session-active" data-id="fixture-new-active"/);
-  assert.doesNotMatch(f.els.dashboardSessionsBody.innerHTML, /session-active" data-id="fixture-old-active"/);
+  const html = f.els.dashboardSessionsBody.innerHTML;
+  assert.match(html, /session-active" data-id="fixture-old-active"/);
+  assert.doesNotMatch(html, /session-active" data-id="fixture-new-active"/);
+  const row = id => html.match(new RegExp(`data-id="${id}">([^]*?)</tr>`))[1];
+  assert.match(row("fixture-new-active"), /<span class="session-sidebar-port in-table"[^>]*>:8080<\/span>/);
+  assert.doesNotMatch(row("fixture-old-active"), /session-sidebar-port/);
 });
 
 // Promise ordering is controlled here; these never call a real API or session action.
@@ -265,24 +251,88 @@ test("an obsolete list cannot resurrect rows after a newer empty list", async ()
   assert.equal(f.rendered.length, 1);
 });
 
-test("a superseded read cannot announce a stale active-session change", async () => {
-  const f = raceFixture(), changes = [];
-  f.context.handleExternalSessionChanged = async id => changes.push(id);
-  const older = f.context.loadSessions({ reloadOnActiveChange: true });
-  const newer = f.context.loadSessions({ reloadOnActiveChange: true });
+// A list without the session on screen means it was deleted, and the window
+// then shows another session.
+test("a superseded read cannot announce that the session on screen is gone", async () => {
+  const f = raceFixture(), left = [];
+  f.context.workspaceLoaded = true;
+  f.state.viewedSessionId = "fixture-active";
+  f.context.showDefaultSessionAfterDelete = async id => { left.push(id); };
+  const older = f.context.loadSessions();
+  const newer = f.context.loadSessions();
   const latest = [session("fixture-active", true), session("fixture-latest")];
   f.requests[1].resolve(response(latest));
   await newer;
   f.requests[0].resolve(response([session("fixture-obsolete", true)]));
   await older;
-  assert.deepEqual(changes, []);
+  assert.deepEqual(left, []);
   assert.equal(f.state.sessions, latest);
 });
 
-test("errors from a current external-session handler are not swallowed by a newer list", async () => {
+test("a list without the session on screen leaves it, also on a rows-only refresh", async () => {
+  for (const options of [undefined, { preserveWorkspaceOwner: true }]) {
+    const f = raceFixture(), left = [];
+    f.context.workspaceLoaded = true;
+    f.context.workspaceStateGeneration = 0;
+    f.state.viewedSessionId = "fixture-active";
+    f.context.showDefaultSessionAfterDelete = async id => { left.push(id); };
+    const reading = f.context.loadSessions(options);
+    const latest = [session("fixture-other", true)];
+    f.requests[0].resolve(response(latest));
+    await reading;
+    assert.deepEqual(left, ["fixture-active"]);
+    assert.equal(f.state.sessions, latest);
+    assert.equal(f.state.activeSession.id, "fixture-active", "the reload that follows relabels, not the list");
+  }
+});
+
+test("the proxy listener moving elsewhere leaves the window on its session", async () => {
+  const f = raceFixture();
+  f.context.workspaceLoaded = true;
+  f.state.activeSession = session("fixture-stored");
+  f.state.viewedSessionId = "fixture-stored";
+  const reading = f.context.loadSessions();
+  const moved = [session("fixture-active"), session("fixture-stored"), session("fixture-new", true)];
+  f.requests[0].resolve(response(moved));
+  await reading;
+  assert.equal(f.state.activeSession, moved[1]);
+  assert.equal(f.state.viewedSessionId, "fixture-stored");
+});
+
+test("a click on a session is the one the next list read shows", async () => {
+  const f = raceFixture();
+  f.context.workspaceLoaded = false;
+  f.state.viewedSessionId = "fixture-stored";
+  const reading = f.context.loadSessions();
+  const listed = [session("fixture-active", true), session("fixture-stored")];
+  f.requests[0].resolve(response(listed));
+  await reading;
+  assert.equal(f.state.activeSession, listed[1]);
+});
+
+// A click asked for a session that was deleted before the window loaded it.
+// The window takes the session the proxy records into, and says why.
+test("a session deleted before it loaded gives way to the proxy's session, with a notice", async () => {
+  const f = raceFixture(), toasts = [];
+  f.context.workspaceLoaded = false;
+  f.context.showToast = (...args) => toasts.push(args);
+  f.state.viewedSessionId = "fixture-gone";
+  const reading = f.context.loadSessions();
+  const listed = [session("fixture-active", true), session("fixture-stored")];
+  f.requests[0].resolve(response(listed));
+  await reading;
+  assert.equal(f.state.activeSession, listed[0]);
+  assert.equal(f.state.viewedSessionId, "fixture-active");
+  assert.equal(toasts.length, 1);
+  assert.match(toasts[0][0], /was deleted/);
+});
+
+test("errors from leaving a deleted session are not swallowed by a newer list", async () => {
   const f = raceFixture(), change = deferred();
-  f.context.handleExternalSessionChanged = () => change.promise;
-  const first = f.context.loadSessions({ reloadOnActiveChange: true });
+  f.context.workspaceLoaded = true;
+  f.state.viewedSessionId = "fixture-active";
+  f.context.showDefaultSessionAfterDelete = () => change.promise;
+  const first = f.context.loadSessions();
   f.requests[0].resolve(response([session("fixture-new-active", true)]));
   await nextTurn();
   const newer = f.context.loadSessions();

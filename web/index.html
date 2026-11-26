@@ -11,8 +11,13 @@
     <div class="toast-container" id="toastContainer" role="status" aria-atomic="false" aria-relevant="additions text"></div>
     <div class="app-shell">
       <header class="top-strip">
+        <button class="utility-button icon-button session-sidebar-toggle" id="sessionSidebarToggle" type="button" aria-controls="sessionSidebar" aria-expanded="false" aria-label="Show sessions" title="Show sessions">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" focusable="false">
+            <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+            <path d="M9.5 4.5v15" />
+          </svg>
+        </button>
         <nav class="main-tabs" aria-label="Main tools">
-          <button class="main-tab" data-tool="dashboard">Session</button>
           <button class="main-tab" data-tool="target">Scope</button>
           <button class="main-tab active" data-tool="proxy">Capture</button>
           <button class="main-tab" data-tool="map">Map</button>
@@ -25,10 +30,10 @@
         </nav>
 
         <div class="top-utilities">
-          <span class="proxy-status-indicator offline" id="proxyStatusIndicator" title="Proxy offline">
+          <button class="proxy-status-indicator offline" id="proxyStatusIndicator" type="button" title="Proxy offline" disabled>
             <span class="proxy-status-dot"></span>
             <span class="proxy-status-label" id="proxyStatusLabel">Proxy</span>
-          </span>
+          </button>
           <span class="remote-ui-indicator hidden" id="remoteUiIndicator" title="The Sniper UI is reachable from the network">
             <span class="remote-ui-dot"></span>
             <span class="remote-ui-label">Exposed</span>
@@ -64,49 +69,105 @@
         </section>
       </header>
 
+      <nav class="session-sidebar hidden" id="sessionSidebar" aria-label="Sessions">
+        <div class="session-sidebar-top">
+          <button class="session-sidebar-action" id="sessionSidebarNewButton" type="button">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            <span>New session</span>
+          </button>
+          <div class="session-sidebar-create hidden" id="sessionSidebarCreate">
+            <input id="sessionSidebarCreateName" type="text" placeholder="Session name" aria-label="New session name" spellcheck="false" autocomplete="off" />
+          </div>
+          <button class="session-sidebar-action" id="sessionSidebarNewGroupButton" type="button">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
+              <path d="M12 11v5M9.5 13.5h5" />
+            </svg>
+            <span>New group</span>
+          </button>
+          <div class="session-sidebar-create hidden" id="sessionSidebarGroup">
+            <input id="sessionSidebarGroupName" type="text" placeholder="Group name" aria-label="Group name" spellcheck="false" autocomplete="off" />
+          </div>
+        </div>
+        <header class="session-sidebar-header">
+          <span class="session-sidebar-title">List</span>
+          <span class="session-sidebar-actions">
+            <button class="utility-button icon-button" id="sessionSortButton" type="button" aria-label="View options" title="View options" aria-haspopup="menu">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false">
+                <path d="M4 7h16M7 12h10M10 17h4" />
+              </svg>
+            </button>
+            <button class="utility-button icon-button" id="sessionPageButton" type="button" aria-label="Manage sessions" title="Manage sessions" aria-pressed="false" aria-controls="dashboardShell">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false">
+                <path fill-rule="evenodd" d="M10.29 6.04 L10.61 4.12 L13.39 4.12 L13.71 6.04 L15.01 6.58 L16.59 5.45 L18.55 7.41 L17.42 8.99 L17.96 10.29 L19.88 10.61 L19.88 13.39 L17.96 13.71 L17.42 15.01 L18.55 16.59 L16.59 18.55 L15.01 17.42 L13.71 17.96 L13.39 19.88 L10.61 19.88 L10.29 17.96 L8.99 17.42 L7.41 18.55 L5.45 16.59 L6.58 15.01 L6.04 13.71 L4.12 13.39 L4.12 10.61 L6.04 10.29 L6.58 8.99 L5.45 7.41 L7.41 5.45 L8.99 6.58 Z M14.6 12 a2.6 2.6 0 1 0-5.2 0 a2.6 2.6 0 1 0 5.2 0 Z" />
+              </svg>
+            </button>
+          </span>
+        </header>
+        <ul class="session-sidebar-list" id="sessionSidebarList"></ul>
+        <div class="session-sidebar-resizer" id="sessionSidebarResizer" role="separator" aria-orientation="vertical" aria-label="Resize session list" tabindex="0"></div>
+      </nav>
+
       <main class="workspace">
-        <section class="dashboard-shell hidden" id="dashboardShell">
-          <section class="panel-card">
-            <header class="panel-toolbar">
-              <div>
-                <h2>Sessions</h2>
-                <p class="dashboard-storage" id="dashboardCurrentSessionStorage"><span class="dashboard-storage-path" id="dashboardCurrentSessionPath">Loading…</span> <button class="session-path-open-btn" id="dashboardOpenStorageBtn" type="button">Open</button></p>
-              </div>
-              <div class="toolbar-actions">
-                <div class="dashboard-create hidden" id="dashboardCreateSessionForm">
-                  <input id="dashboardCreateSessionName" type="text" placeholder="Session name" aria-label="Session name" />
-                  <button class="primary-action" id="dashboardCreateSessionButton" type="button">Create</button>
+        <section class="session-page hidden" id="dashboardShell">
+          <nav class="sub-tabs" aria-label="Session views">
+            <button class="sub-tab active" type="button" data-session-view="overview">Overview</button>
+            <button class="sub-tab" type="button" data-session-view="all">All sessions</button>
+          </nav>
+          <div class="dashboard-shell">
+            <section class="panel-card" id="sessionOverviewPanel">
+              <header class="panel-toolbar">
+                <div>
+                  <h2 id="sessionOverviewName"></h2>
+                  <p class="dashboard-storage" id="sessionOverviewStorage"><span class="dashboard-storage-path" id="sessionOverviewPath">Loading…</span> <button class="session-path-open-btn" id="sessionOverviewOpenStorageBtn" type="button">Open</button></p>
                 </div>
-                <button class="primary-action" id="dashboardNewSessionButton" type="button" title="A session keeps its own traffic, rules, notes and settings">New session</button>
-                <details class="more-menu" id="dashboardSessionsMore">
-                  <summary class="secondary-action" aria-label="More">⋯</summary>
-                  <div class="context-menu more-menu-list" role="menu">
-                    <button class="context-menu-item" id="dashboardReloadSessionsButton" type="button" role="menuitem">Reload sessions</button>
-                  </div>
-                </details>
+                <div class="toolbar-actions">
+                  <button class="secondary-action session-more-button" id="sessionOverviewMoreButton" type="button" aria-label="More" aria-haspopup="menu">⋯</button>
+                </div>
+              </header>
+              <div class="dashboard-tiles" id="sessionOverviewTiles"></div>
+              <section class="dashboard-detail" id="sessionOverviewDetail" aria-label="This session"></section>
+            </section>
+            <section class="panel-card hidden" id="sessionAllPanel">
+              <header class="panel-toolbar">
+                <div>
+                  <h2>Sessions</h2>
+                  <p class="dashboard-storage" id="dashboardCurrentSessionStorage"><span class="dashboard-storage-path" id="dashboardCurrentSessionPath">Loading…</span> <button class="session-path-open-btn" id="dashboardOpenStorageBtn" type="button">Open</button></p>
+                </div>
+                <div class="toolbar-actions">
+                  <details class="more-menu" id="dashboardSessionsMore">
+                    <summary class="secondary-action" aria-label="More">⋯</summary>
+                    <div class="context-menu more-menu-list" role="menu">
+                      <button class="context-menu-item" id="dashboardReloadSessionsButton" type="button" role="menuitem">Reload sessions</button>
+                    </div>
+                  </details>
+                </div>
+              </header>
+              <div class="dashboard-tiles" id="dashboardTiles"></div>
+              <div class="history-table-shell">
+                <table class="history-table session-table" id="dashboardSessionsTable">
+                  <thead>
+                    <tr>
+                      <th data-sort-key="name" aria-sort="none"><button class="session-sort-button" type="button">Name</button></th>
+                      <th data-sort-key="group" aria-sort="none"><button class="session-sort-button" type="button">Group</button></th>
+                      <th data-sort-key="storage_bytes" aria-sort="none"><button class="session-sort-button" type="button">Size</button></th>
+                      <th data-sort-key="request_count" aria-sort="none"><button class="session-sort-button" type="button">Requests</button></th>
+                      <th data-sort-key="websocket_count" aria-sort="none"><button class="session-sort-button" type="button">WebSockets</button></th>
+                      <th data-sort-key="tcp_connection_count" aria-sort="none"><button class="session-sort-button" type="button">TCP</button></th>
+                      <th data-sort-key="finding_count" aria-sort="none"><button class="session-sort-button" type="button">Findings</button></th>
+                      <th data-sort-key="last_captured_at" aria-sort="none"><button class="session-sort-button" type="button">Last HTTP capture</button></th>
+                      <th data-sort-key="created_at" aria-sort="descending"><button class="session-sort-button" type="button">Created</button></th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="dashboardSessionsBody"></tbody>
+                </table>
               </div>
-            </header>
-            <div class="dashboard-tiles" id="dashboardTiles"></div>
-            <div class="history-table-shell">
-              <table class="history-table session-table" id="dashboardSessionsTable">
-                <thead>
-                  <tr>
-                    <th data-sort-key="name" aria-sort="none"><button class="session-sort-button" type="button">Name</button></th>
-                    <th data-sort-key="storage_bytes" aria-sort="none"><button class="session-sort-button" type="button">Size</button></th>
-                    <th data-sort-key="request_count" aria-sort="none"><button class="session-sort-button" type="button">Requests</button></th>
-                    <th data-sort-key="websocket_count" aria-sort="none"><button class="session-sort-button" type="button">WebSockets</button></th>
-                    <th data-sort-key="tcp_connection_count" aria-sort="none"><button class="session-sort-button" type="button">TCP</button></th>
-                    <th data-sort-key="finding_count" aria-sort="none"><button class="session-sort-button" type="button">Findings</button></th>
-                    <th data-sort-key="last_captured_at" aria-sort="none"><button class="session-sort-button" type="button">Last HTTP capture</button></th>
-                    <th data-sort-key="created_at" aria-sort="descending"><button class="session-sort-button" type="button">Created</button></th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody id="dashboardSessionsBody"></tbody>
-              </table>
-            </div>
-            <section class="dashboard-detail" id="dashboardDetail" aria-label="Selected session"></section>
-          </section>
+              <section class="dashboard-detail" id="dashboardDetail" aria-label="Selected session"></section>
+            </section>
+          </div>
         </section>
 
         <section class="proxy-shell" id="proxyShell">
@@ -199,7 +260,7 @@
                 <label class="pane-search" aria-label="Search request">
                   <input id="requestSearchInput" type="search" placeholder="Search request" />
                 </label>
-                <span id="requestSearchMeta">No highlights</span>
+                <span id="requestSearchMeta"></span>
               </footer>
             </section>
 
@@ -229,7 +290,7 @@
                 <label class="pane-search" aria-label="Search response">
                   <input id="responseSearchInput" type="search" placeholder="Search response" />
                 </label>
-                <span id="responseSearchMeta">No highlights</span>
+                <span id="responseSearchMeta"></span>
               </footer>
             </section>
 
@@ -272,7 +333,7 @@
                     </section>
                     <div class="notes-panel" id="notesPanel">
                       <h3>Notes</h3>
-                      <div id="notesCard"><p>No anomalies were recorded for this transaction.</p></div>
+                      <div id="notesCard"><p>No notes.</p></div>
                     </div>
                   </div>
                 </div>
@@ -361,7 +422,7 @@
                   <label class="pane-search" aria-label="Search intercepted message">
                     <input id="interceptSearchInput" type="search" placeholder="Search" />
                   </label>
-                  <span id="interceptSearchMeta">No highlights</span>
+                  <span id="interceptSearchMeta"></span>
                   <span id="interceptMeta"></span>
                 </footer>
               </section>
@@ -374,13 +435,18 @@
                 <div class="filter-bar">
                   <div class="filter-summary" id="tcpHistoryStatus" role="status" aria-live="polite">No TCP connections</div>
                   <div class="filter-actions">
+                    <input id="tcpSearch" type="search" placeholder="Search bytes" aria-label="Search captured bytes" spellcheck="false" autocomplete="off" />
+                    <select id="tcpSearchKind" aria-label="Search as"><option value="text">Text</option><option value="hex">Hex</option><option value="regex">Regex</option></select>
                     <button class="scope-pill" id="tcpLiveOnly" type="button" aria-pressed="false">Live only</button>
+                    <button class="secondary-action" id="tcpClearHistory" type="button" title="Remove every ended TCP connection in this session" disabled>Clear</button>
                     <button class="tcp-listener-link" id="tcpOpenSettings" type="button">Listener off</button>
                     <span class="tcp-intercept-control">
                       <span id="tcpInterceptLabel">Intercept</span>
                       <button class="switch" id="tcpInterceptToggle" type="button" role="switch" aria-checked="false" aria-labelledby="tcpInterceptLabel" disabled></button>
                     </span>
                     <select id="tcpInterceptDirection" aria-label="Intercept direction" hidden disabled><option value="both">Both directions</option><option value="client_to_server">Client → Server</option><option value="server_to_client">Server → Client</option></select>
+                    <input id="tcpInterceptMatch" type="text" placeholder="Hold only when it contains" aria-label="Hold only reads that contain" spellcheck="false" autocomplete="off" hidden disabled />
+                    <select id="tcpInterceptMatchKind" aria-label="Match as" hidden disabled><option value="text">Text</option><option value="hex">Hex</option><option value="regex">Regex</option></select>
                     <span id="tcpInterceptStatus" role="status"></span>
                   </div>
                 </div>
@@ -389,6 +455,7 @@
                     <thead id="tcpHistoryHead">
                       <tr>
                         <th class="table-sortable active tcp-col-index" data-sort="index" aria-sort="descending"># <span class="table-sort-indicator" aria-hidden="true">↓</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                        <th class="table-sortable tcp-col-number" data-sort="local_port" aria-sort="none">Listener <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
                         <th class="table-sortable" data-sort="target" aria-sort="none">Target <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
                         <th class="table-sortable" data-sort="peer" aria-sort="none">Client <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
                         <th class="table-sortable" data-sort="status" aria-sort="none">Status <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
@@ -408,13 +475,24 @@
                   <div class="view-tabs">
                     <button class="view-tab active" id="tcpStreamTab" type="button" aria-pressed="true">Stream</button>
                     <button class="view-tab" id="tcpPendingTab" type="button" aria-pressed="false" hidden>Pending</button>
+                    <button class="view-tab" id="tcpReplayTab" type="button" aria-pressed="false" hidden>Replay</button>
                   </div>
                   <span class="tcp-stream-title" id="tcpStreamTitle"></span>
                   <div class="view-tabs">
                     <select id="tcpDirection" aria-label="Direction"><option value="both">Both directions</option><option value="client_to_server">Client → Server</option><option value="server_to_client">Server → Client</option></select>
+                    <select id="tcpSplit" aria-label="Split by"><option value="reads">Reads</option><option value="lines">Lines (\n)</option><option value="crlf">Lines (\r\n)</option><option value="nul">NUL-terminated</option><option value="delimiter">Delimiter…</option><option value="u8">1-byte length</option><option value="u16be">2-byte length (big endian)</option><option value="u16le">2-byte length (little endian)</option><option value="u32be">4-byte length (big endian)</option><option value="u32le">4-byte length (little endian)</option></select>
+                    <input id="tcpSplitDelimiter" type="text" value="0a" placeholder="0a" aria-label="Delimiter as hex" spellcheck="false" autocomplete="off" hidden />
                     <button class="view-tab active" id="tcpHexView" type="button" aria-pressed="true">Hex</button>
                     <button class="view-tab" id="tcpTextView" type="button" aria-pressed="false">Text</button>
                     <button class="secondary-action tcp-close" id="tcpCloseConnection" type="button" title="Close both directions" disabled>Close connection</button>
+                    <details class="more-menu" id="tcpStreamMore" hidden>
+                      <summary class="secondary-action" aria-label="More">⋯</summary>
+                      <div class="context-menu more-menu-list" role="menu">
+                        <button class="context-menu-item" id="tcpSaveClient" type="button" role="menuitem">Save client bytes</button>
+                        <button class="context-menu-item" id="tcpSaveServer" type="button" role="menuitem">Save server bytes</button>
+                        <button class="context-menu-item" id="tcpCopyHex" type="button" role="menuitem">Copy as hex</button>
+                      </div>
+                    </details>
                   </div>
                 </header>
                 <div id="tcpStreamSurface" class="tcp-stream-surface">
@@ -426,12 +504,28 @@
                   <div class="tcp-pending-bar">
                     <select id="tcpPendingPicker" aria-label="Pending bytes" disabled></select>
                     <span id="tcpPendingMeta"></span>
+                    <span class="view-tabs tcp-pending-mode"><button class="view-tab active" id="tcpPendingHexMode" type="button" aria-pressed="true">Hex</button><button class="view-tab" id="tcpPendingTextMode" type="button" aria-pressed="false">Text</button></span>
+                    <button id="tcpDropAll" class="secondary-action" type="button" title="Drop every held read in this session" disabled>Drop all</button>
+                    <button id="tcpForwardAll" class="secondary-action" type="button" title="Forward every held read in this session unchanged" disabled>Forward all</button>
                     <button id="tcpPendingReset" class="secondary-action" type="button" disabled>Reset</button>
                     <button id="tcpDrop" class="secondary-action" type="button" disabled>Drop</button>
                     <button id="tcpForward" class="primary-action" type="button" disabled>Forward</button>
                   </div>
                   <textarea id="tcpPendingHex" aria-label="Pending bytes as hex" spellcheck="false" autocomplete="off" autocapitalize="off" disabled placeholder="No pending bytes"></textarea>
                   <details id="tcpPendingOriginal" hidden><summary>Original bytes</summary><pre id="tcpPendingOriginalHex" tabindex="0" aria-label="Original bytes as hex"></pre></details>
+                </div>
+                <div id="tcpReplaySurface" class="tcp-replay-surface" hidden>
+                  <div class="tcp-replay-bar">
+                    <input id="tcpReplayHost" type="text" aria-label="Replay target host" spellcheck="false" autocomplete="off" />
+                    <input id="tcpReplayPort" type="number" min="1" max="65535" aria-label="Replay target port" />
+                    <label class="tcp-replay-option"><input id="tcpReplayTls" type="checkbox" /> TLS</label>
+                    <label class="tcp-replay-option" title="How long the target may stay silent before the next message goes">Wait <input id="tcpReplayWait" type="number" min="50" max="30000" value="1000" aria-label="Wait for replies in milliseconds" /> ms</label>
+                    <span class="view-tabs"><button class="view-tab active" id="tcpReplayHexMode" type="button" aria-pressed="true">Hex</button><button class="view-tab" id="tcpReplayTextMode" type="button" aria-pressed="false">Text</button></span>
+                    <button class="primary-action" id="tcpReplaySend" type="button">Send</button>
+                  </div>
+                  <div id="tcpReplayMessages" class="tcp-replay-messages"></div>
+                  <div class="tcp-replay-bar"><button class="secondary-action" id="tcpReplayAdd" type="button">Add message</button></div>
+                  <p id="tcpReplayError" class="tcp-error" role="alert"></p>
                 </div>
                 <p id="tcpInterceptNotice" class="tcp-notice" role="status"></p>
                 <p id="tcpInterceptError" class="tcp-error" role="alert"></p>
@@ -445,7 +539,7 @@
               <section class="panel-card panel-card-top ws-sessions-card">
                 <div class="filter-bar websocket-filter-bar">
                   <div class="filter-summary websocket-filter-summary" id="websocketMeta" aria-live="polite">
-                    Loading captured WebSocket sessions.
+                    Loading…
                   </div>
                   <label class="search-box" for="websocketSearchInput">
                     <input id="websocketSearchInput" type="search" placeholder="Host, path, status" autocomplete="off" aria-label="Search captured WebSocket sessions" />
@@ -490,7 +584,7 @@
                     <label class="pane-search" aria-label="Search handshake">
                       <input id="wsHandshakeSearchInput" type="search" placeholder="Search handshake" />
                     </label>
-                    <span id="wsHandshakeSearchMeta">No highlights</span>
+                    <span id="wsHandshakeSearchMeta"></span>
                   </footer>
                 </section>
                 <div class="pane-resizer" id="websocketSplitResizer" aria-hidden="true"></div>
@@ -570,7 +664,7 @@
                     <button class="primary-action" id="saveMatchReplaceRuleButton" type="button" disabled>Save</button>
                   </div>
                 </header>
-                <p class="panel-empty" id="matchReplaceEmpty">Add a rule to replace or annotate traffic.</p>
+                <p class="panel-empty" id="matchReplaceEmpty">No rules yet.</p>
                 <div class="settings-form hidden" id="matchReplaceForm">
                   <label class="settings-field">
                     <span>Scope</span>
@@ -694,7 +788,7 @@
             <div class="findings-detail-resizer" id="findingsDetailResizer"></div>
             <div class="findings-detail-panel" id="findingsDetailPanel">
               <div class="findings-detail-placeholder" id="findingsDetailPlaceholder">
-                <span class="text-muted">Select a finding to view details</span>
+                <span class="text-muted">Select a finding</span>
               </div>
               <div class="findings-detail-content hidden" id="findingsDetailContent">
                 <div class="findings-detail-header">
@@ -721,7 +815,7 @@
                     <label class="pane-search" aria-label="Search request">
                       <input id="findingsReqSearchInput" type="search" placeholder="Search request" />
                     </label>
-                    <span id="findingsReqSearchMeta">No highlights</span>
+                    <span id="findingsReqSearchMeta"></span>
                   </footer>
                 </section>
                 <section class="findings-pane">
@@ -733,7 +827,7 @@
                     <label class="pane-search" aria-label="Search response">
                       <input id="findingsResSearchInput" type="search" placeholder="Search response" />
                     </label>
-                    <span id="findingsResSearchMeta">No highlights</span>
+                    <span id="findingsResSearchMeta"></span>
                   </footer>
                 </section>
               </div>
@@ -918,20 +1012,47 @@
 
               <section class="capture-settings-section" id="tcpSettingsSection" aria-labelledby="tcpSettingsHeading">
                 <div class="capture-settings-head">
-                  <h2 id="tcpSettingsHeading">TCP listener</h2>
+                  <h2 id="tcpSettingsHeading">TCP listeners</h2>
                   <span class="capture-settings-status" id="tcpListenerStatus" role="status">Loading…</span>
+                  <button class="secondary-action" id="tcpAddListener" type="button" disabled>Add</button>
                 </div>
-                <form class="tcp-listener-form" id="tcpListenerForm" aria-describedby="tcpRoutingDisclosure">
-                  <small id="tcpRoutingDisclosure">Connects directly, without the proxy chain.</small>
+                <div class="history-table-shell tcp-listener-shell" id="tcpListenerShell" tabindex="0" aria-label="TCP listeners">
+                  <table class="mini-table tcp-listener-table" id="tcpListenerTable">
+                    <thead id="tcpListenerHead">
+                      <tr>
+                        <th class="tcp-col-on">On</th>
+                        <th class="table-sortable active" data-sort="local_port" aria-sort="ascending">Listen <span class="table-sort-indicator" aria-hidden="true">↑</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                        <th class="table-sortable" data-sort="target" aria-sort="none">Target <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th>
+                        <th class="table-sortable" data-sort="status" aria-sort="none">Status <span class="table-sort-indicator" aria-hidden="true">↕</span></th>
+                      </tr>
+                    </thead>
+                    <tbody id="tcpListenerRows"></tbody>
+                  </table>
+                </div>
+                <form class="tcp-listener-form" id="tcpListenerForm" aria-describedby="tcpRoutingDisclosure" hidden>
+                  <small id="tcpRoutingDisclosure">Uses the upstream proxy when it is on; this machine and bypassed hosts go direct.</small>
                   <div class="tcp-listener-route">
-                    <label class="tcp-listener-field"><span>Listen on 127.0.0.1</span><input id="tcpLocalPort" type="number" min="1" max="65535" step="1" value="9000" required aria-label="TCP listen port" /></label>
+                    <label class="tcp-listener-field"><span id="tcpListenAddress">Listen on 127.0.0.1</span><input id="tcpLocalPort" type="number" min="1" max="65535" step="1" value="9000" required aria-label="TCP listen port" /></label>
                     <span class="tcp-listener-arrow" aria-hidden="true">→</span>
                     <label class="tcp-listener-field tcp-listener-host"><span>Target host</span><input id="tcpTargetHost" type="text" placeholder="127.0.0.1" autocomplete="off" spellcheck="false" required /></label>
                     <label class="tcp-listener-field"><span>Port</span><input id="tcpTargetPort" type="number" min="1" max="65535" step="1" required aria-label="Target port" /></label>
-                    <span class="tcp-listener-actions"><button class="primary-action" id="tcpStart" type="submit" disabled>Start</button><button class="secondary-action" id="tcpStop" type="button" disabled>Stop</button></span>
+                    <label class="tcp-listener-field"><span>Protocol</span><select id="tcpListenerProtocol"><option value="tcp">TCP</option><option value="udp">UDP</option></select></label>
+                    <label class="tcp-listener-field" title="Decrypt: a client that starts TLS gets a certificate from Sniper's CA. To target only: the client speaks plain text and Sniper adds TLS."><span>TLS</span><select id="tcpListenerTls"><option value="off">None</option><option value="decrypt">Decrypt</option><option value="upstream">To target only</option></select></label>
                   </div>
-                  <p id="tcpSettingsError" class="tcp-error" role="alert"></p>
+                  <div class="tcp-listener-route">
+                    <label class="tcp-listener-check"><input id="tcpListenerRemote" type="checkbox" /> Other devices can connect</label>
+                    <label class="tcp-listener-field tcp-listener-allowed" id="tcpListenerAllowedField" hidden><span>Allowed devices</span><textarea id="tcpListenerAllowed" rows="2" placeholder="192.0.2.0/24" spellcheck="false" autocomplete="off" aria-label="Addresses or networks that may connect, one per line"></textarea></label>
+                  </div>
+                  <div class="tcp-listener-actions">
+                    <button class="secondary-action" id="tcpRemoveListener" type="button" hidden>Remove</button>
+                    <button class="secondary-action" id="tcpCancelListener" type="button">Cancel</button>
+                    <button class="primary-action" id="tcpSaveListener" type="submit">Save</button>
+                  </div>
                 </form>
+                <div class="tcp-settings-footer">
+                  <p id="tcpSettingsError" class="tcp-error" role="alert"></p>
+                  <button class="secondary-action" id="tcpRetrySaving" type="button" hidden>Stop and retry saving</button>
+                </div>
               </section>
 
               <section class="capture-settings-section" id="captureSettingsHistory" aria-labelledby="captureSettingsHistoryTitle">
@@ -1093,7 +1214,7 @@
                 <label class="pane-search">
                   <input id="replayRequestSearchInput" type="search" aria-label="Search Replay request" placeholder="Search request" />
                 </label>
-                <span id="replayRequestSearchMeta">No highlights · 1 lines · Pretty view</span>
+                <span id="replayRequestSearchMeta"></span>
               </footer>
             </section>
 
@@ -1124,7 +1245,7 @@
                 <label class="pane-search">
                   <input id="replayResponseSearchInput" type="search" aria-label="Search Replay response" placeholder="Search response" />
                 </label>
-                <span id="replayResponseSearchMeta">No highlights · 1 lines · Pretty view</span>
+                <span id="replayResponseSearchMeta"></span>
               </footer>
             </section>
           </section>
@@ -1189,7 +1310,7 @@
                   <span id="wsFrameCount" class="search-hit-count">0 frames</span>
                 </div>
                 <div class="ws-frame-list" id="wsFrameList">
-                  <div class="empty-copy">Connect to start a WebSocket conversation.</div>
+                  <div class="empty-copy">Not connected.</div>
                 </div>
               </div>
               <div class="ws-replay-frame-resizer" id="wsReplayFrameResizer"></div>
@@ -1204,7 +1325,7 @@
           </div>
 
           <div class="replay-empty hidden" id="replayEmptyState">
-            <p>Send a request here from HTTP history with <kbd data-shortcut="mod+r"></kbd>, or start one.</p>
+            <p>Press <kbd data-shortcut="mod+r"></kbd> from HTTP, or open a new tab.</p>
             <div class="replay-empty-actions">
               <button class="secondary-action" id="replayEmptyNewTabButton" type="button">New tab</button>
               <button class="secondary-action" id="replayEmptyImportCurlButton" type="button">Import cURL</button>
@@ -1219,7 +1340,7 @@
                 <div class="panel-toolbar">
                   <div>
                     <h2>Tools</h2>
-                    <p class="settings-inline-status error hidden" id="toolsLoadError" role="status" aria-live="polite" aria-atomic="true">Tools could not finish loading. Preserve any unsaved work, then reload the app to try again.</p>
+                    <p class="settings-inline-status error hidden" id="toolsLoadError" role="status" aria-live="polite" aria-atomic="true">Tools failed to load. Save unsaved work, then reload.</p>
                   </div>
                 </div>
                 <div class="tools-tool-strip">
@@ -1249,7 +1370,7 @@
                     class="request-editor tools-input-editor"
                     data-autosize="decoder"
                     spellcheck="false"
-                    placeholder="Paste text, tokens, payloads, JSON, JWT, hashes, or network values here."
+                    placeholder="Paste text, JSON, JWT, or encoded data…"
                   ></textarea>
                 </label>
 
@@ -1281,7 +1402,7 @@
               <header class="panel-toolbar tools-output-toolbar">
                 <div>
                   <h2 id="toolsActiveToolTitle">Encode output</h2>
-                  <p class="inline-copy" id="toolsOutputHint">Results appear here as you type.</p>
+                  <p class="inline-copy" id="toolsOutputHint">Enter input to decode.</p>
                 </div>
               </header>
               <div id="output" class="tools-output-list"></div>
@@ -1563,12 +1684,12 @@
         <section class="sequence-shell hidden" id="sequenceShell">
           <section class="sequence-empty hidden" id="sequenceEmpty">
             <h2>No sequences yet</h2>
-            <p>A sequence sends requests in order and passes values between them. Write <code>{{variable}}</code> in a later step to use a value an earlier step extracted.</p>
+            <p>Chain requests in order and pass extracted values with <code>{{variable}}</code>.</p>
             <button class="primary-action" id="sequenceEmptyNewButton" type="button">New sequence</button>
           </section>
           <header class="panel-toolbar replay-header" id="sequenceHeader">
             <div>
-              <p class="inline-copy">Chain requests with variable extraction. Use <code>{{variable}}</code> in subsequent steps.</p>
+              <p class="inline-copy">Pass extracted values between steps with <code>{{variable}}</code>.</p>
             </div>
             <div class="toolbar-actions">
               <button class="secondary-action" id="newSequenceButton" type="button">New sequence</button>
@@ -1664,12 +1785,12 @@
                 <label class="settings-field target-scope-field">
                   <span>In-scope hosts</span>
                   <textarea id="targetScopeEditor" rows="4" placeholder="*.example.com&#10;api.example.com"></textarea>
-                  <small>Leave empty to include every host.</small>
+                  <small>Empty matches all hosts.</small>
                 </label>
                 <label class="settings-field target-scope-field">
                   <span>Excluded hosts</span>
                   <textarea id="targetScopeExcludeEditor" rows="4" placeholder="log-*.example.com&#10;static.example.com"></textarea>
-                  <small>Taken back out of scope, with or without an in-scope list. These patterns are shared with intercept and filter settings.</small>
+                  <small>Always excluded. Shared across Intercept and Filters.</small>
                 </label>
               </div>
             </section>
@@ -1686,7 +1807,7 @@
               <button class="sub-tab target-tab active" id="targetServiceMapTab" type="button" data-target-view="service-map" role="tab" aria-selected="true" aria-controls="targetServiceMapPanel">Service Map</button>
               <button class="sub-tab target-tab" id="targetApisTab" type="button" data-target-view="apis" role="tab" aria-selected="false" aria-controls="targetServiceMapPanel">APIs</button>
             </div>
-            <span class="target-passive-label">Retained history · read only</span>
+            <span class="target-passive-label">Read-only</span>
           </header>
           <section class="service-map-workspace" id="targetServiceMapPanel" role="tabpanel" aria-labelledby="targetServiceMapTab">
             <div class="service-map-toolbar">
@@ -1711,7 +1832,7 @@
               <section class="service-map-graph" aria-label="Captured service origins">
                 <div class="service-map-body-overlay hidden" id="serviceMapBodyOverlay" aria-label="Shown retained inspections" aria-live="polite"></div>
                 <div class="service-map-viewport" id="serviceMapViewport" tabindex="0" aria-label="Service map. Plus or minus to zoom, zero to reset, F to fit."><div class="service-map-canvas" id="serviceMapCanvas"></div></div>
-                <div class="service-map-legend"><span class="service-map-legend-lines"><span class="service-map-line" aria-hidden="true"></span>Redirect <span class="service-map-line dashed" aria-hidden="true"></span>Origin / Referer <span class="service-map-line dotted" aria-hidden="true"></span>Body URL <span class="service-map-line link-declaration" aria-hidden="true"></span>Link header <span class="service-map-line preconnect-hint" aria-hidden="true"></span>Preconnect <span class="service-map-line peer-observation" aria-hidden="true"></span>Same address <span class="service-map-line client-request" aria-hidden="true"></span>Direct request</span><span class="service-map-legend-flow"><span class="service-map-line flow-api" aria-hidden="true"></span>API call <span class="service-map-line flow-page" aria-hidden="true"></span>Page <span class="service-map-line flow-static" aria-hidden="true"></span>Script or static file <span class="service-map-line flow-redirect" aria-hidden="true"></span>Redirect back</span><span id="serviceMapLinkKinds" class="service-map-kinds" role="group" aria-label="Origin and Referer links by request kind"></span><span id="serviceMapSiteControls" class="service-map-kinds" role="group" aria-label="Site grouping and origins hidden from the map"></span><details class="service-map-bounds-details hidden" id="serviceMapBoundsDetails"><summary id="serviceMapDetailsSummary">Details</summary><p class="service-map-status" id="serviceMapStatus"></p><p id="serviceMapGraphBounds"></p><p id="serviceMapGraphDiagnostics"></p></details><span class="service-map-view-actions"><button class="service-map-mode" id="serviceMapDirectRelations" type="button" aria-pressed="false" title="Pin the selected origin and show only its direct retained relations">Direct relations</button><button class="secondary-action hidden" id="serviceMapFocusSelection" type="button">Focus selection</button><button class="secondary-action hidden" id="serviceMapFlowMermaid" type="button" title="Copy this flow as a Mermaid sequence diagram">Copy Mermaid</button></span></div>
+                <div class="service-map-legend"><span class="service-map-legend-lines"><span class="service-map-legend-item"><span class="service-map-line" aria-hidden="true"></span>Redirect</span><span class="service-map-legend-item"><span class="service-map-line dashed" aria-hidden="true"></span>Origin / Referer</span><span class="service-map-legend-item"><span class="service-map-line dotted" aria-hidden="true"></span>Body URL</span><span class="service-map-legend-item"><span class="service-map-line link-declaration" aria-hidden="true"></span>Link</span><span class="service-map-legend-item"><span class="service-map-line preconnect-hint" aria-hidden="true"></span>Preconnect</span><span class="service-map-legend-item"><span class="service-map-line peer-observation" aria-hidden="true"></span>Same IP</span><span class="service-map-legend-item"><span class="service-map-line client-request" aria-hidden="true"></span>Direct</span></span><span class="service-map-legend-flow"><span class="service-map-legend-item"><span class="service-map-line flow-api" aria-hidden="true"></span>API</span><span class="service-map-legend-item"><span class="service-map-line flow-page" aria-hidden="true"></span>Page</span><span class="service-map-legend-item"><span class="service-map-line flow-static" aria-hidden="true"></span>Static</span><span class="service-map-legend-item"><span class="service-map-line flow-redirect" aria-hidden="true"></span>Redirect</span></span><span id="serviceMapLinkKinds" class="service-map-kinds" role="group" aria-label="Origin and Referer links by request kind"></span><span id="serviceMapSiteControls" class="service-map-kinds" role="group" aria-label="Site grouping and origins hidden from the map"></span><details class="service-map-bounds-details hidden" id="serviceMapBoundsDetails"><summary id="serviceMapDetailsSummary">Details</summary><p class="service-map-status" id="serviceMapStatus"></p><p id="serviceMapGraphBounds"></p><p id="serviceMapGraphDiagnostics"></p></details><span class="service-map-view-actions"><button class="service-map-mode" id="serviceMapDirectRelations" type="button" aria-pressed="false" title="Pin the selected origin and show only its direct retained relations">Direct relations</button><button class="secondary-action hidden" id="serviceMapFocusSelection" type="button">Focus selection</button><button class="secondary-action hidden" id="serviceMapFlowMermaid" type="button" title="Copy this flow as a Mermaid sequence diagram">Copy Mermaid</button></span></div>
               </section>
               <div class="pane-resizer service-map-resizer" id="serviceMapResizer" role="separator" aria-orientation="vertical" aria-label="Resize the map and the inspector" tabindex="0" title="Drag to resize; double-click to reset"></div>
               <aside class="service-map-detail" id="serviceMapDetail" aria-label="Selected origin details"></aside>
@@ -1839,6 +1960,7 @@
                 </div>
                 <div class="recon-limit-fields templates-limits">
                   <label class="recon-field" for="templatesScanRate">Requests/s<input id="templatesScanRate" type="number" min="1" max="50" value="10" /></label>
+                  <label class="recon-field" for="templatesScanDelay" title="Wait between requests: 500, or a random time in a range such as 200-800">Delay (ms)<input id="templatesScanDelay" type="text" inputmode="numeric" placeholder="0" spellcheck="false" autocomplete="off" /></label>
                   <label class="recon-field" for="templatesScanConcurrency">Parallel<input id="templatesScanConcurrency" type="number" min="1" max="8" value="4" title="Templates sent at once" /></label>
                   <label class="recon-field" for="templatesScanMaxRequests">Max requests<input id="templatesScanMaxRequests" type="number" min="1" max="50000" value="10000" /></label>
                 </div>
@@ -1929,6 +2051,7 @@
                 </select>
               </div>
               <div class="toolbar-actions" id="templatesListActions">
+                <button class="secondary-action hidden" id="templatesOnCount" type="button" aria-pressed="false" title="Show the templates turned on"></button>
                 <button class="secondary-action hidden" id="templatesEnableShown" type="button">Turn on all</button>
                 <button class="secondary-action hidden" id="templatesDisableShown" type="button">Turn off all</button>
               </div>
@@ -1942,7 +2065,7 @@
             <div class="recon-results">
               <div class="recon-table-scroll" tabindex="0" aria-label="Templates">
                 <table class="mini-table recon-table templates-table" id="templatesTable">
-                  <thead id="templatesHead"><tr><th class="table-sortable" data-sort="on" aria-sort="none" title="On: a template that can judge captured traffic checks it; one that must send its requests goes to each new host while the auto scan is on.">On <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="severity" aria-sort="none">Severity <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="name" aria-sort="none">Template <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="mode" aria-sort="none">Mode <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="tags" aria-sort="none">Tags <span class="table-sort-indicator" aria-hidden="true">↕</span></th></tr></thead>
+                  <thead id="templatesHead"><tr><th class="table-sortable" data-sort="on" aria-sort="none" title="On: a template that can judge captured traffic checks it; one that must send its requests goes to each new host while the auto scan is on. Shift-click sets a range.">On<span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="severity" aria-sort="none">Severity <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="name" aria-sort="none">Template <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="mode" aria-sort="none">Mode <span class="table-sort-indicator" aria-hidden="true">↕</span><span class="table-col-resize" aria-hidden="true"></span></th><th class="table-sortable" data-sort="tags" aria-sort="none">Tags <span class="table-sort-indicator" aria-hidden="true">↕</span></th></tr></thead>
                   <tbody id="templatesRows"></tbody>
                 </table>
                 <table class="mini-table recon-table templates-results-table hidden" id="templatesResultsTable">
@@ -2103,14 +2226,14 @@
 <section class="filter-group">
               <h3>Command line</h3>
               <p class="modal-copy" id="cliPathDescription">
-                Make this app's bundled sniper-cli available in a terminal. PATH setup is optional.
+                Add bundled sniper-cli to your shell PATH.
               </p>
               <p class="modal-copy cli-path-directory hidden" id="cliPathDirectory"></p>
               <div class="filter-group-actions">
                 <button class="secondary-action" id="installCliPathButton" type="button" disabled>Add sniper-cli to PATH</button>
                 <button class="secondary-action" id="refreshCliPathButton" type="button">Refresh status</button>
               </div>
-              <p class="modal-copy settings-inline-status" id="installCliPathStatus" role="status" aria-live="polite" aria-atomic="true">Checking command-line availability…</p>
+              <p class="modal-copy settings-inline-status" id="installCliPathStatus" role="status" aria-live="polite" aria-atomic="true">Checking PATH…</p>
             </section>
 <section class="filter-group" aria-labelledby="vulndataTitle">
               <div class="filter-group-header">
@@ -2130,7 +2253,7 @@
                 <button class="switch" id="vulndataAutoUpdate" type="button" role="switch" aria-checked="true" aria-labelledby="vulndataUpdateLabel"></button>
               </div>
               <ul class="vulndata-sources" id="vulndataSources"></ul>
-              <p class="modal-copy hidden" id="vulndataRescanNote">Traffic captured before the data arrived needs a Findings Rescan.</p>
+              <p class="modal-copy hidden" id="vulndataRescanNote">Run Rescan in Findings to check earlier traffic.</p>
               <p class="modal-copy settings-inline-status" id="vulndataMessage" role="status" aria-live="polite"></p>
               <input class="hidden" id="vulndataImportFile" type="file" multiple accept=".json,.csv,.gz,application/json,text/csv,application/gzip" />
             </section>
@@ -2184,10 +2307,10 @@
               <label class="settings-field">
                 <span>Base text size (px)</span>
                 <input id="displaySizeInput" type="number" min="8" max="20" step="1" />
-                <small>Lower numbers make the whole workbench denser. The default is 12 px.</small>
+                <small>Default: 12 px.</small>
               </label>
 
-              <p class="modal-copy" id="displaySettingsLoadStatus" role="status" aria-live="polite">Loading saved display settings. You can edit while they load.</p>
+              <p class="modal-copy" id="displaySettingsLoadStatus" role="status" aria-live="polite">Loading settings…</p>
               <button class="secondary-action" id="retryDisplaySettingsButton" type="button" disabled>Retry</button>
 
             </section>
@@ -2224,7 +2347,7 @@
                 <input id="displayRenderResourcesInput" type="checkbox" />
                 <span>Load images, styles and fonts</span>
               </label>
-              <p class="modal-copy">Off, Render draws only what the response itself holds. On, it also fetches the images, stylesheets and fonts the page names, through Sniper and the session's proxy chain. Those requests go to the target and to any other host the page names, and are not recorded in HTTP history. Scripts never run either way.</p>
+              <p class="modal-copy">Fetches external images, styles, and fonts through Sniper (not logged in HTTP history). Scripts never run.</p>
             </section>
             <section class="filter-group">
               <h3>Findings in HTTP</h3>
@@ -2241,7 +2364,7 @@
                   <option value="none">No color</option>
                 </select>
               </label>
-              <p class="modal-copy">For requests with passive scan findings while Findings is on in HTTP. A color tag you set on a row, and a note you wrote, show instead.</p>
+              <p class="modal-copy">Highlights rows with passive findings unless manually tagged.</p>
             </section>
           </div>
           <div class="settings-panel-plain" data-settings-panel="shortcuts" role="tabpanel">

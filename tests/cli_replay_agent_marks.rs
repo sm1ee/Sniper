@@ -45,6 +45,9 @@ impl Fixture {
         let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_sniper-cli"))
             .env_remove("SNIPER_ACTOR")
             .env_remove("CLAUDECODE")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CODEX_SANDBOX")
+            .env_remove("CODEX_MANAGED_PACKAGE_ROOT")
             .envs(actor.iter().copied())
             .env("SNIPER_DATA_DIR", &self.dir)
             .args(["--output", "compact", "--api", &self.api])
@@ -167,6 +170,49 @@ async fn a_tab_says_who_opened_it_and_who_changed_a_persons_tab() {
     assert_eq!(marks(&copy), (Some(json!("Claude")), None));
     // Saving the whole workspace marks only the tab the command changed.
     assert_eq!(marks(&untouched), (None, None));
+}
+
+/// Codex is named without being told: it sets CODEX_THREAD_ID on the commands
+/// it runs, CODEX_SANDBOX when it sandboxes them, and its npm launcher sets
+/// CODEX_MANAGED_PACKAGE_ROOT. Codex started from Claude Code, as Claude
+/// Code's Codex plugin starts it, also inherits CLAUDECODE=1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tab_codex_opens_says_codex() {
+    let fixture = Fixture::start().await;
+    let cases: [(&[(&str, &str)], &str); 6] = [
+        (&[("CODEX_THREAD_ID", "thread")], "Codex"),
+        (&[("CODEX_SANDBOX", "seatbelt")], "Codex"),
+        (&[("CODEX_MANAGED_PACKAGE_ROOT", "/opt/codex")], "Codex"),
+        (
+            &[("CLAUDECODE", "1"), ("CODEX_THREAD_ID", "thread")],
+            "Codex",
+        ),
+        // Claude Code's Codex plugin marks Claude's own commands too.
+        (
+            &[
+                ("CLAUDECODE", "1"),
+                ("CODEX_COMPANION_SESSION_ID", "session"),
+            ],
+            "Claude",
+        ),
+        (
+            &[("SNIPER_ACTOR", "Reviewer"), ("CODEX_THREAD_ID", "thread")],
+            "Reviewer",
+        ),
+    ];
+    let mut opened = Vec::new();
+    for (actor, expected) in cases {
+        let tab = fixture.command(actor, &["replay", "open", "--yes"]).await;
+        let id = tab.get("data").unwrap_or(&tab)["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        opened.push((id, expected));
+    }
+    let list = fixture.command(&[], &["replay", "list"]).await;
+    for (id, expected) in opened {
+        assert_eq!(Fixture::tab(&list, &id)["opened_by"], expected, "{id}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

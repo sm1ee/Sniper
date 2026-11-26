@@ -68,11 +68,40 @@ use crate::{
     session::SessionContext,
     special_host,
     state::AppState,
+    tcp_capture::{Io, TcpSource},
     upstream_proxy::UpstreamProxyRouteSnapshot,
 };
 
-const REPLAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const REPLAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a request Sniper sends for the operator may take: to connect, to
+/// stay silent while the response is awaited or read, and in all.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RequestTimeouts {
+    pub connect: Duration,
+    pub idle: Duration,
+    pub total: Duration,
+}
+
+impl RequestTimeouts {
+    fn apply(self, builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+        builder
+            .connect_timeout(self.connect)
+            .read_timeout(self.idle)
+            .timeout(self.total)
+    }
+}
+
+/// Replay and Fuzzer. Silence is timed, not the whole exchange, so a large
+/// body still arriving is not cut off. Two minutes outlasts the gateways in
+/// front of most services (nginx and AWS ALB give up at 60 s, Cloudflare at
+/// 100 s), so their own 504 reaches the operator first, and leaves room for a
+/// time-based payload. Five minutes ends a response that trickles in forever.
+pub(crate) const REPLAY_TIMEOUTS: RequestTimeouts = RequestTimeouts {
+    connect: REPLAY_CONNECT_TIMEOUT,
+    idle: Duration::from_secs(120),
+    total: Duration::from_secs(300),
+};
 const PROXY_ACCEPT_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(50);
 const PROXY_ACCEPT_RETRY_MAX_DELAY: Duration = Duration::from_secs(1);
 const WEBSOCKET_CAPTURE_PREVIEW_BYTES: usize = 64 * 1024;
@@ -228,17 +257,12 @@ pub async fn run_proxy(state: Arc<AppState>) -> Result<()> {
     serve_proxy(listener, state).await
 }
 
-/// Bind a TCP listener with `SO_REUSEADDR` so that recently-closed sockets
-/// on the same port don't block us.
+/// Binds a proxy listener that nothing else answers on. `SO_REUSEADDR` is
+/// used only for a port that is waiting out its last connections, so a
+/// listener that was just closed starts again at once; see
+/// `session_ports::bind_exclusive` for what the option did before.
 pub async fn bind_proxy_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
-    let socket = if addr.is_ipv6() {
-        tokio::net::TcpSocket::new_v6()?
-    } else {
-        tokio::net::TcpSocket::new_v4()?
-    };
-    socket.set_reuseaddr(true)?;
-    socket.bind(addr)?;
-    socket.listen(1024)
+    crate::session_ports::bind_exclusive(addr).await
 }
 
 /// Try to rebind the proxy listener to a new address at runtime.
@@ -264,9 +288,25 @@ pub async fn rebind_proxy_locked(
         }
         return Ok(());
     }
+    // A client left pointing at a session's number must reach that session
+    // or nothing, never the main listener and whichever session it records.
+    if state.own_listeners().keeps(new_addr.port()) {
+        return Err(format!(
+            "Port {} is kept for a session's own proxy port. Choose another port.",
+            new_addr.port()
+        ));
+    }
 
-    close_live_websocket_relays(
+    // Only what the main listener carries moves with it: its connections and
+    // the work of the session it records into. A session port keeps its own.
+    // The activation lock keeps that session the same until the drain is
+    // done: were it to change, and the session it was to get a port
+    // meanwhile, the drain would cut that port's tunnels.
+    let _activation_guard = state.hold_session_activation().await;
+    let default_session = state.sessions.active_session_id();
+    close_session_websocket_relays(
         state.as_ref(),
+        default_session,
         "Proxy listener rebind closed the live WebSocket relay.",
     )
     .await
@@ -279,6 +319,11 @@ pub async fn rebind_proxy_locked(
     state.abort_proxy_task().await;
     state.set_proxy_online(false);
     persist_proxy_runtime_state(&state, current, false, "after stopping proxy for rebind").await;
+    // The guards know the new address before anything listens there, as for
+    // a session port: a connection the old listener accepted lives until the
+    // drain below, and must not reach the new one through it as a local
+    // client. Kept until the address is the main listener's.
+    let announced = state.own_listeners().announce(new_addr);
 
     // Bind the new address with SO_REUSEADDR.
     // Retry a few times because macOS may not release the port instantly
@@ -356,7 +401,7 @@ pub async fn rebind_proxy_locked(
         }
     };
 
-    drain_proxy_connections(Duration::from_millis(200)).await;
+    drain_main_listener(default_session, Duration::from_millis(200)).await;
 
     let bound_addr = listener
         .local_addr()
@@ -365,6 +410,7 @@ pub async fn rebind_proxy_locked(
     // Update active address
     state.set_active_proxy_addr(bound_addr).await;
     let proxy_generation = state.mark_proxy_listener_online();
+    drop(announced);
     persist_proxy_runtime_state(&state, bound_addr, true, "after proxy rebind").await;
 
     info!(old = %current, new = %bound_addr, "proxy listener rebound");
@@ -466,6 +512,28 @@ pub async fn mark_proxy_offline_after_task_exit(
 }
 
 pub async fn serve_proxy(listener: TcpListener, state: Arc<AppState>) -> Result<()> {
+    serve_listener(listener, state, None).await
+}
+
+/// Serves a session's own port: every request on it is recorded into
+/// `session`, whichever session the main listener records into.
+pub(crate) async fn serve_session_port(
+    listener: TcpListener,
+    state: Arc<AppState>,
+    session: Arc<SessionContext>,
+) -> Result<()> {
+    serve_listener(listener, state, Some(session)).await
+}
+
+async fn serve_listener(
+    listener: TcpListener,
+    state: Arc<AppState>,
+    bound: Option<Arc<SessionContext>>,
+) -> Result<()> {
+    let owner = match &bound {
+        Some(session) => ConnectionOwner::SessionPort(session.id()),
+        None => ConnectionOwner::MainListener,
+    };
     let mut accept_retry_delay = PROXY_ACCEPT_RETRY_INITIAL_DELAY;
     loop {
         let (stream, peer_addr) = match listener.accept().await {
@@ -490,16 +558,17 @@ pub async fn serve_proxy(listener: TcpListener, state: Arc<AppState>) -> Result<
         };
         let io = TokioIo::new(stream);
         let state = state.clone();
+        let bound = bound.clone();
 
         let connection_id = Uuid::new_v4();
         let (abort, registration) = AbortHandle::new_pair();
-        remember_proxy_connection(connection_id, abort);
+        remember_proxy_connection(connection_id, owner, abort);
         tokio::spawn(async move {
             let service = service_fn(move |request| {
                 // A dual-stack `[::]` listener sees IPv4 clients as `::ffff:a.b.c.d`.
                 CLIENT_ADDRESS.scope(
                     peer_addr.ip().to_canonical(),
-                    handle_request(request, state.clone(), peer_addr),
+                    handle_request(request, state.clone(), peer_addr, bound.clone()),
                 )
             });
 
@@ -649,6 +718,7 @@ pub async fn try_send_replay_request_for_session(
         &request,
         target.as_ref(),
         requested_http_version,
+        REPLAY_TIMEOUTS,
     )
     .await
     .map_err(ReplaySendError::without_record)?;
@@ -677,6 +747,7 @@ pub async fn try_send_replay_request_for_session(
         SocketPeerCapture::Disabled,
         request_color,
         None,
+        Some(REPLAY_TIMEOUTS),
     )
     .await;
 
@@ -823,6 +894,7 @@ pub(crate) async fn send_template_scan_request(
         SocketPeerCapture::Disabled,
         request_color,
         None,
+        None,
     )
     .await;
     match exchange.response {
@@ -847,10 +919,7 @@ pub(crate) async fn targets_own_listener(
     else {
         return true;
     };
-    for listener in [
-        state.get_active_proxy_addr().await,
-        state.get_active_ui_addr().await,
-    ] {
+    for listener in state.own_listeners().all() {
         if request_targets_own_listener(&uri, listener)
             || name_resolves_to_own_listener(session, &uri, listener).await
         {
@@ -858,6 +927,24 @@ pub(crate) async fn targets_own_listener(
         }
     }
     false
+}
+
+/// The proxy listener of Sniper's that `uri` leads back to, by address or by
+/// a name that resolves to this machine: the main listener or a session port.
+/// Forwarding there would send the request round again and again.
+async fn own_proxy_listener_for(
+    state: &AppState,
+    session: &SessionContext,
+    uri: &Uri,
+) -> Option<SocketAddr> {
+    for listener in state.own_listeners().proxies() {
+        if request_targets_own_listener(uri, listener)
+            || name_resolves_to_own_listener(session, uri, listener).await
+        {
+            return Some(listener);
+        }
+    }
+    None
 }
 
 const RENDER_RESOURCE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -878,7 +965,7 @@ pub(crate) struct RenderResource {
 pub(crate) async fn fetch_render_resource(
     session: &SessionContext,
     url: &str,
-    own_listeners: [SocketAddr; 2],
+    own_listeners: Vec<SocketAddr>,
 ) -> Result<RenderResource> {
     let proxy = session.runtime.upstream_proxy().await;
     // A redirect must not lead back into Sniper's own listeners either.
@@ -946,18 +1033,25 @@ fn render_resource_content_type(headers: &HeaderMap) -> Option<String> {
 fn build_legacy_tls_client(
     upstream_insecure: bool,
     proxy: &crate::upstream_proxy::UpstreamProxy,
+    timeouts: Option<RequestTimeouts>,
 ) -> Option<ProxyClient> {
-    // A TLS compatibility retry must use the configured chain as well.
-    proxy
+    // A TLS compatibility retry must use the configured chain as well, and the
+    // limits of the attempt it repeats: browser traffic has none, a Replay has
+    // REPLAY_TIMEOUTS.
+    let builder = proxy
         .apply(Client::builder())
         .ok()?
         .redirect(Policy::none())
         .danger_accept_invalid_certs(upstream_insecure)
         .http1_only()
         .connect_timeout(REPLAY_CONNECT_TIMEOUT)
-        .use_native_tls()
-        .build()
-        .ok()
+        .use_native_tls();
+    match timeouts {
+        Some(timeouts) => timeouts.apply(builder),
+        None => builder,
+    }
+    .build()
+    .ok()
 }
 
 /// Whether a failed send is worth one more attempt over the platform TLS stack.
@@ -1005,14 +1099,15 @@ async fn build_replay_client(
     request: &EditableRequest,
     target: Option<&RequestTargetOverride>,
     http_version: Option<Version>,
+    timeouts: RequestTimeouts,
 ) -> Result<ProxyClient> {
-    let mut builder = proxy
-        .apply(Client::builder())?
-        .use_rustls_tls()
-        .redirect(Policy::none())
-        .danger_accept_invalid_certs(upstream_insecure)
-        .timeout(REPLAY_REQUEST_TIMEOUT)
-        .connect_timeout(REPLAY_CONNECT_TIMEOUT);
+    let mut builder = timeouts.apply(
+        proxy
+            .apply(Client::builder())?
+            .use_rustls_tls()
+            .redirect(Policy::none())
+            .danger_accept_invalid_certs(upstream_insecure),
+    );
 
     // Force HTTP version if specified
     match http_version {
@@ -1285,8 +1380,17 @@ async fn handle_request(
     request: Request<Incoming>,
     state: Arc<AppState>,
     peer_addr: SocketAddr,
+    bound: Option<Arc<SessionContext>>,
 ) -> Result<Response<Body>, Infallible> {
-    let (session, _session_owner) = state.session_with_proxy_owner().await;
+    let (session, _session_owner) = match bound {
+        // A session port holds its session's one writable context, so its
+        // requests never ask which session is active.
+        Some(session) => {
+            let owner = remember_active_proxy_session_owner(session.id(), PROXY_WORK_HTTP_REQUEST);
+            (session, owner)
+        }
+        None => state.session_with_proxy_owner().await,
+    };
     let response = if request.method() == Method::CONNECT {
         handle_connect(request, state, session, peer_addr).await
     } else {
@@ -1386,7 +1490,7 @@ async fn handle_connect(
         .path_and_query("/")
         .build();
     if let Ok(uri) = &tunnel {
-        if remote_client_reaches_guarded(&state, &session, peer_addr.ip(), uri).await {
+        if remote_client_reaches_guarded(&state, peer_addr.ip(), uri).await {
             return record_connect_rejection(
                 &state,
                 &session,
@@ -1396,6 +1500,24 @@ async fn handle_connect(
                 started,
                 StatusCode::FORBIDDEN,
                 REMOTE_GUARDED_MESSAGE.to_string(),
+                request_http_version,
+            )
+            .await;
+        }
+        // A tunnel to one of Sniper's own proxy listeners, the main one or a
+        // session's port, comes back in as a local client.
+        if let Some(proxy_addr) = own_proxy_listener_for(&state, &session, uri).await {
+            return record_connect_rejection(
+                &state,
+                &session,
+                request.uri(),
+                request.headers(),
+                started_at,
+                started,
+                StatusCode::LOOP_DETECTED,
+                format!(
+                    "CONNECT target resolves to Sniper's own proxy listener ({proxy_addr}); refusing to open a proxy loop."
+                ),
                 request_http_version,
             )
             .await;
@@ -1431,14 +1553,8 @@ async fn handle_connect(
         let authority = target
             .parse::<Authority>()
             .expect("validated CONNECT authority");
-        let upstream_stream = match session
-            .runtime
-            .upstream_proxy()
-            .await
-            .connect(authority.host(), authority.port_u16().unwrap_or(443))
-            .await
-        {
-            Ok(stream) => stream,
+        let upstream = match dial_tunnel_target(&session, &authority).await {
+            Ok(upstream) => upstream,
             Err(error) => {
                 warn!(
                     %peer_addr,
@@ -1479,7 +1595,7 @@ async fn handle_connect(
         spawn_tracked_proxy_task(session.id(), PROXY_WORK_TUNNEL, async move {
             if let Err(error) = serve_passthrough_tunnel(
                 upgrade,
-                upstream_stream,
+                upstream,
                 state.clone(),
                 session.clone(),
                 target.clone(),
@@ -1487,6 +1603,7 @@ async fn handle_connect(
                 started_at,
                 started,
                 request_http_version,
+                peer_addr,
             )
             .await
             {
@@ -1503,7 +1620,7 @@ async fn handle_connect(
         let failure_request_http_version = request_http_version;
 
         spawn_tracked_proxy_task(session.id(), PROXY_WORK_TUNNEL, async move {
-            if let Err(error) = serve_https_mitm(
+            if let Err(error) = serve_connect_tunnel(
                 upgrade,
                 state.clone(),
                 session.clone(),
@@ -1516,7 +1633,7 @@ async fn handle_connect(
             )
             .await
             {
-                warn!(%peer_addr, ?error, target = %failure_target, "HTTPS MITM handler failed");
+                warn!(%peer_addr, ?error, target = %failure_target, "CONNECT tunnel failed");
                 record_connect_post_ok_tunnel_failure(
                     &failure_state,
                     &failure_session,
@@ -1524,7 +1641,7 @@ async fn handle_connect(
                     failure_capture,
                     failure_started_at,
                     failure_started,
-                    format!("HTTPS MITM failed: {error}"),
+                    error.to_string(),
                     failure_request_http_version,
                 )
                 .await;
@@ -1644,7 +1761,7 @@ async fn handle_forwardable_request(
             .await
         }
     };
-    if remote_client_reaches_guarded(&state, &session, peer_addr.ip(), &absolute_uri).await {
+    if remote_client_reaches_guarded(&state, peer_addr.ip(), &absolute_uri).await {
         return record_http_rejection(
             &state,
             &session,
@@ -1660,10 +1777,7 @@ async fn handle_forwardable_request(
         )
         .await;
     }
-    let proxy_addr = state.get_active_proxy_addr().await;
-    if request_targets_own_listener(&absolute_uri, proxy_addr)
-        || name_resolves_to_own_listener(&session, &absolute_uri, proxy_addr).await
-    {
+    if let Some(proxy_addr) = own_proxy_listener_for(&state, &session, &absolute_uri).await {
         return record_http_rejection(
             &state,
             &session,
@@ -1923,7 +2037,7 @@ fn host_belongs_to_this_machine(host: &str, bound_ip: IpAddr) -> bool {
     ip_belongs_to_this_machine(ip, bound_ip)
 }
 
-fn ip_belongs_to_this_machine(ip: IpAddr, bound_ip: IpAddr) -> bool {
+pub(crate) fn ip_belongs_to_this_machine(ip: IpAddr, bound_ip: IpAddr) -> bool {
     if ip.is_loopback() || ip.is_unspecified() {
         return true;
     }
@@ -1942,49 +2056,60 @@ fn target_port(uri: &Uri) -> Option<u16> {
 }
 
 const REMOTE_GUARDED_MESSAGE: &str =
-    "Sniper's UI and the browsers it opened are not reachable through the proxy from another machine.";
+    "Sniper listens on this port, so another machine cannot reach it through the proxy, by address or by name.";
 
-/// What a client on another machine is refused through the proxy. The UI trusts
-/// a connection from this machine, and the proxy's own outbound one is such a
-/// connection, so a phone using a proxy bound beyond loopback would otherwise
-/// reach the UI's API past `remote_ui_auth_guard`. The loopback ports a browser
-/// Sniper opened is driven through (`browser::driver_ports`) hand over its
-/// logged-in sessions. A client on this machine reaches these directly anyway,
-/// and the browser Sniper opens sends loopback traffic through the proxy, the UI
-/// included; other local ports, a dev server for one, stay open to a phone.
-fn remote_client_targets(client: IpAddr, uri: &Uri, guarded: &[SocketAddr]) -> bool {
-    !client.to_canonical().is_loopback()
-        && guarded
-            .iter()
-            .any(|listener| request_targets_own_listener(uri, *listener))
-}
-
-/// `remote_client_targets` for the listeners guarded now, with names that
-/// resolve to them.
-async fn remote_client_reaches_guarded(
-    state: &AppState,
-    session: &SessionContext,
-    client: IpAddr,
-    uri: &Uri,
-) -> bool {
+/// What a client on another machine is refused through the proxy: a port Sniper
+/// listens on, at any address of this machine. The UI trusts a connection from
+/// this machine, and the proxy's own outbound one is such a connection, so a
+/// phone using a proxy bound beyond loopback would otherwise reach the UI's API
+/// past `remote_ui_auth_guard`. A tunnel to the proxy's own port arrives there as
+/// a local client and goes on to the UI the same way. The loopback ports a
+/// browser Sniper opened is driven through (`browser::driver_ports`) hand over
+/// its logged-in sessions.
+///
+/// Any address of this machine counts: a UI on every interface is announced as
+/// 127.0.0.1 and answers, and trusts this machine, on the others. A name on one
+/// of these ports is refused without a lookup, because the connection looks the
+/// name up again and an answer checked here says nothing about where it lands.
+///
+/// A client on this machine reaches these directly anyway, and the browser Sniper
+/// opens sends loopback traffic through the proxy, the UI included; other local
+/// ports, a dev server for one, stay open to a phone.
+fn remote_client_targets(client: IpAddr, uri: &Uri, ports: &[u16]) -> bool {
     if client.to_canonical().is_loopback() {
         return false;
     }
-    let mut guarded = vec![state.get_active_ui_addr().await];
-    guarded.extend(
-        crate::browser::driver_ports()
-            .into_iter()
-            .map(|port| SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))),
-    );
-    if remote_client_targets(client, uri, &guarded) {
-        return true;
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    if !target_port(uri).is_some_and(|port| ports.contains(&port)) {
+        return false;
     }
-    for listener in guarded {
-        if name_resolves_to_own_listener(session, uri, listener).await {
-            return true;
-        }
+    // Sniper answers its own page itself and never dials it.
+    if special_host::is_special_host(authority.host()) {
+        return false;
     }
-    false
+    let anywhere = IpAddr::from(std::net::Ipv4Addr::UNSPECIFIED);
+    match url::Host::parse(authority.host()) {
+        Ok(url::Host::Ipv4(ip)) => ip_belongs_to_this_machine(ip.into(), anywhere),
+        Ok(url::Host::Ipv6(ip)) => ip_belongs_to_this_machine(ip.to_canonical(), anywhere),
+        Ok(url::Host::Domain(_)) | Err(_) => true,
+    }
+}
+
+/// `remote_client_targets` for the ports Sniper listens on now.
+async fn remote_client_reaches_guarded(state: &AppState, client: IpAddr, uri: &Uri) -> bool {
+    if client.to_canonical().is_loopback() {
+        return false;
+    }
+    let mut ports: Vec<u16> = state
+        .own_listeners()
+        .refused_to_remote()
+        .iter()
+        .map(SocketAddr::port)
+        .collect();
+    ports.extend(crate::browser::driver_ports());
+    remote_client_targets(client, uri, &ports)
 }
 
 /// True when `uri` resolves back to the proxy's own listener, which would make
@@ -2598,7 +2723,30 @@ async fn record_connect_post_ok_tunnel_failure(
     note: String,
     request_http_version: Version,
 ) {
-    let note = format!("{note}; CONNECT 200 had already been sent to the client");
+    record_connect_tunnel(
+        state,
+        session,
+        target,
+        request_capture,
+        started_at,
+        started,
+        request_http_version,
+        format!("{note}; CONNECT 200 had already been sent to the client"),
+    )
+    .await;
+}
+
+/// Records a CONNECT tunnel the proxy answered with 200, and what became of it.
+async fn record_connect_tunnel(
+    state: &Arc<AppState>,
+    session: &Arc<SessionContext>,
+    target: String,
+    request_capture: MessageRecord,
+    started_at: chrono::DateTime<Utc>,
+    started: Instant,
+    request_http_version: Version,
+    note: String,
+) {
     let record = with_record_http_versions(
         TransactionRecord::tunnel(
             started_at,
@@ -2611,9 +2759,289 @@ async fn record_connect_post_ok_tunnel_failure(
         Some(request_http_version),
         Some(Version::HTTP_11),
     );
-    let insert_outcome =
-        insert_transaction_quiet(session, record, "connect post-ok tunnel failure").await;
+    let insert_outcome = insert_transaction_quiet(session, record, "connect tunnel").await;
     persist_transaction_insert_outcome(state, session, insert_outcome).await;
+}
+
+/// What a client speaks through a CONNECT tunnel, told by its first bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TunnelStart {
+    Tls,
+    Http,
+    /// Anything else, or a server that speaks first.
+    Other,
+}
+
+/// How long a quiet client may wait before the target is dialled to hear
+/// whether it speaks first, as SMTP and MySQL do. TLS clients speak at once.
+const TUNNEL_QUIET: Duration = Duration::from_millis(500);
+/// How much of a tunnel's first line is read to tell HTTP from anything else.
+const TUNNEL_HEAD_BYTES: usize = 8 * 1024;
+const TLS_ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
+const WEBSOCKET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn is_http_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+fn looks_like_http_request_line(line: &[u8]) -> bool {
+    if line == b"PRI * HTTP/2.0" {
+        return true;
+    }
+    let mut parts = line.split(|byte| *byte == b' ');
+    let (Some(method), Some(target), Some(version), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    !method.is_empty()
+        && method.iter().all(|byte| is_http_token_byte(*byte))
+        && !target.is_empty()
+        && target.iter().all(|byte| byte.is_ascii_graphic())
+        && matches!(version, b"HTTP/1.1" | b"HTTP/1.0")
+}
+
+/// Tells what a tunnel's first bytes are, or `None` while too few have come.
+/// `complete` says no more are coming in time.
+fn tunnel_start(head: &[u8], complete: bool) -> Option<TunnelStart> {
+    match head {
+        // Nothing came: the TLS path reports the tunnel as it always has.
+        [] => complete.then_some(TunnelStart::Tls),
+        [0x16, 0x03, version, ..] if *version <= 0x04 => Some(TunnelStart::Tls),
+        [0x16] | [0x16, 0x03] if !complete => None,
+        [first, ..] if is_http_token_byte(*first) => {
+            match head.iter().position(|byte| *byte == b'\n') {
+                Some(end) => {
+                    let line = head[..end].strip_suffix(b"\r").unwrap_or(&head[..end]);
+                    Some(if looks_like_http_request_line(line) {
+                        TunnelStart::Http
+                    } else {
+                        TunnelStart::Other
+                    })
+                }
+                // A request line is printable, so any other byte settles it.
+                None if !complete
+                    && head
+                        .iter()
+                        .all(|byte| byte.is_ascii_graphic() || matches!(byte, b' ' | b'\r')) =>
+                {
+                    None
+                }
+                None => Some(TunnelStart::Other),
+            }
+        }
+        _ => Some(TunnelStart::Other),
+    }
+}
+
+/// Dials a CONNECT tunnel's target the way the session reaches it, and says
+/// whether that went through the upstream proxy.
+async fn dial_tunnel_target(
+    session: &SessionContext,
+    authority: &Authority,
+) -> Result<(tokio::net::TcpStream, bool)> {
+    let proxy = session.runtime.upstream_proxy().await;
+    let host = authority.host().trim_matches(['[', ']']);
+    let via_proxy = proxy.enabled && !proxy.bypasses(host);
+    let stream = proxy
+        .connect(host, authority.port_u16().unwrap_or(443))
+        .await?;
+    Ok((stream, via_proxy))
+}
+
+/// Returns true once the server sends at least one byte, or false if the
+/// server closes or errors without speaking.
+async fn speaks(server: &tokio::net::TcpStream) -> bool {
+    let mut byte = [0; 1];
+    matches!(server.peek(&mut byte).await, Ok(read) if read > 0)
+}
+
+/// Takes the client's end of a CONNECT tunnel and tells what it speaks
+/// without consuming it. A target dialled to hear whether it speaks first
+/// comes back only for `TunnelStart::Other`; otherwise it is closed at once.
+async fn sniff_tunnel(
+    upgraded: hyper::upgrade::Upgraded,
+    session: &SessionContext,
+    authority: &Authority,
+) -> (
+    Box<dyn Io>,
+    TunnelStart,
+    Option<(tokio::net::TcpStream, bool)>,
+) {
+    use tokio::io::AsyncReadExt as _;
+    // Only the proxy's own socket can be peeked; anything else is TLS, as before.
+    let parts = match upgraded.downcast::<TokioIo<tokio::net::TcpStream>>() {
+        Ok(parts) => parts,
+        Err(upgraded) => return (Box::new(TokioIo::new(upgraded)), TunnelStart::Tls, None),
+    };
+    let socket = parts.io.into_inner();
+    // Bytes the client sent along with the CONNECT come first.
+    let buffered = parts.read_buf;
+    let mut upstream = None;
+    if buffered.is_empty()
+        && tokio::time::timeout(TUNNEL_QUIET, socket.readable())
+            .await
+            .is_err()
+    {
+        upstream = dial_tunnel_target(session, authority).await.ok();
+        if let Some((server, _)) = &upstream {
+            // No limit: with both ends silent the tunnel is not TLS yet. A
+            // mail server may hold its greeting for six seconds on purpose,
+            // and giving up at five took the tunnel for TLS and closed the
+            // target under it. A client that goes away ends the wait.
+            let server_first = tokio::select! {
+                _ = socket.readable() => false,
+                spoke = speaks(server) => spoke,
+            };
+            if server_first {
+                return (Box::new(socket), TunnelStart::Other, upstream);
+            }
+        }
+    }
+    let mut head = vec![0; TUNNEL_HEAD_BYTES];
+    let mut seen = buffered.to_vec();
+    let deadline = tokio::time::Instant::now() + TUNNEL_QUIET;
+    let mut peeked = false;
+    let start = loop {
+        let complete = seen.len() >= TUNNEL_HEAD_BYTES || tokio::time::Instant::now() >= deadline;
+        if let Some(start) = tunnel_start(&seen, complete) {
+            break start;
+        }
+        if peeked {
+            // A peek returns what is there at once; give the rest a moment.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        peeked = true;
+        match tokio::time::timeout_at(deadline, socket.peek(&mut head)).await {
+            Ok(Ok(read)) if read > 0 => seen = [&buffered[..], &head[..read]].concat(),
+            // Closed, failed, or quiet until the deadline: decide on what came.
+            _ => break tunnel_start(&seen, true).unwrap_or(TunnelStart::Other),
+        }
+    };
+    let client: Box<dyn Io> = if buffered.is_empty() {
+        Box::new(socket)
+    } else {
+        let (read, write) = socket.into_split();
+        Box::new(tokio::io::join(
+            std::io::Cursor::new(buffered).chain(read),
+            write,
+        ))
+    };
+    // Close any preconnected upstream socket immediately when the tunnel is
+    // handled as TLS or HTTP instead of raw TCP relay.
+    let upstream = if matches!(start, TunnelStart::Other) {
+        upstream
+    } else {
+        None
+    };
+    (client, start, upstream)
+}
+
+/// Serves a CONNECT tunnel by what its client speaks: TLS is decrypted and
+/// its requests recorded, plain HTTP is recorded as it is, and anything else,
+/// or a server that speaks first, is relayed and recorded in TCP history. The
+/// error is the note recorded for the tunnel.
+async fn serve_connect_tunnel(
+    upgrade: hyper::upgrade::OnUpgrade,
+    state: Arc<AppState>,
+    session: Arc<SessionContext>,
+    target: String,
+    connect_capture: MessageRecord,
+    started_at: chrono::DateTime<Utc>,
+    started: Instant,
+    peer_addr: SocketAddr,
+    request_http_version: Version,
+) -> Result<()> {
+    let authority: Authority = target
+        .parse()
+        .with_context(|| format!("invalid CONNECT target authority: {target}"))?;
+    let upgraded = upgrade
+        .await
+        .map_err(|error| anyhow!("CONNECT upgrade failed: {error}"))?;
+    let (client, start, upstream) = sniff_tunnel(upgraded, &session, &authority).await;
+    match start {
+        TunnelStart::Tls => serve_https_mitm(
+            client,
+            state,
+            session,
+            authority,
+            connect_capture,
+            started_at,
+            started,
+            peer_addr,
+            request_http_version,
+        )
+        .await
+        .map_err(|error| anyhow!("HTTPS MITM failed: {error}")),
+        TunnelStart::Http => {
+            record_connect_tunnel(
+                &state,
+                &session,
+                target,
+                connect_capture,
+                started_at,
+                started,
+                request_http_version,
+                "Plain HTTP through the tunnel; its requests are recorded as they pass."
+                    .to_string(),
+            )
+            .await;
+            serve_tunnel_requests(client, "http", state, session, peer_addr, authority).await;
+            Ok(())
+        }
+        TunnelStart::Other => {
+            let (upstream, via_proxy) = match upstream {
+                Some(upstream) => upstream,
+                None => dial_tunnel_target(&session, &authority)
+                    .await
+                    .map_err(|error| {
+                        anyhow!("CONNECT tunnel could not reach the target: {error}")
+                    })?,
+            };
+            record_connect_tunnel(
+                &state,
+                &session,
+                target.clone(),
+                connect_capture,
+                started_at,
+                started,
+                request_http_version,
+                "Neither TLS nor HTTP: relayed and recorded in TCP history.".to_string(),
+            )
+            .await;
+            let peer = SocketAddr::new(peer_addr.ip().to_canonical(), peer_addr.port());
+            // The TCP record holds how the relay went.
+            let _ = session
+                .tcp_capture
+                .relay_tunnel(
+                    client,
+                    Box::new(upstream),
+                    peer.to_string(),
+                    target,
+                    TcpSource::Connect,
+                    via_proxy,
+                )
+                .await;
+            Ok(())
+        }
+    }
 }
 
 trait EmptyStringExt {
@@ -2712,10 +3140,26 @@ async fn serve_special_host_tls(
             return Err(anyhow!(message));
         }
     };
-    let tls_stream = match acceptor.accept(upgraded).await {
-        Ok(tls_stream) => tls_stream,
-        Err(error) => {
+    let tls_stream = match tokio::time::timeout(TLS_ACCEPT_TIMEOUT, acceptor.accept(upgraded)).await
+    {
+        Ok(Ok(tls_stream)) => tls_stream,
+        Ok(Err(error)) => {
             let message = format!("TLS handshake failed for special host: {error}");
+            record_connect_post_ok_tunnel_failure(
+                &state,
+                &session,
+                connect_target.clone(),
+                connect_capture,
+                started_at,
+                started,
+                message.clone(),
+                request_http_version,
+            )
+            .await;
+            return Err(anyhow!(message));
+        }
+        Err(_) => {
+            let message = "TLS handshake timed out for special host".to_string();
             record_connect_post_ok_tunnel_failure(
                 &state,
                 &session,
@@ -2782,7 +3226,7 @@ fn special_host_record_authority(connect_target: &str) -> String {
 
 async fn serve_passthrough_tunnel(
     upgrade: hyper::upgrade::OnUpgrade,
-    mut upstream_stream: tokio::net::TcpStream,
+    (upstream_stream, via_proxy): (tokio::net::TcpStream, bool),
     state: Arc<AppState>,
     session: Arc<SessionContext>,
     target: String,
@@ -2790,6 +3234,7 @@ async fn serve_passthrough_tunnel(
     started_at: chrono::DateTime<chrono::Utc>,
     started: Instant,
     request_http_version: Version,
+    peer_addr: SocketAddr,
 ) -> Result<()> {
     let upgraded = match upgrade.await {
         Ok(upgraded) => upgraded,
@@ -2809,12 +3254,12 @@ async fn serve_passthrough_tunnel(
             return Err(anyhow!(message));
         }
     };
-    let mut client_stream = TokioIo::new(upgraded);
+    let client_stream = TokioIo::new(upgraded);
 
     let record = with_record_http_versions(
         TransactionRecord::tunnel(
             started_at,
-            target,
+            target.clone(),
             Some(StatusCode::OK.as_u16()),
             0,
             request_capture,
@@ -2830,7 +3275,19 @@ async fn serve_passthrough_tunnel(
         .await;
     persist_transaction_insert_outcome(&state, &session, insert_outcome).await;
 
-    let result = tokio::io::copy_bidirectional(&mut client_stream, &mut upstream_stream).await;
+    // Its bytes are kept in TCP history, still undecrypted.
+    let peer = SocketAddr::new(peer_addr.ip().to_canonical(), peer_addr.port());
+    let result = session
+        .tcp_capture
+        .relay_tunnel(
+            Box::new(client_stream),
+            Box::new(upstream_stream),
+            peer.to_string(),
+            target,
+            TcpSource::Passthrough,
+            via_proxy,
+        )
+        .await;
 
     let notes = match &result {
         Ok((client_to_server, server_to_client)) => {
@@ -2862,60 +3319,62 @@ async fn serve_passthrough_tunnel(
 }
 
 async fn serve_https_mitm(
-    upgrade: hyper::upgrade::OnUpgrade,
+    client: Box<dyn Io>,
     state: Arc<AppState>,
     session: Arc<SessionContext>,
-    target: String,
+    authority: Authority,
     connect_capture: MessageRecord,
     started_at: chrono::DateTime<Utc>,
     started: Instant,
     peer_addr: SocketAddr,
     request_http_version: Version,
 ) -> Result<()> {
-    let authority: Authority = target
-        .parse()
-        .with_context(|| format!("invalid CONNECT target authority: {target}"))?;
-    let upgraded = upgrade
-        .await
-        .context("CONNECT upgrade failed for HTTPS MITM")?;
-    let upgraded = TokioIo::new(upgraded);
     let acceptor = state
         .certificates
         .tls_acceptor_for_host(authority.host())
         .with_context(|| format!("failed to build MITM certificate for {}", authority.host()))?;
-    let tls_stream = acceptor
-        .accept(upgraded)
+    let tls_stream = tokio::time::timeout(TLS_ACCEPT_TIMEOUT, acceptor.accept(client))
         .await
+        .map_err(|_| anyhow!("TLS handshake timed out for {}", authority.host()))?
         .with_context(|| format!("TLS handshake failed for {}", authority.host()))?;
-
-    let record = with_record_http_versions(
-        TransactionRecord::tunnel(
-            started_at,
-            target,
-            Some(StatusCode::OK.as_u16()),
-            started.elapsed().as_millis() as u64,
-            connect_capture,
-            vec![format!(
-                "HTTPS MITM terminated locally and is forwarding upstream traffic for {}.",
-                authority.host()
-            )],
+    record_connect_tunnel(
+        &state,
+        &session,
+        authority.as_str().to_string(),
+        connect_capture,
+        started_at,
+        started,
+        request_http_version,
+        format!(
+            "HTTPS MITM terminated locally and is forwarding upstream traffic for {}.",
+            authority.host()
         ),
-        Some(request_http_version),
-        Some(Version::HTTP_11),
-    );
-    let insert_outcome = insert_transaction_quiet(&session, record, "https mitm tunnel").await;
-    persist_transaction_insert_outcome(&state, &session, insert_outcome).await;
+    )
+    .await;
+    serve_tunnel_requests(tls_stream, "https", state, session, peer_addr, authority).await;
+    Ok(())
+}
 
-    let io = TokioIo::new(tls_stream);
+/// Serves the HTTP requests a CONNECT tunnel carries, decrypted or plain.
+async fn serve_tunnel_requests<I>(
+    io: I,
+    scheme: &'static str,
+    state: Arc<AppState>,
+    session: Arc<SessionContext>,
+    peer_addr: SocketAddr,
+    authority: Authority,
+) where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let connect_authority = authority.to_string();
-    let log_authority = connect_authority.clone();
     let service = service_fn(move |request| {
-        handle_https_mitm_request(
+        handle_tunnel_request(
             request,
             state.clone(),
             session.clone(),
             peer_addr,
             connect_authority.clone(),
+            scheme,
         )
     });
     let mut builder = AutoBuilder::new(TokioExecutor::new());
@@ -2924,13 +3383,11 @@ async fn serve_https_mitm(
         .preserve_header_case(true)
         .title_case_headers(true);
     if let Err(error) = builder
-        .serve_connection_with_upgrades(io, service)
+        .serve_connection_with_upgrades(TokioIo::new(io), service)
         .await
-        .map_err(|error| anyhow!("HTTPS MITM HTTP serving failed: {error}"))
     {
-        warn!(%peer_addr, target = %log_authority, ?error, "HTTPS MITM HTTP serving failed after CONNECT was recorded");
+        warn!(%peer_addr, target = %authority, %error, scheme, "HTTP serving failed after CONNECT was recorded");
     }
-    Ok(())
 }
 
 async fn handle_special_host_request(
@@ -2995,7 +3452,7 @@ async fn handle_special_host_request(
         body_bytes.as_ref(),
         state.config.body_preview_bytes,
     );
-    let proxy_addr = state.get_active_proxy_addr().await;
+    let proxy_addr = state.proxy_addr_for_session(session.id()).await;
     let response = special_host::respond(&path, &parts.method, state.as_ref(), true, proxy_addr);
     let special_host::SpecialHostResponse {
         status,
@@ -3043,21 +3500,22 @@ async fn handle_special_host_request(
     ))
 }
 
-async fn handle_https_mitm_request(
+async fn handle_tunnel_request(
     request: Request<Incoming>,
     state: Arc<AppState>,
     session: Arc<SessionContext>,
     peer_addr: SocketAddr,
     connect_authority: String,
+    scheme: &'static str,
 ) -> Result<Response<Body>, Infallible> {
     Ok(handle_forwardable_request(
         request,
         state,
         session,
         peer_addr,
-        "https",
+        scheme,
         Some(connect_authority),
-        true,
+        scheme == "https",
     )
     .await)
 }
@@ -3159,6 +3617,7 @@ async fn forward_http_request(
         SocketPeerCapture::ForwardedHttp(upstream_proxy.route_snapshot()),
         request_color,
         Some(response_rules),
+        None,
     )
     .await;
     let mut record = exchange.record.clone();
@@ -3313,6 +3772,7 @@ async fn forward_websocket_request(
             SocketPeerCapture::Disabled,
             request_color,
             None,
+            None,
         )
         .await;
         let record = exchange.record.clone();
@@ -3401,6 +3861,7 @@ async fn forward_websocket_request(
             None,
             SocketPeerCapture::Disabled,
             request_color,
+            None,
             None,
         )
         .await;
@@ -4309,7 +4770,8 @@ async fn execute_streaming_http_exchange(
         if should_retry_over_legacy_tls(error, absolute_uri.scheme_str()) {
             let upstream_insecure = session.runtime.upstream_insecure().await;
             let upstream_proxy = session.runtime.upstream_proxy().await;
-            if let Some(legacy_client) = build_legacy_tls_client(upstream_insecure, &upstream_proxy)
+            if let Some(legacy_client) =
+                build_legacy_tls_client(upstream_insecure, &upstream_proxy, None)
             {
                 peer_capture.use_attempt(upstream_proxy.route_snapshot());
                 let retried = build_outbound(&legacy_client).send().await;
@@ -4503,6 +4965,15 @@ fn stream_upstream_response_body(
                     notes.push(
                         "Shutdown finalized streamed response capture before upstream EOF.".to_string(),
                     );
+                    // Signal an error downstream so hyper aborts the response
+                    // instead of writing a clean 0\r\n\r\n chunked terminator
+                    // over truncated bytes.
+                    let _ = tx
+                        .send(Err(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionAborted,
+                            "proxy shutdown aborted streamed response",
+                        )))
+                        .await;
                     break;
                 }
                 chunk = upstream.next() => {
@@ -4525,7 +4996,7 @@ fn stream_upstream_response_body(
                             break;
                         }
                         Some(Err(error)) => {
-                            let message = format!("Failed to read upstream response body: {error}");
+                            let message = format!("Failed to read upstream response body: {error:#}");
                             notes.push(message.clone());
                             let _ = tx.send(Err(std::io::Error::other(message))).await;
                             break;
@@ -4595,10 +5066,15 @@ async fn read_response_body_limited(response: reqwest::Response, limit: usize) -
     {
         bail!("upstream response body exceeds {limit} bytes");
     }
+    let close_delimited = response_body_is_close_delimited(response.version(), response.headers());
     let mut stream = response.bytes_stream();
     let mut body = BytesMut::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("failed to read upstream response body chunk")?;
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) if close_delimited && is_unexpected_eof(&error) => break,
+            Err(error) => return Err(error).context("failed to read upstream response body chunk"),
+        };
         if body.len().saturating_add(chunk.len()) > limit {
             bail!("upstream response body exceeds {limit} bytes");
         }
@@ -4709,19 +5185,25 @@ impl StreamedRecordContext {
         body_size: usize,
         notes: Vec<String>,
     ) -> TransactionRecord {
-        let mut response_capture = MessageRecord::from_headers_and_body(
-            &self.response_headers,
-            preview.as_ref(),
-            self.max_preview,
-        );
-        response_capture.body_size = body_size;
-        if body_size > preview.len() {
-            response_capture.preview_truncated = true;
-            if response_capture.content_decoded {
-                response_capture.decoded_body_size = None;
-                response_capture.content_decoded = false;
-            }
-        }
+        let response_capture = if body_size > preview.len() {
+            // Do not attempt content decompression on a truncated wire prefix:
+            // multi-member gzip/zstd prefixes could decode partially and leave
+            // decoded text marked with `content_decoded = false`.
+            MessageRecord::from_headers_and_body_truncated_wire(
+                &self.response_headers,
+                preview.as_ref(),
+                body_size,
+                self.max_preview,
+            )
+        } else {
+            let mut record = MessageRecord::from_headers_and_body(
+                &self.response_headers,
+                preview.as_ref(),
+                self.max_preview,
+            );
+            record.body_size = body_size;
+            record
+        };
         with_auto_color(
             with_record_http_versions(
                 TransactionRecord::http(
@@ -4764,6 +5246,7 @@ async fn execute_http_exchange(
     peer_capture: SocketPeerCapture,
     request_color: Option<String>,
     response_rules: Option<Vec<MatchReplaceRule>>,
+    retry_timeouts: Option<RequestTimeouts>,
 ) -> ExecutedExchange {
     let rules = match response_rules {
         Some(rules) => rules,
@@ -4784,6 +5267,7 @@ async fn execute_http_exchange(
         outbound_uri_authority,
         peer_capture,
         rules,
+        retry_timeouts,
     )
     .await;
     exchange.record.color_tag = exchange.record.color_tag.or(request_color);
@@ -4805,6 +5289,7 @@ async fn execute_http_exchange_with_rules(
     outbound_uri_authority: Option<&str>,
     peer_capture: SocketPeerCapture,
     response_rules: Vec<MatchReplaceRule>,
+    retry_timeouts: Option<RequestTimeouts>,
 ) -> ExecutedExchange {
     let request_headers = header_map_from_records(&request.headers);
     let request_body = request.body_bytes();
@@ -4849,7 +5334,7 @@ async fn execute_http_exchange_with_rules(
     };
 
     if special_host::is_special_host(&request.host) {
-        let proxy_addr = state.get_active_proxy_addr().await;
+        let proxy_addr = state.proxy_addr_for_session(session.id()).await;
         let response = special_host::respond(
             &path,
             &method,
@@ -4937,6 +5422,32 @@ async fn execute_http_exchange_with_rules(
     outbound_headers.remove(HOST);
     outbound_headers.remove(CONTENT_LENGTH);
 
+    let host_matches_uri_authority = |host: &HeaderValue| -> bool {
+        let Ok(raw_host) = host.to_str() else {
+            return false;
+        };
+        let Some(authority) = absolute_uri.authority() else {
+            return false;
+        };
+        let default_port = match absolute_uri.scheme_str() {
+            Some("https") => Some(443),
+            Some("http") => Some(80),
+            _ => None,
+        };
+        let normalize = |value: &str| -> String {
+            let trimmed = value.trim();
+            if let Ok(parsed) = trimmed.parse::<Authority>() {
+                let host_part = parsed.host().to_ascii_lowercase();
+                match parsed.port_u16() {
+                    Some(port) if Some(port) != default_port => format!("{host_part}:{port}"),
+                    _ => host_part,
+                }
+            } else {
+                trimmed.to_ascii_lowercase()
+            }
+        };
+        normalize(raw_host) == normalize(authority.as_str())
+    };
     let build_outbound = |client: &ProxyClient| {
         let mut request_builder = client
             .request(method.clone(), absolute_uri.to_string())
@@ -4952,7 +5463,15 @@ async fn execute_http_exchange_with_rules(
             request_builder = request_builder.version(version);
         }
         if let Some(host_override) = host_override.clone() {
-            request_builder = request_builder.header(HOST, host_override);
+            // For HTTP/2, `:authority` already carries the normalized authority;
+            // sending a redundant `Host: example.com:443` disagrees with
+            // `:authority: example.com` and triggers 400/PROTOCOL_ERROR on strict
+            // HTTP/2 servers. Preserve `Host` only when deliberately distinct.
+            let omit_redundant_h2_host = requested_http_version == Some(Version::HTTP_2)
+                && host_matches_uri_authority(&host_override);
+            if !omit_redundant_h2_host {
+                request_builder = request_builder.header(HOST, host_override);
+            }
         }
         request_builder
     };
@@ -4961,10 +5480,18 @@ async fn execute_http_exchange_with_rules(
     let mut peer_capture = peer_capture.freeze(&session).await;
     let mut send_result = build_outbound(client).send().await;
     if let Err(error) = &send_result {
-        if should_retry_over_legacy_tls(error, absolute_uri.scheme_str()) {
+        // Never retry on the generic legacy TLS client when a Replay target
+        // override is active (that client has neither resolve_to_addrs nor
+        // override bypass and would leak the request to the real host) or when
+        // HTTP/2 was explicitly requested (legacy client is http1_only).
+        if outbound_uri_authority.is_none()
+            && requested_http_version != Some(Version::HTTP_2)
+            && should_retry_over_legacy_tls(error, absolute_uri.scheme_str())
+        {
             let upstream_insecure = session.runtime.upstream_insecure().await;
             let upstream_proxy = session.runtime.upstream_proxy().await;
-            if let Some(legacy_client) = build_legacy_tls_client(upstream_insecure, &upstream_proxy)
+            if let Some(legacy_client) =
+                build_legacy_tls_client(upstream_insecure, &upstream_proxy, retry_timeouts)
             {
                 peer_capture.use_attempt(upstream_proxy.route_snapshot());
                 let retried = build_outbound(&legacy_client).send().await;
@@ -5137,7 +5664,7 @@ async fn finish_buffered_http_exchange(
                     }
                 }
                 Err(error) => {
-                    let message = format!("Failed to read upstream response body: {error}");
+                    let message = format!("Failed to read upstream response body: {error:#}");
                     notes.push(message.clone());
                     session
                         .event_log
@@ -5749,16 +6276,19 @@ async fn connect_upstream_websocket(
         .connect(host, port)
         .await
         .map_err(UpstreamWebSocketConnectError::Other)?;
-    let (websocket, response) = match client_async_tls_with_config(
-        upstream_request,
-        stream,
-        None,
-        crate::ws_tls::insecure_connector(upstream_insecure),
+    let (websocket, response) = match tokio::time::timeout(
+        WEBSOCKET_HANDSHAKE_TIMEOUT,
+        client_async_tls_with_config(
+            upstream_request,
+            stream,
+            None,
+            crate::ws_tls::insecure_connector(upstream_insecure),
+        ),
     )
     .await
     {
-        Ok(response) => response,
-        Err(TungsteniteError::Http(response)) => {
+        Ok(Ok(response)) => response,
+        Ok(Err(TungsteniteError::Http(response))) => {
             let status = response.status();
             let headers = response.headers().clone();
             let body = Bytes::from(response.into_body().unwrap_or_default());
@@ -5768,10 +6298,15 @@ async fn connect_upstream_websocket(
                 body,
             });
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             return Err(UpstreamWebSocketConnectError::Other(
                 anyhow!(error).context("upstream WebSocket handshake failed"),
             ));
+        }
+        Err(_) => {
+            return Err(UpstreamWebSocketConnectError::Other(anyhow!(
+                "upstream WebSocket handshake timed out"
+            )));
         }
     };
 
@@ -5791,6 +6326,22 @@ pub(crate) fn websocket_forward_headers_from_records(records: &[HeaderRecord]) -
         .collect::<Vec<_>>();
     for name in remove {
         headers.remove(name);
+    }
+    // RFC 6455 §4.1 allows multiple Sec-WebSocket-Protocol headers, but
+    // tungstenite validates the server's chosen subprotocol against `.get()`
+    // (first header only). Join them into one comma-separated header.
+    let subprotocols: Vec<String> = headers
+        .get_all(http::header::SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if subprotocols.len() > 1 {
+        if let Ok(joined) = HeaderValue::from_str(&subprotocols.join(", ")) {
+            headers.insert(http::header::SEC_WEBSOCKET_PROTOCOL, joined);
+        }
     }
     headers
 }
@@ -5937,7 +6488,19 @@ static ACTIVE_STREAMED_RESPONSE_PUMPS: LazyLock<Mutex<HashMap<Uuid, StreamedResp
 pub(crate) static GLOBAL_PROXY_WORK_TEST_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
 
-static ACTIVE_PROXY_CONNECTIONS: LazyLock<Mutex<HashMap<Uuid, AbortHandle>>> =
+/// What a connection in the process-wide list belongs to, so one listener can
+/// be drained or cut without touching another's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectionOwner {
+    /// Accepted by the main listener.
+    MainListener,
+    /// Accepted by this session's own port.
+    SessionPort(Uuid),
+    /// A long-running task of this session: a tunnel, a relay, post-capture work.
+    SessionTask(Uuid),
+}
+
+static ACTIVE_PROXY_CONNECTIONS: LazyLock<Mutex<HashMap<Uuid, (ConnectionOwner, AbortHandle)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 /// Per session, how much work is in flight broken down by what is holding it.
 /// The breakdown exists so a refused session switch can say what to close, and so
@@ -6356,11 +6919,30 @@ fn signal_streamed_response_pumps(session_id: Uuid) -> usize {
     count
 }
 
-fn remember_proxy_connection(connection_id: Uuid, abort: AbortHandle) {
+fn remember_proxy_connection(connection_id: Uuid, owner: ConnectionOwner, abort: AbortHandle) {
     let mut connections = ACTIVE_PROXY_CONNECTIONS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    connections.insert(connection_id, abort);
+    connections.insert(connection_id, (owner, abort));
+}
+
+fn connections_where(matches: impl Fn(ConnectionOwner) -> bool) -> Vec<AbortHandle> {
+    ACTIVE_PROXY_CONNECTIONS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .values()
+        .filter(|(owner, _)| matches(*owner))
+        .map(|(_, abort)| abort.clone())
+        .collect()
+}
+
+/// Cuts the connections a session's own port accepted and says how many.
+pub(crate) fn abort_session_port_connections(session_id: Uuid) -> usize {
+    let connections = connections_where(|owner| owner == ConnectionOwner::SessionPort(session_id));
+    for connection in &connections {
+        connection.abort();
+    }
+    connections.len()
 }
 
 fn forget_proxy_connection(connection_id: Uuid) {
@@ -6470,7 +7052,11 @@ where
     let connection_id = Uuid::new_v4();
     let (abort, registration) = AbortHandle::new_pair();
     let session_owner = remember_active_proxy_session_owner(session_id, reason);
-    remember_proxy_connection(connection_id, abort.clone());
+    remember_proxy_connection(
+        connection_id,
+        ConnectionOwner::SessionTask(session_id),
+        abort.clone(),
+    );
     remember_session_task(session_id, connection_id, reason, abort);
     let client = current_client_address();
     tokio::spawn(async move {
@@ -6578,13 +7164,7 @@ pub async fn drain_proxy_connections(timeout: Duration) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    let connections = {
-        let connections = ACTIVE_PROXY_CONNECTIONS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        connections.values().cloned().collect::<Vec<_>>()
-    };
-    for connection in connections {
+    for connection in connections_where(|_| true) {
         connection.abort();
     }
 
@@ -6598,12 +7178,33 @@ pub async fn drain_proxy_connections(timeout: Duration) {
 }
 
 pub async fn close_live_websocket_relays(state: &AppState, note: &'static str) -> Result<()> {
+    close_live_websocket_relays_where(state, note, |_| true).await
+}
+
+/// `close_live_websocket_relays` for one session. Each relay is closed
+/// through its own handle, so the close is recorded and the relay forgotten.
+/// One cut with its outer task stays registered, and that entry refuses every
+/// later delete of the session.
+pub(crate) async fn close_session_websocket_relays(
+    state: &AppState,
+    session_id: Uuid,
+    note: &'static str,
+) -> Result<()> {
+    close_live_websocket_relays_where(state, note, |id| id == session_id).await
+}
+
+async fn close_live_websocket_relays_where(
+    state: &AppState,
+    note: &'static str,
+    matches: impl Fn(Uuid) -> bool,
+) -> Result<()> {
     let relays = {
         let relays = LIVE_WEBSOCKET_RELAYS
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         relays
             .iter()
+            .filter(|(_, relay)| matches(relay.session.id()))
             .map(|(websocket_id, relay)| (*websocket_id, relay.clone()))
             .collect::<Vec<_>>()
     };
@@ -6732,6 +7333,13 @@ pub fn session_has_pending_persist(session_id: Uuid) -> bool {
 }
 
 pub async fn flush_pending_session_persists(state: &AppState) -> Result<()> {
+    flush_pending_persists_where(state, |_| true).await
+}
+
+async fn flush_pending_persists_where(
+    state: &AppState,
+    matches: impl Fn(Uuid) -> bool,
+) -> Result<()> {
     let mut failures = Vec::new();
 
     for _ in 0..PENDING_PERSIST_FLUSH_SWEEP_LIMIT {
@@ -6745,6 +7353,9 @@ pub async fn flush_pending_session_persists(state: &AppState) -> Result<()> {
             pending
                 .iter()
                 .filter_map(|(session_id, session)| {
+                    if !matches(*session_id) {
+                        return None;
+                    }
                     if !state.sessions.contains_session(*session_id)
                         && !pending_session_belongs_to_state(state, session.as_ref())
                     {
@@ -6815,11 +7426,11 @@ pub async fn flush_pending_session_persists(state: &AppState) -> Result<()> {
                 }
             }
         }
-        if !failures.is_empty() || pending_persist_session_count_for_state(state) == 0 {
+        if !failures.is_empty() || pending_persist_session_count_where(state, &matches) == 0 {
             break;
         }
     }
-    let remaining = pending_persist_session_count_for_state(state);
+    let remaining = pending_persist_session_count_where(state, &matches);
     if failures.is_empty() && remaining == 0 {
         Ok(())
     } else {
@@ -6847,17 +7458,103 @@ fn pending_session_belongs_to_state(state: &AppState, session: &SessionContext) 
         .is_some_and(|parent| parent == state.config.data_dir.join(crate::session::SESSIONS_DIR))
 }
 
-fn pending_persist_session_count_for_state(state: &AppState) -> usize {
+fn pending_persist_session_count_where(state: &AppState, matches: &impl Fn(Uuid) -> bool) -> usize {
     let pending = PERSIST_PENDING_CONTEXTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     pending
         .iter()
         .filter(|(session_id, session)| {
-            state.sessions.contains_session(**session_id)
-                || pending_session_belongs_to_state(state, session.as_ref())
+            matches(**session_id)
+                && (state.sessions.contains_session(**session_id)
+                    || pending_session_belongs_to_state(state, session.as_ref()))
         })
         .count()
+}
+
+/// How long a closing session port waits for a request that is about to
+/// finish, and then for what it cut to unwind.
+const SESSION_PORT_CLOSE_WAIT: Duration = Duration::from_secs(2);
+
+fn session_has_work_where(session_id: Uuid, matches: impl Fn(&'static str) -> bool) -> bool {
+    let owners = ACTIVE_PROXY_SESSION_OWNERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    owners.get(&session_id).is_some_and(|reasons| {
+        reasons
+            .iter()
+            .any(|(reason, count)| *count > 0 && matches(reason))
+    })
+}
+
+async fn wait_while(timeout: Duration, busy: impl Fn() -> bool) {
+    let deadline = Instant::now() + timeout;
+    while busy() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Ends what a session's own port carried, once the port has stopped
+/// accepting. Work the API started in the session is left alone.
+pub(crate) async fn end_session_port_work(
+    state: &AppState,
+    session: &Arc<SessionContext>,
+) -> Result<()> {
+    let session_id = session.id();
+    // A request about to finish gets a moment to do so. Idle tunnels and
+    // relays are not waited for: they end only when they are cut.
+    wait_while(SESSION_PORT_CLOSE_WAIT, || {
+        session_has_work_where(session_id, |reason| {
+            [
+                PROXY_WORK_HTTP_REQUEST,
+                PROXY_WORK_STREAMED_RESPONSE,
+                PROXY_WORK_CAPTURE_TASK,
+            ]
+            .contains(&reason)
+        })
+    })
+    .await;
+    // With one feed for each session, every tunnel, held request and
+    // streamed response of the session came through this port.
+    abort_session_port_connections(session_id);
+    abort_session_tasks_where(session_id, |reason| {
+        reason == PROXY_WORK_TUNNEL || reason == PROXY_WORK_HTTP_REQUEST
+    });
+    signal_streamed_response_pumps(session_id);
+    let relays = close_session_websocket_relays(
+        state,
+        session_id,
+        "Closing the session's port closed the live WebSocket relay.",
+    )
+    .await;
+    wait_while(SESSION_PORT_CLOSE_WAIT, || {
+        !connections_where(|owner| owner == ConnectionOwner::SessionPort(session_id)).is_empty()
+            || session_has_work_where(session_id, |reason| reason != PROXY_WORK_REPLAY)
+    })
+    .await;
+    // What the cut requests held for a decision went with them.
+    session.intercepts.discard_cancelled().await;
+    session.response_intercepts.discard_cancelled().await;
+    // A delete can follow at once only if no save is still pending.
+    let flushed = flush_pending_persists_where(state, |id| id == session_id).await;
+    relays.and(flushed)
+}
+
+/// `drain_proxy_connections` for the main listener alone: the connections it
+/// accepted and the work of the session it records into. A session port and
+/// its session are left as they are.
+async fn drain_main_listener(default_session: Uuid, timeout: Duration) {
+    let mine = move |owner| {
+        owner == ConnectionOwner::MainListener
+            || owner == ConnectionOwner::SessionTask(default_session)
+    };
+    let busy =
+        || !connections_where(mine).is_empty() || session_has_active_proxy_work(default_session);
+    wait_while(timeout, busy).await;
+    for connection in connections_where(mine) {
+        connection.abort();
+    }
+    wait_while(timeout, busy).await;
 }
 
 /// Waits for a session's in-flight proxy work, and if it is still busy at the
@@ -7851,8 +8548,135 @@ mod tests {
 
     #[test]
     fn a_legacy_tls_client_can_be_built() {
-        assert!(super::build_legacy_tls_client(true, &Default::default()).is_some());
-        assert!(super::build_legacy_tls_client(false, &Default::default()).is_some());
+        assert!(super::build_legacy_tls_client(true, &Default::default(), None).is_some());
+        assert!(super::build_legacy_tls_client(false, &Default::default(), None).is_some());
+    }
+
+    /// A server that reads the request and then says nothing.
+    async fn silent_upstream() -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4096];
+                    let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buffer).await;
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    drop(socket);
+                });
+            }
+        });
+        address
+    }
+
+    const SHORT_LIMITS: super::RequestTimeouts = super::RequestTimeouts {
+        connect: Duration::from_secs(2),
+        idle: Duration::from_millis(300),
+        total: Duration::from_secs(3),
+    };
+
+    #[test]
+    fn replay_waits_two_minutes_for_a_silent_server_and_five_for_any_answer() {
+        assert_eq!(super::REPLAY_TIMEOUTS.connect, Duration::from_secs(10));
+        assert_eq!(super::REPLAY_TIMEOUTS.idle, Duration::from_secs(120));
+        assert_eq!(super::REPLAY_TIMEOUTS.total, Duration::from_secs(300));
+    }
+
+    #[tokio::test]
+    async fn a_replay_to_a_server_that_stays_silent_ends_at_the_idle_limit() {
+        let address = silent_upstream().await;
+        let request = editable_request(&address.to_string());
+        let client = super::build_replay_client(
+            false,
+            &Default::default(),
+            &request,
+            None,
+            None,
+            SHORT_LIMITS,
+        )
+        .await
+        .unwrap();
+        let started = Instant::now();
+        let error = client
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_timeout(), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the idle limit ended it, not the total"
+        );
+    }
+
+    // The retry over the platform TLS stack is a second client: it once had
+    // only a connect limit, so a server that took the retry and went silent
+    // kept a Replay tab sending for good.
+    #[tokio::test]
+    async fn the_legacy_tls_retry_keeps_the_limits_of_the_first_attempt() {
+        let address = silent_upstream().await;
+        let client =
+            super::build_legacy_tls_client(false, &Default::default(), Some(SHORT_LIMITS)).unwrap();
+        let started = Instant::now();
+        let error = client
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_timeout(), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn a_response_that_never_stops_trickling_ends_at_the_total_limit() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buffer).await;
+            let head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, head).await;
+            // A byte every 100 ms: never idle, never finished.
+            loop {
+                if tokio::io::AsyncWriteExt::write_all(&mut socket, b"1\r\na\r\n")
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+        let limits = super::RequestTimeouts {
+            connect: Duration::from_secs(2),
+            idle: Duration::from_secs(1),
+            total: Duration::from_millis(1500),
+        };
+        let request = editable_request(&address.to_string());
+        let client =
+            super::build_replay_client(false, &Default::default(), &request, None, None, limits)
+                .await
+                .unwrap();
+        let started = Instant::now();
+        let response = client
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        let error = super::read_response_body_limited(response, 1 << 20)
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(1400) && elapsed < Duration::from_secs(4),
+            "{elapsed:?}"
+        );
+        assert!(format!("{error:#}").contains("timed out"), "{error:#}");
     }
 
     #[test]
@@ -9875,30 +10699,367 @@ mod tests {
     #[tokio::test]
     async fn another_machine_is_refused_the_ports_of_a_browser_sniper_opened() {
         let (state, data_dir) = test_proxy_state("sniper-proxy-driver-ports");
-        let session = state.session().await;
         let profile = data_dir.join("browser-profiles").join("example");
         let remote: IpAddr = "192.0.2.10".parse().unwrap();
         let local: IpAddr = "127.0.0.1".parse().unwrap();
         let devtools: Uri = "http://127.0.0.1:45123/json/version".parse().unwrap();
-        assert!(!remote_client_reaches_guarded(&state, &session, remote, &devtools).await);
+        assert!(!remote_client_reaches_guarded(&state, remote, &devtools).await);
 
         crate::browser::remember_driver_ports(&profile, vec![45123]);
-        assert!(remote_client_reaches_guarded(&state, &session, remote, &devtools).await);
-        assert!(!remote_client_reaches_guarded(&state, &session, local, &devtools).await);
+        assert!(remote_client_reaches_guarded(&state, remote, &devtools).await);
+        assert!(!remote_client_reaches_guarded(&state, local, &devtools).await);
 
         // Once the browser exits the port is anyone's again.
         crate::browser::forget_driver_ports(&profile);
-        assert!(!remote_client_reaches_guarded(&state, &session, remote, &devtools).await);
+        assert!(!remote_client_reaches_guarded(&state, remote, &devtools).await);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A session port is one more second hop: a client that makes Sniper
+    // connect to it arrives there as a local client.
+    #[tokio::test]
+    async fn another_machine_is_refused_a_session_port() {
+        let (state, data_dir) = test_proxy_state("sniper-proxy-session-port-guard");
+        let agent = state
+            .create_inactive_session(Some("agent".into()))
+            .await
+            .unwrap()
+            .id;
+        let status = state.open_session_port(agent).await.unwrap();
+        let port = status.proxy_port.unwrap();
+        let remote: IpAddr = "192.0.2.10".parse().unwrap();
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let targets = [
+            format!("http://127.0.0.1:{port}/"),
+            format!("http://[::1]:{port}/"),
+            format!("http://example.com:{port}/"),
+        ];
+        for target in &targets {
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                remote_client_reaches_guarded(&state, remote, &uri).await,
+                "{target}"
+            );
+            assert!(
+                !remote_client_reaches_guarded(&state, local, &uri).await,
+                "{target}"
+            );
+        }
+
+        // Once it is closed the port is anyone's again.
+        state.close_session_port(agent).await.unwrap();
+        for target in &targets {
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                !remote_client_reaches_guarded(&state, remote, &uri).await,
+                "{target}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    /// A WebSocket the session captured that a relay still carries.
+    async fn live_relay(session: &Arc<SessionContext>) -> Uuid {
+        let websocket_id = Uuid::new_v4();
+        session
+            .websockets
+            .open(WebSocketSessionRecord {
+                id: websocket_id,
+                sequence: 0,
+                started_at: Utc::now(),
+                closed_at: None,
+                duration_ms: None,
+                scheme: "wss".to_string(),
+                host: "example.test".to_string(),
+                path: "/ws".to_string(),
+                status: Some(StatusCode::SWITCHING_PROTOCOLS.as_u16()),
+                request: MessageRecord::from_headers_and_body(&HeaderMap::new(), &[], 1024),
+                response: None,
+                frames: Vec::new(),
+                notes: Vec::new(),
+            })
+            .await;
+        let (abort, registration) = AbortHandle::new_pair();
+        remember_live_websocket_relay(
+            websocket_id,
+            Some(websocket_id),
+            session,
+            Instant::now(),
+            abort,
+        );
+        // The relay's task, as `handle_websocket_upgrade` runs it.
+        spawn_tracked_proxy_task(session.id(), PROXY_WORK_WEBSOCKET, async move {
+            let _ = Abortable::new(std::future::pending::<()>(), registration).await;
+            forget_live_websocket_relay_unless_close_pending(websocket_id);
+        });
+        websocket_id
+    }
+
+    // Closing must leave nothing that refuses a delete: a relay cut from
+    // outside stays registered, and a save still pending holds the session.
+    #[tokio::test]
+    async fn closing_a_session_port_ends_its_work_so_the_session_can_be_deleted() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let (state, data_dir) = test_proxy_state("sniper-proxy-port-close");
+        let agent = state
+            .create_inactive_session(Some("agent".into()))
+            .await
+            .unwrap()
+            .id;
+        state.open_session_port(agent).await.unwrap();
+        let session = state.session_port_context(agent).unwrap();
+        let websocket_id = live_relay(&session).await;
+        spawn_tracked_proxy_task(agent, PROXY_WORK_TUNNEL, std::future::pending());
+        mark_session_persist_pending(&state, &session);
+        assert!(session_has_live_websocket_relays(agent));
+
+        state.close_session_port(agent).await.unwrap();
+
+        assert!(!session_has_live_websocket_relays(agent));
+        assert!(!session_has_active_proxy_work(agent));
+        assert!(!session_has_pending_persist(agent));
+        let closed = session.websockets.get(websocket_id).await.unwrap();
+        assert!(closed.closed_at.is_some());
+        assert!(closed.notes.iter().any(|note| note.contains("port")));
+        state.delete_session(agent).await.unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn closing_a_session_port_leaves_work_the_api_started() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let (state, data_dir) = test_proxy_state("sniper-proxy-port-close-api-work");
+        let agent = state
+            .create_inactive_session(Some("agent".into()))
+            .await
+            .unwrap()
+            .id;
+        state.open_session_port(agent).await.unwrap();
+        let replay = remember_active_proxy_session_owner(agent, PROXY_WORK_REPLAY);
+        // Post-capture work, as a Replay starts it. It outlasts the moment the
+        // close gives a request to finish, so it is still running when the
+        // close cuts what the port carried.
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = finished.clone();
+        spawn_tracked_proxy_task(agent, PROXY_WORK_CAPTURE_TASK, async move {
+            tokio::time::sleep(SESSION_PORT_CLOSE_WAIT + Duration::from_millis(500)).await;
+            done.store(true, Ordering::Release);
+        });
+
+        state.close_session_port(agent).await.unwrap();
+
+        assert!(finished.load(Ordering::Acquire), "the close cut it");
+        assert_eq!(describe_session_proxy_work(agent), "1 replay");
+        drop(replay);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // Closing is what was asked, and it happened. A save that then fails is
+    // not a reason to answer that the close failed.
+    #[tokio::test]
+    async fn a_port_is_closed_even_when_its_session_cannot_be_saved() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let (state, data_dir) = test_proxy_state("sniper-proxy-port-close-unsaved");
+        let agent = state
+            .create_inactive_session(Some("agent".into()))
+            .await
+            .unwrap()
+            .id;
+        let opened = state.open_session_port(agent).await.unwrap();
+        let session = state.session_port_context(agent).unwrap();
+        mark_session_persist_pending(&state, &session);
+        let storage = session.storage_dir().to_path_buf();
+        let held = storage.with_extension("held");
+        std::fs::rename(&storage, &held).unwrap();
+        std::fs::write(&storage, b"storage unavailable").unwrap();
+
+        let closed = state.close_session_port(agent).await.unwrap();
+
+        assert!(!closed.open);
+        assert_eq!(closed.proxy_port, opened.proxy_port);
+        assert!(session_has_pending_persist(agent));
+        let events = session.event_log.snapshot(None).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.title == "Session port closed, session not saved"),
+            "{events:?}"
+        );
+        std::fs::remove_file(&storage).unwrap();
+        std::fs::rename(&held, &storage).unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A relay cut by its outer task never forgets itself, and that entry then
+    // refused every delete of the session until Sniper restarted.
+    #[tokio::test]
+    async fn a_forced_switch_leaves_no_relay_that_refuses_a_delete() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let (state, data_dir) = test_proxy_state("sniper-proxy-forced-switch-relay");
+        let first = state.session().await;
+        let websocket_id = live_relay(&first).await;
+
+        state
+            .create_inactive_session(Some("second".into()))
+            .await
+            .unwrap();
+        let second = state.list_sessions().await;
+        let second = second.iter().find(|s| s.id != first.id()).unwrap().id;
+        state
+            .activate_session_with_options(second, true)
+            .await
+            .unwrap();
+
+        assert!(!session_has_live_websocket_relays(first.id()));
+        assert!(first
+            .websockets
+            .get(websocket_id)
+            .await
+            .unwrap()
+            .closed_at
+            .is_some());
+        state.delete_session(first.id()).await.unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // `force` cuts what holds the session the main listener leaves. The
+    // session it moves to has only work the API started there, a Fuzzer
+    // attack for one, and cutting that would lose it for nothing.
+    #[tokio::test]
+    async fn a_forced_switch_cuts_nothing_in_the_session_it_moves_to() {
+        let _global_proxy_work = GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let (state, data_dir) = test_proxy_state("sniper-proxy-forced-switch-target");
+        let target = state
+            .create_inactive_session(Some("target".into()))
+            .await
+            .unwrap()
+            .id;
+        let context = state.session_context_for_id(target).await.unwrap();
+        spawn_tracked_proxy_task(
+            target,
+            PROXY_WORK_CAPTURE_TASK,
+            std::future::pending::<()>(),
+        );
+
+        state
+            .activate_session_with_options(target, true)
+            .await
+            .unwrap();
+
+        assert!(session_has_active_proxy_work(target), "its task still runs");
+        assert!(Arc::ptr_eq(&state.session().await, &context));
+        assert_eq!(abort_session_tracked_tasks(target), 1);
+        wait_for_session_proxy_work_to_finish(target, Duration::from_secs(2)).await;
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn another_machine_is_refused_every_port_sniper_listens_on() {
+        let (state, data_dir) = test_proxy_state("sniper-proxy-own-ports");
+        state
+            .set_active_proxy_addr("127.0.0.1:18080".parse().unwrap())
+            .await;
+        state
+            .set_active_ui_addr("127.0.0.1:18081".parse().unwrap())
+            .await;
+        let remote: IpAddr = "192.0.2.10".parse().unwrap();
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let mut refused = vec![
+            // The proxy itself: a tunnel to it arrives there as a local client.
+            "http://127.0.0.1:18080/".to_string(),
+            "http://[::1]:18080/".to_string(),
+            // The connection looks a name up again, so no lookup here can clear it.
+            "http://example.com:18080/".to_string(),
+            "http://example.com:18081/".to_string(),
+        ];
+        // A UI on every interface is announced as 127.0.0.1 and answers on the others.
+        for ip in local_interface_ips() {
+            if !ip.is_loopback() {
+                refused.push(match ip {
+                    IpAddr::V4(ip) => format!("http://{ip}:18081/"),
+                    IpAddr::V6(ip) => format!("http://[{ip}]:18081/"),
+                });
+            }
+        }
+        for target in &refused {
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                remote_client_reaches_guarded(&state, remote, &uri).await,
+                "{target}"
+            );
+            assert!(
+                !remote_client_reaches_guarded(&state, local, &uri).await,
+                "{target}"
+            );
+        }
+        for open in [
+            // Other ports of this machine stay reachable from a phone.
+            "http://127.0.0.1:3000/",
+            "http://example.com:3000/",
+            // The same port on another machine is not Sniper's.
+            "http://192.0.2.44:18080/",
+            // The page Sniper serves itself is never dialled.
+            "http://sniper:18080/",
+        ] {
+            let uri: Uri = open.parse().unwrap();
+            assert!(
+                !remote_client_reaches_guarded(&state, remote, &uri).await,
+                "{open}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // The connections a listener accepted live on after it goes down: its
+    // accept task ends and they do not. A client on another machine that
+    // keeps one must still be refused the listener's address, or it opens a
+    // tunnel there while the listener is down, sends nothing until it is back,
+    // and arrives on it as a local client, which the UI trusts.
+    #[tokio::test]
+    async fn another_machine_is_refused_the_main_listener_s_address_while_it_is_down() {
+        let (state, data_dir) = test_proxy_state("sniper-proxy-down-guard");
+        state
+            .set_active_proxy_addr("0.0.0.0:18080".parse().unwrap())
+            .await;
+        state.set_proxy_online(false);
+        let remote: IpAddr = "192.0.2.10".parse().unwrap();
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        for target in ["http://127.0.0.1:18080/", "http://example.com:18080/"] {
+            let uri: Uri = target.parse().unwrap();
+            assert!(
+                remote_client_reaches_guarded(&state, remote, &uri).await,
+                "{target}"
+            );
+            assert!(
+                !remote_client_reaches_guarded(&state, local, &uri).await,
+                "{target}"
+            );
+        }
+        // For this machine the address is whoever has the port now.
+        let session = state.session().await;
+        let uri: Uri = "http://127.0.0.1:18080/".parse().unwrap();
+        assert_eq!(own_proxy_listener_for(&state, &session, &uri).await, None);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn another_machine_is_refused_the_proxy_listener_itself() {
+        let (state, data_dir) = test_proxy_state("sniper-proxy-self-guard");
+        state
+            .set_active_proxy_addr("0.0.0.0:18080".parse().unwrap())
+            .await;
+        let remote: IpAddr = "192.0.2.10".parse().unwrap();
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let proxy_loopback: Uri = "http://127.0.0.1:18080/".parse().unwrap();
+        assert!(remote_client_reaches_guarded(&state, remote, &proxy_loopback).await);
+        assert!(!remote_client_reaches_guarded(&state, local, &proxy_loopback).await);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[test]
     fn a_client_on_another_machine_cannot_reach_the_ui_through_the_proxy() {
         // The UI, and a DevTools port of a browser Sniper opened.
-        let guarded: [SocketAddr; 2] = [
-            "127.0.0.1:8081".parse().unwrap(),
-            "127.0.0.1:9222".parse().unwrap(),
-        ];
+        let guarded = [8081, 9222];
         let remote: IpAddr = "192.0.2.10".parse().unwrap();
         let mapped: IpAddr = "::ffff:192.0.2.10".parse().unwrap();
         let local: IpAddr = "127.0.0.1".parse().unwrap();
@@ -9906,8 +11067,12 @@ mod tests {
             "http://127.0.0.1:8081/api/runtime",
             "http://localhost:8081/",
             "http://127.1:8081/",
+            "http://0.0.0.0:8081/",
+            "http://[::ffff:127.0.0.1]:8081/",
             "http://127.0.0.1:9222/json/version",
             "http://localhost:9222/",
+            // A host that does not parse is not let through on the doubt.
+            "http://exa_mple..com:8081/",
         ] {
             let uri: Uri = target.parse().unwrap();
             assert!(remote_client_targets(remote, &uri, &guarded), "{target}");
@@ -10493,9 +11658,16 @@ mod tests {
             port: "9443".to_string(),
         };
 
-        let error = build_replay_client(false, &Default::default(), &request, Some(&target), None)
-            .await
-            .unwrap_err();
+        let error = build_replay_client(
+            false,
+            &Default::default(),
+            &request,
+            Some(&target),
+            None,
+            REPLAY_TIMEOUTS,
+        )
+        .await
+        .unwrap_err();
 
         assert!(error.to_string().contains("request host is an IP address"));
     }
@@ -10509,9 +11681,16 @@ mod tests {
             port: "443".to_string(),
         };
 
-        build_replay_client(false, &Default::default(), &request, Some(&target), None)
-            .await
-            .expect("equivalent target override should be treated as a no-op");
+        build_replay_client(
+            false,
+            &Default::default(),
+            &request,
+            Some(&target),
+            None,
+            REPLAY_TIMEOUTS,
+        )
+        .await
+        .expect("equivalent target override should be treated as a no-op");
     }
 
     #[tokio::test]
@@ -10523,9 +11702,16 @@ mod tests {
             port: "9443".to_string(),
         };
 
-        let _error = build_replay_client(false, &Default::default(), &request, Some(&target), None)
-            .await
-            .unwrap_err();
+        let _error = build_replay_client(
+            false,
+            &Default::default(),
+            &request,
+            Some(&target),
+            None,
+            REPLAY_TIMEOUTS,
+        )
+        .await
+        .unwrap_err();
     }
 
     #[test]
@@ -10761,6 +11947,7 @@ mod tests {
             SocketPeerCapture::ForwardedHttp(
                 crate::upstream_proxy::UpstreamProxy::default().route_snapshot(),
             ),
+            None,
             None,
             None,
         )
@@ -11074,5 +12261,38 @@ mod tests {
         let map = header_map_from_records(&records);
         assert_eq!(map.get_all(COOKIE).iter().count(), 1);
         assert_eq!(map.get(COOKIE).unwrap(), "a=1; b=2; c=3");
+    }
+
+    #[test]
+    fn a_tunnels_first_bytes_tell_tls_http_and_everything_else() {
+        use TunnelStart::{Http, Other, Tls};
+        for (head, complete, start) in [
+            (&b""[..], false, None),
+            (b"", true, Some(Tls)),
+            (b"\x16\x03\x01\x02\x00", false, Some(Tls)),
+            (b"\x16", false, None),
+            (b"\x16", true, Some(Other)),
+            (b"\x16\x01\x00", false, Some(Other)),
+            (
+                b"GET / HTTP/1.1\r\nHost: example.com\r\n",
+                false,
+                Some(Http),
+            ),
+            (b"OPTIONS * HTTP/1.0\n", false, Some(Http)),
+            (b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", false, Some(Http)),
+            (b"GET / HT", false, None),
+            (b"GET / HT", true, Some(Other)),
+            (b"NICK sniper\r\n", false, Some(Other)),
+            (b"SET k v\x00", false, Some(Other)),
+            (b"\x00\x01ping", false, Some(Other)),
+            (b"*1\r\n$4\r\nPING\r\n", false, Some(Other)),
+        ] {
+            assert_eq!(
+                tunnel_start(head, complete),
+                start,
+                "{:?}",
+                String::from_utf8_lossy(head)
+            );
+        }
     }
 }

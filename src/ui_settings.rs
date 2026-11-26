@@ -45,6 +45,11 @@ const ACTIVE_TOOL_OPTIONS: &[&str] = &[
     "tools",
     "logger",
 ];
+/// The orders the session list offers. "manual" is the dragged one.
+const SESSION_SORT_OPTIONS: &[&str] = &["manual", "recent", "created", "name", "agent"];
+/// What a row of the session list can say under its name, in the order the
+/// list's menu offers them.
+const SESSION_ROW_DETAIL_OPTIONS: &[&str] = &["domains", "captured", "created", "requests"];
 const ACTIVE_PROXY_TAB_OPTIONS: &[&str] = &[
     "intercept",
     "http-history",
@@ -398,6 +403,35 @@ pub struct AppUiSettingsSnapshot {
     /// Replay's tabs wrap onto as many rows as they need, as Burp's "Wrapped"
     /// tab view does, rather than scrolling along one.
     pub replay_tabs_wrap: bool,
+    /// The session list beside the workspace is put away.
+    pub session_sidebar_hidden: bool,
+    /// The groups of the session list that are folded shut, by name.
+    pub session_groups_collapsed: Vec<String>,
+    /// The list's own sections that are folded shut: "pinned", "sessions"
+    /// for all the others, and "default" for the sessions in no group. They
+    /// are not groups, so a group of the same name folds on its own.
+    pub session_sections_collapsed: Vec<String>,
+    /// The order a person dragged sessions into, by id. A session not listed
+    /// comes before the listed ones of its group, newest first.
+    pub session_order: Vec<String>,
+    /// The groups a person made or dragged in the list, in their order. The
+    /// list keeps these while no session is in them. A group not listed
+    /// comes after, by name, and lasts while a session carries its name.
+    pub session_group_order: Vec<String>,
+    /// The group that Default, the folder of the sessions in no group, was
+    /// left under. Empty is no group: Default is the first folder.
+    pub session_default_after: String,
+    /// The width a person dragged the session list to.
+    pub session_sidebar_width: Option<u16>,
+    /// The sessions kept at the top of the list, by id, in the order pinned.
+    pub session_pinned: Vec<String>,
+    /// How the list orders the sessions of each group. "manual" is the order
+    /// they were dragged into.
+    pub session_sort: String,
+    /// What a row of the list says under its session's name, in the order
+    /// the list's menu offers them. A file from before the choice has the
+    /// domains, which is what a row showed then; an empty list shows nothing.
+    pub session_row_details: Vec<String>,
     pub websocket_stack_height: Option<u16>,
     pub ws_replay_left_width: Option<u16>,
     pub ws_replay_frame_detail_height: Option<u16>,
@@ -438,6 +472,16 @@ impl Default for AppUiSettingsSnapshot {
             websocket_in_scope_only: false,
             websocket_live_only: false,
             replay_tabs_wrap: false,
+            session_sidebar_hidden: false,
+            session_groups_collapsed: Vec::new(),
+            session_sections_collapsed: Vec::new(),
+            session_order: Vec::new(),
+            session_group_order: Vec::new(),
+            session_default_after: String::new(),
+            session_sidebar_width: None,
+            session_pinned: Vec::new(),
+            session_sort: "manual".to_string(),
+            session_row_details: vec!["domains".to_string()],
             websocket_stack_height: None,
             ws_replay_left_width: None,
             ws_replay_frame_detail_height: None,
@@ -512,6 +556,33 @@ impl AppUiSettingsSnapshot {
         sanitized.websocket_in_scope_only = self.websocket_in_scope_only;
         sanitized.websocket_live_only = self.websocket_live_only;
         sanitized.replay_tabs_wrap = self.replay_tabs_wrap;
+        sanitized.session_sidebar_hidden = self.session_sidebar_hidden;
+        sanitized.session_groups_collapsed = sanitize_group_names(self.session_groups_collapsed);
+        sanitized.session_sections_collapsed = ["pinned", "sessions", "default"]
+            .into_iter()
+            .filter(|section| {
+                self.session_sections_collapsed
+                    .iter()
+                    .any(|name| name == section)
+            })
+            .map(str::to_owned)
+            .collect();
+        sanitized.session_group_order = sanitize_group_names(self.session_group_order);
+        sanitized.session_default_after = sanitize_group_names(vec![self.session_default_after])
+            .pop()
+            .unwrap_or_default();
+        sanitized.session_order = sanitize_session_ids(self.session_order);
+        sanitized.session_sidebar_width = self
+            .session_sidebar_width
+            .filter(|width| *width > 0)
+            .map(|width| width.clamp(160, 480));
+        sanitized.session_pinned = sanitize_session_ids(self.session_pinned);
+        sanitized.session_sort = sanitize_option(self.session_sort, "manual", SESSION_SORT_OPTIONS);
+        sanitized.session_row_details = SESSION_ROW_DETAIL_OPTIONS
+            .iter()
+            .filter(|option| self.session_row_details.iter().any(|name| name == *option))
+            .map(|option| option.to_string())
+            .collect();
         sanitized.websocket_stack_height = self
             .websocket_stack_height
             .filter(|height| *height > 0)
@@ -773,6 +844,29 @@ fn sanitize_map_entries(entries: Vec<String>) -> Vec<String> {
         })
         .filter(|entry| seen.insert(entry.clone(), ()).is_none())
         .take(SERVICE_MAP_ENTRY_MAX_COUNT)
+        .collect()
+}
+
+/// Sessions the list keeps a place for: ids only, each once, and bounded.
+fn sanitize_session_ids(ids: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeMap::new();
+    ids.into_iter()
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        .filter(|id| seen.insert(id.clone(), ()).is_none())
+        .take(2_000)
+        .collect()
+}
+
+/// Folded session groups: trimmed, unique and bounded, as a group's name is
+/// when a session is put in it.
+fn sanitize_group_names(names: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeMap::new();
+    names
+        .into_iter()
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty() && name.len() <= 256 && !name.chars().any(char::is_control))
+        .filter(|name| seen.insert(name.clone(), ()).is_none())
+        .take(200)
         .collect()
 }
 
@@ -1644,6 +1738,29 @@ mod tests {
         snapshot.websocket_in_scope_only = true;
         snapshot.websocket_live_only = true;
         snapshot.replay_tabs_wrap = true;
+        snapshot.session_sidebar_hidden = true;
+        snapshot.session_groups_collapsed = vec![" acme ".into(), "acme".into(), "a\nb".into()];
+        snapshot.session_group_order = vec!["beta".into(), "acme".into(), "beta".into()];
+        snapshot.session_default_after = " beta ".to_string();
+        let dragged = uuid::Uuid::new_v4().to_string();
+        snapshot.session_order = vec![dragged.clone(), "not an id".into(), dragged.clone()];
+        snapshot.session_sidebar_width = Some(9_999);
+        let pinned = uuid::Uuid::new_v4().to_string();
+        snapshot.session_pinned = vec![pinned.clone(), "not an id".into(), pinned.clone()];
+        snapshot.session_sort = "agent".to_string();
+        snapshot.session_row_details = vec![
+            "requests".into(),
+            "by moon phase".into(),
+            "domains".into(),
+            "requests".into(),
+        ];
+        snapshot.session_sections_collapsed = vec![
+            "default".into(),
+            "acme".into(),
+            "pinned".into(),
+            "default".into(),
+            "sessions".into(),
+        ];
         snapshot.websocket_stack_height = Some(345);
         snapshot.ws_replay_left_width = Some(555);
         snapshot.ws_replay_frame_detail_height = Some(222);
@@ -1692,6 +1809,39 @@ mod tests {
         assert!(persisted.websocket_in_scope_only);
         assert!(persisted.websocket_live_only);
         assert!(persisted.replay_tabs_wrap);
+        assert!(persisted.session_sidebar_hidden);
+        assert_eq!(persisted.session_groups_collapsed, ["acme"]);
+        assert_eq!(persisted.session_group_order, ["beta", "acme"]);
+        assert_eq!(persisted.session_default_after, "beta");
+        assert_eq!(persisted.session_order, [dragged]);
+        assert_eq!(persisted.session_sidebar_width, Some(480));
+        assert_eq!(persisted.session_pinned, [pinned]);
+        assert_eq!(persisted.session_sort, "agent");
+        // What a row shows: only what the menu offers, each once, in its order.
+        assert_eq!(persisted.session_row_details, ["domains", "requests"]);
+        // Only the list's own sections, each once: a group folds by name.
+        assert_eq!(
+            persisted.session_sections_collapsed,
+            ["pinned", "sessions", "default"]
+        );
+        // An order this build does not know is the dragged one.
+        let mut unknown = AppUiSettingsSnapshot::default();
+        assert_eq!(unknown.session_sort, "manual");
+        unknown.session_sort = "by moon phase".to_string();
+        unknown.session_sidebar_width = Some(12);
+        // A row begins with the domains under its name, as it had before
+        // there was a choice, and showing nothing is a choice that is kept.
+        assert_eq!(unknown.session_row_details, ["domains"]);
+        unknown.session_row_details = Vec::new();
+        // Default begins as the first folder, and a name no group can carry
+        // leaves it there.
+        assert_eq!(unknown.session_default_after, "");
+        unknown.session_default_after = "a\nb".to_string();
+        let unknown = unknown.sanitized();
+        assert_eq!(unknown.session_sort, "manual");
+        assert_eq!(unknown.session_sidebar_width, Some(160));
+        assert_eq!(unknown.session_default_after, "");
+        assert!(unknown.session_row_details.is_empty());
         assert_eq!(persisted.websocket_stack_height, Some(345));
         assert_eq!(persisted.ws_replay_left_width, Some(555));
         assert_eq!(persisted.ws_replay_frame_detail_height, Some(222));

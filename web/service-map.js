@@ -15,7 +15,7 @@
     capture_preview_truncated: "Capture preview is truncated", scan_prefix_truncated: "Scan prefix limit reached",
     candidate_limit: "URL candidate limit reached", candidate_bytes: "An oversized URL candidate was skipped",
     origin_limit: "Origin output limit reached", offset_limit: "Offset output limit reached",
-    inactive_session: "Only the active session can be inspected", invalid_evidence_id: "Evidence token is invalid",
+    inactive_session: "Bodies are read only in the session the proxy records into", invalid_evidence_id: "Evidence token is invalid",
     session_mismatch: "The source session changed", stale_generation: "Retained history changed",
     record_missing: "The source row is no longer retained", record_changed: "The source row changed",
     body_identity_unverifiable: "The retained body identity could not be verified",
@@ -401,29 +401,237 @@
       : Math.max(0, Math.min(anchor.bottom + gap, view.height - size.height));
     return { left: Math.max(0, Math.min(anchor.left, view.width - size.width)), top };
   }
+  function morePopupKind(anchor) {
+    const explicit = anchor?.getAttribute?.("data-more-kind");
+    if (explicit) return explicit;
+    const classes = typeof anchor?.className === "string" ? anchor.className.split(/\s+/) : [];
+    if (classes.includes("service-map-auth")) return "auth";
+    if (classes.includes("service-map-exposure")) return "exposure";
+    if (classes.includes("service-map-products-more")) return "products";
+    if (classes.includes("service-map-advisories") || classes.includes("service-map-kev")) return "advisories";
+    return "list";
+  }
+  const MORE_POPUP_LIMITS = Object.freeze({ authGroups: 10, authTokensPerGroup: 6, products: 16, exposures: 12, lines: 16 });
+  const MORE_ADVISORY_LINE = /^(\d+) known advisor(?:y|ies) for (.+), (\d+) exploited \(CISA KEV\)\.(?:\s*(.*))?$/;
+  // Auth detail names from the server never contain whitespace; keeping the
+  // parenthesised group non-whitespace preserves "Negotiate (Kerberos or NTLM)".
+  const MORE_AUTH_DETAIL = /^(.+?)\s+\(([^\s()]+)\)$/;
+  const MORE_PRODUCT_VERSION = /^(.+?)\s+(\d[\w.+-]*)$/;
+  function populateMorePopup(doc, popup, kind, text) {
+    // Only DOM nodes with textContent enter the popup — never innerHTML — so
+    // captured names, headers, or cookie identifiers cannot inject markup.
+    if (typeof popup.appendChild !== "function") {
+      popup.textContent = text;
+      return;
+    }
+    if (typeof popup.replaceChildren === "function") popup.replaceChildren();
+    else popup.textContent = "";
+    const el = (tag, className, content) => {
+      const node = doc.createElement(tag);
+      if (className) node.className = className;
+      if (content !== undefined) node.textContent = content;
+      return node;
+    };
+    const addHead = (title, count, danger = false) => {
+      const head = el("div", "service-map-more-head");
+      head.appendChild(el("span", `service-map-more-title${danger ? " is-danger" : ""}`, title));
+      if (count !== null && count !== undefined) {
+        head.appendChild(el("span", `service-map-more-count${danger ? " is-danger" : ""}`, String(count)));
+      }
+      popup.appendChild(head);
+    };
+    const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+    popup.setAttribute?.("data-more-kind", kind);
+
+    if (kind === "auth") {
+      addHead("Authentication", lines.length);
+      const groups = [];
+      const byLabel = new Map();
+      for (const line of lines) {
+        const match = MORE_AUTH_DETAIL.exec(line);
+        const label = match ? match[1] : line;
+        const detail = match ? match[2] : "";
+        let group = byLabel.get(label);
+        if (!group) {
+          group = { label, count: 0, details: [] };
+          byLabel.set(label, group);
+          groups.push(group);
+        }
+        group.count += 1;
+        if (detail && !group.details.includes(detail)) group.details.push(detail);
+      }
+      const list = el("ul", "service-map-more-list");
+      const visible = groups.slice(0, MORE_POPUP_LIMITS.authGroups);
+      for (const group of visible) {
+        const row = el("li", "service-map-more-row");
+        if (group.details.length === 1 && group.details[0].length <= 20) {
+          const line = el("div", "service-map-more-row-head");
+          line.appendChild(el("span", "service-map-more-label", group.label));
+          line.appendChild(el("code", "service-map-more-code", group.details[0]));
+          row.appendChild(line);
+        } else {
+          const line = el("div", "service-map-more-row-head");
+          line.appendChild(el("span", "service-map-more-label", group.label));
+          if (group.details.length > 1 || group.count > 1) {
+            line.appendChild(el("span", "service-map-more-subcount", String(group.details.length || group.count)));
+          }
+          row.appendChild(line);
+          if (group.details.length) {
+            const tokens = el("div", "service-map-more-tokens");
+            for (const detail of group.details.slice(0, MORE_POPUP_LIMITS.authTokensPerGroup)) {
+              tokens.appendChild(el("code", "service-map-more-code", detail));
+            }
+            const hiddenDetails = group.details.length - MORE_POPUP_LIMITS.authTokensPerGroup;
+            if (hiddenDetails > 0) {
+              tokens.appendChild(el("span", "service-map-more-overflow", `+${hiddenDetails} more`));
+            }
+            row.appendChild(tokens);
+          }
+        }
+        list.appendChild(row);
+      }
+      popup.appendChild(list);
+      const hiddenGroups = groups.length - visible.length;
+      if (hiddenGroups > 0) popup.appendChild(el("div", "service-map-more-note", `+${hiddenGroups} more in inspector`));
+      return;
+    }
+
+    if (kind === "products") {
+      addHead("More technologies", lines.length);
+      const tags = el("div", "service-map-more-tags");
+      const visible = lines.slice(0, MORE_POPUP_LIMITS.products);
+      for (const line of visible) {
+        let name = line;
+        let version = "";
+        const multiIndex = line.indexOf(" · ");
+        if (multiIndex > 0) {
+          name = line.slice(0, multiIndex);
+          version = line.slice(multiIndex + 3);
+        } else {
+          const match = MORE_PRODUCT_VERSION.exec(line);
+          if (match) {
+            name = match[1];
+            version = match[2];
+          }
+        }
+        const tag = el("span", "service-map-more-tag");
+        tag.appendChild(el("span", "service-map-more-tag-name", name));
+        if (version) tag.appendChild(el("span", "service-map-more-tag-ver", version));
+        tags.appendChild(tag);
+      }
+      popup.appendChild(tags);
+      const hidden = lines.length - visible.length;
+      if (hidden > 0) popup.appendChild(el("div", "service-map-more-note", `+${hidden} more in inspector`));
+      return;
+    }
+
+    if (kind === "exposure") {
+      addHead("Exposures", lines.length, true);
+      const list = el("ul", "service-map-more-list");
+      const visible = lines.slice(0, MORE_POPUP_LIMITS.exposures);
+      for (const line of visible) {
+        const row = el("li", "service-map-more-exposure-item");
+        row.appendChild(el("span", "service-map-more-dot is-danger", "⚠"));
+        row.appendChild(el("span", "service-map-more-label", line));
+        list.appendChild(row);
+      }
+      popup.appendChild(list);
+      const hidden = lines.length - visible.length;
+      if (hidden > 0) popup.appendChild(el("div", "service-map-more-note", `+${hidden} more in inspector`));
+      return;
+    }
+
+    if (kind === "advisories") {
+      const parsed = lines.map((line) => {
+        const match = MORE_ADVISORY_LINE.exec(line);
+        return match
+          ? { count: Number(match[1]), target: match[2], kev: Number(match[3]), note: match[4] || "" }
+          : { raw: line };
+      });
+      const totalKev = parsed.reduce((sum, item) => sum + (item.kev || 0), 0);
+      addHead("Known advisories", totalKev > 0 ? "KEV" : parsed.reduce((sum, item) => sum + (item.count || 0), 0) || null, totalKev > 0);
+      const list = el("ul", "service-map-more-list");
+      let note = "";
+      for (const item of parsed) {
+        const row = el("li", "service-map-more-row");
+        if (item.raw) {
+          row.appendChild(el("span", "service-map-more-label", item.raw));
+        } else {
+          const head = el("div", "service-map-more-row-head");
+          head.appendChild(el("span", "service-map-more-label", item.target));
+          head.appendChild(el("span", "service-map-more-subcount", `${item.count} advisor${item.count === 1 ? "y" : "ies"}`));
+          row.appendChild(head);
+          const meta = el("span", `service-map-more-meta${item.kev > 0 ? " is-danger" : ""}`,
+            item.kev > 0 ? `${item.kev} exploited (CISA KEV)` : "No known CISA KEV");
+          row.appendChild(meta);
+          if (!note && item.note) note = item.note;
+        }
+        list.appendChild(row);
+      }
+      popup.appendChild(list);
+      if (note) popup.appendChild(el("div", "service-map-more-note", note));
+      return;
+    }
+
+    const list = el("ul", "service-map-more-list");
+    const visible = lines.slice(0, MORE_POPUP_LIMITS.lines);
+    for (const line of visible) {
+      list.appendChild(el("li", "service-map-more-label", line));
+    }
+    popup.appendChild(list);
+    const hidden = lines.length - visible.length;
+    if (hidden > 0) popup.appendChild(el("div", "service-map-more-note", `+${hidden} more`));
+  }
   function createMorePopup(doc) {
     let popup = null;
+    let openTimer = null;
+    const cancelTimer = () => {
+      if (openTimer !== null && typeof clearTimeout === "function") clearTimeout(openTimer);
+      openTimer = null;
+    };
+    const showNow = (anchor) => {
+      cancelTimer();
+      const text = anchor?.getAttribute?.("data-more");
+      if (!text || !doc?.body) return;
+      if (!popup) {
+        popup = doc.createElement("div");
+        popup.className = "service-map-more";
+        popup.setAttribute("role", "tooltip");
+        doc.body.appendChild(popup);
+      }
+      populateMorePopup(doc, popup, morePopupKind(anchor), text);
+      // Reset coordinates before measuring so a previous right-edge placement
+      // cannot squeeze the new content's intrinsic width and inflate its height.
+      popup.style.left = "0px";
+      popup.style.top = "0px";
+      popup.hidden = false;
+      const view = { width: doc.documentElement?.clientWidth || 0, height: doc.documentElement?.clientHeight || 0 };
+      const place = morePopupPlacement(anchor.getBoundingClientRect(), { width: popup.offsetWidth, height: popup.offsetHeight }, view);
+      popup.style.left = `${place.left}px`;
+      popup.style.top = `${place.top}px`;
+    };
     return {
-      show(anchor) {
-        const text = anchor?.getAttribute?.("data-more");
-        if (!text || !doc?.body) return;
-        if (!popup) {
-          popup = doc.createElement("div");
-          popup.className = "service-map-more";
-          popup.setAttribute("role", "tooltip");
-          doc.body.appendChild(popup);
+      show: showNow,
+      schedule(anchor, delayMs = 160) {
+        cancelTimer();
+        if (!anchor) return;
+        // Once a popup is already open, sliding across sibling chips updates
+        // immediately instead of flickering through another hover delay.
+        if ((popup && !popup.hidden) || delayMs <= 0 || typeof setTimeout !== "function") {
+          showNow(anchor);
+          return;
         }
-        popup.textContent = text;
-        popup.hidden = false;
-        const view = { width: doc.documentElement?.clientWidth || 0, height: doc.documentElement?.clientHeight || 0 };
-        const place = morePopupPlacement(anchor.getBoundingClientRect(), { width: popup.offsetWidth, height: popup.offsetHeight }, view);
-        popup.style.left = `${place.left}px`;
-        popup.style.top = `${place.top}px`;
+        openTimer = setTimeout(() => {
+          openTimer = null;
+          if (anchor.isConnected !== false) showNow(anchor);
+        }, delayMs);
       },
       hide() {
+        cancelTimer();
         if (popup) popup.hidden = true;
       },
       remove() {
+        cancelTimer();
         popup?.remove();
         popup = null;
       },
@@ -709,7 +917,7 @@
   const PEER_MATCH_LIMITS = Object.freeze({ max_records: 10000, origin_groups: 100, samples_per_origin: 3, projection_bytes: 262144, host_bytes: 512, scheme_bytes: 8, scope_pattern_entries: 500, scope_pattern_bytes: 512, scope_work_units: 8388608 });
   const PEER_MATCH_REASONS = Object.freeze({
     invalid_evidence_id: "The exact evidence token is invalid", session_mismatch: "The source session changed", stale_generation: "Retained history changed",
-    record_missing: "The source row is no longer retained", record_changed: "The source row changed", inactive_session: "Only the active session can be inspected",
+    record_missing: "The source row is no longer retained", record_changed: "The source row changed", inactive_session: "Bodies are read only in the session the proxy records into",
     session_source_changed: "The active source changed", unsupported_source_context: "This source is not an ordinary captured HTTP row",
     observation_not_recorded: "No peer was recorded for this source", observation_unavailable: "The recorded source address is unavailable",
     non_direct_observation: "Proxy and unknown routes are diagnostics only", invalid_observation: "The recorded source address is not eligible for matching",
@@ -2068,7 +2276,7 @@
       const unavailableVersion = !!state.productVersion && !(state.snapshot?.origins || []).some((origin) => productMatches(origin, state.productId, state.productVersion));
       if (state.productId) products.set(state.productId, products.get(state.productId) ?? TECHNOLOGY_CATALOG_V2.get(state.productId)?.[0] ?? state.productId);
       if (state.productVersion.startsWith("reported:") && !options.has(state.productVersion)) options.set(state.productVersion, `Reported: ${state.productVersion.slice(9)} (unavailable)`);
-      replace(productFilterContainer, `<div class="service-map-product-filter-controls"><label>Product (exact)<select data-service-product-filter="product" data-service-focus="products:product" aria-describedby="serviceMapProductHelp"><option value="">All products</option>${[...products].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([id, name]) => `<option value="${escape(id)}" ${state.productId === id ? "selected" : ""}>${escape(name)}${unavailableProduct && state.productId === id ? " (unavailable)" : ""}</option>`).join("")}</select></label><label>Version/status (exact)<select data-service-product-filter="version" data-service-focus="products:version" title="${escape(options.get(state.productVersion))}" aria-describedby="serviceMapProductHelp">${[...options].map(([id, name]) => `<option value="${escape(id)}" ${state.productVersion === id ? "selected" : ""}>${escape(name)}</option>`).join("")}</select></label><button class="secondary-action" type="button" data-service-product-filter-clear="true" data-service-focus="products:clear" ${!state.productId && !state.productVersion ? "disabled" : ""}>Clear</button></div><p id="serviceMapProductHelp" class="service-map-muted">Loaded response-header declarations only. Product and version/status match the same product. Versions are literal and unverified. Options are independent of origin search.</p>${unavailableProduct || unavailableVersion ? '<p class="service-map-filter-notice" role="status">Selected product/version is unavailable in the loaded snapshot. Filters retained; zero matching origins.</p>' : ""}`);
+      replace(productFilterContainer, `<div class="service-map-product-filter-controls"><label>Product<select data-service-product-filter="product" data-service-focus="products:product" aria-describedby="serviceMapProductHelp"><option value="">All products</option>${[...products].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([id, name]) => `<option value="${escape(id)}" ${state.productId === id ? "selected" : ""}>${escape(name)}${unavailableProduct && state.productId === id ? " (unavailable)" : ""}</option>`).join("")}</select></label><label>Version<select data-service-product-filter="version" data-service-focus="products:version" title="${escape(options.get(state.productVersion))}" aria-describedby="serviceMapProductHelp">${[...options].map(([id, name]) => `<option value="${escape(id)}" ${state.productVersion === id ? "selected" : ""}>${escape(name)}</option>`).join("")}</select></label><button class="secondary-action" type="button" data-service-product-filter-clear="true" data-service-focus="products:clear" ${!state.productId && !state.productVersion ? "disabled" : ""}>Clear</button></div><p id="serviceMapProductHelp" class="service-map-muted">Matches exact reported product and version from loaded headers.</p>${unavailableProduct || unavailableVersion ? '<p class="service-map-filter-notice" role="status">Selected product/version is unavailable in the loaded snapshot. Filters retained; zero matching origins.</p>' : ""}`);
       productFilterContainer.parentElement?.classList.toggle("has-filter", !!state.productId || !!state.productVersion);
       const summary = productFilterContainer.parentElement?.querySelector("summary");
       if (summary) summary.textContent = state.productId || state.productVersion ? "Products / versions · active" : "Products / versions";
@@ -2789,7 +2997,7 @@
       renderApiDocs(opening);
       try {
         const response = await request(`/api/target/service-map/openapi?${new URLSearchParams({ session_id: sessionId, origin: originId })}`);
-        if (!response.ok) throw new Error(response.status === 409 ? "API docs are read from the active session only." : "API docs unavailable.");
+        if (!response.ok) throw new Error(response.status === 409 ? "API docs are read only in the session the proxy records into." : "API docs unavailable.");
         const document = await response.json();
         if (requestId !== state.apiDocsRequestId || sessionId !== getSessionId()) return;
         if (document?.openapi !== "3.1.0" || document.servers?.[0]?.url !== originId || typeof document.paths !== "object" || !document.paths) throw new Error("API docs unavailable.");
@@ -2925,7 +3133,7 @@
           items: array(result.parameters).filter((item) => typeof item?.name === "string" && ["query", "form", "json", "multipart"].includes(item.location))
             .map((item) => ({ name: item.name, location: item.location, rows: count(item.rows), examples: array(item.examples).filter((value) => typeof value === "string") })),
         } : null;
-        state.parametersError = result.available === true ? "" : array(result.reasons).includes("inactive_session") ? "Parameters are read from the active session only." : "Parameters unavailable.";
+        state.parametersError = result.available === true ? "" : array(result.reasons).includes("inactive_session") ? "Parameters are read only in the session the proxy records into." : "Parameters unavailable.";
       } catch {
         if (!current()) return;
         state.parametersError = "Parameters unavailable.";
@@ -3779,7 +3987,7 @@
       const methods = new Set(loadedEndpointEntries(state.snapshot?.origins || [], false).map(({ endpoint }) => endpoint.method));
       const missingMethod = !!state.endpointMethod && !methods.has(state.endpointMethod);
       if (state.endpointMethod) methods.add(state.endpointMethod);
-      return `<fieldset class="service-map-endpoint-filters"><legend>Loaded endpoint filters</legend><div class="service-map-endpoint-filter-controls"><label>Method (exact)<select data-service-endpoint-filter="method" data-service-focus="${place}:method" title="${escape(state.endpointMethod || "All loaded methods")}"><option value="">All methods</option>${[...methods].sort().map((method) => `<option value="${escape(method)}" ${method === state.endpointMethod ? "selected" : ""}>${escape(method)}</option>`).join("")}</select></label><label>Path contains<input type="search" value="${escape(state.endpointPath)}" data-service-endpoint-filter="path" data-service-focus="${place}:path" placeholder="Path substring" autocomplete="off" spellcheck="false" /></label><button class="secondary-action" type="button" data-service-endpoint-filter-clear="true" data-service-focus="${place}:clear" ${!state.endpointMethod && !state.endpointPath ? "disabled" : ""}>Clear</button></div>${missingMethod ? '<p class="service-map-filter-notice" role="status">Selected method is absent from the loaded snapshot. Filter retained; no loaded endpoints match.</p>' : ""}</fieldset>`;
+      return `<fieldset class="service-map-endpoint-filters"><legend>Filter endpoints</legend><div class="service-map-endpoint-filter-controls"><label>Method (exact)<select data-service-endpoint-filter="method" data-service-focus="${place}:method" title="${escape(state.endpointMethod || "All loaded methods")}"><option value="">All methods</option>${[...methods].sort().map((method) => `<option value="${escape(method)}" ${method === state.endpointMethod ? "selected" : ""}>${escape(method)}</option>`).join("")}</select></label><label>Path contains<input type="search" value="${escape(state.endpointPath)}" data-service-endpoint-filter="path" data-service-focus="${place}:path" placeholder="Filter path…" autocomplete="off" spellcheck="false" /></label><button class="secondary-action" type="button" data-service-endpoint-filter-clear="true" data-service-focus="${place}:clear" ${!state.endpointMethod && !state.endpointPath ? "disabled" : ""}>Clear</button></div>${missingMethod ? '<p class="service-map-filter-notice" role="status">Selected method is absent from the loaded snapshot. Filter retained; no loaded endpoints match.</p>' : ""}</fieldset>`;
     }
     function endpointSelectionNotice(origin = selectedOrigin()) {
       if (!origin) return "";
@@ -4006,7 +4214,8 @@
       const inactive = activeInspectionsBlocked() ? `<p class="service-map-muted" role="status">${escape(INACTIVE_SESSION_NOTICE)}</p>` : "";
       // The picker and panes are one block sized to the inspector; inspections
       // and peers follow it, so opening one never shrinks the panes.
-      return `<div class="packet-block"><div class="packet-source">${picker}${!row && endpoint ? `<span>${escape(endpoint.method)} <strong>${escape(endpoint.path)}</strong></span>` : ""}${row ? `<span>${escape(row.method)} ${escape(row.path)} · ${escape(row.status ?? "No response")} · ${escape(row.started_at)}</span>` : ""}${variants}${info}</div>${inactive}${items.length > 30 ? `<p class="service-map-muted">30 of ${items.length} samples</p>` : ""}
+      const rowLabel = row ? `${row.method} ${row.path} · ${row.status ?? "No response"} · ${row.started_at}` : "";
+      return `<div class="packet-block"><div class="packet-source">${picker}${!row && endpoint ? `<span>${escape(endpoint.method)} <strong>${escape(endpoint.path)}</strong></span>` : ""}${row ? `<span title="${escape(rowLabel)}">${escape(rowLabel)}</span>` : ""}${variants}${info}</div>${inactive}${items.length > 30 ? `<p class="service-map-muted">30 of ${items.length} samples</p>` : ""}
         ${message ? `<p role="status">${escape(message)}</p>${!state.evidenceLoading && !state.packetLoading ? '<button type="button" class="secondary-action" data-service-packet-retry="true">Retry</button>' : ""}` : ""}
         ${state.packet && packetViewerMarkup ? `<div data-service-packet>${packetViewerMarkup(packetInspectOptions())}</div>` : !message && !row ? '<p class="empty-copy">Select a captured sample.</p>' : ""}</div>
         ${selectedInspectionMarkup()}${peerOriginMarkup(origin)}`;
@@ -4080,14 +4289,13 @@
       // snapshot can establish that the selected site's members disappeared.
       if (state.snapshot) state.selectedSite = null;
       const origin = selectedOrigin();
-      if (!origin) { replaceDetail('<div class="service-map-empty"><h3>Select an origin</h3><p>Choose a card to inspect its API paths and retained evidence.</p></div>'); return; }
+      if (!origin) { replaceDetail('<div class="service-map-empty"><h3>Select an origin</h3><p>Pick a card to inspect its APIs and packets.</p></div>'); return; }
       if (origin.peerInspectionOnly) {
         replaceDetail(`<header class="service-map-detail-header"><div><h3 title="${escape(origin.origin)}">${escape(new URL(origin.origin).host)}</h3><p>${escape(origin.origin)}</p></div><span class="detail-chip ${origin.in_scope ? "ok" : "none"}">${origin.in_scope ? "In scope" : "Out of scope"}</span></header><div class="service-map-detail-body">${endpointSelectionNotice(origin)}${evidenceMarkup(origin)}</div>`);
         return;
       }
       if (!origin.captured) {
-        const bodyReference = overlayReferences().some((item) => item.target_origin === origin.origin);
-        replaceDetail(`<header class="service-map-detail-header"><div><h3 title="${escape(new URL(origin.origin).host)}">${escape(new URL(origin.origin).host)}</h3><p title="${escape(origin.origin)}">${escape(origin.origin)}</p></div></header>${originActionsMarkup(origin)}<div class="service-map-detail-body">${endpointSelectionNotice(origin)}<h4>Referenced only in this snapshot</h4><p class="service-map-muted">This origin appears only in loaded declarations${bodyReference ? " or explicitly shown retained references" : ""}. No captured rows are shown for this origin. Scope and projection bounds may omit captured history; no service role or request count is established here.</p>${relationshipMarkup(origin)}<h4>Captured origins</h4><div class="service-map-evidence-list">${origin.references.map((ref) => `<button class="service-map-evidence-button" type="button" data-service-origin="${escape(ref.origin)}" data-service-focus="reference:${escape(ref.origin)}"><span>${escape(ref.label)} ${escape(ref.origin)}</span><span>Inspect source ›</span></button>`).join("")}</div>${origin.referencesOmitted ? `<p class="service-map-muted">${origin.referencesOmitted} additional source references omitted from this pane.</p>` : ""}</div>`);
+        replaceDetail(`<header class="service-map-detail-header"><div><h3 title="${escape(new URL(origin.origin).host)}">${escape(new URL(origin.origin).host)}</h3><p title="${escape(origin.origin)}">${escape(origin.origin)}</p></div></header>${originActionsMarkup(origin)}<div class="service-map-detail-body">${endpointSelectionNotice(origin)}<h4>Referenced only in this snapshot</h4><p class="service-map-muted">No captured rows are shown here. Scope and projection bounds may omit captured history; no service role or request count is established.</p>${relationshipMarkup(origin)}<h4>Captured origins</h4><div class="service-map-evidence-list">${origin.references.map((ref) => `<button class="service-map-evidence-button" type="button" data-service-origin="${escape(ref.origin)}" data-service-focus="reference:${escape(ref.origin)}"><span>${escape(ref.label)} ${escape(ref.origin)}</span><span>Inspect source ›</span></button>`).join("")}</div>${origin.referencesOmitted ? `<p class="service-map-muted">${origin.referencesOmitted} more references omitted.</p>` : ""}</div>`);
         return;
       }
       const entries = loadedEndpointEntries([origin]);
@@ -4098,7 +4306,7 @@
       if (!state.detailPageAnchor && units[start]) state.detailPageAnchor = endpointIdentity(units[start].members[0]);
       replaceDetail(`<header class="service-map-detail-header"><div><h3 title="${escape(new URL(origin.origin).host)}">${escape(new URL(origin.origin).host)}</h3><p title="${escape(origin.origin)}">${escape(origin.origin)}</p></div><span class="detail-chip ${origin.in_scope ? "ok" : "none"}">${origin.in_scope ? "In scope" : "Out of scope"}</span></header>${originActionsMarkup(origin)}
         <div class="service-map-detail-tabs" role="tablist" aria-label="Origin details"><button type="button" role="tab" id="serviceMapDetailApisTab" aria-controls="serviceMapDetailBody" aria-selected="${state.detailTab === "apis"}" tabindex="${state.detailTab === "apis" ? 0 : -1}" data-service-detail-tab="apis" data-service-focus="detail:apis">APIs</button><button type="button" role="tab" id="serviceMapDetailEvidenceTab" aria-controls="serviceMapDetailBody" aria-selected="${state.detailTab === "evidence"}" tabindex="${state.detailTab === "evidence" ? 0 : -1}" data-service-detail-tab="evidence" data-service-focus="detail:evidence">Details</button></div>
-        <div class="service-map-detail-body${state.detailTab === "apis" ? "" : " packet-details"}" id="serviceMapDetailBody" role="tabpanel" aria-labelledby="${state.detailTab === "apis" ? "serviceMapDetailApisTab" : "serviceMapDetailEvidenceTab"}">${endpointSelectionNotice(origin)}${state.detailTab === "evidence" ? evidenceMarkup(origin) : `${authMarkup(origin)}${state.endpointIndex === null ? "" : parametersMarkup(origin, origin.endpoints[state.endpointIndex])}${endpointFiltersMarkup("serviceMapDetail")}${endpointCoverageMarkup(units.length, origin.endpoints.length, start, 0, 0, entries.length)}<div class="service-map-api-list">${units.slice(start, start + API_PAGE_SIZE).map((unit) => endpointUnitMarkup(unit)).join("") || '<p class="empty-copy">No loaded endpoints match these filters for this origin.</p>'}</div>${pageCount > 1 ? `<div class="service-map-pagination"><button class="secondary-action" type="button" data-service-detail-page="${state.detailPage - 1}" ${state.detailPage === 0 ? "disabled" : ""}>Previous</button><span>${state.detailPage + 1} / ${pageCount}</span><button class="secondary-action" type="button" data-service-detail-page="${state.detailPage + 1}" ${state.detailPage + 1 >= pageCount ? "disabled" : ""}>Next</button></div>` : ""}${peerOriginMarkup(origin)}${technologyMarkup(origin.technology_observations, origin)}${serverTechnologiesMarkup(origin)}${frontTechnologiesMarkup(origin)}${unnamedMarkup(origin)}${relationshipMarkup(origin)}<div class="service-map-evidence-summary"><h4>Evidence summary</h4><p>${origin.request_count.toLocaleString()} sampled HTTP rows in this snapshot. ${origin.redirects.length} redirect instruction${origin.redirects.length === 1 ? "" : "s"}.</p><button class="secondary-action" type="button" data-service-detail-tab="evidence" data-service-focus="view:evidence">${state.endpointSelection ? "View selected endpoint details" : "View details"}</button></div>`}</div>`);
+        <div class="service-map-detail-body${state.detailTab === "apis" ? "" : " packet-details"}" id="serviceMapDetailBody" role="tabpanel" aria-labelledby="${state.detailTab === "apis" ? "serviceMapDetailApisTab" : "serviceMapDetailEvidenceTab"}">${endpointSelectionNotice(origin)}${state.detailTab === "evidence" ? evidenceMarkup(origin) : `${authMarkup(origin)}${state.endpointIndex === null ? "" : parametersMarkup(origin, origin.endpoints[state.endpointIndex])}${endpointFiltersMarkup("serviceMapDetail")}${endpointCoverageMarkup(units.length, origin.endpoints.length, start, 0, 0, entries.length)}<div class="service-map-api-list">${units.slice(start, start + API_PAGE_SIZE).map((unit) => endpointUnitMarkup(unit)).join("") || '<p class="empty-copy">No loaded endpoints match these filters.</p>'}</div>${pageCount > 1 ? `<div class="service-map-pagination"><button class="secondary-action" type="button" data-service-detail-page="${state.detailPage - 1}" ${state.detailPage === 0 ? "disabled" : ""}>Previous</button><span>${state.detailPage + 1} / ${pageCount}</span><button class="secondary-action" type="button" data-service-detail-page="${state.detailPage + 1}" ${state.detailPage + 1 >= pageCount ? "disabled" : ""}>Next</button></div>` : ""}${peerOriginMarkup(origin)}${technologyMarkup(origin.technology_observations, origin)}${serverTechnologiesMarkup(origin)}${frontTechnologiesMarkup(origin)}${unnamedMarkup(origin)}${relationshipMarkup(origin)}<div class="service-map-evidence-summary"><p>${origin.request_count.toLocaleString()} sampled HTTP rows · ${origin.redirects.length} redirect${origin.redirects.length === 1 ? "" : "s"}</p><button class="secondary-action" type="button" data-service-detail-tab="evidence" data-service-focus="view:evidence">${state.endpointSelection ? "View endpoint details" : "View details"}</button></div>`}</div>`);
     }
     function renderCatalog() {
       const loaded = loadedEndpointEntries((state.snapshot?.origins || []).filter((origin) => !state.scopeOnly || origin.in_scope), false);
@@ -4113,7 +4321,7 @@
       if (state.snapshot) state.page = Math.min(state.page, pages - 1);
       const start = state.page * API_PAGE_SIZE;
       if (!state.pageAnchor && units[start]) state.pageAnchor = endpointIdentity(units[start].members[0]);
-      replace(els.catalog, `<header class="service-map-catalog-header"><div><h3>Observed API paths</h3></div><span>${entries.length.toLocaleString()} matching loaded combinations</span></header>${endpointFiltersMarkup("serviceMapCatalog")}${endpointSelectionNotice()}${endpointCoverageMarkup(units.length, loaded.length, start, loaded.length - searchedEntries.length, searchedEntries.length - originEntries.length, entries.length)}<div class="service-map-api-list">${units.slice(start, start + API_PAGE_SIZE).map((unit) => endpointUnitMarkup(unit, true)).join("") || `<p class="empty-copy">${state.loading && !state.snapshot ? "Loading retained API paths…" : "No loaded endpoints match these filters, origin search and origin products/versions."}</p>`}</div><div class="service-map-pagination"><button class="secondary-action" type="button" data-service-page="${state.page - 1}" ${!state.snapshot || state.page === 0 ? "disabled" : ""}>Previous</button><span>${units.length ? start + 1 : 0}–${Math.min(start + API_PAGE_SIZE, units.length)} / ${units.length}</span><button class="secondary-action" type="button" data-service-page="${state.page + 1}" ${state.page + 1 >= pages ? "disabled" : ""}>Next</button></div>`);
+      replace(els.catalog, `<header class="service-map-catalog-header"><div><h3>API paths</h3></div><span>${entries.length.toLocaleString()} endpoints</span></header>${endpointFiltersMarkup("serviceMapCatalog")}${endpointSelectionNotice()}${endpointCoverageMarkup(units.length, loaded.length, start, loaded.length - searchedEntries.length, searchedEntries.length - originEntries.length, entries.length)}<div class="service-map-api-list">${units.slice(start, start + API_PAGE_SIZE).map((unit) => endpointUnitMarkup(unit, true)).join("") || `<p class="empty-copy">${state.loading && !state.snapshot ? "Loading API paths…" : "No loaded endpoints match current filters."}</p>`}</div><div class="service-map-pagination"><button class="secondary-action" type="button" data-service-page="${state.page - 1}" ${!state.snapshot || state.page === 0 ? "disabled" : ""}>Previous</button><span>${units.length ? start + 1 : 0}–${Math.min(start + API_PAGE_SIZE, units.length)} / ${units.length}</span><button class="secondary-action" type="button" data-service-page="${state.page + 1}" ${state.page + 1 >= pages ? "disabled" : ""}>Next</button></div>`);
     }
     function render() {
       if (destroyed) return;
@@ -4321,12 +4529,13 @@
     const moreAnchor = (target) => target?.closest?.("[data-more]") || null;
     listen(els.viewport, "pointerover", (event) => {
       const anchor = moreAnchor(event.target);
-      if (anchor) morePopup.show(anchor);
+      if (anchor) morePopup.schedule(anchor);
     });
     listen(els.viewport, "pointerout", (event) => {
       const anchor = moreAnchor(event.target);
       if (anchor && !anchor.contains(event.relatedTarget)) morePopup.hide();
     });
+    listen(els.viewport, "pointerdown", () => morePopup.hide());
     // +N's list also opens when its card has keyboard focus.
     listen(els.viewport, "focusin", (event) => {
       const more = event.target?.matches?.(".service-map-card:focus-visible")

@@ -22,6 +22,9 @@ function fixture(cached = false, surface = 'requestView') {
   const menu=element(), pane=element(), doc=element(); menu.querySelectorAll=()=>[];
   f.els.contextMenu=menu;
   for(const key of ['requestView','responseView','requestViewCM','responseViewCM'])f.els[key]=element();
+  // The Findings detail's panes, and the button that holds the record its finding is about.
+  for(const key of ['findingsReqCM','findingsResCM'])f.els[key]=element();
+  f.els.findingsDetailJump=element({recordId:record.id});
   const oldGetElement=f.document.getElementById;f.document.getElementById=id=>id==='paneContextMenu'?pane:oldGetElement(id);
   f.document.addEventListener=doc.addEventListener;
   Object.assign(c,{URLSearchParams,window:{...c.window,innerWidth:1000,innerHeight:800},
@@ -87,6 +90,25 @@ function assertCurrent(f,outcome) {
     assert.equal(f.saved[0].session,'session-a');
   } else assert.equal(visibleError(f),true);
 }
+// The Findings detail shows a record's request and response as History does.
+// A right-click there opens the same menu, for the record the finding is about.
+for(const surface of ['findingsReqCM','findingsResCM'])test(`${surface} opens the pane menu for the finding's record`,async()=>{
+  const f=fixture(false,surface);
+  // Nothing is selected in History: the menu must not depend on it.
+  f.state.selectedId=null;f.state.selectedRecord=null;
+  let prevented=0;
+  f.els[surface].dispatch('contextmenu',{clientX:10,clientY:10,preventDefault(){prevented++;}});
+  assert.equal(prevented,1,"the webview's own menu stays away");
+  assert.equal(f.pane.classList.contains('hidden'),false);
+  f.click();
+  assert.equal(f.requests.length,1);assert.equal(f.requests[0].url,'/api/transactions/record-a?session_id=session-a');
+  f.requests[0].resolve({ok:true,json:async()=>record});await tick();
+  assert.equal(successful(f),true);
+  // While a finding's record is not loaded there is nothing to act on.
+  const g=fixture(false,surface);delete g.els.findingsDetailJump.dataset.recordId;
+  let kept=0;g.els[surface].dispatch('contextmenu',{preventDefault(){kept++;}});
+  assert.equal(kept,0);assert.equal(g.pane.classList.contains('hidden'),true);
+});
 for(const surface of ['requestView','responseView'])for(const stage of ['fetch','JSON']) {
   for(const change of ['session B','ABA','same-session reset'])for(const outcome of ['success','failure'])test(`${surface} ${stage} ${outcome} retires after ${change}`,async()=>{
     const f=fixture(false,surface),finish=await pending(f,stage);f.reset(change);const before=JSON.stringify(f.b);

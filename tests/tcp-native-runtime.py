@@ -100,7 +100,7 @@ try:
  payload=bytes(range(256))*2200
  check('563200-byte binary roundtrip with client half-close',exchange(payload)==payload)
  rows=poll(lambda:terminal(1)); detail=api('/api/tcp/connections/'+rows[0]['id'])
- check('capture cap does not truncate relay',detail['client_bytes']==len(payload) and detail['server_bytes']==len(payload) and detail['captured_bytes']==262144 and detail['capture_truncated'])
+ check('capture cap does not truncate relay',detail['client_bytes']==len(payload) and detail['server_bytes']==len(payload) and detail['captured_bytes']==1048576 and detail['capture_truncated'])
  check('summary excludes payload',rows[0]['chunks']==[])
  api('/api/transactions'+q,method='DELETE')
  check('HTTP history clear leaves TCP detail unchanged',api('/api/tcp/connections/'+rows[0]['id'])==detail)

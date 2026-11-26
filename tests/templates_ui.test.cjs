@@ -172,6 +172,19 @@ test("a scan request names its targets, its selection and whether it only counts
   assert.throws(() => templates.parseTargets(Array.from({ length: 21 }, (_, i) => `https://h${i}.example.com`).join(" ")), /at most 20/);
 });
 
+test("a scan's delay reads as Fuzzer's does, and its pace says so", () => {
+  const values = { targets: "https://app.example.com", selection: "on", rate: "10", concurrency: "4", maxRequests: "100" };
+  const delay = (text) => templates.scanRequest({ ...values, delay: text }, {}, null, "s-1", true).delay;
+  assert.deepEqual(delay("200-800"), { min_ms: 200, max_ms: 800 });
+  assert.deepEqual(delay(" 500 "), { min_ms: 500, max_ms: 500 });
+  for (const none of ["", "0", undefined]) assert.equal(delay(none), undefined, String(none));
+  for (const bad of ["800-200", "60001", "soon", "-5"]) assert.throws(() => delay(bad), /Delay is milliseconds/, bad);
+  const job = { rate: 10, concurrency: 4, max_requests: 10000 };
+  assert.equal(templates.paceLine(job), "10 a second · 4 templates at once · limit 10,000");
+  assert.equal(templates.paceLine({ ...job, delay: { min_ms: 200, max_ms: 800 } }), "10 a second · 200–800 ms apart · 4 templates at once · limit 10,000");
+  assert.equal(templates.paceLine({ ...job, delay: { min_ms: 500, max_ms: 500 } }), "10 a second · 500 ms apart · 4 templates at once · limit 10,000");
+});
+
 test("previews and jobs read as what was or will be sent", () => {
   assert.equal(
     templates.previewLine({ requests: 1200, templates: 300, targets: ["https://app.example.com"], max_requests: 10000, excluded_by_risk: { intrusive: 4 } }),
@@ -250,8 +263,8 @@ test("the Scan tool is registered where the UI and the server keep their tool li
     "More", "Switch", "ImportMenu", "Views", "ResultsHead", "ResultsRows", "ResultsTitle", "ResultsMatched", "ResultsStop",
     "ScanKeepAll", "AutoOptions",
     "Search", "Severity", "Support", "EnableShown", "DisableShown", "Meta", "Rows", "Detail",
-    "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanConcurrency",
-    "ScanMaxRequests", "ScanMatchReplace", "ScanPlan", "ScanStart", "ScanNotice",
+    "PageMeta", "Previous", "Next", "ScanTargets", "ScanSelection", "ScanRisks", "ScanRate", "ScanDelay", "ScanConcurrency",
+    "ScanMaxRequests", "ScanMatchReplace", "ScanPlan", "ScanStart", "ScanNotice", "OnCount",
     "ScanJobs", "Version", "AutoToggle", "AutoSummary", "AutoHosts", "AutoRate"]) {
     assert.match(html, new RegExp(`id="templates${id}"`), id);
   }
@@ -723,6 +736,67 @@ test("the list shows what is turned on, and On goes on for many at once", async 
   assert.deepEqual(range.find((sent) => sent.url === "/api/templates/passive").body, { ids: ["example-a", "example-c"], enabled: true });
   assert.deepEqual(range.find((sent) => sent.url === "/api/templates/auto/templates").body, { ids: ["example-b"], enabled: true });
   f.controller.dispose();
+});
+
+test("the whole On cell is its box's target, and Shift on a cell sets a range", async () => {
+  const items = [
+    { id: "example-a", name: "A", severity: "high", tags: [], passive_supported: true },
+    { id: "example-b", name: "B", severity: "high", tags: [], active_supported: true },
+    { id: "example-c", name: "C", severity: "high", tags: [], passive_supported: true },
+    { id: "example-d", name: "D", severity: "high", tags: [] },
+  ];
+  const f = await listFixture(items, () => 0, { sessionId: "s-1", auto: { session_id: "s-1", enabled: false, hosts: [], rate: 10, templates: 0 } });
+  const cell = (index) => {
+    const node = f.rows()[index].children[0];
+    node.querySelector = () => node.children[0];
+    return node;
+  };
+  assert.equal(cell(3).dataset.templateOn, undefined, "a template Sniper cannot run has no box to tick");
+  assert.match(cell(0).children[0].title, /Shift-click/);
+  // A click beside the box ticks it, and does not open the row.
+  const first = cell(0);
+  f.els.get("#templatesRows").dispatch("click", { target: inside(first) });
+  await settle();
+  assert.equal(first.children[0].checked, true);
+  assert.deepEqual(f.sent.at(-1), { url: "/api/templates/passive", body: { ids: ["example-a"], enabled: true } });
+  assert.equal(f.urls.some((url) => url === "/api/templates/example-a"), false);
+  const before = f.sent.length;
+  f.els.get("#templatesRows").dispatch("click", { target: inside(cell(2)), shiftKey: true });
+  await settle();
+  const range = f.sent.slice(before);
+  assert.deepEqual(range.find((sent) => sent.url === "/api/templates/passive").body, { ids: ["example-a", "example-c"], enabled: true });
+  assert.deepEqual(range.find((sent) => sent.url === "/api/templates/auto/templates").body, { ids: ["example-b"], enabled: true });
+  f.controller.dispose();
+});
+
+test("the list says how many are on, shows them on a click, and bulk buttons count what they change", async () => {
+  const items = [
+    { id: "example-a", name: "A", severity: "high", tags: [], passive_supported: true, enabled: true },
+    { id: "example-b", name: "B", severity: "high", tags: [], active_supported: true, enabled: true },
+    { id: "example-c", name: "C", severity: "high", tags: [], passive_supported: true },
+  ];
+  const f = await listFixture(items, () => 0, { libraryStatus: { passive_enabled: 1, auto_enabled: 1 } });
+  const onCount = f.els.get("#templatesOnCount");
+  assert.equal(onCount.classList.contains("hidden"), false);
+  assert.equal(onCount.textContent, "2 on");
+  onCount.dispatch("click", {});
+  await settle();
+  assert.equal(f.els.get("#templatesSupport").value, "on");
+  assert.equal(onCount.getAttribute("aria-pressed"), "true");
+  assert.equal(onCount.classList.contains("active"), true, "pressed reads as Matched only does");
+  assert.match(f.urls.filter((url) => url.startsWith("/api/templates?")).at(-1), /enabled=true/);
+  // Narrowed to what is on, the bulk buttons say how many they change.
+  assert.equal(f.els.get("#templatesDisableShown").textContent, "Turn off all 3");
+  assert.equal(f.els.get("#templatesEnableShown").textContent, "Turn on all 3");
+  onCount.dispatch("click", {});
+  await settle();
+  assert.equal(f.els.get("#templatesSupport").value, "");
+  assert.equal(onCount.getAttribute("aria-pressed"), "false");
+  f.controller.dispose();
+
+  const none = await listFixture(items, () => 0, { libraryStatus: { passive_enabled: 0, auto_enabled: 0 } });
+  assert.equal(none.els.get("#templatesOnCount").classList.contains("hidden"), true, "nothing on, nothing to show");
+  none.controller.dispose();
 });
 test("a refusal reads as what the server said, not as its JSON", async () => {
   const items = [{ id: "example-active", name: "Example Active", severity: "high", tags: [], active_supported: true }];

@@ -89,6 +89,12 @@ curl -s -x http://127.0.0.1:18902 -X POST http://127.0.0.1:18911/api/orders \
 The `unset` matters: if `no_proxy` covers loopback, curl ignores `-x` and Sniper
 captures nothing.
 
+When the proxy listens beyond loopback, a client on another machine is refused
+every port Sniper itself listens on: the UI, the proxy, and a wired browser's
+DevTools port, at any address of this machine. A hostname on one of those ports
+is refused as well, so `http://example.com:8080` fails from that client while
+Sniper's proxy is on 8080. Move the proxy to another port to reach such a site.
+
 ### Or open a browser that is already wired
 
 Sniper can also open a browser with the proxy and certificate set up: click
@@ -424,6 +430,12 @@ printf 'GET /api/orders?status=closed HTTP/1.1\r\nhost: 127.0.0.1:18911\r\naccep
 `replay open` returns the tab with its `id` and the target it took from the
 capture, and the UI shows the same tab. Each send adds a new row to the history.
 
+A body that is not text, such as a file in a multipart upload, shows one
+character per byte in Replay and Intercept, as Burp's Raw view shows it. Change
+`filename="a.png"` in place, and every byte you leave alone is sent as it was.
+**Import cURL**, in the empty Replay tab and the tab menu, reads `-F` forms. It
+does not read local files, so a part given as `@file` or `<file` stays empty.
+
 `--host`, `--port` and `--scheme` on `replay open` and `replay update` change
 where the request goes without touching its `Host:` header. If the captured host
 is an IP address, as everywhere in this guide, they are refused with
@@ -446,9 +458,11 @@ sends no request. Labels collapse whitespace and are limited to 80 characters.
 A session holds its own captured traffic, scope, replay tabs and settings.
 Sessions live under the data directory: `~/.sniper` by default, or whatever
 `SNIPER_DATA_DIR` names. `session list` shows each session's `storage_path`. A
-new session starts empty and becomes the active one at once. To rename a
-session, double-click its name on the Session screen and press Enter, or run
-`session rename --id <id> --name <name> --yes`.
+new session starts empty and becomes the active one at once. The session list
+left of every tool opens a session in one click; the button at the left end of
+the top bar hides it. To rename a session, double-click its name on the Session
+screen, or right-click it in the list and choose Rename session, then press
+Enter, or run `session rename --id <id> --name <name> --yes`.
 
 ```bash
 ./target/release/sniper-cli --api http://127.0.0.1:18901 --output compact session list

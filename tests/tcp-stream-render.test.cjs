@@ -93,7 +93,7 @@ test("oversized snapshot inputs are not retained in the cache", async () => {
     await f.controller.select("x"); data.client_bytes++; f.set(data); await f.controller.refresh();
     assert.equal(decodes, 2050);
     assert.match(f.get("tcpStreamBytes").textContent, /No bytes captured/);
-    data.chunks = [chunk(C, 0, Buffer.alloc(400 * 1024))]; f.set(data); await f.controller.refresh();
+    data.chunks = [chunk(C, 0, Buffer.alloc(1100 * 1024))]; f.set(data); await f.controller.refresh();
     assert.match(f.get("tcpStreamMeta").textContent, /too large/);
     const before = decodes; data.client_bytes++; f.set(data); await f.controller.refresh();
     assert.equal(decodes, before + 1, "oversized encoded bytes must not be retained as a snapshot");

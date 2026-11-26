@@ -14,10 +14,15 @@ use std::{
     io::{Read, Seek, SeekFrom},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{mpsc, Mutex, OnceLock},
     time::Duration,
 };
+
+#[cfg(target_os = "macos")]
+use disclaimed::Child as BrowserChild;
+#[cfg(not(target_os = "macos"))]
+use std::process::Child as BrowserChild;
 
 use anyhow::{anyhow, Result};
 use base64::Engine as _;
@@ -706,6 +711,14 @@ pub struct LaunchContext<'a> {
     /// The browser the user chose as their default. Used only when the request names
     /// none, and only if it is installed.
     pub preferred: Option<BrowserKind>,
+    /// The session the browser is for, when it is not the one the main listener
+    /// records into. `proxy_addr` is then that session's own port, and the browser
+    /// gets a profile no other session's browser shares.
+    pub session: Option<Uuid>,
+    /// The main proxy listener, which is `proxy_addr` unless the browser is for a
+    /// session with its own port. It is the way in from another machine, so
+    /// whether a driver port may be opened is read from it.
+    pub main_proxy_addr: SocketAddr,
 }
 
 impl<'a> LaunchContext<'a> {
@@ -718,8 +731,24 @@ impl<'a> LaunchContext<'a> {
             early_exit_probe: EARLY_EXIT_PROBE,
             startup_settle: STARTUP_SETTLE,
             preferred: None,
+            session: None,
+            main_proxy_addr: proxy_addr,
         }
     }
+
+    /// For a session that has its own port, which `proxy_addr` must be.
+    pub fn for_session(mut self, session: Uuid, main_proxy_addr: SocketAddr) -> Self {
+        self.session = Some(session);
+        self.main_proxy_addr = main_proxy_addr;
+        self
+    }
+}
+
+/// Where the profiles of one session's browsers are kept: beside the shared
+/// ones, not in the session's folder, so a session folder that is copied or
+/// sent to someone carries no logged-in cookies.
+fn session_profiles_dir(profiles_root: &Path, session: Uuid) -> PathBuf {
+    profiles_root.join(format!("session-{session}"))
 }
 
 #[derive(Debug, Serialize)]
@@ -860,6 +889,47 @@ pub fn not_installed_message(kind: BrowserKind) -> String {
     }
 }
 
+/// What `launch` refuses before it starts anything: a browser that is not
+/// installed, one that is not opened in this context, a URL it does not open.
+/// A caller that must open a port for the browser asks first, so that a
+/// launch refused for what it asks opens none.
+pub fn refusal(ctx: &LaunchContext<'_>, request: &LaunchRequest) -> Option<LaunchError> {
+    let kind = match choose(request.browser, ctx.preferred, find_executable) {
+        Ok((kind, ..)) => kind,
+        Err(error) => return Some(error),
+    };
+    refuse_before_start(ctx, kind, request).err()
+}
+
+/// The refusals that need nothing started, and the URL the browser opens.
+fn refuse_before_start(
+    ctx: &LaunchContext<'_>,
+    kind: BrowserKind,
+    request: &LaunchRequest,
+) -> Result<String, LaunchError> {
+    let driver = kind.driver();
+    if driver.opens_port(request.agent) && !ctx.main_proxy_addr.ip().is_loopback() {
+        // The header guards on the API only keep web pages out, and a proxy that
+        // listens beyond loopback relays requests to local ports, including this
+        // one, which hands over the browser's logged-in sessions. A session's own
+        // port is always on loopback, so the main listener is what is asked.
+        return Err(LaunchError::Forbidden(format!(
+            "{} is only opened while the proxy listens on loopback only",
+            driver.port_name()
+        )));
+    }
+    if ctx.session.is_some() && driver.shared_instance_hint().is_some() {
+        // Its command drives whichever copy of the browser runs. Two sessions
+        // would each be told to use it, and one agent would drive the other's.
+        return Err(LaunchError::Forbidden(format!(
+            "{} cannot be pointed at one window, so it is opened only for the session the \
+             proxy listener records into; name another browser for a session with its own port",
+            kind.name()
+        )));
+    }
+    validate_url(request.url.as_deref().unwrap_or("about:blank"))
+}
+
 enum Started {
     /// A new process. `exited` reports its exit status text when it ends.
     New {
@@ -878,25 +948,16 @@ async fn launch_at(
 ) -> Result<LaunchedBrowser, LaunchError> {
     let driver = kind.driver();
     let wants_port = driver.opens_port(request.agent);
-    if wants_port && !ctx.proxy_addr.ip().is_loopback() {
-        // The header guards on the API only keep web pages out, and a proxy that
-        // listens beyond loopback relays requests to local ports, including this
-        // one, which hands over the browser's logged-in sessions.
-        return Err(LaunchError::Forbidden(format!(
-            "{} is only opened while the proxy listens on loopback only",
-            driver.port_name()
-        )));
-    }
-    let url = validate_url(request.url.as_deref().unwrap_or("about:blank"))?;
+    let url = refuse_before_start(ctx, kind, &request)?;
     let spki =
         spki_sha256_base64(ctx.cert_der).map_err(|error| LaunchError::Failed(error.to_string()))?;
     let proxy = proxy_arg(ctx.proxy_addr);
 
     let profiles_root = ctx.data_dir.join("browser-profiles");
-    let profile = if request.fresh {
-        profiles_root.join(format!("fresh-{}", Uuid::new_v4()))
-    } else {
-        profiles_root.join(kind.name())
+    let profile = match ctx.session {
+        _ if request.fresh => profiles_root.join(format!("fresh-{}", Uuid::new_v4())),
+        Some(session) => session_profiles_dir(&profiles_root, session).join(kind.name()),
+        None => profiles_root.join(kind.name()),
     };
     let server_name = driver.server_name(ctx.proxy_addr.port(), &profile);
     let own_port = driver.own_port();
@@ -1281,27 +1342,200 @@ fn spawn_browser(
     args: &[String],
     profile: &Path,
     keep_log: bool,
-) -> Result<Child, LaunchError> {
-    let log = if keep_log {
-        fs::File::create(profile.join(LAUNCH_LOG))
-            .map(Stdio::from)
-            .unwrap_or_else(|_| Stdio::null())
-    } else {
-        Stdio::null()
-    };
-    Command::new(exe)
+) -> Result<BrowserChild, LaunchError> {
+    let log = keep_log
+        .then(|| fs::File::create(profile.join(LAUNCH_LOG)).ok())
+        .flatten();
+    #[cfg(target_os = "macos")]
+    let spawned = disclaimed::spawn(exe, args, log.as_ref());
+    #[cfg(not(target_os = "macos"))]
+    let spawned = Command::new(exe)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(log)
-        .spawn()
+        .stderr(log.map_or_else(Stdio::null, Stdio::from))
+        .spawn();
+    spawned
         .map_err(|error| LaunchError::Failed(format!("could not start {}: {error}", exe.display())))
+}
+
+/// On macOS a browser Sniper starts answers for itself. macOS asks the process
+/// responsible for a child about the privacy permissions the child uses (screen
+/// recording, input monitoring), and Sniper's ad-hoc signature changes with every
+/// build, so a browser answering as Sniper lost each grant at the next build. As
+/// its own responsible process it is asked under its maker's signature, which
+/// keeps. Chromium and LLDB start processes this way. It stays Sniper's child.
+#[cfg(target_os = "macos")]
+mod disclaimed {
+    use std::{
+        ffi::{c_char, c_int, CString},
+        fs, io, iter,
+        os::unix::{
+            ffi::{OsStrExt, OsStringExt},
+            io::AsRawFd,
+            process::ExitStatusExt,
+        },
+        path::Path,
+        process::ExitStatus,
+        ptr,
+    };
+
+    pub(super) struct Child {
+        pid: libc::pid_t,
+    }
+
+    impl Child {
+        pub(super) fn id(&self) -> u32 {
+            self.pid as u32
+        }
+
+        pub(super) fn wait(&mut self) -> io::Result<ExitStatus> {
+            let mut status = 0;
+            loop {
+                if unsafe { libc::waitpid(self.pid, &mut status, 0) } == self.pid {
+                    return Ok(ExitStatus::from_raw(status));
+                }
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    /// What `std::process::Command` does with stdin and stdout on /dev/null, plus
+    /// the disclaim, which it has no way to ask for.
+    pub(super) fn spawn(
+        exe: &Path,
+        args: &[String],
+        stderr: Option<&fs::File>,
+    ) -> io::Result<Child> {
+        let program = CString::new(exe.as_os_str().as_bytes())?;
+        let argv = iter::once(Ok(program.clone()))
+            .chain(args.iter().map(|arg| CString::new(arg.as_str())))
+            .collect::<Result<Vec<_>, _>>()?;
+        // std copies the environment under its lock; `environ` read directly
+        // could be changing under another thread.
+        let env: Vec<CString> = std::env::vars_os()
+            .filter_map(|(key, value)| {
+                let mut pair = key.into_vec();
+                pair.push(b'=');
+                pair.extend(value.into_vec());
+                CString::new(pair).ok()
+            })
+            .collect();
+        let (argv, envp) = (terminated(&argv), terminated(&env));
+
+        let mut attr = Attr::new()?;
+        let mut actions = Actions::new()?;
+        let null = c"/dev/null".as_ptr();
+        let mut pid = 0;
+        unsafe {
+            let files = &mut actions.0;
+            check(libc::posix_spawn_file_actions_addopen(
+                files,
+                0,
+                null,
+                libc::O_RDONLY,
+                0,
+            ))?;
+            check(libc::posix_spawn_file_actions_addopen(
+                files,
+                1,
+                null,
+                libc::O_WRONLY,
+                0,
+            ))?;
+            check(match stderr {
+                Some(log) => libc::posix_spawn_file_actions_adddup2(files, log.as_raw_fd(), 2),
+                None => libc::posix_spawn_file_actions_addopen(files, 2, null, libc::O_WRONLY, 0),
+            })?;
+            // Rust ignores SIGPIPE and Command gives it back to the child. Nothing
+            // but the three descriptors above is inherited.
+            let mut sigpipe = 0;
+            libc::sigemptyset(&mut sigpipe);
+            libc::sigaddset(&mut sigpipe, libc::SIGPIPE);
+            check(libc::posix_spawnattr_setsigdefault(&mut attr.0, &sigpipe))?;
+            check(libc::posix_spawnattr_setflags(
+                &mut attr.0,
+                (libc::POSIX_SPAWN_SETSIGDEF | libc::POSIX_SPAWN_CLOEXEC_DEFAULT) as libc::c_short,
+            ))?;
+            // Private, so looked up rather than linked: where it is missing the
+            // browser still opens, answering as Sniper.
+            let symbol = libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"responsibility_spawnattrs_setdisclaim".as_ptr(),
+            );
+            if !symbol.is_null() {
+                let disclaim: unsafe extern "C" fn(*mut libc::posix_spawnattr_t, c_int) -> c_int =
+                    std::mem::transmute(symbol);
+                let _ = disclaim(&mut attr.0, 1);
+            }
+            check(libc::posix_spawnp(
+                &mut pid,
+                program.as_ptr(),
+                &actions.0,
+                &attr.0,
+                argv.as_ptr(),
+                envp.as_ptr(),
+            ))?;
+        }
+        Ok(Child { pid })
+    }
+
+    /// The NULL-terminated array exec takes; `strings` must outlive it.
+    fn terminated(strings: &[CString]) -> Vec<*mut c_char> {
+        strings
+            .iter()
+            .map(|string| string.as_ptr().cast_mut())
+            .chain(iter::once(ptr::null_mut()))
+            .collect()
+    }
+
+    fn check(code: c_int) -> io::Result<()> {
+        match code {
+            0 => Ok(()),
+            code => Err(io::Error::from_raw_os_error(code)),
+        }
+    }
+
+    struct Attr(libc::posix_spawnattr_t);
+
+    impl Attr {
+        fn new() -> io::Result<Self> {
+            let mut attr = ptr::null_mut();
+            check(unsafe { libc::posix_spawnattr_init(&mut attr) })?;
+            Ok(Self(attr))
+        }
+    }
+
+    impl Drop for Attr {
+        fn drop(&mut self) {
+            unsafe { libc::posix_spawnattr_destroy(&mut self.0) };
+        }
+    }
+
+    struct Actions(libc::posix_spawn_file_actions_t);
+
+    impl Actions {
+        fn new() -> io::Result<Self> {
+            let mut actions = ptr::null_mut();
+            check(unsafe { libc::posix_spawn_file_actions_init(&mut actions) })?;
+            Ok(Self(actions))
+        }
+    }
+
+    impl Drop for Actions {
+        fn drop(&mut self) {
+            unsafe { libc::posix_spawn_file_actions_destroy(&mut self.0) };
+        }
+    }
 }
 
 /// Waits on the process so it is reaped, then forgets it: clears the registry and
 /// owner record under the same lock a launch takes, and deletes a throwaway profile.
 fn watch_browser(
-    mut child: Child,
+    mut child: BrowserChild,
     profile: &Path,
     pid: u32,
     exe: &Path,
@@ -1389,7 +1623,7 @@ fn remove_profile_with_retry(profile: &Path) {
 
 /// Detached handoffs: the process exits as soon as the running browser takes the
 /// request, and something has to collect it.
-fn reap_in_background(mut child: Child, slot: HandoffSlot) {
+fn reap_in_background(mut child: BrowserChild, slot: HandoffSlot) {
     let _ = std::thread::Builder::new()
         .name("sniper-browser-reap".to_string())
         .spawn(move || {
@@ -1602,6 +1836,75 @@ fn sweep_stale_fresh_profiles(root: &Path) {
     }
 }
 
+/// Whether a browser still runs on the profile, started by this Sniper or by
+/// an earlier one.
+fn profile_is_held(profile: &Path) -> bool {
+    let live = live_profiles()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains_key(profile);
+    // The record names the process Sniper started, which a browser that
+    // relaunched itself has left behind; its lock names the one that carries on.
+    live || read_owner(profile).is_some_and(|owner| {
+        process_runs_as(owner.pid, &owner.exe) || lock_holder(profile, &owner.exe).is_some()
+    })
+        // The record itself goes when the process Sniper started ends, so
+        // after a relaunch only the lock is left. With no executable to check
+        // its pid against, the process must be running on this profile.
+        || singleton_lock_pid(profile)
+            .and_then(process_args)
+            .is_some_and(|args| args.contains(&format!("--user-data-dir={}", profile.display())))
+}
+
+/// Removes the profiles in one session's directory, and the directory once it
+/// is empty. A profile a browser still holds is left for a later call: its
+/// files are in use, and removing them would break the browser.
+fn remove_idle_session_profiles(dir: &Path) {
+    // A link with a session's name leads somewhere that is not Sniper's.
+    if !fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()) {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for profile in entries.flatten().map(|entry| entry.path()) {
+        if !profile_is_held(&profile) {
+            remove_profile_with_retry(&profile);
+        }
+    }
+    // Fails while a profile is left in it, which is what keeps that one.
+    let _ = fs::remove_dir(dir);
+}
+
+/// Removes a deleted session's browser profiles. They hold the logged-in
+/// sessions of whoever used them, and nothing would open them again.
+pub fn remove_session_profiles(data_dir: &Path, session: Uuid) {
+    remove_idle_session_profiles(&session_profiles_dir(
+        &data_dir.join("browser-profiles"),
+        session,
+    ));
+}
+
+/// Removes the browser profiles of sessions that are gone: what
+/// `remove_session_profiles` left because a browser still held it, and what a
+/// session deleted while Sniper was not running left behind. Run at start-up
+/// and before each launch.
+pub fn sweep_session_profiles(data_dir: &Path, exists: impl Fn(Uuid) -> bool) {
+    let Ok(entries) = fs::read_dir(data_dir.join("browser-profiles")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let session = name
+            .to_string_lossy()
+            .strip_prefix("session-")
+            .and_then(|id| Uuid::parse_str(id).ok());
+        if session.is_some_and(|session| !exists(session)) {
+            remove_idle_session_profiles(&entry.path());
+        }
+    }
+}
+
 enum PortWait {
     Port(u16),
     BrowserExited(Exit),
@@ -1691,6 +1994,76 @@ fn live_profiles() -> &'static Mutex<HashMap<PathBuf, Owner>> {
     LIVE.get_or_init(Default::default)
 }
 
+/// Every browser profile Sniper keeps: the shared ones, and each session's,
+/// which are one level down in the session's own directory.
+fn profile_dirs(data_dir: &Path) -> Vec<PathBuf> {
+    let Ok(profiles) = fs::read_dir(data_dir.join("browser-profiles")) else {
+        return Vec::new();
+    };
+    profiles
+        .flatten()
+        .flat_map(|entry| {
+            let path = entry.path();
+            if entry.file_name().to_string_lossy().starts_with("session-") {
+                fs::read_dir(&path)
+                    .map(|inner| inner.flatten().map(|entry| entry.path()).collect())
+                    .unwrap_or_default()
+            } else {
+                vec![path]
+            }
+        })
+        .collect()
+}
+
+/// The proxy ports that the browsers Sniper opened send to, for the browsers
+/// that still run: started by this Sniper or by an earlier one. A browser is
+/// wired to one proxy for its life, so the port says whose traffic it is: the
+/// main listener's, or a session's own. The profile's place does not, because
+/// a throwaway profile is at the top level whichever proxy it was opened for.
+pub fn live_browser_proxy_ports(data_dir: &Path) -> Vec<u16> {
+    let live = live_profiles()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    profile_dirs(data_dir)
+        .into_iter()
+        .filter_map(|profile| {
+            let proxy = match live.get(&profile) {
+                Some(owner) => owner.proxy.clone(),
+                None => {
+                    let owner = read_owner(&profile)?;
+                    // The record names the process Sniper started, which a
+                    // browser that relaunched itself has left behind; its
+                    // lock names the one that carries on.
+                    (process_runs_as(owner.pid, &owner.exe)
+                        || lock_holder(&profile, &owner.exe).is_some())
+                    .then_some(owner.proxy)?
+                }
+            };
+            proxy.rsplit(':').next()?.parse().ok()
+        })
+        .collect()
+}
+
+/// Writes the record of a browser on a shared profile that sends to `proxy`,
+/// with the test process standing in for the browser.
+#[cfg(test)]
+pub(crate) fn stand_in_for_a_running_browser(data_dir: &Path, proxy: &str) {
+    let profile = data_dir.join("browser-profiles").join("example");
+    fs::create_dir_all(&profile).unwrap();
+    write_owner(
+        &profile,
+        &Owner {
+            pid: std::process::id(),
+            exe: std::env::current_exe().unwrap(),
+            proxy: proxy.to_string(),
+            devtools_port: false,
+            started: None,
+        },
+    )
+    .unwrap();
+}
+
 /// The loopback ports a browser Sniper opened is driven through, by profile: its
 /// DevTools or MCP port, and the daemon its driver calls. Each hands over the
 /// browser's logged-in sessions, so while the browser runs the proxy refuses them
@@ -1728,9 +2101,278 @@ pub(crate) fn forget_driver_ports(profile: &Path) {
         .remove(profile);
 }
 
+/// The port of the service a browser calls for itself, as its command line names
+/// it: `build_args` puts it in the bypass list.
+fn bypassed_own_port(args: &str) -> Option<u16> {
+    switch_value(args, "--proxy-bypass-list")?
+        .split(';')
+        .find_map(|rule| rule.strip_prefix("127.0.0.1:")?.parse().ok())
+}
+
+/// Guards again the ports of browsers an earlier Sniper opened that still run. The
+/// list lives in memory and is filled at launch, so without this a restart leaves
+/// a running browser's DevTools port open to a client on another machine.
+// ponytail: an entry found here stays until Sniper stops, even after that browser
+// quits; nothing watches a process this Sniper did not start.
+pub fn recover_driver_ports(data_dir: &Path) {
+    for profile in profile_dirs(data_dir) {
+        let Some(owner) = read_owner(&profile) else {
+            continue;
+        };
+        let pid = if process_runs_as(owner.pid, &owner.exe) {
+            owner.pid
+        } else if let Some(holder) = lock_holder(&profile, &owner.exe) {
+            // It relaunched itself, and the record names the process that left.
+            holder
+        } else {
+            continue;
+        };
+        let mut ports = Vec::new();
+        // Only a browser started with the port: a later one can sit on the file an
+        // older run left in the profile.
+        if owner.devtools_port {
+            ports.extend(
+                [Driver::Cdp, Driver::BrowserosMcp]
+                    .into_iter()
+                    .filter_map(|driver| {
+                        let text = fs::read_to_string(profile.join(driver.port_file())).ok()?;
+                        driver.parse_port(&text)
+                    }),
+            );
+        }
+        ports.extend(process_args(pid).as_deref().and_then(bypassed_own_port));
+        if !ports.is_empty() {
+            remember_driver_ports(&profile, ports);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Child;
+
+    #[test]
+    fn a_browser_an_earlier_sniper_opened_has_its_ports_guarded_again() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-recover-ports-{}", Uuid::new_v4()));
+        let root = data_dir.join("browser-profiles");
+        let (running, gone, unasked) = (root.join("example"), root.join("gone"), root.join("old"));
+        for profile in [&running, &gone, &unasked] {
+            fs::create_dir_all(profile).unwrap();
+        }
+        // This test process stands in for a browser that is still running.
+        let me = Owner {
+            pid: std::process::id(),
+            exe: std::env::current_exe().unwrap(),
+            proxy: "127.0.0.1:8080".to_string(),
+            devtools_port: true,
+            started: None,
+        };
+        write_owner(&running, &me).unwrap();
+        fs::write(
+            running.join("DevToolsActivePort"),
+            "45131\n/devtools/browser/example",
+        )
+        .unwrap();
+        // A record whose process has gone guards nothing.
+        write_owner(
+            &gone,
+            &Owner {
+                pid: 0,
+                ..me.clone()
+            },
+        )
+        .unwrap();
+        fs::write(gone.join("DevToolsActivePort"), "45132\n").unwrap();
+        // A browser opened without the port can sit on a file an older run left.
+        write_owner(
+            &unasked,
+            &Owner {
+                devtools_port: false,
+                ..me.clone()
+            },
+        )
+        .unwrap();
+        fs::write(unasked.join("DevToolsActivePort"), "45133\n").unwrap();
+
+        recover_driver_ports(&data_dir);
+
+        let ports = driver_ports();
+        assert!(ports.contains(&45131));
+        assert!(!ports.contains(&45132));
+        assert!(!ports.contains(&45133));
+        forget_driver_ports(&running);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    // The session list marks the sessions a browser sends to. A browser is wired
+    // to one proxy for its life, so the port of its proxy says which session.
+    #[test]
+    fn the_proxy_ports_of_the_browsers_that_still_run_are_listed() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-live-browsers-{}", Uuid::new_v4()));
+        let root = data_dir.join("browser-profiles");
+        let shared = root.join("example");
+        let of_session = session_profiles_dir(&root, Uuid::new_v4()).join("example");
+        // A throwaway profile is at the top level whichever proxy it was opened for.
+        let throwaway = root.join(format!("fresh-{}", Uuid::new_v4()));
+        let gone = root.join("gone");
+        let started_here = root.join("started-here");
+        for profile in [&shared, &of_session, &throwaway, &gone, &started_here] {
+            fs::create_dir_all(profile).unwrap();
+        }
+        // This test process stands in for a browser that is still running.
+        let me = Owner {
+            pid: std::process::id(),
+            exe: std::env::current_exe().unwrap(),
+            proxy: "127.0.0.1:8080".to_string(),
+            devtools_port: false,
+            started: None,
+        };
+        let with_proxy = |proxy: &str| Owner {
+            proxy: proxy.to_string(),
+            ..me.clone()
+        };
+        write_owner(&shared, &me).unwrap();
+        write_owner(&of_session, &with_proxy("127.0.0.1:18081")).unwrap();
+        write_owner(&throwaway, &with_proxy("[::1]:18082")).unwrap();
+        // A record whose process has gone is no browser.
+        write_owner(
+            &gone,
+            &Owner {
+                pid: 0,
+                ..with_proxy("127.0.0.1:18083")
+            },
+        )
+        .unwrap();
+        // One this Sniper started is known before its record is read.
+        live_profiles()
+            .lock()
+            .unwrap()
+            .insert(started_here.clone(), with_proxy("127.0.0.1:18084"));
+
+        let mut ports = live_browser_proxy_ports(&data_dir);
+        ports.sort_unstable();
+        live_profiles().lock().unwrap().remove(&started_here);
+
+        assert_eq!(ports, [8080, 18081, 18082, 18084]);
+        assert!(live_browser_proxy_ports(&data_dir.join("nothing-here")).is_empty());
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    // A session's browser keeps its profile one level down. Read only at the top
+    // level, a restart would leave its DevTools port open to another machine.
+    #[test]
+    fn a_running_browser_on_a_session_profile_has_its_port_guarded_again() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-recover-session-ports-{}", Uuid::new_v4()));
+        let profile = session_profiles_dir(&data_dir.join("browser-profiles"), Uuid::new_v4())
+            .join("example");
+        fs::create_dir_all(&profile).unwrap();
+        write_owner(
+            &profile,
+            &Owner {
+                pid: std::process::id(),
+                exe: std::env::current_exe().unwrap(),
+                proxy: "127.0.0.1:18081".to_string(),
+                devtools_port: true,
+                started: None,
+            },
+        )
+        .unwrap();
+        fs::write(profile.join("DevToolsActivePort"), "45141\n/devtools/x").unwrap();
+
+        recover_driver_ports(&data_dir);
+
+        assert!(driver_ports().contains(&45141));
+        forget_driver_ports(&profile);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    // Profiles hold logged-in cookies, so those of a deleted session go with it.
+    // One a browser still holds is left alone until that browser has quit.
+    #[test]
+    fn the_profiles_of_a_session_that_is_gone_are_removed_once_no_browser_holds_them() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-session-profiles-{}", Uuid::new_v4()));
+        let root = data_dir.join("browser-profiles");
+        let (gone, kept) = (Uuid::new_v4(), Uuid::new_v4());
+        let running = Owner {
+            pid: std::process::id(),
+            exe: std::env::current_exe().unwrap(),
+            proxy: "127.0.0.1:18081".to_string(),
+            devtools_port: false,
+            started: None,
+        };
+        let idle = session_profiles_dir(&root, gone).join("chrome");
+        let held = session_profiles_dir(&root, gone).join("edge");
+        let of_kept = session_profiles_dir(&root, kept).join("chrome");
+        let shared = root.join("chrome");
+        let stranger = root.join("session-not-an-id").join("chrome");
+        for profile in [&idle, &held, &of_kept, &shared, &stranger] {
+            fs::create_dir_all(profile).unwrap();
+            fs::write(profile.join("Cookies"), b"logged in").unwrap();
+        }
+        write_owner(
+            &idle,
+            &Owner {
+                pid: 0,
+                ..running.clone()
+            },
+        )
+        .unwrap();
+        write_owner(&held, &running).unwrap();
+
+        sweep_session_profiles(&data_dir, |session| session == kept);
+
+        assert!(!idle.exists());
+        assert!(held.exists(), "a browser still runs on it");
+        assert!(of_kept.exists(), "its session exists");
+        assert!(
+            shared.exists() && stranger.exists(),
+            "not a session's profile"
+        );
+
+        // Its browser has quit: the next sweep takes it, and the directory with it.
+        write_owner(
+            &held,
+            &Owner {
+                pid: 0,
+                ..running.clone()
+            },
+        )
+        .unwrap();
+        sweep_session_profiles(&data_dir, |session| session == kept);
+        assert!(!session_profiles_dir(&root, gone).exists());
+
+        // Deleting a session removes its profiles at once, by the same rule.
+        write_owner(&of_kept, &running).unwrap();
+        remove_session_profiles(&data_dir, kept);
+        assert!(of_kept.exists(), "a browser still runs on it");
+        write_owner(&of_kept, &Owner { pid: 0, ..running }).unwrap();
+        remove_session_profiles(&data_dir, kept);
+        assert!(!session_profiles_dir(&root, kept).exists());
+        assert!(shared.exists());
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn a_browser_s_own_port_is_read_from_its_bypass_list() {
+        assert_eq!(
+            bypassed_own_port(
+                "/Applications/Example.app/Contents/MacOS/Example --user-data-dir=/data/p \
+                 --proxy-server=127.0.0.1:8080 \
+                 --proxy-bypass-list=<-loopback>;127.0.0.1:21420;localhost:21420 --no-first-run"
+            ),
+            Some(21420)
+        );
+        assert_eq!(
+            bypassed_own_port("/bin/example --proxy-bypass-list=<-loopback> --no-first-run"),
+            None
+        );
+        assert_eq!(bypassed_own_port("/bin/example"), None);
+    }
 
     #[test]
     fn spki_hash_is_the_sha256_of_the_public_key_info() {
@@ -2445,6 +3087,48 @@ mod tests {
             let _ = fs::remove_dir_all(&profile);
         }
 
+        // A browser that relaunched itself is named by no record: the record of
+        // the process Sniper started went when that process ended. Deleting its
+        // session must not remove the profile under it.
+        #[test]
+        fn a_session_profile_held_through_its_lock_alone_is_kept() {
+            let data_dir = scratch("session-profile-lock");
+            let session = Uuid::new_v4();
+            let profile =
+                session_profiles_dir(&data_dir.join("browser-profiles"), session).join("ego");
+            fs::create_dir_all(&profile).unwrap();
+            let successor = held_browser(&[format!("--user-data-dir={}", profile.display())]);
+            lock(&profile, &format!("host-{}", successor.id()));
+
+            remove_session_profiles(&data_dir, session);
+            assert!(profile.exists(), "a browser still runs on it");
+
+            // A lock left by a browser that has gone names nothing that holds it.
+            drop(successor);
+            remove_session_profiles(&data_dir, session);
+            assert!(!profile.exists());
+            let _ = fs::remove_dir_all(data_dir);
+        }
+
+        // The directory of a session that is gone can be a link someone put
+        // there. What it points at is not Sniper's to remove.
+        #[test]
+        fn a_link_named_like_a_session_s_profiles_is_not_followed() {
+            let data_dir = scratch("session-profile-link");
+            let root = data_dir.join("browser-profiles");
+            let outside = data_dir.join("elsewhere");
+            fs::create_dir_all(&root).unwrap();
+            fs::create_dir_all(outside.join("kept")).unwrap();
+            let session = Uuid::new_v4();
+            symlink(&outside, session_profiles_dir(&root, session)).unwrap();
+
+            sweep_session_profiles(&data_dir, |_| false);
+            remove_session_profiles(&data_dir, session);
+
+            assert!(outside.join("kept").exists());
+            let _ = fs::remove_dir_all(data_dir);
+        }
+
         #[test]
         fn a_holder_no_record_names_is_adopted_with_the_wiring_it_was_started_with() {
             let shell = Path::new(SHELL);
@@ -2614,16 +3298,46 @@ mod tests {
             fs::write(profile.join("Cookies"), b"x").unwrap();
             let successor = browser_process(successor_for, &flags(&profile, &[]));
             lock(&profile, &format!("host-{}", successor.id()));
-            let first = Command::new(SHELL)
-                .args(["-c", &format!("sleep {lived}; {ends_with}")])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
+            let first = spawn_browser(
+                Path::new(SHELL),
+                &["-c".to_string(), format!("sleep {lived}; {ends_with}")],
+                &profile,
+                false,
+            )
+            .unwrap();
             let (tx, _rx) = mpsc::channel();
             let pid = first.id();
             watch_browser(first, &profile, pid, Path::new(SHELL), true, tx).unwrap();
             (root, profile, successor)
+        }
+
+        // macOS asks the process responsible for a child about the privacy
+        // permissions the child uses. A browser that answered as Sniper lost each
+        // grant at the next build, since Sniper's ad-hoc signature changes with it.
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn a_browser_answers_for_itself_on_macos() {
+            let symbol = unsafe {
+                libc::dlsym(
+                    libc::RTLD_DEFAULT,
+                    c"responsibility_get_pid_responsible_for_pid".as_ptr(),
+                )
+            };
+            assert!(!symbol.is_null());
+            let responsible: unsafe extern "C" fn(libc::pid_t) -> libc::pid_t =
+                unsafe { std::mem::transmute(symbol) };
+            let mut child = spawn_browser(
+                Path::new("/bin/sleep"),
+                &["5".to_string()],
+                &std::env::temp_dir(),
+                false,
+            )
+            .unwrap();
+            let pid = child.id() as libc::pid_t;
+            let answers = unsafe { responsible(pid) };
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            let _ = child.wait();
+            assert_eq!(answers, pid, "the browser answers as Sniper");
         }
 
         fn wait_until_gone(path: &Path, within: Duration) -> bool {
@@ -2904,6 +3618,8 @@ mod tests {
                     early_exit_probe,
                     startup_settle: Duration::ZERO,
                     preferred: None,
+                    session: None,
+                    main_proxy_addr: proxy.parse().unwrap(),
                 }
             }
         }
@@ -3996,6 +4712,148 @@ mod tests {
                 !fixture.profile("chrome").exists(),
                 "nothing was started for the refused one"
             );
+        }
+
+        // A session with its own port has a browser of its own: pointed at that
+        // port, and on a profile no other session's browser shares.
+        #[tokio::test]
+        async fn a_browser_for_a_session_uses_its_port_and_a_profile_of_its_own() {
+            let fixture = Fixture::new();
+            let out = fixture.dir.join("argv.txt");
+            let exe = fixture.open_browser(&recording_script(&out));
+            let session = Uuid::new_v4();
+            let main: SocketAddr = PROXY.parse().unwrap();
+            let ctx = fixture
+                .build(
+                    "127.0.0.1:18081",
+                    Duration::from_secs(30),
+                    Duration::from_millis(50),
+                )
+                .for_session(session, main);
+
+            let launched = launch_at(&ctx, BrowserKind::Chrome, &exe, LaunchRequest::default())
+                .await
+                .unwrap();
+
+            let profile = fixture
+                .profile(&format!("session-{session}"))
+                .join("chrome");
+            let argv = wait_for(&out).await;
+            assert!(argv.contains(&format!("--user-data-dir={}", profile.display())));
+            assert!(argv.contains("--proxy-server=127.0.0.1:18081"));
+            assert_eq!(launched.proxy, "127.0.0.1:18081");
+            assert_eq!(launched.profile_dir, profile.display().to_string());
+            assert!(
+                !fixture.profile("chrome").exists(),
+                "the shared profile belongs to the main listener's session"
+            );
+
+            // A throwaway profile stays a throwaway, on the session's port.
+            let fresh = launch_at(
+                &ctx,
+                BrowserKind::Chrome,
+                &exe,
+                LaunchRequest {
+                    fresh: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(
+                fresh.profile_dir.contains("fresh-"),
+                "{}",
+                fresh.profile_dir
+            );
+            assert_eq!(fresh.proxy, "127.0.0.1:18081");
+        }
+
+        // Aside's command drives whichever Aside runs and cannot be pointed at a
+        // window, so an agent given it for one session would drive another's.
+        #[tokio::test]
+        async fn a_browser_that_cannot_be_told_apart_is_not_opened_for_a_session() {
+            let fixture = Fixture::new();
+            let exe = fixture.open_browser("");
+            let main: SocketAddr = PROXY.parse().unwrap();
+            let session = Uuid::new_v4();
+            let for_session = fixture.ctx().for_session(session, main);
+
+            let refused = launch_at(
+                &for_session,
+                BrowserKind::Aside,
+                &exe,
+                LaunchRequest::default(),
+            )
+            .await;
+            let Err(LaunchError::Forbidden(why)) = refused else {
+                panic!("{refused:?}");
+            };
+            assert!(why.contains("aside"), "{why}");
+            assert!(
+                !fixture
+                    .profile(&format!("session-{session}"))
+                    .join("aside")
+                    .exists(),
+                "nothing was started for the refused one"
+            );
+
+            // Without a session it opens as before, and the others open for one.
+            let shared = launch_at(
+                &fixture.ctx(),
+                BrowserKind::Aside,
+                &exe,
+                LaunchRequest::default(),
+            )
+            .await;
+            assert!(shared.is_ok(), "{shared:?}");
+            let ego = launch_at(
+                &for_session,
+                BrowserKind::Ego,
+                &exe,
+                LaunchRequest::default(),
+            )
+            .await;
+            assert!(ego.is_ok(), "{ego:?}");
+        }
+
+        // A session port is always on loopback. The way in from another machine is
+        // the main listener, so that is the one the refusal must look at.
+        #[tokio::test]
+        async fn a_devtools_port_for_a_session_is_withheld_while_the_main_listener_is_exposed() {
+            let fixture = Fixture::new();
+            let exe = fixture.open_browser("");
+            let session = Uuid::new_v4();
+            let exposed = fixture
+                .build(
+                    "127.0.0.1:18081",
+                    Duration::from_secs(5),
+                    Duration::from_millis(50),
+                )
+                .for_session(session, "0.0.0.0:18890".parse().unwrap());
+
+            let refused = launch_at(
+                &exposed,
+                BrowserKind::Chrome,
+                &exe,
+                LaunchRequest {
+                    agent: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(
+                matches!(refused, Err(LaunchError::Forbidden(_))),
+                "{refused:?}"
+            );
+
+            let plain = launch_at(
+                &exposed,
+                BrowserKind::Chrome,
+                &exe,
+                LaunchRequest::default(),
+            )
+            .await;
+            assert!(plain.is_ok(), "{plain:?}");
         }
 
         #[tokio::test]

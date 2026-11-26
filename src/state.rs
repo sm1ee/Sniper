@@ -133,6 +133,12 @@ pub struct AppState {
     session_contexts: Arc<AsyncMutex<HashMap<uuid::Uuid, Arc<SessionContext>>>>,
     /// Cached read-only inactive sessions for repeated pinned history/detail reads.
     read_only_session_contexts: Arc<AsyncMutex<HashMap<uuid::Uuid, Arc<SessionContext>>>>,
+    /// The proxy ports that each record into one session. Opened and closed
+    /// under `session_activation_lock`.
+    session_ports: Arc<crate::session_ports::SessionPorts>,
+    /// Every address Sniper listens on, for the guards against a connection
+    /// that leads back into it.
+    own_listeners: crate::session_ports::OwnListeners,
     /// WebSocket replay connections.
     pub ws_replay: Arc<WsReplayStore>,
     /// Stable owner token for runtime-state writes from this app process.
@@ -145,6 +151,24 @@ pub struct AppState {
     /// Bounds queued plus running ordinary Service Map jobs across all sessions.
     /// Other API reads and proxy work never acquire this permit.
     service_map_read_slot: Arc<Semaphore>,
+}
+
+/// The listeners of a session that receives which are on: those that run,
+/// and those that did not start.
+async fn session_tcp_listeners(
+    session: &SessionContext,
+) -> Vec<crate::session::SessionTcpListener> {
+    let listeners = session.tcp_capture.status().await.listeners;
+    listeners
+        .into_iter()
+        .filter(|listener| listener.running || listener.error.is_some())
+        .map(|listener| crate::session::SessionTcpListener {
+            local_port: listener.config.settings.local_port,
+            target: listener.config.settings.target_label(),
+            udp: listener.config.settings.protocol == crate::tcp_capture::Protocol::Udp,
+            running: listener.running,
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -174,6 +198,10 @@ fn apply_live_session_counts(summary: &mut SessionSummary, counts: LiveSessionCo
     summary.rule_count = counts.rule_count;
 }
 
+/// The answer to a TCP change from a caller that expected another session to
+/// be the default one.
+const TCP_SESSION_CHANGED: &str = "active session changed; reload TCP settings";
+
 async fn session_summary_with_live_counts(
     session: &Arc<SessionContext>,
     active: bool,
@@ -183,8 +211,28 @@ async fn session_summary_with_live_counts(
     summary
 }
 
+/// Whether one of the browsers Sniper opened sends to a session. A browser
+/// is wired to one proxy port: the main listener's reaches the session that
+/// listener records into, and a session's own reaches it while it is open.
+fn browser_sends_to(
+    records_main: bool,
+    port: &crate::session_ports::SessionPortStatus,
+    main_port: u16,
+    browser_ports: &[u16],
+) -> bool {
+    let receives_from = if records_main {
+        Some(main_port)
+    } else {
+        port.proxy_port.filter(|_| port.open)
+    };
+    receives_from.is_some_and(|port| browser_ports.contains(&port))
+}
+
 impl AppState {
     pub fn new(config: AppConfig) -> Result<Self> {
+        // Before any listener answers: a browser an earlier run opened may still
+        // have its DevTools port, which the proxy refuses to another machine.
+        crate::browser::recover_driver_ports(&config.data_dir);
         let certificates = Arc::new(CertificateAuthority::load_or_create(&config.data_dir)?);
         let startup = Arc::new(StartupSettingsStore::load_or_create(
             &config.data_dir,
@@ -199,8 +247,20 @@ impl AppState {
             config.max_transaction_entries,
             MAX_WEBSOCKET_FRAMES_PER_SESSION,
         )?;
+        // The browser profiles of sessions deleted while Sniper was not running,
+        // or deleted while a browser still held them.
+        crate::browser::sweep_session_profiles(&config.data_dir, |id| {
+            sessions.contains_session(id)
+        });
 
         let saved_operations = Arc::new(SavedOperationLedger::new(&config.data_dir));
+        let own_listeners = crate::session_ports::OwnListeners::default();
+        own_listeners.set_main(config.proxy_addr);
+        own_listeners.set_ui(config.ui_addr);
+        let session_ports = Arc::new(crate::session_ports::SessionPorts::load(
+            &config.data_dir,
+            own_listeners.clone(),
+        ));
         let active_proxy_addr = config.proxy_addr;
         let active_ui_addr = config.ui_addr;
         let runtime_instance_id = uuid::Uuid::new_v4();
@@ -230,6 +290,8 @@ impl AppState {
             session_activation_lock: Arc::new(AsyncMutex::new(())),
             session_contexts: Arc::new(AsyncMutex::new(HashMap::new())),
             read_only_session_contexts: Arc::new(AsyncMutex::new(HashMap::new())),
+            session_ports,
+            own_listeners,
             ws_replay: Arc::new(WsReplayStore::new()),
             runtime_instance_id,
             workspace_retention_uncertain: Arc::new(Default::default()),
@@ -278,6 +340,7 @@ impl AppState {
             }
         }
         self.proxy_online.store(online, Ordering::Relaxed);
+        self.own_listeners.set_main_listening(online);
     }
 
     pub fn is_proxy_online(&self) -> bool {
@@ -295,6 +358,7 @@ impl AppState {
                 .is_ok()
             {
                 self.proxy_online.store(true, Ordering::Relaxed);
+                self.own_listeners.set_main_listening(true);
                 return next_generation;
             }
         }
@@ -314,37 +378,234 @@ impl AppState {
             .is_ok()
         {
             self.proxy_online.store(false, Ordering::Relaxed);
+            self.own_listeners.set_main_listening(false);
             true
         } else {
             false
         }
     }
 
-    pub async fn configure_tcp_capture(
+    /// The writable context of the session a write names, or the default
+    /// session's when it names none.
+    ///
+    /// A write is not refused because its session has work in flight: a session
+    /// the UI shows, and one with a port of its own, are written while a Replay or
+    /// a capture runs in them. What keeps that safe is the one writable context
+    /// each session has, which every branch below returns.
+    pub async fn writable_session_context(
         &self,
-        settings: Option<crate::tcp_capture::TcpSettings>,
+        id: Option<uuid::Uuid>,
+    ) -> Result<Arc<SessionContext>> {
+        let active = self.session().await;
+        let Some(id) = id.filter(|id| *id != active.id()) else {
+            return Ok(active);
+        };
+        // The context its port records into, so a write never loads another.
+        if let Some(session) = self.session_port_context(id) {
+            return Ok(session);
+        }
+        if let Some(session) = crate::proxy::live_websocket_session_context(id) {
+            return Ok(session);
+        }
+        if let Some(session) = crate::proxy::pending_session_context(id) {
+            return Ok(session);
+        }
+        if !self.sessions.contains_session(id) {
+            anyhow::bail!("session {id} was not found");
+        }
+        self.session_context_for_id(id).await
+    }
+
+    /// The session a TCP change names, as that session's one writable
+    /// context, with the activation lock. While the caller holds the lock no
+    /// session starts or stops receiving, so a change cannot cross a session
+    /// switch or the closing of a port.
+    async fn tcp_session(
+        &self,
+        session_id: Option<uuid::Uuid>,
+        expected_active_session_id: Option<uuid::Uuid>,
+    ) -> Result<(tokio::sync::MutexGuard<'_, ()>, Arc<SessionContext>)> {
+        // Loaded before the lock is taken: activation, shutdown and the
+        // desktop's quit all wait on it, and a load can take seconds.
+        let named = match session_id {
+            Some(id) => Some(self.writable_session_context(Some(id)).await?),
+            None => None,
+        };
+        let guard = self.session_activation_lock.lock().await;
+        let active = self.session().await;
+        anyhow::ensure!(
+            expected_active_session_id
+                .map(|id| id == active.id())
+                .unwrap_or(true),
+            TCP_SESSION_CHANGED
+        );
+        let session = match named {
+            Some(session) if session.id() != active.id() => {
+                anyhow::ensure!(
+                    self.sessions.contains_session(session.id()),
+                    "session {} was not found",
+                    session.id()
+                );
+                // A port opened since the load holds the context it records
+                // into, which is the one to change.
+                self.session_ports.context(session.id()).unwrap_or(session)
+            }
+            _ => active,
+        };
+        Ok((guard, session))
+    }
+
+    /// `tcp_session` for the calls that answer with an intercept error.
+    async fn tcp_intercept_session(
+        &self,
+        session_id: Option<uuid::Uuid>,
+        expected_active_session_id: Option<uuid::Uuid>,
+    ) -> std::result::Result<
+        (tokio::sync::MutexGuard<'_, ()>, Arc<SessionContext>),
+        crate::tcp_capture::InterceptError,
+    > {
+        self.tcp_session(session_id, expected_active_session_id)
+            .await
+            .map_err(|error| {
+                let message = error.to_string();
+                if message.contains("was not found") {
+                    crate::tcp_capture::InterceptError::NotFound(message)
+                } else {
+                    crate::tcp_capture::InterceptError::Conflict(message)
+                }
+            })
+    }
+
+    /// Adds, changes or removes a listener of the session the change names,
+    /// the default session when it names none, and saves the list with the
+    /// session's small state.
+    ///
+    /// A session's listeners run while it receives. One that starts in a
+    /// session nothing reaches opens that session's port first, as a browser
+    /// opened for the session does.
+    pub async fn change_tcp_listeners(
+        &self,
+        change: crate::tcp_capture::ListenerChange,
         session_id: Option<uuid::Uuid>,
         expected_active_session_id: Option<uuid::Uuid>,
     ) -> Result<crate::tcp_capture::TcpStatus> {
-        let _guard = self.session_activation_lock.lock().await;
-        let session = self.session().await;
+        // Both asked before a port is opened for the listener: a change that
+        // could never start would leave the session a number it keeps for good.
+        change.validate()?;
+        let default = self.sessions.active_session_id();
         anyhow::ensure!(
-            session_id.map(|id| id == session.id()).unwrap_or(true)
-                && expected_active_session_id
-                    .map(|id| id == session.id())
-                    .unwrap_or(true),
-            "active session changed; reload TCP settings"
+            expected_active_session_id
+                .map(|id| id == default)
+                .unwrap_or(true),
+            TCP_SESSION_CHANGED
         );
-        if let Some(settings) = settings {
+        let opened = match session_id {
+            Some(id) if change.starts() && id != default => self
+                .open_session_port_as(id)
+                .await?
+                .1
+                .map(|opening| (id, opening)),
+            _ => None,
+        };
+        let changed = self
+            .change_tcp_listeners_locked(change, session_id, expected_active_session_id)
+            .await;
+        if let (Err(_), Some((id, opening))) = (&changed, opened) {
+            // The port was opened for this listener, which did not start.
+            // Whoever else asked for the port meanwhile keeps it.
+            if let Err(error) = self.close_session_port_opened_as(id, opening).await {
+                tracing::warn!(
+                    ?error,
+                    session_id = %id,
+                    "failed to close the port opened for a TCP listener that did not start"
+                );
+            }
+        }
+        changed
+    }
+
+    async fn change_tcp_listeners_locked(
+        &self,
+        change: crate::tcp_capture::ListenerChange,
+        session_id: Option<uuid::Uuid>,
+        expected_active_session_id: Option<uuid::Uuid>,
+    ) -> Result<crate::tcp_capture::TcpStatus> {
+        let (_guard, session) = self
+            .tcp_session(session_id, expected_active_session_id)
+            .await?;
+        if change.starts() {
             anyhow::ensure!(
                 !self.tcp_shutdown.load(Ordering::Acquire),
                 "TCP capture cannot start while Sniper is shutting down"
             );
-            session.tcp_capture.start(settings).await?;
-        } else {
-            session.tcp_capture.stop().await?;
+            // A listener runs only while its session receives: closing the
+            // port is what stops it. The port opened for this one can have
+            // been closed again before the lock was taken.
+            if session.id() != self.session().await.id()
+                && !self.session_ports.is_open(session.id())
+            {
+                return Err(crate::session_ports::refused(
+                    "the session's port closed before its listener started; try again",
+                ));
+            }
         }
+        let operation_lock = self.session_operation_lock(session.id()).await;
+        let _operation_guard = operation_lock.lock_owned().await;
+        // A delete takes the operation lock and not the activation lock.
+        anyhow::ensure!(
+            self.sessions.contains_session(session.id()),
+            "session {} was not found",
+            session.id()
+        );
+        self.arm_tcp_capture(&session).await;
+        let changed = session.tcp_capture.apply(change).await;
+        // Saved even when the change failed part way, as turning every listener
+        // off does before reporting unsaved records: what runs is what is kept.
+        let saved = {
+            let _mutation_guard = session.mutation_guard().await;
+            self.persist_session_state_mutation_locked(&session).await
+        };
+        changed?;
+        saved?;
         Ok(session.tcp_capture.status().await)
+    }
+
+    /// Removes the ended TCP records of the session the call names.
+    pub async fn clear_tcp_history(
+        &self,
+        session_id: Option<uuid::Uuid>,
+        expected_active_session_id: Option<uuid::Uuid>,
+    ) -> Result<usize> {
+        let (_guard, session) = self
+            .tcp_session(session_id, expected_active_session_id)
+            .await?;
+        let operation_lock = self.session_operation_lock(session.id()).await;
+        let _operation_guard = operation_lock.lock_owned().await;
+        anyhow::ensure!(
+            self.sessions.contains_session(session.id()),
+            "session {} was not found",
+            session.id()
+        );
+        session.tcp_capture.clear().await
+    }
+
+    /// What a session's TCP listeners need from Sniper: its CA to decrypt TLS.
+    /// Sniper's own listeners, which a client on another device must not
+    /// reach, come to it through the session's runtime settings.
+    async fn arm_tcp_capture(&self, session: &SessionContext) {
+        session
+            .tcp_capture
+            .use_certificates(self.certificates.clone());
+    }
+
+    /// Starts the active session's saved listeners once Sniper is up.
+    pub async fn start_saved_tcp_listeners(&self) {
+        let _guard = self.session_activation_lock.lock().await;
+        if !self.tcp_shutdown.load(Ordering::Acquire) {
+            let session = self.session().await;
+            self.arm_tcp_capture(&session).await;
+            session.tcp_capture.start_saved().await;
+        }
     }
 
     // Keep the activation guard through owner acknowledgement, so a decision
@@ -357,11 +618,42 @@ impl AppState {
         expected_active_session_id: Option<uuid::Uuid>,
     ) -> std::result::Result<crate::tcp_capture::InterceptPolicy, crate::tcp_capture::InterceptError>
     {
-        let _guard = self.session_activation_lock.lock().await;
-        let session = self
-            .checked_tcp_write_session(session_id, expected_active_session_id)
+        let (_guard, session) = self
+            .tcp_intercept_session(session_id, expected_active_session_id)
             .await?;
-        session.tcp_capture.set_policy(update)
+        session.tcp_capture.update_policy(update).await
+    }
+
+    pub async fn release_tcp_intercepts(
+        &self,
+        action: crate::tcp_capture::DecisionAction,
+        session_id: Option<uuid::Uuid>,
+        expected_active_session_id: Option<uuid::Uuid>,
+    ) -> std::result::Result<usize, crate::tcp_capture::InterceptError> {
+        let (_guard, session) = self
+            .tcp_intercept_session(session_id, expected_active_session_id)
+            .await?;
+        Ok(session.tcp_capture.release_all(action).await)
+    }
+
+    /// Replays in the session the call names. The session is checked, then
+    /// let go of: a replay can take two minutes and must not hold up a session
+    /// switch, and one that outlasts a switch stays in the session it was
+    /// started from.
+    pub async fn replay_tcp(
+        &self,
+        request: crate::tcp_capture::ReplayRequest,
+        session_id: Option<uuid::Uuid>,
+        expected_active_session_id: Option<uuid::Uuid>,
+    ) -> std::result::Result<crate::tcp_capture::TcpConnection, crate::tcp_capture::InterceptError>
+    {
+        let session = {
+            let (_guard, session) = self
+                .tcp_intercept_session(session_id, expected_active_session_id)
+                .await?;
+            session
+        };
+        session.tcp_capture.replay(request).await
     }
 
     pub async fn decide_tcp_intercept(
@@ -373,9 +665,8 @@ impl AppState {
         expected_active_session_id: Option<uuid::Uuid>,
     ) -> std::result::Result<crate::tcp_capture::DecisionReceipt, crate::tcp_capture::InterceptError>
     {
-        let _guard = self.session_activation_lock.lock().await;
-        let session = self
-            .checked_tcp_write_session(session_id, expected_active_session_id)
+        let (_guard, session) = self
+            .tcp_intercept_session(session_id, expected_active_session_id)
             .await?;
         session
             .tcp_capture
@@ -389,28 +680,10 @@ impl AppState {
         session_id: Option<uuid::Uuid>,
         expected_active_session_id: Option<uuid::Uuid>,
     ) -> std::result::Result<(), crate::tcp_capture::InterceptError> {
-        let _guard = self.session_activation_lock.lock().await;
-        let session = self
-            .checked_tcp_write_session(session_id, expected_active_session_id)
+        let (_guard, session) = self
+            .tcp_intercept_session(session_id, expected_active_session_id)
             .await?;
         session.tcp_capture.close(connection_id)
-    }
-
-    // The caller must hold session_activation_lock until its mutation finishes.
-    async fn checked_tcp_write_session(
-        &self,
-        session_id: Option<uuid::Uuid>,
-        expected_active_session_id: Option<uuid::Uuid>,
-    ) -> std::result::Result<Arc<SessionContext>, crate::tcp_capture::InterceptError> {
-        let session = self.session().await;
-        if session_id.is_some_and(|id| id != session.id())
-            || expected_active_session_id.is_some_and(|id| id != session.id())
-        {
-            return Err(crate::tcp_capture::InterceptError::Conflict(
-                "active session changed; reload TCP settings".into(),
-            ));
-        }
-        Ok(session)
     }
 
     pub async fn session(&self) -> Arc<SessionContext> {
@@ -426,6 +699,11 @@ impl AppState {
     }
 
     fn bind_upstream_peer_durability(&self, session: &Arc<SessionContext>) {
+        // Every context this state loads passes through here, so each checks
+        // its upstream proxy and its TCP relay against Sniper's own listeners.
+        session
+            .runtime
+            .use_own_listeners(self.own_listeners.clone());
         let gate = self
             .upstream_peer_durability_gates
             .lock()
@@ -698,6 +976,48 @@ impl AppState {
         listings
     }
 
+    /// Every session with what it is doing now. Only a loaded session can be
+    /// doing anything, and asking one takes a few locks, so the session list
+    /// can ask every few seconds, unlike `list_session_listings`.
+    pub async fn session_activity(&self) -> Vec<crate::session::SessionActivity> {
+        let loaded = self.loaded_listed_sessions().await;
+        // Reads each profile's record and asks whether its process runs: off
+        // the runtime, as the list asks every few seconds.
+        let browser_ports = {
+            let data_dir = self.config.data_dir.clone();
+            tokio::task::spawn_blocking(move || crate::browser::live_browser_proxy_ports(&data_dir))
+                .await
+                .unwrap_or_default()
+        };
+        let main_port = self.get_active_proxy_addr().await.port();
+        let mut activity = Vec::new();
+        for summary in self.sessions.summaries() {
+            let (running, held) = match loaded.get(&summary.id) {
+                Some(session) => session.activity().await,
+                None => (Vec::new(), 0),
+            };
+            let port = self.session_ports.status(summary.id);
+            let tcp = match loaded.get(&summary.id) {
+                Some(session) if summary.active || port.open => {
+                    session_tcp_listeners(session).await
+                }
+                _ => Vec::new(),
+            };
+            activity.push(crate::session::SessionActivity {
+                id: summary.id,
+                name: summary.name,
+                active: summary.active,
+                running,
+                held,
+                browser: browser_sends_to(summary.active, &port, main_port, &browser_ports),
+                proxy_port: port.proxy_port,
+                proxy_port_open: port.open,
+                tcp,
+            });
+        }
+        activity
+    }
+
     /// The loaded context of each session the registry still lists. A
     /// read-only context stands in for a writable one of the same session.
     async fn loaded_listed_sessions(&self) -> HashMap<uuid::Uuid, Arc<SessionContext>> {
@@ -732,8 +1052,460 @@ impl AppState {
     }
 
     pub async fn create_session(&self, name: Option<String>) -> Result<SessionSummary> {
-        let metadata = self.sessions.create_session(name)?;
-        self.activate_session_inner(metadata.id, false, true).await
+        self.create_session_as(name, None, None, true).await
+    }
+
+    /// Creates a session and leaves the main listener where it is. An agent
+    /// that makes a session of its own must not move everyone else's capture.
+    pub async fn create_inactive_session(&self, name: Option<String>) -> Result<SessionSummary> {
+        self.create_session_as(name, None, None, false).await
+    }
+
+    /// Creates a session as the API is asked to: who makes it, the group it
+    /// starts in, and whether the main listener moves to it.
+    pub async fn create_session_as(
+        &self,
+        name: Option<String>,
+        created_by: Option<String>,
+        group: Option<String>,
+        activate: bool,
+    ) -> Result<SessionSummary> {
+        if activate {
+            let metadata = self.sessions.create_session_as(name, created_by, group)?;
+            return self.activate_session_inner(metadata.id, false, true).await;
+        }
+        let sessions = self.sessions.clone();
+        let metadata = tokio::task::spawn_blocking(move || {
+            sessions.create_session_as(name, created_by, group)
+        })
+        .await
+        .context("session create writer panicked")??;
+        self.sessions
+            .summaries()
+            .into_iter()
+            .find(|session| session.id == metadata.id)
+            .ok_or_else(|| anyhow::anyhow!("session {} was not found", metadata.id))
+    }
+
+    /// Renames a group, or ends it with no name, and returns how many
+    /// sessions it had.
+    pub async fn rename_session_group(&self, from: String, to: Option<String>) -> Result<usize> {
+        let sessions = self.sessions.clone();
+        tokio::task::spawn_blocking(move || sessions.rename_session_group(&from, to.as_deref()))
+            .await
+            .context("session group writer panicked")?
+    }
+
+    /// Puts the session in a group, or takes it out, and returns the group it
+    /// is in now. Only the registry keeps a group, so no session is loaded.
+    pub async fn set_session_group(
+        &self,
+        id: uuid::Uuid,
+        group: Option<String>,
+    ) -> Result<Option<String>> {
+        let sessions = self.sessions.clone();
+        let metadata =
+            tokio::task::spawn_blocking(move || sessions.set_session_group(id, group.as_deref()))
+                .await
+                .context("session group writer panicked")??;
+        Ok(metadata.group)
+    }
+
+    /// The session's port as the API reports it: the number it holds, and
+    /// the address while the port is open.
+    pub fn session_port_status(&self, id: uuid::Uuid) -> crate::session_ports::SessionPortStatus {
+        self.session_ports.status(id)
+    }
+
+    /// The context an open session port records into, which is the session's
+    /// one writable context.
+    pub fn session_port_context(&self, id: uuid::Uuid) -> Option<Arc<SessionContext>> {
+        self.session_ports.context(id)
+    }
+
+    /// The proxy address that records into the session: its own port while
+    /// one is open, else the main listener.
+    pub async fn proxy_addr_for_session(&self, id: uuid::Uuid) -> SocketAddr {
+        match self.session_ports.addr(id) {
+            Some(addr) => addr,
+            None => self.get_active_proxy_addr().await,
+        }
+    }
+
+    /// Opens the session's own proxy port, or returns it when it is open.
+    pub async fn open_session_port(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<crate::session_ports::SessionPortStatus> {
+        Ok(self.open_session_port_as(id).await?.0)
+    }
+
+    /// `open_session_port`, and which opening this call made when it was the
+    /// one that opened the port. A caller that opens the port for something
+    /// that then falls through closes it with that
+    /// (`close_session_port_opened_as`).
+    pub(crate) async fn open_session_port_as(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<(crate::session_ports::SessionPortStatus, Option<u64>)> {
+        use crate::session_ports::{bind_announced, loopback, refused, MAX_OPEN};
+        // Loaded before any lock is taken: activation, shutdown and the
+        // desktop's quit all wait on the activation lock, and a load can take
+        // seconds.
+        let session = self.session_context_for_id(id).await?;
+        let _activation_guard = self.session_activation_lock.lock().await;
+        let operation_lock = self.session_operation_lock(id).await;
+        let _operation_guard = operation_lock.lock().await;
+        if !self.sessions.contains_session(id) {
+            anyhow::bail!("session {id} was not found");
+        }
+        if self.tcp_shutdown.load(Ordering::Acquire) {
+            return Err(refused("Sniper is shutting down"));
+        }
+        if self.session_ports.is_open(id) {
+            self.session_ports.share(id);
+            return Ok((self.session_ports.status(id), None));
+        }
+        let main = self.get_active_proxy_addr().await;
+        // One feed for each session: the session the main listener records
+        // into has that listener, and a switch never touches a session port.
+        if self.sessions.active_session_id() == id
+            || self.active_session_for_read().await.id() == id
+        {
+            return Err(refused(format!(
+                "the proxy on {main} records into this session already; a session port is for a session it does not record into"
+            )));
+        }
+        // The port must hold the session's one writable context. If it was
+        // replaced since the load above, holding this one would make a second.
+        if !self.is_current_session_context(&session).await {
+            return Err(refused(
+                "the session was reloaded while its port was opening; try again",
+            ));
+        }
+        if self.session_ports.open_count() >= MAX_OPEN {
+            return Err(refused(format!(
+                "{MAX_OPEN} session ports are open, which is the most; close one first"
+            )));
+        }
+        let numbers = self.session_ports.numbers()?;
+        // Each bind is announced to the guards first, and the announcement is
+        // kept until the port is in the registry.
+        let (listener, announced, port) = match numbers.of(id) {
+            // A client set to this number gains nothing from another one, so
+            // the session is not given a second.
+            Some(port) => match bind_announced(&self.own_listeners, loopback(port)).await {
+                Ok((listener, announced)) => (listener, announced, port),
+                Err(error) => {
+                    return Err(refused(format!(
+                        "port {port}, which this session keeps, did not open ({error}); free it and try again"
+                    )))
+                }
+            },
+            None => {
+                let avoid = [
+                    main.port(),
+                    self.get_active_ui_addr().await.port(),
+                    self.startup.snapshot().await.proxy_port,
+                ];
+                let mut bound = None;
+                // ponytail: gives up after 64 taken numbers in a row.
+                for port in numbers
+                    .candidates(self.session_ports.first_port())
+                    .filter(|port| !avoid.contains(port))
+                    .take(64)
+                {
+                    match bind_announced(&self.own_listeners, loopback(port)).await {
+                        Ok((listener, announced)) => {
+                            bound = Some((listener, announced, port));
+                            break;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+                        Err(error) => {
+                            return Err(anyhow::Error::new(error)
+                                .context(format!("failed to open a session port on {port}")))
+                        }
+                    }
+                }
+                let Some((listener, announced, port)) = bound else {
+                    return Err(refused(
+                        "the next 64 port numbers are all in use; free one and try again",
+                    ));
+                };
+                // Saved before anything is accepted, so no request arrives on
+                // a number that a restart would give to another session.
+                self.session_ports.give(id, port).await?;
+                (listener, announced, port)
+            }
+        };
+        let addr = listener.local_addr().unwrap_or_else(|_| loopback(port));
+        // A tunnel on this port that is neither TLS nor HTTP is relayed
+        // through the session's TCP capture.
+        self.arm_tcp_capture(&session).await;
+        let opening = self.start_session_port(session.clone(), listener, addr);
+        drop(announced);
+        // The session receives now, so the listeners it kept on run again,
+        // as the default session's do when Sniper starts.
+        session.tcp_capture.start_saved().await;
+        tracing::info!(session_id = %id, %addr, "session port opened");
+        Ok((self.session_ports.status(id), Some(opening)))
+    }
+
+    /// Starts serving a bound session port and enters it in the registry.
+    /// The caller holds `session_activation_lock`.
+    fn start_session_port(
+        &self,
+        session: Arc<SessionContext>,
+        listener: tokio::net::TcpListener,
+        addr: SocketAddr,
+    ) -> u64 {
+        let state = Arc::new(self.clone());
+        let served = session.clone();
+        let accept = tokio::spawn(async move {
+            if let Err(error) = crate::proxy::serve_session_port(listener, state, served).await {
+                tracing::error!(?error, %addr, "session port stopped");
+            }
+        });
+        self.session_ports.register(session, addr, accept)
+    }
+
+    /// Stops every proxy listener from accepting: each session port, then
+    /// the main listener. A shutdown calls this before it drains what they
+    /// carried, and `resume_after_cancelled_shutdown` undoes it.
+    pub async fn stop_proxy_listeners(&self) {
+        {
+            let _activation_guard = self.session_activation_lock.lock().await;
+            self.session_ports.suspend_all().await;
+        }
+        self.abort_proxy_task().await;
+    }
+
+    /// For a shutdown, the sessions the main listener does not record into.
+    /// Saves the small components of each one a port fed until the shutdown
+    /// stopped it, and tells the registry what every loaded one holds. Their
+    /// traffic is in the journals already, and a full save of each would hold
+    /// the desktop's event loop for all of them.
+    pub async fn persist_other_loaded_sessions(&self) -> Result<()> {
+        let mut failures = Vec::new();
+        let fed = self.session_ports.suspended_sessions();
+        // A session the API wrote to has no port: a window showed it, and a
+        // Replay was sent or a rule added there.
+        let mut sessions = fed.clone();
+        for session in self.session_contexts.lock().await.values() {
+            if !sessions.iter().any(|known| known.id() == session.id()) {
+                sessions.push(session.clone());
+            }
+        }
+        let default = self.sessions.active_session_id();
+        for (index, session) in sessions.into_iter().enumerate() {
+            // The default session was saved in full just before.
+            if session.id() == default || !self.sessions.contains_session(session.id()) {
+                continue;
+            }
+            // A port's work changes the small components with no save, and
+            // the exit does not wait for a save that is still queued. What
+            // else the API changed was saved as it changed.
+            if index < fed.len() || session.state_persist_pending() {
+                if let Err(error) = session.persist_state_only().await {
+                    failures.push(format!("{}: {error:#}", session.id()));
+                    continue;
+                }
+            }
+            // Only a full save tells the registry how much a session holds.
+            // Without this the session list would show the counts of the
+            // last one until the session is loaded again.
+            let counts = session_live_counts(&session).await;
+            let overview = session.overview().await;
+            let sessions = self.sessions.clone();
+            let id = session.id();
+            let refreshed = tokio::task::spawn_blocking(move || {
+                sessions.refresh_metadata(id, |metadata| {
+                    metadata.request_count = counts.request_count;
+                    metadata.websocket_count = counts.websocket_count;
+                    metadata.event_count = counts.event_count;
+                    metadata.fuzzer_count = counts.fuzzer_count;
+                    metadata.rule_count = counts.rule_count;
+                    metadata.overview = overview;
+                })
+            })
+            .await;
+            match refreshed {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => failures.push(format!("{id}: {error:#}")),
+                Err(error) => failures.push(format!("{id}: {error}")),
+            }
+        }
+        anyhow::ensure!(
+            failures.is_empty(),
+            "failed to save {} session(s) beside the one the proxy records into: {}",
+            failures.len(),
+            failures.join("; ")
+        );
+        Ok(())
+    }
+
+    /// Brings back what a shutdown stopped when the shutdown does not go
+    /// through: the main listener, the TCP relay and the session ports.
+    /// Sniper then carries on, and must carry on as it was.
+    pub async fn resume_after_cancelled_shutdown(&self) {
+        self.cancel_tcp_shutdown();
+        let state = Arc::new(self.clone());
+        // The accept task is gone once the shutdown got as far as stopping
+        // it, whatever the status still says.
+        if self.proxy_task.read().await.is_none() {
+            self.set_proxy_online(false);
+            let proxy_addr = self.get_active_proxy_addr().await;
+            match crate::proxy::rebind_proxy(state, proxy_addr).await {
+                Ok(()) => {
+                    tracing::warn!(
+                        %proxy_addr,
+                        "restored proxy listener after a cancelled shutdown"
+                    );
+                }
+                Err(error) => {
+                    self.set_proxy_online(false);
+                    let ui_addr = self.get_active_ui_addr().await;
+                    if let Err(persist_error) = crate::runtime_state::persist_runtime_state(
+                        &self.config.data_dir,
+                        &crate::runtime_state::RuntimeStateSnapshot::with_proxy_status_and_instance(
+                            proxy_addr,
+                            ui_addr,
+                            false,
+                            self.runtime_instance_id,
+                        ),
+                    ) {
+                        tracing::warn!(
+                            ?persist_error,
+                            "failed to persist offline runtime state after a cancelled shutdown"
+                        );
+                    }
+                    tracing::warn!(
+                        %error,
+                        %proxy_addr,
+                        "failed to restore proxy listener after a cancelled shutdown"
+                    );
+                }
+            }
+        }
+        self.start_saved_tcp_listeners().await;
+        let _activation_guard = self.session_activation_lock.lock().await;
+        for (session, addr) in self.session_ports.take_suspended() {
+            let id = session.id();
+            // Deleted, reloaded or made the default while its port was
+            // stopped: then the port stays closed.
+            if !self.sessions.contains_session(id)
+                || self.sessions.active_session_id() == id
+                || !self.is_current_session_context(&session).await
+            {
+                continue;
+            }
+            match crate::session_ports::bind_announced(&self.own_listeners, addr).await {
+                Ok((listener, announced)) => {
+                    let _ = self.start_session_port(session.clone(), listener, addr);
+                    drop(announced);
+                    // The shutdown stopped its relay too.
+                    session.tcp_capture.start_saved().await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, session_id = %id, %addr, "session port did not reopen");
+                    self.log_warn(
+                        "runtime",
+                        "Session port did not reopen",
+                        format!(
+                            "Port {} of session {id} did not open again after the shutdown was cancelled ({error}). Open it again from the session.",
+                            addr.port()
+                        ),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    /// Closes the session's port. The number stays the session's.
+    pub async fn close_session_port(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<crate::session_ports::SessionPortStatus> {
+        if !self.sessions.contains_session(id) {
+            anyhow::bail!("session {id} was not found");
+        }
+        let state = self.clone();
+        // A close that has begun is finished even when its caller goes away.
+        // The API drops a request's future when the client disconnects, and a
+        // port left half closed would be closed in the registry and still
+        // serve the connections it had.
+        tokio::spawn(async move { state.finish_closing_session_port(id, None).await })
+            .await
+            .context("session port close task failed")?
+    }
+
+    /// Closes the port for the caller that opened it and has no use for it
+    /// after all, as a browser launch does when its browser does not start.
+    /// The port stays open when someone else asked for it since, or when it
+    /// is a later opening: that caller's connections must not be cut.
+    pub(crate) async fn close_session_port_opened_as(
+        &self,
+        id: uuid::Uuid,
+        opening: u64,
+    ) -> Result<crate::session_ports::SessionPortStatus> {
+        let state = self.clone();
+        tokio::spawn(async move { state.finish_closing_session_port(id, Some(opening)).await })
+            .await
+            .context("session port close task failed")?
+    }
+
+    async fn finish_closing_session_port(
+        &self,
+        id: uuid::Uuid,
+        opening: Option<u64>,
+    ) -> Result<crate::session_ports::SessionPortStatus> {
+        let activation_guard = self.session_activation_lock.lock().await;
+        // A delete or a switch that follows waits here until the port is
+        // fully closed.
+        let operation_lock = self.session_operation_lock(id).await;
+        let _operation_guard = operation_lock.lock().await;
+        // Asked under the lock a port opens under, so the answer holds.
+        if opening.is_some_and(|opening| !self.session_ports.opened_alone(id, opening)) {
+            return Ok(self.session_ports.status(id));
+        }
+        let Some(session) = self.session_ports.context(id) else {
+            return Ok(self.session_ports.status(id));
+        };
+        let addr = self.session_ports.unregister(id).await;
+        // The registry is settled. What is left concerns this session alone,
+        // and can take seconds, so nothing else waits for it.
+        drop(activation_guard);
+        // Nothing reaches the session now, so its relay stops with the port.
+        // No listener is turned off: they run again when it receives again.
+        let stopped = session.tcp_capture.stop().await;
+        let ended = crate::proxy::end_session_port_work(self, &session)
+            .await
+            .and(stopped.map_err(anyhow::Error::from));
+        tracing::info!(session_id = %id, ?addr, "session port closed");
+        // The port is closed, which is what was asked, so a save that failed
+        // is not answered as a failed close. It stays pending, a delete says
+        // so, and the session's event log has why.
+        if let Err(error) = ended {
+            tracing::warn!(?error, session_id = %id, "session port closed, but its session was not saved");
+            session
+                .event_log
+                .push(
+                    crate::event_log::EventLevel::Warn,
+                    "runtime",
+                    "Session port closed, session not saved",
+                    format!("The port is closed. Saving the session failed and is still pending: {error:#}"),
+                )
+                .await;
+        }
+        Ok(self.session_ports.status(id))
+    }
+
+    /// Held by a rebind of the main listener, so that the session it records
+    /// into does not change, and no session port opens, while the rebind
+    /// closes and drains what that listener carried.
+    pub(crate) async fn hold_session_activation(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.session_activation_lock.clone().lock_owned().await
     }
 
     pub async fn rename_session(&self, id: uuid::Uuid, name: String) -> Result<SessionSummary> {
@@ -829,6 +1601,13 @@ impl AppState {
             if !self.sessions.contains_session(id) {
                 anyhow::bail!("session {id} was not found");
             }
+            // One feed for each session. A port opens under this lock, so
+            // what follows never has a session port's work to wait for or cut.
+            if let Some(port) = self.session_ports.addr(id) {
+                return Err(crate::session_ports::refused(format!(
+                    "this session records from its own port {port}; close that port before the proxy records into it"
+                )));
+            }
             let operation_lock = self.session_operation_lock(id).await;
             let operation_guard = operation_lock.lock_owned().await;
             if !self.sessions.contains_session(id) {
@@ -851,11 +1630,16 @@ impl AppState {
             // spot — an ordinary request is done in milliseconds. This runs before the
             // active-session write lock is taken, so the rest of the app keeps serving
             // while we wait.
+            //
+            // Only the session the main listener leaves is asked: its capture
+            // stops being recorded there, so all of its work has to end. The
+            // session it moves to has only work the API started in it, such
+            // as a Replay or a Fuzzer attack from a window that shows it. That
+            // work goes on in the same context, so it is neither waited for
+            // nor cut.
+            let session_id = current_id;
             if current_id != id {
-                for session_id in [current_id, id] {
-                    if !crate::proxy::session_has_active_proxy_work(session_id) {
-                        continue;
-                    }
+                if crate::proxy::session_has_active_proxy_work(session_id) {
                     if force {
                         // Stops everything a session can be holding: streamed
                         // responses, and the long-running tasks behind HTTPS tunnels
@@ -868,6 +1652,29 @@ impl AppState {
                         )
                         .await;
                         if crate::proxy::session_has_active_proxy_work(session_id) {
+                            // Relays first, through their own handles: one cut
+                            // with its outer task stays registered and refuses
+                            // every later delete of the session.
+                            // In a task of its own: this part of a switch is
+                            // dropped when its caller goes away, and a close
+                            // dropped half way leaves the relay registered too.
+                            let state = self.clone();
+                            let closed = tokio::spawn(async move {
+                                crate::proxy::close_session_websocket_relays(
+                                    &state,
+                                    session_id,
+                                    "A forced session switch closed the live WebSocket relay.",
+                                )
+                                .await
+                            })
+                            .await;
+                            if !matches!(closed, Ok(Ok(()))) {
+                                tracing::warn!(
+                                    ?closed,
+                                    %session_id,
+                                    "failed to save WebSocket relays closed for a forced session switch"
+                                );
+                            }
                             let aborted = crate::proxy::abort_session_tracked_tasks(session_id);
                             tracing::warn!(
                                 %session_id,
@@ -918,13 +1725,9 @@ impl AppState {
             let current = active_session.clone();
             let current_id = current.id();
             let session = if current_id != id {
-                if crate::proxy::session_has_active_proxy_work(current_id)
-                    || crate::proxy::session_has_active_proxy_work(id)
-                {
-                    let busy = [current_id, id]
-                        .into_iter()
-                        .map(crate::proxy::describe_session_proxy_work)
-                        .find(|description| !description.is_empty())
+                if crate::proxy::session_has_active_proxy_work(current_id) {
+                    let busy = Some(crate::proxy::describe_session_proxy_work(current_id))
+                        .filter(|description| !description.is_empty())
                         .unwrap_or_else(|| "proxy work".to_string());
                     anyhow::bail!(
                         "cannot switch sessions while proxy activity is still running ({busy})"
@@ -945,7 +1748,20 @@ impl AppState {
                     if let Some(session) = contexts.get(&id) {
                         session.clone()
                     } else {
+                        // Work in a session runs in its context, which is
+                        // cached from then on. Should it ever not be, loading
+                        // one here would put a second writable context on the
+                        // session's directory.
+                        if crate::proxy::session_has_active_proxy_work(id) {
+                            anyhow::bail!(
+                                "cannot record into a session that has work in flight and no loaded context ({})",
+                                crate::proxy::describe_session_proxy_work(id)
+                            );
+                        }
                         let session = self.sessions.load_context(id)?;
+                        // Bound here and not only once the switch is
+                        // committed: it stays cached when that fails.
+                        self.bind_upstream_peer_durability(&session);
                         contexts.insert(id, session.clone());
                         session
                     }
@@ -1021,6 +1837,12 @@ impl AppState {
                             *active_session = session.clone();
                         }
                         state.start_history_retention_worker(&session);
+                        // The old session's listeners stopped above; this one's
+                        // saved listeners take over.
+                        if !state.tcp_shutdown.load(Ordering::Acquire) {
+                            state.arm_tcp_capture(&session).await;
+                            session.tcp_capture.start_saved().await;
+                        }
                         SessionActivationOutcome::Replaced {
                             summary: session
                                 .summary(commit.metadata.id == state.sessions.active_session_id()),
@@ -1087,6 +1909,14 @@ impl AppState {
             self.remove_session_operation_lock(id).await;
             anyhow::bail!("session {id} was not found");
         }
+        // Before anything is stopped: closing the port here would leave it
+        // closed when a later check refuses the delete. A port opens under
+        // this session's operation lock, so none opens from here on.
+        if let Some(port) = self.session_ports.addr(id) {
+            return Err(crate::session_ports::refused(format!(
+                "this session's port {port} is open; close its port first"
+            )));
+        }
         if crate::proxy::session_has_live_websocket_relays(id) {
             anyhow::bail!("cannot delete a session while live captures are active");
         }
@@ -1110,6 +1940,13 @@ impl AppState {
         }
         if crate::proxy::session_has_pending_persist(id) {
             anyhow::bail!("cannot delete a session while capture persistence is pending");
+        }
+        // A TCP replay sent from a window that shows the session can still be
+        // waiting for its target. It ends before the storage goes, where its
+        // record would otherwise be written. What it could not save goes with
+        // the session.
+        if let Some(session) = cached_session.as_ref() {
+            let _ = session.tcp_capture.stop().await;
         }
         // Before the mutation guard: a scan storing a match persists the
         // session, which takes it.
@@ -1142,6 +1979,18 @@ impl AppState {
                     .await
                     .context("session delete writer panicked")??;
             state.ws_replay.remove_session(id).await;
+            // The number goes with the session and is given to no other. A
+            // failed save leaves it held, which only keeps it unused.
+            if let Err(error) = state.session_ports.forget(id).await {
+                tracing::warn!(?error, session_id = %id, "failed to forget a deleted session's port number");
+            }
+            // Its browsers' profiles hold logged-in sessions and nothing opens
+            // them again. One a browser still holds is swept once it has quit.
+            let data_dir = state.config.data_dir.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::browser::remove_session_profiles(&data_dir, id)
+            })
+            .await;
             if let Some(removed) = state.session_contexts.lock().await.remove(&id) {
                 removed.store.notify_retention_work();
             }
@@ -1354,6 +2203,19 @@ impl AppState {
                 session.id()
             )));
         }
+        // A session port records into the cached context. Replacing that one
+        // for a caller that holds another would leave two writable contexts
+        // on one session, so such a caller is refused instead.
+        if self
+            .session_ports
+            .context(session.id())
+            .is_some_and(|held| !Arc::ptr_eq(&held, session))
+        {
+            return Err(crate::workspace::WorkspaceReplaceError::Persist(format!(
+                "session {} is recording through its own port; reload it and save again",
+                session.id()
+            )));
+        }
         self.read_only_session_contexts
             .lock()
             .await
@@ -1443,6 +2305,36 @@ impl AppState {
 
     pub async fn set_active_proxy_addr(&self, addr: SocketAddr) {
         *self.active_proxy_addr.write().await = addr;
+        self.own_listeners.set_main(addr);
+    }
+
+    /// Every address Sniper listens on now: the UI, the main proxy listener
+    /// and each open session port.
+    pub fn own_listeners(&self) -> &crate::session_ports::OwnListeners {
+        &self.own_listeners
+    }
+
+    /// The main listener is where the operator put it, the environment
+    /// included. A session that kept that number for a port of its own loses
+    /// it and gets another when its port is opened next.
+    pub async fn claim_main_listener_port(&self) {
+        let port = self.get_active_proxy_addr().await.port();
+        match self.session_ports.release(port).await {
+            Ok(Some(session)) => {
+                self.log_warn(
+                    "runtime",
+                    "Session port number released",
+                    format!(
+                        "The proxy listener started on {port}, the number session {session} kept for its own port. That session gets another number when its port is opened."
+                    ),
+                )
+                .await;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(?error, port, "failed to release a session's port number")
+            }
+        }
     }
 
     pub async fn get_active_ui_addr(&self) -> SocketAddr {
@@ -1462,6 +2354,7 @@ impl AppState {
 
     pub async fn set_active_ui_addr(&self, addr: SocketAddr) {
         *self.active_ui_addr.write().await = addr;
+        self.own_listeners.set_ui(addr);
     }
 
     pub async fn set_proxy_task(&self, handle: JoinHandle<()>) {
@@ -1484,7 +2377,19 @@ impl AppState {
 
     pub async fn runtime_info(&self) -> RuntimeInfo {
         let session = self.session().await;
-        let active_session = session_summary_with_live_counts(&session, true).await;
+        self.runtime_info_for(&session).await
+    }
+
+    /// The settings as a window that shows `session` reads them: Sniper's
+    /// own, and that session's runtime and summary. `active_session` keeps
+    /// its name from when the two were always the same session; its `active`
+    /// says whether the main listener records into it.
+    pub async fn runtime_info_for(&self, session: &Arc<SessionContext>) -> RuntimeInfo {
+        let active_session = session_summary_with_live_counts(
+            session,
+            session.id() == self.sessions.active_session_id(),
+        )
+        .await;
         let active_addr = self.get_active_proxy_addr().await;
         let ui_addr = self.get_active_ui_addr().await;
         RuntimeInfo {
@@ -1826,7 +2731,7 @@ impl AppState {
         artifact_guard.clear_detach_targets();
 
         if let Err(error) = self.prepare_for_self_update_shutdown().await {
-            self.cancel_tcp_shutdown();
+            self.resume_after_cancelled_shutdown().await;
             cleanup_update_artifacts(&[], &tmp_dir).await;
             return Err(error);
         }
@@ -1841,7 +2746,7 @@ impl AppState {
             installer_log,
         ) {
             cleanup_update_artifacts(&[], &tmp_dir).await;
-            self.restore_proxy_after_self_update_prepare_failure().await;
+            self.resume_after_cancelled_shutdown().await;
             return Err(error);
         }
 
@@ -1877,7 +2782,7 @@ impl AppState {
         )
         .await
         .context("failed to persist closed live WebSocket relays before self-update restart");
-        self.abort_proxy_task().await;
+        self.stop_proxy_listeners().await;
         self.set_proxy_online(false);
         crate::proxy::drain_proxy_connections(Duration::from_secs(1)).await;
         crate::proxy::flush_pending_session_persists(self)
@@ -1886,44 +2791,9 @@ impl AppState {
         self.persist_active_session()
             .await
             .context("failed to persist active session before self-update restart")?;
+        self.persist_other_loaded_sessions().await?;
         relay_result?;
         Ok(())
-    }
-
-    async fn restore_proxy_after_self_update_prepare_failure(self: &Arc<Self>) {
-        self.cancel_tcp_shutdown();
-        let proxy_addr = self.get_active_proxy_addr().await;
-        match crate::proxy::rebind_proxy(Arc::clone(self), proxy_addr).await {
-            Ok(()) => {
-                tracing::warn!(
-                    %proxy_addr,
-                    "restored proxy listener after self-update installer spawn failure"
-                );
-            }
-            Err(error) => {
-                self.set_proxy_online(false);
-                let ui_addr = self.get_active_ui_addr().await;
-                if let Err(persist_error) = crate::runtime_state::persist_runtime_state(
-                    &self.config.data_dir,
-                    &crate::runtime_state::RuntimeStateSnapshot::with_proxy_status_and_instance(
-                        proxy_addr,
-                        ui_addr,
-                        false,
-                        self.runtime_instance_id,
-                    ),
-                ) {
-                    tracing::warn!(
-                        ?persist_error,
-                        "failed to persist offline runtime state after self-update installer spawn failure"
-                    );
-                }
-                tracing::warn!(
-                    %error,
-                    %proxy_addr,
-                    "failed to restore proxy listener after self-update installer spawn failure"
-                );
-            }
-        }
     }
 
     fn remove_runtime_state_for_self_update_restart(&self) {
@@ -3023,8 +3893,9 @@ fn proxy_url_targets_loopback(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_release_is_newer, find_update_app_bundle, find_update_app_bundle_in_mounts,
-        native_release_asset_arch, open_self_update_installer_log, parse_codesign_team_identifier,
+        browser_sends_to, ensure_release_is_newer, find_update_app_bundle,
+        find_update_app_bundle_in_mounts, native_release_asset_arch,
+        open_self_update_installer_log, parse_codesign_team_identifier,
         parse_hdiutil_attach_output, proxy_url_targets_loopback,
         release_asset_archs_match_binary_archs, release_asset_matches_arch,
         release_proxy_env_targets_loopback, release_query_failure, release_update_available,
@@ -3502,6 +4373,37 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn creating_a_session_without_activating_moves_nothing() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-create-inactive-{}", uuid::Uuid::new_v4()));
+        let state = AppState::new(AppConfig {
+            proxy_addr: "127.0.0.1:0".parse().unwrap(),
+            ui_addr: "127.0.0.1:0".parse().unwrap(),
+            max_entries: 100,
+            max_transaction_entries: 100,
+            body_preview_bytes: 4096,
+            data_dir: data_dir.clone(),
+        })
+        .unwrap();
+        let before = state.session().await;
+
+        let created = state
+            .create_inactive_session(Some("agent".to_string()))
+            .await
+            .unwrap();
+
+        assert!(!created.active);
+        assert_eq!(created.name, "agent");
+        assert_eq!(state.sessions.active_session_id(), before.id());
+        assert!(Arc::ptr_eq(&state.session().await, &before));
+        let listed = state.list_sessions().await;
+        assert!(listed.iter().any(|s| s.id == created.id && !s.active));
+        assert!(listed.iter().any(|s| s.id == before.id() && s.active));
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
     #[test]
     fn self_update_guard_rejects_concurrent_updates() {
         let data_dir =
@@ -3578,9 +4480,7 @@ mod tests {
         state.prepare_for_self_update_shutdown().await.unwrap();
         assert!(!state.is_proxy_online());
 
-        state
-            .restore_proxy_after_self_update_prepare_failure()
-            .await;
+        state.resume_after_cancelled_shutdown().await;
         assert!(state.is_proxy_online());
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -3814,6 +4714,132 @@ mod tests {
         let summary = serde_json::to_value(&state.list_sessions().await[0]).unwrap();
         assert!(summary.get("overview").is_none() && summary.get("storage_bytes").is_none());
         drop(context);
+        drop(state);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_activity_reports_each_session_running_jobs_and_held_intercepts() {
+        let (data_dir, state) = rename_session_test_state();
+        let first = state.session().await;
+        first.recon.push_running_job_for_test();
+        // Opening another session leaves the first loaded, its job running.
+        let second = state.create_session(Some("Second".into())).await.unwrap();
+        let unopened = state
+            .sessions
+            .create_session(Some("Unopened".into()))
+            .unwrap();
+        let active = state.session().await;
+        let held = tokio::spawn({
+            let active = active.clone();
+            async move {
+                active
+                    .intercepts
+                    .enqueue(crate::intercept::InterceptRecord {
+                        id: uuid::Uuid::new_v4(),
+                        started_at: chrono::Utc::now(),
+                        peer_addr: "127.0.0.1:1".into(),
+                        request: EditableRequest {
+                            scheme: "https".into(),
+                            host: "example.com".into(),
+                            method: "GET".into(),
+                            path: "/".into(),
+                            headers: Vec::new(),
+                            body: String::new(),
+                            body_encoding: BodyEncoding::Utf8,
+                            preview_truncated: false,
+                        },
+                        is_websocket: false,
+                    })
+                    .await
+            }
+        });
+        while active.intercepts.held().await == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let activity = state.session_activity().await;
+        assert_eq!(activity.len(), 3);
+        let entry = |id| activity.iter().find(|entry| entry.id == id).unwrap();
+        assert_eq!(entry(first.id()).running, ["recon"]);
+        assert_eq!(entry(first.id()).held, 0);
+        assert_eq!(entry(second.id).name, "Second");
+        assert!(entry(second.id).running.is_empty());
+        assert_eq!(entry(second.id).held, 1);
+        assert!(entry(unopened.id).running.is_empty());
+        assert_eq!(entry(unopened.id).held, 0);
+
+        active.intercepts.drop_all().await;
+        held.await.unwrap();
+        drop((first, active));
+        drop(state);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    // A browser is wired to the port a session receives from: the main
+    // listener's for the session it records into, or the session's own while
+    // that port is open.
+    #[test]
+    fn a_browser_is_a_sessions_when_it_sends_to_the_port_the_session_receives_from() {
+        let port = |proxy_port, open| crate::session_ports::SessionPortStatus {
+            session_id: uuid::Uuid::nil(),
+            proxy_port,
+            open,
+            proxy_addr: None,
+        };
+        let browsers = [8080, 18081];
+        // The session the main listener records into.
+        assert!(browser_sends_to(true, &port(None, false), 8080, &browsers));
+        assert!(!browser_sends_to(true, &port(None, false), 9090, &browsers));
+        // A session with its own port open.
+        assert!(browser_sends_to(
+            false,
+            &port(Some(18081), true),
+            8080,
+            &browsers
+        ));
+        assert!(!browser_sends_to(
+            false,
+            &port(Some(18082), true),
+            8080,
+            &browsers
+        ));
+        // A port that is kept but closed receives nothing, whatever sends to it.
+        assert!(!browser_sends_to(
+            false,
+            &port(Some(18081), false),
+            8080,
+            &browsers
+        ));
+        assert!(!browser_sends_to(
+            false,
+            &port(None, false),
+            8080,
+            &browsers
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_activity_says_which_session_a_browser_sniper_opened_sends_to() {
+        let (data_dir, state) = rename_session_test_state();
+        let recording = state.session().await.id();
+        let other = state.sessions.create_session(Some("Other".into())).unwrap();
+        let browser = |activity: &[crate::session::SessionActivity], id| {
+            activity
+                .iter()
+                .find(|entry| entry.id == id)
+                .unwrap()
+                .browser
+        };
+        let before = state.session_activity().await;
+        assert!(!browser(&before, recording) && !browser(&before, other.id));
+
+        let main = state.get_active_proxy_addr().await;
+        crate::browser::stand_in_for_a_running_browser(&data_dir, &main.to_string());
+        let after = state.session_activity().await;
+        assert!(browser(&after, recording));
+        assert!(!browser(&after, other.id));
+
         drop(state);
         std::fs::remove_dir_all(data_dir).unwrap();
     }
@@ -4651,29 +5677,225 @@ mod tests {
             local_port: reservation.local_addr().unwrap().port(),
             target_host: "127.0.0.1".into(),
             target_port: 1,
+            ..Default::default()
         };
         drop(reservation);
         let (_start, stop) = tokio::join!(
-            state.configure_tcp_capture(Some(settings.clone()), None, None),
+            state.change_tcp_listeners(
+                crate::tcp_capture::ListenerChange::Start(settings.clone()),
+                None,
+                None
+            ),
             state.stop_background_jobs()
         );
         stop.unwrap();
         assert!(!state.session().await.tcp_capture.status().await.enabled);
         let error = state
-            .configure_tcp_capture(Some(settings.clone()), None, None)
+            .change_tcp_listeners(
+                crate::tcp_capture::ListenerChange::Start(settings.clone()),
+                None,
+                None,
+            )
             .await
             .unwrap_err();
         assert_eq!(
             error.to_string(),
             "TCP capture cannot start while Sniper is shutting down"
         );
-        state.configure_tcp_capture(None, None, None).await.unwrap();
-        state.cancel_tcp_shutdown();
         state
-            .configure_tcp_capture(Some(settings), None, None)
+            .change_tcp_listeners(crate::tcp_capture::ListenerChange::StopAll, None, None)
             .await
             .unwrap();
-        state.configure_tcp_capture(None, None, None).await.unwrap();
+        state.cancel_tcp_shutdown();
+        state
+            .change_tcp_listeners(
+                crate::tcp_capture::ListenerChange::Start(settings),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        state
+            .change_tcp_listeners(crate::tcp_capture::ListenerChange::StopAll, None, None)
+            .await
+            .unwrap();
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A context that an activation loaded stays cached when the activation
+    // does not go through, and a later write or a session port uses it. It
+    // must check its upstream proxy and its TCP relay against Sniper's own
+    // listeners like every other context.
+    #[tokio::test]
+    async fn a_context_loaded_by_a_failed_activation_knows_sniper_s_listeners() {
+        let (data_dir, state) = activation_commit_test_state();
+        let target = state
+            .sessions
+            .create_session(Some("target".to_owned()))
+            .unwrap();
+        state
+            .sessions
+            .fail_next_activation(crate::session::SessionActivationFault::BeforeReplacement);
+        assert!(state.activate_session(target.id).await.is_err());
+
+        let cached = state
+            .session_contexts
+            .lock()
+            .await
+            .get(&target.id)
+            .cloned()
+            .expect("the loaded context stays cached");
+        assert!(!cached.runtime.own_listeners().all().is_empty());
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A window can show a session the main listener does not record into,
+    // and its TCP controls then name that session. They reach it, and a
+    // caller whose guard is stale is still told so.
+    #[tokio::test]
+    async fn a_tcp_relay_change_reaches_the_session_it_names() {
+        let (data_dir, state) = activation_commit_test_state();
+        let active = state.session().await.id();
+        let other = state
+            .create_inactive_session(Some("other".into()))
+            .await
+            .unwrap()
+            .id;
+        let stop = || crate::tcp_capture::ListenerChange::StopAll;
+
+        assert!(state
+            .change_tcp_listeners(stop(), Some(other), None)
+            .await
+            .is_ok());
+        assert_eq!(state.clear_tcp_history(Some(other), None).await.unwrap(), 0);
+        // The session was asked, and has no such connection.
+        let error = state
+            .close_tcp_connection(uuid::Uuid::new_v4(), Some(other), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::tcp_capture::InterceptError::NotFound(_)),
+            "{error}"
+        );
+        // A session that is gone is not found, in either kind of answer.
+        let gone = uuid::Uuid::new_v4();
+        let error = state
+            .change_tcp_listeners(stop(), Some(gone), None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("was not found"), "{error}");
+        let error = state
+            .close_tcp_connection(uuid::Uuid::new_v4(), Some(gone), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::tcp_capture::InterceptError::NotFound(_)),
+            "{error}"
+        );
+
+        let error = state
+            .change_tcp_listeners(stop(), Some(active), Some(other))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().starts_with("active session changed"));
+        assert!(state
+            .change_tcp_listeners(stop(), Some(active), None)
+            .await
+            .is_ok());
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // Closing a session's port is what stops its listeners, so none starts
+    // in a session that has no port and is not the default one.
+    #[tokio::test]
+    async fn a_tcp_listener_does_not_start_in_a_session_nothing_reaches() {
+        let (data_dir, state) = activation_commit_test_state();
+        let other = state
+            .create_inactive_session(Some("other".into()))
+            .await
+            .unwrap()
+            .id;
+        let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+
+        let error = state
+            .change_tcp_listeners_locked(
+                crate::tcp_capture::ListenerChange::Start(crate::tcp_capture::TcpSettings {
+                    local_port: port,
+                    target_host: "127.0.0.1".into(),
+                    target_port: 1,
+                    ..Default::default()
+                }),
+                Some(other),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.is::<crate::session_ports::Refused>(), "{error:#}");
+        let session = state.session_context_for_id(other).await.unwrap();
+        assert!(session.tcp_capture.listener_configs().is_empty());
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A replay can be sent in any session a window shows, and can wait half
+    // a minute for its target. It ends with its session: one left running
+    // would write its record into storage the delete took away.
+    #[tokio::test]
+    async fn deleting_a_session_ends_the_tcp_replay_sent_in_it() {
+        use base64::Engine;
+        let (data_dir, state) = activation_commit_test_state();
+        let other = state
+            .create_inactive_session(Some("other".into()))
+            .await
+            .unwrap()
+            .id;
+        // A target that takes the bytes and never answers.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = silent.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = silent.accept().await {
+                held.push(stream);
+            }
+        });
+        let replaying = state.clone();
+        let replay = tokio::spawn(async move {
+            replaying
+                .replay_tcp(
+                    crate::tcp_capture::ReplayRequest {
+                        target_host: "127.0.0.1".into(),
+                        target_port: port,
+                        tls: false,
+                        messages: vec![base64::engine::general_purpose::STANDARD.encode("ping")],
+                        wait_ms: 30_000,
+                        from: None,
+                    },
+                    Some(other),
+                    None,
+                )
+                .await
+        });
+        let session = state.session_context_for_id(other).await.unwrap();
+        for _ in 0..250 {
+            if session.tcp_capture.connection_count() == Some(1) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(session.tcp_capture.connection_count(), Some(1));
+        let storage = state.session_storage_path(other).unwrap();
+
+        state.delete_session(other).await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), replay)
+            .await
+            .expect("the replay ended with its session")
+            .unwrap()
+            .ok();
+        assert!(!storage.exists());
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -4689,21 +5911,27 @@ mod tests {
         let port = reservation.local_addr().unwrap().port();
         drop(reservation);
         state
-            .configure_tcp_capture(
-                Some(crate::tcp_capture::TcpSettings {
+            .change_tcp_listeners(
+                crate::tcp_capture::ListenerChange::Start(crate::tcp_capture::TcpSettings {
                     local_port: port,
                     target_host: "127.0.0.1".into(),
                     target_port: 1,
+                    ..Default::default()
                 }),
                 Some(original.id()),
                 Some(original.id()),
             )
             .await
             .unwrap();
+        // A change that names the other session leaves this one's alone.
         assert!(state
-            .configure_tcp_capture(None, Some(target.id), Some(original.id()))
+            .change_tcp_listeners(
+                crate::tcp_capture::ListenerChange::StopAll,
+                Some(target.id),
+                Some(original.id())
+            )
             .await
-            .is_err());
+            .is_ok());
         assert!(original.tcp_capture.status().await.enabled);
         state
             .sessions
@@ -4713,6 +5941,54 @@ mod tests {
         assert!(original.tcp_capture.status().await.enabled);
         state.activate_session(target.id).await.unwrap();
         assert!(!original.tcp_capture.status().await.enabled);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
+    async fn tcp_listeners_are_saved_and_follow_the_active_session() {
+        let (data_dir, state) = activation_commit_test_state();
+        let original = state.session().await;
+        let target = state
+            .sessions
+            .create_session(Some("TCP target".to_owned()))
+            .unwrap();
+        let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let status = state
+            .change_tcp_listeners(
+                crate::tcp_capture::ListenerChange::Add(crate::tcp_capture::TcpListenerInput {
+                    enabled: true,
+                    settings: crate::tcp_capture::TcpSettings {
+                        local_port: port,
+                        target_host: "127.0.0.1".into(),
+                        target_port: 1,
+                        ..Default::default()
+                    },
+                }),
+                Some(original.id()),
+                Some(original.id()),
+            )
+            .await
+            .unwrap();
+        let id = status.listeners[0].config.id;
+        assert!(status.listeners[0].running);
+        let saved = std::fs::read_to_string(
+            state
+                .session_storage_path(original.id())
+                .unwrap()
+                .join("state.json"),
+        )
+        .unwrap();
+        assert!(saved.contains(&id.to_string()));
+        state.activate_session(target.id).await.unwrap();
+        assert!(!original.tcp_capture.status().await.enabled);
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+        state.activate_session(original.id()).await.unwrap();
+        let back = state.session().await.tcp_capture.status().await;
+        assert_eq!(back.listeners[0].config.id, id);
+        assert!(back.listeners[0].running);
+        state.session().await.tcp_capture.stop().await.unwrap();
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
@@ -6017,8 +7293,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
+    // Work in a session always runs in its cached context. If that ever
+    // failed to hold, an activation must not load a second context beside it.
     #[tokio::test]
-    async fn activate_session_rejects_target_active_proxy_work_until_owner_dropped() {
+    async fn a_session_with_work_and_no_loaded_context_is_not_loaded_again() {
+        let (data_dir, state) = activation_commit_test_state();
+        let target = state
+            .sessions
+            .create_session(Some("never loaded".to_owned()))
+            .unwrap();
+        let owner = crate::proxy::remember_active_proxy_session_owner(
+            target.id,
+            crate::proxy::PROXY_WORK_REPLAY,
+        );
+
+        let error = state.activate_session(target.id).await.unwrap_err();
+        assert!(error.to_string().contains("no loaded context"), "{error}");
+        assert!(!state.session_contexts.lock().await.contains_key(&target.id));
+
+        drop(owner);
+        assert_eq!(
+            state.activate_session(target.id).await.unwrap().id,
+            target.id
+        );
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // A window that shows a session runs a Replay or a Fuzzer in it while the
+    // main listener records into another. Moving the listener there must not
+    // be refused by that work, and the work goes on in the one context the
+    // session has.
+    #[tokio::test]
+    async fn the_main_listener_moves_to_a_session_the_api_works_in() {
         let data_dir = std::env::temp_dir().join(format!(
             "sniper-activate-target-active-proxy-{}",
             uuid::Uuid::new_v4()
@@ -6032,28 +7338,25 @@ mod tests {
             data_dir: data_dir.clone(),
         })
         .unwrap();
-        let original_id = state.active_session_summary().await.id;
-        let next = state
+        let original = state.session().await;
+        let original_id = original.id();
+        state
             .create_session(Some("Second".to_string()))
             .await
             .unwrap();
 
         let owner = crate::proxy::remember_active_proxy_session_owner(
             original_id,
-            crate::proxy::PROXY_WORK_STREAMED_RESPONSE,
+            crate::proxy::PROXY_WORK_REPLAY,
         );
-        let error = state.activate_session(original_id).await.unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("proxy activity is still running"));
-        assert_eq!(state.active_session_summary().await.id, next.id);
-
-        drop(owner);
         assert_eq!(
             state.activate_session(original_id).await.unwrap().id,
             original_id
         );
+        assert!(crate::proxy::session_has_active_proxy_work(original_id));
+        assert!(Arc::ptr_eq(&state.session().await, &original));
 
+        drop(owner);
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

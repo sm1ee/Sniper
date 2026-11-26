@@ -44,7 +44,7 @@ function fixture() {
   const c = loadFunctions(['renderDashboard', 'sessionFindingCount', 'formatSize', 'escapeHtml'], {
     state, document, els, getSortedSessions: () => state.sessions, formatCappedCount: String,
     retainedEntriesCap() {}, formatTimestamp: () => '-', onClickWithProgress: (btn, fn) => btn.addEventListener('click', fn),
-    withButtonProgress: (btn, fn) => Promise.resolve(fn()), activateSessionById: id => activated.push(id), handleWorkspaceActionError: assert.fail,
+    withButtonProgress: (btn, fn) => Promise.resolve(fn()), viewSessionById: id => activated.push(id), handleWorkspaceActionError: assert.fail,
   });
   c.renderDashboard();
   return { state, document, c, body, activated, rows: () => rows, renders: () => renders };
@@ -99,7 +99,8 @@ test('long session names stay within the cell with a full-name tooltip', () => {
   assert.match(f.body.innerHTML, /title="Saved &quot;review&quot;"/);
   const css = fs.readFileSync(path.join(__dirname, '../web/styles.css'), 'utf8');
   const rule = css.match(/\.session-table \.session-select-button \{([^}]+)\}/)[1];
-  for (const declaration of ['display: block', 'max-width: 100%', 'box-sizing: border-box', 'overflow: hidden', 'text-overflow: ellipsis', 'white-space: nowrap', 'margin: -3px 0']) {
+  // Inline, and narrower than the cell by the port that can sit beside the name.
+  for (const declaration of ['display: inline-block', 'max-width: calc(100% - 64px)', 'box-sizing: border-box', 'overflow: hidden', 'text-overflow: ellipsis', 'white-space: nowrap', 'margin: -3px 0']) {
     assert.ok(rule.includes(declaration), declaration);
   }
 });
@@ -109,10 +110,14 @@ test('Session column budgets leave room for names and both actions without chang
   const css = fs.readFileSync(path.join(__dirname, '../web/styles.css'), 'utf8');
   assert.match(css, /\.history-table\.session-table \{\s*width: 100%;\s*min-width: 1204px;/);
   assert.match(css, /\.session-table thead th \{\s*box-sizing: border-box;/);
-  for (const [column, width] of [[2, 136], [3, 88], [4, 104], [5, 64], [6, 80], [9, 180]]) {
-    assert.ok(css.includes(`.session-table thead th:nth-child(${column}) { width: ${width}px; }`));
+  // Group took its width from the others: the table still fits the default
+  // window beside the session list.
+  const widths = [[2, 104], [3, 128], [4, 88], [5, 96], [6, 64], [7, 80], [8, 136], [9, 120], [10, 156]];
+  for (const [column, width] of widths) {
+    assert.ok(css.includes(`.session-table thead th:nth-child(${column}) { width: ${width}px; }`), `column ${column}`);
   }
-  assert.match(css, /\.session-table thead th:nth-child\(7\),\s*\.session-table thead th:nth-child\(8\) \{ width: 160px; \}/);
+  // 1204 is what the default window leaves beside the list; the name gets the rest.
+  assert.equal(1204 - widths.reduce((sum, [, width]) => sum + width, 0), 232);
   assert.doesNotMatch(css, /\.session-table thead th:nth-child\(1\)\s*\{[^}]*width:/);
   assert.match(css, /\.history-table-shell \{[^}]*overflow: auto;/);
 });

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const vm = require('node:vm');
 const { editorFixture, source, CM } = require('./replay-editor-fixture.cjs');
+const SniperFuzzerWorkflow = require('../web/fuzzer-workflow.js');
 
 function fixture() {
   const f = editorFixture();
@@ -14,12 +15,12 @@ function fixture() {
   Object.assign(f.els, { fuzzerRequestCM: {}, fuzzerPayloadsEditor: { value: '' }, fuzzerMeta: {} });
   f.saves = 0;
   Object.assign(f.context, {
-    renderFuzzerResultsWorkflow() {}, renderFuzzerSetup() {}, renderEmptyFuzzerResults() {},
+    SniperFuzzerWorkflow, renderFuzzerResultsWorkflow() {}, renderFuzzerSetup() {}, renderEmptyFuzzerResults() {},
     renderFuzzerPayloadsEditor() { f.els.fuzzerPayloadsEditor.value = f.state.fuzzerPayloadsText; },
     wireFuzzerMarkerSelection() {}, scheduleFuzzerSetupRender() {},
     scheduleWorkspaceStateSave() { f.saves++; },
   });
-  for (const name of ['renderFuzzer', 'updateFuzzerRequestText', 'markFuzzerDraftChanged']) {
+  for (const name of ['renderFuzzer', 'updateFuzzerRequestText', 'markFuzzerDraftChanged', 'fuzzerBodyIsBinary', 'fuzzerShownText', 'fuzzerStoredText', 'fuzzerDraftShowsBytes']) {
     vm.runInContext(source(name), f.context);
   }
   f.cv = () => f.context.getCMView('fuzzerReq');
@@ -43,7 +44,7 @@ for (const mime of ['application/protobuf','application/cbor','application/msgpa
  let i=f.cv().getContent().indexOf('/a'); f.edit(i,i+2,'/b');
  assert.equal(f.state.fuzzerRequestText.split('\n\n')[1],expected);
  f.undo(); f.redo(); assert.equal(f.state.fuzzerRequestText.split('\n\n')[1],expected);
- i=f.cv().getContent().indexOf(expected); f.edit(i,i+expected.length,'CgNCDQo=');
+ i=f.cv().getContent().lastIndexOf('A'); f.edit(i,i+1,'B');
  assert.equal(f.state.fuzzerRequestText.split('\n\n')[1],'CgNCDQo='); f.undo();
  assert.equal(f.state.fuzzerRequestText.split('\n\n')[1],expected);
  const saved=JSON.parse(JSON.stringify(f.state)); const g=fixture();Object.assign(g.state,saved);g.render();

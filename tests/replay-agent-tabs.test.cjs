@@ -54,16 +54,36 @@ test("the CLI's tabs render on a row of their own under who opened them, and a p
 // A tab that is not selected shows no pin button: an invisible one would sit
 // in front of the name as empty space.
 test("only the selected tab and a pinned one hold a pin button", () => {
-  const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8");
+  const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
   assert.match(css, /\.replay-tab-pin-btn\.idle \{\s*display: none;\s*\}/);
   assert.doesNotMatch(css, /:hover \.replay-tab-pin-btn\.idle/);
   assert.match(css, /\.replay-tab-button\[data-actor\]::before \{[^}]*content: attr\(data-actor\);/);
 });
 
+// Claude and Codex show as a glyph in the name's colour; the screen reader and
+// the tooltip still get the name. Any other name stays text.
+test("Claude and Codex show as a glyph that keeps their name", () => {
+  const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
+  for (const actor of ["Claude", "Codex"]) {
+    // Drawn once, for whatever names the actor: a tab here, a session elsewhere.
+    assert.equal(css.split(`\n[data-actor="${actor}" i] {\n  --actor-glyph: url("data:image/svg+xml,`).length, 2);
+    assert.match(css, new RegExp(`\\.replay-tab-button\\[data-actor="${actor}" i\\]::before \\{[^}]*content: "" / "Opened by ${actor}";`));
+  }
+  const mark = css.match(/\.session-actor:is\(\[data-actor="Claude" i\], \[data-actor="Codex" i\]\) \{([^}]*)\}/)[1];
+  assert.match(mark, /background: currentColor;[^}]*\n  mask: var\(--actor-glyph\)/, "a session's mark is the tab's glyph");
+  const glyph = css.match(/\.replay-tab-button:is\(\[data-actor="Claude" i\], \[data-actor="Codex" i\]\)::before \{([^}]*)\}/)[1];
+  assert.match(glyph, /color: inherit;[^}]*background: currentColor;/, "the name's colour, not the badge's");
+  assert.match(glyph, /\n  mask: var\(--actor-glyph\)/);
+  const { replayTabTooltipLabel } = loadFunctions(["replayTabTooltipLabel"], {});
+  assert.equal(replayTabTooltipLabel({ openedBy: "Codex" }, "1. GET example.com", "1. GET example.com"), "1. GET example.com\nOpened by Codex");
+  assert.equal(replayTabTooltipLabel({ openedBy: "Codex", pinned: true }, "x", "auto"), "auto");
+  assert.equal(replayTabTooltipLabel({ customLabel: "mine" }, "mine", "auto"), "mine");
+});
+
 // A pin sits before the name the way the name of who opened a tab does, with
 // no line between them.
 test("no line separates a tab's pin from its name", () => {
-  const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8");
+  const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
   const rule = css.match(/\n\.replay-tab-pin-btn \{([^}]*)\}/)[1];
   assert.doesNotMatch(rule, /border-right/);
 });
@@ -89,7 +109,7 @@ test("with no tab of the person's, the agent's row shares its line with + and th
   state.replayTabs.push({ id: "a" });
   context.renderReplayTabs();
   assert.deepEqual([...classes], []);
-  const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8");
+  const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
   assert.match(css, /\.replay-tab-rows\.agent-last > \.replay-tab-list-agent \{[^}]*flex: 0 1 auto;/);
 });
 

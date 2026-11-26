@@ -76,7 +76,7 @@ const WEBSOCKET_JOURNAL_FILE: &str = "websockets.journal";
 const MAX_SESSION_NAME_BYTES: usize = 256;
 const MAX_PERSISTED_WEBSOCKET_FRAMES_PER_SESSION: usize = 1_000;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionMetadata {
     pub id: Uuid,
     pub name: String,
@@ -92,6 +92,14 @@ pub struct SessionMetadata {
     pub rule_count: usize,
     #[serde(default)]
     pub overview: SessionOverview,
+    /// Who made the session, when its maker said so: an agent that drives
+    /// sniper-cli. A person in the UI says nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    /// The group the session list shows it under. A group is the sessions
+    /// that carry its name; nothing else is saved for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -124,6 +132,49 @@ pub struct SessionListing {
     /// Retained TCP records, or unknown if their storage cannot be summarized.
     #[serde(default)]
     pub tcp_connection_count: Option<usize>,
+    /// As on `SessionMetadata`. Here and not on the summary, whose fields
+    /// are fixed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+}
+
+/// What a session is doing now, for the session list beside the workspace.
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionActivity {
+    pub id: Uuid,
+    pub name: String,
+    /// Whether the main listener records into the session. A window that
+    /// shows another session learns from this when the listener moves.
+    pub active: bool,
+    /// Jobs running in the session: `fuzzer`, `scan`, `recon`.
+    pub running: Vec<&'static str>,
+    /// Requests, responses and TCP reads Intercept holds for a decision.
+    pub held: usize,
+    /// The proxy port the session keeps for itself until it is deleted.
+    pub proxy_port: Option<u16>,
+    /// Whether that port is open now. Nothing is open after a restart.
+    pub proxy_port_open: bool,
+    /// Whether a browser Sniper opened sends to the session and still runs:
+    /// one wired to the port the session receives from. A browser a person
+    /// pointed at the proxy by hand is not known here.
+    pub browser: bool,
+    /// The session's TCP and UDP listeners that are on, in the order it
+    /// keeps them. None of a session nothing reaches is listed: it runs none.
+    pub tcp: Vec<SessionTcpListener>,
+}
+
+/// A relay listener of a session, for the session list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SessionTcpListener {
+    pub local_port: u16,
+    /// Where it relays to, as `host:port`.
+    pub target: String,
+    pub udp: bool,
+    /// False for one that is on and did not start, such as on a port another
+    /// session's listener holds.
+    pub running: bool,
 }
 
 /// Findings counted by severity.
@@ -459,6 +510,8 @@ struct StoredSessionSnapshot {
     recon: crate::recon::ReconSnapshot,
     #[serde(default)]
     template_scans: crate::templates::scan::TemplateScanSnapshot,
+    #[serde(default, deserialize_with = "deserialize_tcp_listeners_lossy")]
+    tcp_listeners: Vec<crate::tcp_capture::TcpListenerConfig>,
     #[serde(default)]
     oast_callbacks: Option<Vec<crate::oast::OastCallback>>,
     #[serde(default)]
@@ -556,6 +609,31 @@ where
         rule.normalize_restored_activation();
     }
     Ok(rules)
+}
+
+/// A listener this version cannot read, such as one a newer version saved with
+/// options it does not know, is left out rather than run as something else.
+fn deserialize_tcp_listeners_lossy<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<crate::tcp_capture::TcpListenerConfig>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?.unwrap_or_default();
+    Ok(values
+        .into_iter()
+        .filter_map(|value| match serde_json::from_value(value) {
+            Ok(listener) => Some(listener),
+            Err(error) => {
+                warn!(
+                    ?error,
+                    "leaving out a TCP listener this version cannot read"
+                );
+                None
+            }
+        })
+        .take(crate::tcp_capture::MAX_LISTENERS)
+        .collect())
 }
 
 fn deserialize_workspace_state_lossy<'de, D>(
@@ -765,10 +843,13 @@ impl SessionContext {
         if !enable_journal && snapshot.replayed_transaction_deletion {
             store.mark_retention_compaction_pending(transaction_event_sequence);
         }
+        let tcp_capture = crate::tcp_capture::TcpCapture::load(storage_dir.join("tcp-history"));
+        tcp_capture.restore_listeners(snapshot.tcp_listeners);
+        let runtime = Arc::new(RuntimeSettings::from_snapshot(runtime_snapshot.clone()));
+        // Relayed connections follow the session's upstream proxy as it is now.
+        tcp_capture.use_runtime(runtime.clone());
         Self {
-            tcp_capture: Arc::new(crate::tcp_capture::TcpCapture::load(
-                storage_dir.join("tcp-history"),
-            )),
+            tcp_capture: Arc::new(tcp_capture),
             upstream_peer_settings: Default::default(),
             history_retention: Default::default(),
             retention_writable: enable_journal,
@@ -776,7 +857,7 @@ impl SessionContext {
             storage_dir,
             max_entries,
             store,
-            runtime: Arc::new(RuntimeSettings::from_snapshot(runtime_snapshot.clone())),
+            runtime,
             intercepts: Arc::new(InterceptQueue::new()),
             response_intercepts: Arc::new(ResponseInterceptQueue::new()),
             intercept_rules: Arc::new(crate::intercept::InterceptRuleStore::from_rules(
@@ -850,6 +931,12 @@ impl SessionContext {
             #[cfg(test)]
             snapshot_capture_gate: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Whether a save `schedule_state_persist` queued is not written yet.
+    pub(crate) fn state_persist_pending(&self) -> bool {
+        self.state_persist_scheduled.load(Ordering::SeqCst)
+            || self.state_persist_dirty.load(Ordering::SeqCst)
     }
 
     /// Queues a state-only persist and returns immediately.
@@ -1438,6 +1525,7 @@ impl SessionContext {
             sequence_runs: self.sequence.snapshot_runs(Some(self.max_entries)).await,
             recon: self.recon.snapshot(),
             template_scans: self.template_scans.snapshot(),
+            tcp_listeners: self.tcp_capture.listener_configs(),
             oast_callbacks: Some(self.oast.snapshot().await),
             oast_cleared_callback_keys: self.oast.snapshot_cleared_keys().await,
             oast_registration: self.oast.snapshot_registration().await,
@@ -1450,6 +1538,22 @@ impl SessionContext {
             compactable_websocket_journal: false,
             unresolved_websocket_journal: false,
         }
+    }
+
+    /// The jobs running in this session, and how much Intercept holds in it.
+    pub async fn activity(&self) -> (Vec<&'static str>, usize) {
+        let running = [
+            ("fuzzer", self.fuzzer.is_running()),
+            ("scan", self.template_scans.is_running()),
+            ("recon", self.recon.is_running()),
+        ]
+        .into_iter()
+        .filter_map(|(kind, running)| running.then_some(kind))
+        .collect();
+        let held = self.intercepts.held().await
+            + self.response_intercepts.held().await
+            + self.tcp_capture.policy().paused_count;
+        (running, held)
     }
 
     /// This session's overview from its live state. Only the parts it names are
@@ -2038,6 +2142,8 @@ impl SessionRegistry {
                 overview: metadata.overview.clone(),
                 storage_bytes: 0,
                 tcp_connection_count: None,
+                created_by: metadata.created_by.clone(),
+                group: metadata.group.clone(),
             })
             .collect::<Vec<_>>();
         sessions.sort_by_key(|session| std::cmp::Reverse(session.summary.last_opened_at));
@@ -2052,6 +2158,17 @@ impl SessionRegistry {
     }
 
     pub fn create_session(&self, name: Option<String>) -> Result<SessionMetadata> {
+        self.create_session_as(name, None, None)
+    }
+
+    /// `create_session`, with who makes the session and the group it starts
+    /// in.
+    pub fn create_session_as(
+        &self,
+        name: Option<String>,
+        created_by: Option<String>,
+        group: Option<String>,
+    ) -> Result<SessionMetadata> {
         let now = Utc::now();
         let metadata = SessionMetadata {
             id: Uuid::new_v4(),
@@ -2065,6 +2182,8 @@ impl SessionRegistry {
             fuzzer_count: 0,
             rule_count: 0,
             overview: SessionOverview::default(),
+            created_by,
+            group: session_group_name(group.as_deref())?,
         };
 
         persist_session_snapshot(&self.root_dir, &metadata, &StoredSessionSnapshot::default())?;
@@ -2100,6 +2219,65 @@ impl SessionRegistry {
 
     pub fn activate_session(&self, id: Uuid) -> Result<SessionMetadata> {
         self.touch_active_session(id)
+    }
+
+    /// Puts the session in a group, or takes it out when the name is blank
+    /// or missing.
+    pub fn set_session_group(&self, id: Uuid, group: Option<&str>) -> Result<SessionMetadata> {
+        let group = session_group_name(group)?;
+        let mut registry = self.inner.write().expect("session registry lock poisoned");
+        let mut next = registry.clone();
+        let metadata = next
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == id)
+            .ok_or_else(|| anyhow!("session {id} was not found"))?;
+        metadata.group = group;
+        let changed = metadata.clone();
+        self.replace_registry(&mut registry, next)?;
+        Ok(changed)
+    }
+
+    /// Gives every session of a group another name, or none, in one write:
+    /// the group is renamed, joins one there is, or ends. Returns how many
+    /// sessions it had.
+    pub fn rename_session_group(&self, from: &str, to: Option<&str>) -> Result<usize> {
+        let to = session_group_name(to)?;
+        let mut registry = self.inner.write().expect("session registry lock poisoned");
+        let mut next = registry.clone();
+        let mut moved = 0;
+        for session in &mut next.sessions {
+            if session.group.as_deref() == Some(from) {
+                session.group.clone_from(&to);
+                moved += 1;
+            }
+        }
+        if moved == 0 {
+            bail!("session group {from} was not found");
+        }
+        self.replace_registry(&mut registry, next)?;
+        Ok(moved)
+    }
+
+    /// Writes `next` and makes it the registry. One that reached the disk
+    /// without its write being confirmed is the registry all the same.
+    fn replace_registry(
+        &self,
+        registry: &mut SessionRegistrySnapshot,
+        next: SessionRegistrySnapshot,
+    ) -> Result<()> {
+        match self.write_registry_metadata(&next, SessionMetadataWrite::Update) {
+            Ok(()) => {
+                *registry = next;
+                Ok(())
+            }
+            Err(failure) => {
+                if failure.committed {
+                    *registry = next;
+                }
+                Err(failure.error)
+            }
+        }
     }
 
     pub fn rename_session(&self, id: Uuid, name: &str) -> Result<SessionMetadata> {
@@ -2194,6 +2372,8 @@ impl SessionRegistry {
         // A snapshot writer can finish after a rename or activation. These
         // fields belong to the registry, not to the writer's earlier snapshot.
         metadata.name.clone_from(&existing.name);
+        metadata.created_by.clone_from(&existing.created_by);
+        metadata.group.clone_from(&existing.group);
         metadata.created_at = existing.created_at;
         metadata.last_opened_at = existing.last_opened_at;
         metadata.updated_at = metadata.updated_at.max(existing.updated_at);
@@ -2260,6 +2440,36 @@ impl SessionRegistry {
     pub fn contains_session(&self, id: Uuid) -> bool {
         let registry = self.inner.read().expect("session registry lock poisoned");
         registry.sessions.iter().any(|session| session.id == id)
+    }
+
+    /// Tells the registry what a session holds now without saving the session
+    /// in full. A full save does this as it finishes, and a load does when it
+    /// replays the journal. Between the two the session list shows the counts
+    /// of the last full save, so whoever saves less than that says here what
+    /// changed.
+    pub(crate) fn refresh_metadata(
+        &self,
+        id: Uuid,
+        refresh: impl FnOnce(&mut SessionMetadata),
+    ) -> Result<()> {
+        let mut metadata = self
+            .inner
+            .read()
+            .expect("session registry lock poisoned")
+            .sessions
+            .iter()
+            .find(|session| session.id == id)
+            .cloned()
+            .ok_or_else(|| anyhow!("session {id} was not found"))?;
+        let before = metadata.clone();
+        refresh(&mut metadata);
+        // Nothing to tell: the registry is not written, and the session is
+        // not said to have changed now.
+        if metadata == before {
+            return Ok(());
+        }
+        metadata.updated_at = Utc::now();
+        self.update_metadata(metadata)
     }
 
     pub fn delete_session(&self, id: Uuid) -> Result<()> {
@@ -2464,6 +2674,13 @@ impl SessionRegistry {
             snapshot.transaction_locators =
                 write_transactions_file_streaming(&path, &path, &entries)?;
             write_json(&snapshot_path(&storage_dir), &snapshot)?;
+            // Keep state.json at least as fresh as snapshot.json so recovered
+            // scanner findings and closed websockets are not overwritten by a
+            // stale state.json on the next load (even with equal mtimes).
+            let mut state_only = snapshot.clone();
+            state_only.websockets.clear();
+            state_only.transaction_event_sequence = 0;
+            write_json(&state_path(&storage_dir), &state_only)?;
             snapshot.transactions = entries.into_iter().map(|(record, _)| record).collect();
         }
         let mut retention_compaction_pending = false;
@@ -3141,6 +3358,8 @@ fn recovered_session_metadata(
         fuzzer_count: 0,
         rule_count: 0,
         overview: SessionOverview::default(),
+        created_by: None,
+        group: None,
     };
     update_metadata_counts_from_snapshot(
         &mut metadata,
@@ -3165,7 +3384,24 @@ fn default_session_metadata(name: &str) -> SessionMetadata {
         fuzzer_count: 0,
         rule_count: 0,
         overview: SessionOverview::default(),
+        created_by: None,
+        group: None,
     }
+}
+
+/// A group's name as it is kept, held to a session name's rules. None takes
+/// the session out of its group.
+fn session_group_name(group: Option<&str>) -> Result<Option<String>> {
+    let Some(group) = group.map(str::trim).filter(|group| !group.is_empty()) else {
+        return Ok(None);
+    };
+    if group.len() > MAX_SESSION_NAME_BYTES {
+        bail!("session group name cannot exceed {MAX_SESSION_NAME_BYTES} bytes");
+    }
+    if group.chars().any(char::is_control) {
+        bail!("session group name cannot contain control characters");
+    }
+    Ok(Some(group.to_owned()))
 }
 
 /// Validate creation names without changing the caller's raw value or choosing a timestamp.
@@ -4017,6 +4253,8 @@ fn load_session_snapshot_with_mode(
                 full.annotation_client_versions = record.annotation_client_versions;
                 records.push(full);
             } else {
+                let mut record = record;
+                crate::store::strip_transaction_bodies(&mut record);
                 locators.insert(record.id, locator);
                 records.push(record);
             }
@@ -4896,6 +5134,10 @@ fn replay_transaction_journal_file(
                 break;
             }
         };
+        // Advance before any early `continue` for skipped backfill/annotation
+        // entries so a trailing torn line only truncates itself, never valid
+        // complete entries before it.
+        valid_prefix_len = offset;
         *transaction_event_sequence = transaction_event_sequence.saturating_add(1);
         match entry {
             TransactionJournalEntry::Insert { record } => {
@@ -7095,6 +7337,95 @@ mod tests {
             .rename_session(Uuid::new_v4(), "Missing")
             .unwrap_err();
         assert!(error.to_string().contains("was not found"));
+        drop(active);
+        drop(registry);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    // Who made a session and the group it is in belong to the registry, as
+    // its name does. A save of the session carries its own copy of the
+    // record, taken before either was set, and must not put that back.
+    #[tokio::test]
+    async fn a_session_keeps_who_made_it_and_its_group() {
+        let data_dir =
+            std::env::temp_dir().join(format!("sniper-session-group-{}", Uuid::new_v4()));
+        let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+        let made = registry
+            .create_session_as(
+                Some("agent".into()),
+                Some("Claude".into()),
+                Some(" acme ".into()),
+            )
+            .unwrap();
+        assert_eq!(made.created_by.as_deref(), Some("Claude"));
+        assert_eq!(made.group.as_deref(), Some("acme"));
+        let plain = registry.create_session(Some("mine".into())).unwrap();
+        assert_eq!(
+            (plain.created_by.clone(), plain.group.clone()),
+            (None, None)
+        );
+
+        registry.set_session_group(plain.id, Some("acme")).unwrap();
+        let mut stale = made.clone();
+        stale.group = None;
+        stale.created_by = None;
+        stale.request_count = 7;
+        registry.update_metadata(stale).unwrap();
+        let listed = |registry: &SessionRegistry, id: Uuid| {
+            registry
+                .listings()
+                .into_iter()
+                .find(|listing| listing.summary.id == id)
+                .unwrap()
+        };
+        let agent = listed(&registry, made.id);
+        assert_eq!(agent.summary.request_count, 7);
+        assert_eq!(agent.created_by.as_deref(), Some("Claude"));
+        assert_eq!(agent.group.as_deref(), Some("acme"));
+        assert_eq!(listed(&registry, plain.id).group.as_deref(), Some("acme"));
+
+        // A group is renamed for all its sessions at once, and ends with no name.
+        assert_eq!(
+            registry.rename_session_group("acme", Some("beta")).unwrap(),
+            2
+        );
+        assert_eq!(listed(&registry, plain.id).group.as_deref(), Some("beta"));
+        assert!(registry
+            .rename_session_group("acme", Some("beta"))
+            .unwrap_err()
+            .to_string()
+            .contains("was not found"));
+        assert!(registry.rename_session_group("beta", Some("a\nb")).is_err());
+        assert_eq!(
+            registry.rename_session_group("beta", Some("acme")).unwrap(),
+            2
+        );
+
+        // A blank name takes the session out of its group.
+        registry.set_session_group(plain.id, Some("  ")).unwrap();
+        assert_eq!(listed(&registry, plain.id).group, None);
+        assert!(registry.set_session_group(made.id, Some("a\nb")).is_err());
+        assert!(registry
+            .set_session_group(
+                made.id,
+                Some(&"g".repeat(super::MAX_SESSION_NAME_BYTES + 1))
+            )
+            .is_err());
+        assert!(registry
+            .set_session_group(Uuid::new_v4(), Some("acme"))
+            .unwrap_err()
+            .to_string()
+            .contains("was not found"));
+        drop(active);
+        drop(registry);
+
+        let (registry, active) = SessionRegistry::load_or_create(&data_dir, 32, 32).unwrap();
+        let agent = listed(&registry, made.id);
+        assert_eq!(agent.created_by.as_deref(), Some("Claude"));
+        assert_eq!(agent.group.as_deref(), Some("acme"));
+        // A session with neither says neither, where a client reads the list.
+        let plain = serde_json::to_value(listed(&registry, plain.id)).unwrap();
+        assert!(plain.get("group").is_none() && plain.get("created_by").is_none());
         drop(active);
         drop(registry);
         let _ = std::fs::remove_dir_all(data_dir);

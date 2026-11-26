@@ -72,7 +72,7 @@ def done(n):
 up=echo();sessions=[];saved_details={};disk_snapshots={}
 try:
  start();results['baseline_rss_kib']=rss();settings={'local_port':RELAY,'target_host':'127.0.0.1','target_port':up.getsockname()[1]}
- api('/api/tcp/start',settings);exchange(32*1024*1024);row=poll(lambda:done(1))[0];results['large_transfer']={k:row[k] for k in ['client_bytes','server_bytes','captured_bytes','capture_truncated','durable']};results['large_transfer']['rss_kib']=rss();assert row['client_bytes']==row['server_bytes']==32*1024*1024 and row['captured_bytes']==262144 and row['capture_truncated']
+ api('/api/tcp/start',settings);exchange(32*1024*1024);row=poll(lambda:done(1))[0];results['large_transfer']={k:row[k] for k in ['client_bytes','server_bytes','captured_bytes','capture_truncated','durable']};results['large_transfer']['rss_kib']=rss();assert row['client_bytes']==row['server_bytes']==32*1024*1024 and row['captured_bytes']==1048576 and row['capture_truncated']
  api('/api/tcp/stop',method='POST')
  results['session_memory']=[]
  for i in range(SESSIONS):

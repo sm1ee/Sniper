@@ -210,6 +210,30 @@ impl HistoryDirectory {
         Ok(file)
     }
 
+    /// Deletes one record by name, relative to the pinned root.
+    pub(super) fn remove_file(&self, name: &OsStr) -> io::Result<()> {
+        let path = self.child_path(name)?;
+        self.check_current()?;
+        #[cfg(unix)]
+        {
+            use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+            let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| invalid())?;
+            let _ = path;
+            // SAFETY: the directory descriptor and NUL-terminated name stay alive.
+            if unsafe { libc::unlinkat(self.handle.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            if !self.is_regular_entry(name)? {
+                return Err(invalid());
+            }
+            std::fs::remove_file(path)
+        }
+    }
+
     #[cfg(unix)]
     fn open_at(&self, name: &OsStr, flags: i32, mode: libc::mode_t) -> io::Result<File> {
         use std::os::{

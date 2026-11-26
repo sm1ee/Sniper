@@ -274,7 +274,8 @@ async fn root_symlinks_and_replaced_roots_never_read_or_write_external_history()
         .start(TcpSettings {
             local_port: 12345,
             target_host: "127.0.0.1".into(),
-            target_port: 9
+            target_port: 9,
+            ..Default::default()
         })
         .await
         .is_err());

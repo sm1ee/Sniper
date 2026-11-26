@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="web/screenshot.png" width="800" alt="Sniper's HTTP history with synthetic example.com traffic: a tagged POST /v1/cart request and its request and response" />
+  <img src="web/screenshot.png" width="800" alt="Sniper's HTTP history with synthetic example.com traffic: the session list with a pinned session and two groups, a tagged POST /v1/cart request, and its request and response" />
 </p>
 
 <p align="center">
@@ -72,6 +72,20 @@ native Wayland and XWayland are not supported.
 [Linux installation](packaging/linux/README.md) lists the GTK 3 and
 WebKitGTK 4.1 requirements and how to build from source.
 
+### Without a window
+
+The headless server runs the proxy and serves the UI at `http://127.0.0.1:23001`
+with no window: `sniper-server` on macOS (inside the app, and on your `PATH`
+with Homebrew), `sniper` on Windows and Linux. `sniper-cli` finds it through the
+data directory. It stays in the foreground, so put it in the background yourself:
+
+```bash
+nohup sniper-server > ~/sniper-server.log 2>&1 &
+```
+
+One runtime uses a data directory at a time. To run it beside the desktop app,
+give it its own `SNIPER_DATA_DIR`.
+
 ### Build from source
 
 ```bash
@@ -102,15 +116,15 @@ Defaults: the proxy on `127.0.0.1:8080`, the headless server's UI on `127.0.0.1:
 | **Proxy** | HTTP forwarding, HTTPS MITM, upstream HTTP/SOCKS5 proxy chain with login, persistent root CA, `https://sniper` certificate page |
 | **Browsers** | One click opens a browser wired to the proxy and CA, which an AI agent can also drive |
 | **Capture** | HTTP history, WebSocket sessions, intercept queue, match & replace rules, HTML and image responses rendered in a sandbox |
-| **TCP** | A loopback relay to one target for non-HTTP protocols: each connection's bytes as a two-way conversation in Hex or Text, and Intercept to hold, edit, forward or drop them. Set it up in Capture ▸ Settings; it connects directly, without the proxy chain |
+| **TCP** | Relays for non-HTTP protocols: TCP or UDP listeners to a target, with TLS decryption and other devices if you allow them, plus CONNECT tunnels that are not TLS or HTTP. Each connection reads as a conversation in Hex or Text, split into messages and searchable; Intercept holds, edits, forwards or drops reads, and Replay resends them ([guide](docs/guides/tcp-relay.md)) |
 | **Findings** | Passive checks for sensitive data, CORS, missing headers, JWT issues, and the management endpoints and backend addresses the Service Map names. One entry per issue per host, endpoint or value; **Rescan** re-checks captured traffic |
 | **Scan ▸ Recon** | Endpoint discovery per session from a scoped crawler, urlscan and Wayback, with consent per external service and optional limits |
 | **Scan ▸ Active Scan** | Nuclei community templates: turned-on templates check captured in-scope traffic without sending anything; a manual scan sends the ones you pick to targets you name |
 | **Known vulnerabilities** | Advisories for detected front-end library versions, from retire.js, CISA KEV and FIRST EPSS files fetched once a day and matched locally: Info findings and Service Map badges, leads to confirm |
-| **Replay** | Edit and resend any captured request, override host and port, render the response. **Fields** reads Protobuf (without a schema), MessagePack, CBOR and gRPC bodies and edits Protobuf, MessagePack and CBOR request fields; binary bodies stay Base64 in every editor so their bytes never change |
-| **Fuzzer** | Payload lists sent at marked positions (Sniper or Battering ram), in the background with progress, Stop, a delay between requests and a stop on matching responses |
+| **Replay** | Edit and resend any captured request, override host and port, render the response. **Fields** reads Protobuf (without a schema), MessagePack, CBOR and gRPC bodies and edits Protobuf, MessagePack and CBOR request fields. A body that is not text, such as a file upload, is edited one character per byte, as in Burp's Raw view, and bytes left alone are sent unchanged. **Import cURL** reads `-F` forms |
+| **Fuzzer** | Payload lists sent at marked positions (Sniper or Battering ram), also inside a binary body such as a file upload, in the background with progress, Stop, a delay between requests and a stop on matching responses |
 | **Tools** | Decode, encode, hash, JWT inspector, data transformations |
-| **Sessions** | Separate workspaces, each with its own records, scope and state |
+| **Sessions** | Separate workspaces, each with its own records, scope and state, listed beside every tool: one click shows a session, and its row shows where it receives from, held requests and running or finished jobs. A session can capture through a proxy port of its own while the others capture too, with its own browser and TCP listeners. The list groups, pins and sorts sessions, and you choose what a row shows under the name: domains, last capture, created, requests |
 | **Scope** | Host and wildcard filters beside the captured hosts and paths |
 | **Map** | A passive Service Map of captured origins, how they relate, and the APIs they serve |
 | **Themes** | 12 themes: 7 dark, 5 light |
@@ -119,14 +133,14 @@ Defaults: the proxy on `127.0.0.1:8080`, the headless server's UI on `127.0.0.1:
 
 ## Screenshots
 
-All captured from Sniper v0.3.4 with synthetic example.com traffic.
+All captured from Sniper v0.4.0 with synthetic example.com traffic.
 
 ### Session
 
-Each session's size, requests, findings, scope, pins, rules and scans, before you open it.
+A session's size, requests, findings, scope, pins, rules and scans on one page, with a table of every session on the tab beside it. The gear above the session list opens this screen.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.4-session.jpg" width="800" alt="The Session screen: three sessions with their size, requests and findings, and the selected session's scope, busiest hosts, pinned Replay tab, Replace rules, manual scan and findings" />
+  <img src="docs/assets/sniper-v0.4.0-session.jpg" width="800" alt="The session page beside the session list: the open session's requests, findings, last capture and size, its scope, busiest hosts, pinned Replay tab, Replace rule, manual scan and findings by severity. The list has a pinned session, two groups and Default, and shows which sessions receive on which port" />
 </p>
 
 ### Replay
@@ -134,7 +148,7 @@ Each session's size, requests, findings, scope, pins, rules and scans, before yo
 Edit a captured request, send it again and read the answer beside it.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.4-replay.jpg" width="800" alt="Replay with a pinned tab named Cart total check: a POST /v1/cart request on the left and its 201 JSON response on the right" />
+  <img src="docs/assets/sniper-v0.4.0-replay.jpg" width="800" alt="Replay with a pinned tab named Cart total check: a POST /v1/cart request on the left and its 201 JSON response on the right" />
 </p>
 
 ### Scan ▸ Active Scan
@@ -142,7 +156,7 @@ Edit a captured request, send it again and read the answer beside it.
 Run Nuclei templates against targets you name; a match opens with the exchange that proved it.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.4-scan.jpg" width="800" alt="Scan, Active Scan: 14,103 Nuclei templates imported, a finished manual scan of admin.example.com with two matches, and the matched /env request and response" />
+  <img src="docs/assets/sniper-v0.4.0-scan.jpg" width="800" alt="Scan, Active Scan: 14,224 Nuclei templates in the library, a finished manual scan of admin.example.com with three matches, and the matched /actuator/health request and response" />
 </p>
 
 ### Intercept
@@ -150,7 +164,7 @@ Run Nuclei templates against targets you name; a match opens with the exchange t
 Hold a request on its way out, edit it, then forward or drop it.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.4-intercept.jpg" width="800" alt="Intercept holding a POST /v1/cart request in the request queue, with its headers and JSON body open for editing and Drop and Forward buttons" />
+  <img src="docs/assets/sniper-v0.4.0-intercept.jpg" width="800" alt="Intercept, with the session list put away, holding a POST /v1/cart request in the request queue, with its headers and JSON body open for editing and Drop and Forward buttons" />
 </p>
 
 ### Fuzzer
@@ -160,7 +174,7 @@ The [Fuzzer quick start (한국어)](docs/guides/fuzzer-assisted-workflow.ko.md)
 shows what to paste, how to mark a value and how to preview before sending.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.4-fuzzer.jpg" width="800" alt="The Fuzzer with a marked page parameter and its results sorted by status: quote payloads answered 500, others 400" />
+  <img src="docs/assets/sniper-v0.4.0-fuzzer.jpg" width="800" alt="The Fuzzer with a marked page parameter and its results sorted by status: quote payloads answered 500, others 400" />
 </p>
 
 ### Findings
@@ -168,7 +182,7 @@ shows what to paste, how to mark a value and how to preview before sending.
 Passive checks and template matches, each with its evidence highlighted.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.4-findings.jpg" width="800" alt="Findings from passive checks and template matches, with a Spring Boot health endpoint selected and the matched words highlighted in its response" />
+  <img src="docs/assets/sniper-v0.4.0-findings.jpg" width="800" alt="Findings from passive checks and template matches, with a Spring Boot health endpoint selected and the matched words highlighted in its response" />
 </p>
 
 ### Map ▸ Flow
@@ -176,7 +190,7 @@ Passive checks and template matches, each with its evidence highlighted.
 One origin's requests in time order, page load by page load.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.4-flow.jpg" width="800" alt="Map, Flow: the client, www.example.com, api.example.com and auth.example.org as lanes, with each page load's requests and redirects drawn in time order" />
+  <img src="docs/assets/sniper-v0.4.0-flow.jpg" width="800" alt="Map, Flow: the client, www.example.com, api.example.com and auth.example.org as lanes, with each page load's requests and redirects drawn in time order" />
 </p>
 
 ### Tools
@@ -184,7 +198,7 @@ One origin's requests in time order, page load by page load.
 A pasted JWT opens the JWT tool: header and claims decoded, <code>alg: none</code> variants ready.
 
 <p align="center">
-  <img src="docs/assets/sniper-v0.3.4-tools.jpg" width="800" alt="Tools with a JWT pasted in: the JWT tool opened by itself, with the decoded header and claims and alg none variants" />
+  <img src="docs/assets/sniper-v0.4.0-tools.jpg" width="800" alt="Tools with a JWT pasted in: the JWT tool opened by itself, with the decoded header and claims and alg none variants" />
 </p>
 
 ## CLI and AI agents

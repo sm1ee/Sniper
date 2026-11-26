@@ -13,7 +13,7 @@ function fixture(mode) {
     'dropResponseInterceptButton', 'interceptRequestCM', 'interceptResponseCM', 'interceptSearchInput']) els[name] = element();
   els.interceptSearchMeta = null;
   Object.assign(context, { escapeHtml: String, formatTimestamp: String });
-  for (const name of ['renderIntercepts', 'renderResponseIntercepts', 'displayHost', 'extractHostPort', 'defaultSummaryPortForScheme', 'getVisibleRequestInterceptSummaries',
+  for (const name of ['renderIntercepts', 'renderResponseIntercepts', 'writeRows', 'displayHost', 'extractHostPort', 'defaultSummaryPortForScheme', 'getVisibleRequestInterceptSummaries',
     'getInterceptDraftRecovery', 'captureInterceptDraftRecoveryOwners', 'handleInterceptDraftReadFailure', 'takeInterceptDraftRecovery',
     'selectInterceptQueueItem', 'getInterceptDetailRead', 'updateInterceptDetailFeedback', 'retrySelectedInterceptDetail', 'updateInterceptQueueSelectionStatus', 'scrollSelectedInterceptRowIntoView',
     'getVisibleResponseInterceptSummaries', 'reconcileRequestInterceptSelection', 'reconcileResponseInterceptSelection',
@@ -120,8 +120,9 @@ for (const mode of ['request', 'response']) {
   });
 
   test(`${mode}: actual CM restores text alone after unavailable detail, never retired Undo or Redo`, () => {
+    // Recovery keeps the exact text, CRLF included, so a binary body's bytes survive.
     const f = fixture(mode); f.edit('local synthetic draft');
-    const text = f.cv().getContent(), old = f.cv();
+    const text = f.cv().getText(), old = f.cv();
     const recordKey = mode === 'request' ? 'selectedInterceptRecord' : 'selectedResponseInterceptRecord';
     const recoveryKey = mode === 'request' ? 'interceptDraftRecovery' : 'responseInterceptDraftRecovery';
     f.context.handleInterceptDraftReadFailure(mode, 503, {
@@ -131,7 +132,7 @@ for (const mode of ['request', 'response']) {
     f.state[recordKey] = null; f.render();
     assert.equal(f.cv().getContent(), ''); assert.equal(old.view.destroyed, true);
     f.state[recordKey] = f.a; f.render();
-    assert.equal(f.cv().getContent(), text); assert.equal(f.state[recoveryKey], null);
+    assert.equal(f.cv().getText(), text); assert.equal(f.state[recoveryKey], null);
     assert.equal(f.undo(), false); assert.equal(f.redo(), false);
   });
 }

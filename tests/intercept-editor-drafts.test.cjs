@@ -99,7 +99,7 @@ function fixture(mode, cm) {
       writes.push({ key, text });
       if (!views.has(key)) views.set(key, {
         text: "", view: { hasFocus: false, state: { doc: { lines: 1 } } },
-        getContent() { return this.text; }, applySearch() { return { matchCount: 0 }; },
+        getContent() { return this.text; }, getText() { return this.text; }, applySearch() { return { matchCount: 0 }; },
       });
       views.get(key).text = text;
       return { lineCount: 1, matchCount: 0 };
@@ -203,7 +203,7 @@ for (const mode of Object.keys(modes)) for (const cm of [true, false]) {
     await f.load(); f.edit(f.draft); f.blur(); await f.load();
     await f.context[f.config.forward]();
     const sent = f.requests.find(item => item.options.method === "POST");
-    assert.match(sent.url, /\/held-a\/forward\?session_id=session-a&expected_active_session_id=session-a$/);
+    assert.match(sent.url, /\/held-a\/forward\?session_id=session-a$/);
     const body = JSON.parse(sent.options.body);
     assert.equal(body.edited, true);
     if (mode === "request") assert.equal(body.request.path, "/edited");

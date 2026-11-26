@@ -8,7 +8,7 @@ const { appSource } = require('./frontend-test-helpers.cjs');
 const html = fs.readFileSync(path.join(__dirname, '../web/index.html'), 'utf8');
 const css = fs.readFileSync(path.join(__dirname, '../web/styles.css'), 'utf8');
 const markup = html.match(/<table[^>]*id="dashboardSessionsTable"[^]*?<\/thead>/)[0];
-const keys = ['name', 'storage_bytes', 'request_count', 'websocket_count', 'tcp_connection_count', 'finding_count', 'last_captured_at', 'created_at'];
+const keys = ['name', 'group', 'storage_bytes', 'request_count', 'websocket_count', 'tcp_connection_count', 'finding_count', 'last_captured_at', 'created_at'];
 
 function fixture() {
   const state = { sessionSortKey: 'created_at', sessionSortDir: 'desc', selectedSessionId: 'selected' };
@@ -36,7 +36,7 @@ function fixture() {
   return { state, headers, document, render: context.renderDashboard, renders: () => renders };
 }
 
-test('eight native header buttons are tab-reachable; Action is not a control', () => {
+test('nine native header buttons are tab-reachable; Action is not a control', () => {
   for (const key of keys) {
     assert.match(markup, new RegExp(`<th data-sort-key="${key}"[^>]*><button class="session-sort-button" type="button">[^<]+<\\/button><\\/th>`));
   }
@@ -50,7 +50,7 @@ test('native click and header-cell click toggle once with existing defaults', ()
   const f = fixture();
   for (const header of f.headers) {
     f.state.sessionSortKey = 'other';
-    const initial = header.dataset.sortKey === 'name' ? 'asc' : 'desc';
+    const initial = ['name', 'group'].includes(header.dataset.sortKey) ? 'asc' : 'desc';
     const count = f.renders();
     // Enter/Space on native buttons bubble one click; actual key dispatch is browser QA.
     header.listeners.click({ target: header.button });

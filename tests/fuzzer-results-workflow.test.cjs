@@ -691,7 +691,7 @@ function wireSettingsSnapshot(f) {
   for (const name of ['updateUiSettingsServerRevision', 'sanitizeDisplaySettings', 'sanitizeActiveProxyTab',
     'sanitizeHistoryColumnWidths', 'sanitizeHistoryColumnOrder', 'sanitizeHttpQuery', 'sanitizeHttpMethod',
     'sanitizeHttpSortKey', 'sanitizeHttpSortDirection', 'sanitizeHttpFilterSettings', 'sanitizeWorkbenchHeight',
-    'sanitizeWorkbenchPaneWidths', 'sanitizeWebsocketPaneWidth', 'sanitizeServiceMapDetailWidth', 'applyServiceMapDetailWidth',
+    'sanitizeWorkbenchPaneWidths', 'sanitizeWebsocketPaneWidth', 'sanitizeServiceMapDetailWidth', 'sanitizeSessionSidebarWidth', 'applySessionSidebarWidth', 'applyServiceMapDetailWidth',
     'sanitizeWebsocketQuery', 'sanitizeWebsocketSortKey', 'sanitizeWebsocketSortDirection', 'sanitizeWebsocketStackHeight',
     'sanitizeWsReplayLeftWidth', 'sanitizeWsReplayFrameDetailHeight', 'hydrateFilterForm', 'syncColorTagFilterUI',
     'syncHttpInScopePill', 'syncHttpCapturePill', 'hydrateDisplaySettingsForm', 'previewDisplaySettingsFromForm',

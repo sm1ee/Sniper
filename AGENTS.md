@@ -87,11 +87,14 @@ given change, including the parts that are easy to miss.
 | Proxy path, MITM, replay | `src/proxy.rs` |
 | HTTP API and the UI server | `src/api.rs` (largest module, ~17k lines) |
 | Session lifecycle and on-disk format | `src/session.rs`, `src/state.rs` |
+| A proxy port for one session | `src/session_ports.rs` (numbers, the registry, `OwnListeners`), `open_session_port` and `close_session_port` in `src/state.rs`, `serve_session_port` and `end_session_port_work` in `src/proxy.rs`, the `proxy-port` routes in `src/api.rs`, `session port` in `src/bin/sniper-cli.rs` |
+| Who made a session, and its group | `SessionMetadata` and `update_metadata` in `src/session.rs` (both are the registry's own, like the name: a save of the session must not put back its copy), `named_actor` and the `group` route in `src/api.rs`, the header in `api_client_builder` (`src/bin/sniper-cli.rs`), `sessionMakerMark`, `sessionSidebarLayout` and the drag handlers on the list (`web/app.js`), the dragged order in `src/ui_settings.rs`, `[data-actor]` in `web/styles.css` (one glyph for a Replay tab and for a session), `session group` in `src/bin/sniper-cli.rs` |
+| The session list's own choices: pins, sort, what a row shows, kept groups, where Default is, folded sections, width | `sessionSidebarLayout`, `sessionFolderOrder`, `sessionSortOrder`, `sessionRowDetail`, `showSessionViewMenu` and `bindSessionSidebarResizer` (`web/app.js`); `session_pinned`, `session_sort`, `session_row_details`, `session_group_order`, `session_default_after`, `session_sections_collapsed` and `session_sidebar_width` in `src/ui_settings.rs`. They are the UI's alone: the registry and the CLI know none of them. A group no session is in exists only in `session_group_order`, and "Default" is the list's name for the sessions in no group, not a group |
 | Transaction storage, filtering, sorting | `src/store.rs` |
-| Opening a pre-wired browser | `src/browser.rs` (launch, SPKI trust, profile, which browser `auto` picks), `launch_browser` and `set_browser_preference` in `src/api.rs`, the saved default in `src/ui_settings.rs`, `capture browser` in `src/bin/sniper-cli.rs`, the launcher in `web/` (one component mounted by `[data-browser-launcher]`) |
+| Opening a pre-wired browser | `src/browser.rs` (launch, SPKI trust, profile, which browser `auto` picks), `launch_browser` and `set_browser_preference` in `src/api.rs`, the saved default in `src/ui_settings.rs`, `capture browser` in `src/bin/sniper-cli.rs`, the launcher in `web/` (one component mounted by `[data-browser-launcher]`). A browser for a session with its own port: `browser_launch_target` in `src/api.rs`, `LaunchContext::for_session`, and the profiles in `browser-profiles/session-<id>/`, which `recover_driver_ports` and `sweep_session_profiles` read |
 | Scope matching | `src/scope.rs` — **the only matcher**; do not add a second one |
 | Intercept queues | `src/intercept.rs` |
-| TCP relay, its history and intercept | `src/tcp_capture.rs`, `src/tcp_capture/history_io.rs`, `web/tcp-capture.js`; its listener form sits in Capture ▸ Settings (`web/index.html`) |
+| TCP and UDP relay, its history, intercept and replay | `src/tcp_capture.rs`, `src/tcp_capture/history_io.rs`, `web/tcp-capture.js`; its listener form sits in Capture ▸ Settings (`web/index.html`); CONNECT tunnels reach it from `serve_connect_tunnel` in `src/proxy.rs`; `sniper-cli tcp` in `src/bin/sniper-cli.rs`. Which session a change reaches, and when a session's listeners run: `tcp_session` and `change_tcp_listeners` in `src/state.rs`; the list's `tcp:9000` token is `SessionActivity.tcp` (`src/session.rs`) drawn by `sessionSidebarRow` (`web/app.js`) |
 | Frontend | `web/app.js`, `web/index.html`, `web/styles.css` |
 
 Changes that must land in more than one place:
@@ -105,6 +108,24 @@ Changes that must land in more than one place:
   them.
 - **Scope semantics** are shared by the history filter, intercept, and the site
   map. Change `src/scope.rs` and all three follow.
+- **A session has one writable context.** A session port holds it, and every
+  API write to that session resolves to the same `Arc`
+  (`AppState::session_port_context`). Do not load a context for a session
+  another way: a second one on the same directory shows another request's body
+  with no error. This is also what lets a session be written while work runs
+  in it; no check refuses such a write.
+- **A session's relay listeners run while it receives.** They start where a
+  session starts to receive (`start_saved_tcp_listeners`, activation,
+  `open_session_port_as`, `resume_after_cancelled_shutdown`) and stop where it
+  stops (activation, `finish_closing_session_port`, shutdown). A new way for a
+  session to receive must do both. A listener that ran in a session nothing
+  reaches would have nothing to stop it, and a delete would not wait for it.
+- **A window shows a session; it does not follow the active one.** In
+  `web/app.js`, `state.activeSession` is the session on screen and
+  `state.viewedSessionId` the one the next load shows. Read and write by
+  `session_id`, and do not send `expected_active_session_id`. `sessionFeed(id)`
+  says how traffic reaches a session; ask it, not `session.active`, before
+  offering an action the server refuses for a fed session.
 - **A new workspace section** must also be adopted in `adoptExternalWorkspace`
   (`web/app.js`). The app saves the whole workspace at the revision it last
   adopted, so a section it does not adopt puts back what another writer, such
@@ -185,9 +206,17 @@ seriously.
   guard is the only thing standing between a remote listener and someone else's
   captured traffic. Do not remove it, and do not add a path that bypasses it.
   The proxy is one when it listens beyond loopback, since its own connection to
-  the UI comes from this host; it refuses another machine's requests and tunnels
-  to the UI and to the ports the browsers Sniper opened are driven through
-  (`remote_client_targets` in `src/proxy.rs`).
+  the UI comes from this host. For a client on another machine it refuses
+  requests and tunnels to every port Sniper listens on: the UI, the proxy
+  itself, and the ports the browsers Sniper opened are driven through, at any
+  address of this machine and under any name (`remote_client_targets` in
+  `src/proxy.rs`). A new port that Sniper listens on belongs in that list:
+  `OwnListeners` (`src/session_ports.rs`) holds the UI, the proxy listener and
+  every open session port, and each guard reads it. It gives two lists. What
+  another machine is refused (`refused_to_remote`) keeps a listener's address
+  while that listener is down, because the connections it accepted live on.
+  The loop guards (`proxies`, `all`) leave it out then. Tell the guards an
+  address before anything listens on it (`announce`).
 - **Never log captured traffic content** — bodies, headers, cookies, or tokens —
   into event logs, error messages, or temp files.
 - **Never put a real hostname in a test fixture, UI placeholder, or example.**

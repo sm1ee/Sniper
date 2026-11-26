@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 APP_NAME="${APP_NAME:-Sniper}"
 EXPECTED_BUNDLE_IDENTIFIER="${EXPECTED_BUNDLE_IDENTIFIER:-com.sm1ee.sniper}"
-REQUIRED_EXECUTABLES=("$APP_NAME" "sniper-cli")
+REQUIRED_EXECUTABLES=("$APP_NAME" "sniper-cli" "sniper-server")
 
 validate_path_component() {
   local label="$1"
