@@ -2902,14 +2902,14 @@ async fn sniff_tunnel(
     {
         upstream = dial_tunnel_target(session, authority).await.ok();
         if let Some((server, _)) = &upstream {
-            let server_first = tokio::time::timeout(Duration::from_secs(5), async {
-                tokio::select! {
-                    _ = socket.readable() => false,
-                    spoke = speaks(server) => spoke,
-                }
-            })
-            .await
-            .unwrap_or(false);
+            // No limit: with both ends silent the tunnel is not TLS yet. A
+            // mail server may hold its greeting for six seconds on purpose,
+            // and giving up at five took the tunnel for TLS and closed the
+            // target under it. A client that goes away ends the wait.
+            let server_first = tokio::select! {
+                _ = socket.readable() => false,
+                spoke = speaks(server) => spoke,
+            };
             if server_first {
                 return (Box::new(socket), TunnelStart::Other, upstream);
             }
@@ -5185,7 +5185,7 @@ impl StreamedRecordContext {
         body_size: usize,
         notes: Vec<String>,
     ) -> TransactionRecord {
-        let mut response_capture = if body_size > preview.len() {
+        let response_capture = if body_size > preview.len() {
             // Do not attempt content decompression on a truncated wire prefix:
             // multi-member gzip/zstd prefixes could decode partially and leave
             // decoded text marked with `content_decoded = false`.
@@ -5204,7 +5204,6 @@ impl StreamedRecordContext {
             record.body_size = body_size;
             record
         };
-        let _ = &mut response_capture;
         with_auto_color(
             with_record_http_versions(
                 TransactionRecord::http(

@@ -1121,6 +1121,32 @@ async fn a_server_that_speaks_first_through_connect_lands_in_tcp_history() {
     handle.abort();
 }
 
+// A mail server may hold its greeting on purpose: Postfix waits six seconds to
+// catch a client that talks first. With both ends silent the tunnel is not
+// TLS yet, and it waits for whichever speaks.
+#[tokio::test]
+async fn a_server_that_greets_late_through_connect_is_still_relayed() {
+    let (_state, proxy, handle) = start_proxy("connect-late-greeting").await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5500)).await;
+        let _ = socket.write_all(b"220 mail.example.com ready\r\n").await;
+        let mut rest = Vec::new();
+        let _ = socket.read_to_end(&mut rest).await;
+    });
+    let mut tunnel = open_tunnel(proxy, target).await;
+
+    let mut greeting = vec![0; 28];
+    tokio::time::timeout(Duration::from_secs(9), tunnel.read_exact(&mut greeting))
+        .await
+        .expect("the late greeting comes through")
+        .unwrap();
+    assert_eq!(greeting, b"220 mail.example.com ready\r\n");
+    handle.abort();
+}
+
 #[tokio::test]
 async fn plain_http_through_connect_is_recorded_as_http() {
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
