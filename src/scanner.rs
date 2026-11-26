@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        LazyLock, Mutex,
+    },
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -807,15 +810,34 @@ pub fn scan_transaction(record: &TransactionRecord, config: &ScannerConfig) -> V
     findings
 }
 
+/// A custom rule's pattern, compiled the first time a record meets it. Rules
+/// change rarely and every captured record is checked against each of them.
+fn custom_rule_regex(pattern: &str) -> Option<Regex> {
+    static CACHE: LazyLock<Mutex<HashMap<String, Option<Regex>>>> = LazyLock::new(Default::default);
+    let mut cache = CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(compiled) = cache.get(pattern) {
+        return compiled.clone();
+    }
+    // Edited rules leave their old patterns behind; start over rather than
+    // keep every pattern a session ever had.
+    if cache.len() >= 2 * MAX_SCANNER_CUSTOM_RULES {
+        cache.clear();
+    }
+    let compiled = Regex::new(pattern).ok();
+    cache.insert(pattern.to_string(), compiled.clone());
+    compiled
+}
+
 /// Execute a single custom regex rule against the transaction.
 fn check_custom_rule(
     record: &TransactionRecord,
     rule: &CustomRule,
     findings: &mut Vec<ScannerFinding>,
 ) {
-    let re = match Regex::new(&rule.pattern) {
-        Ok(re) => re,
-        Err(_) => return, // invalid pattern — skip silently
+    let Some(re) = custom_rule_regex(&rule.pattern) else {
+        return; // invalid pattern — skip silently
     };
 
     let targets: Vec<(String, Option<FindingLocation>)> = match rule.target.as_str() {
@@ -1272,9 +1294,11 @@ fn is_non_empty_base64url(value: &str) -> bool {
 
 fn extract_jwt_from_text(text: &str) -> Vec<String> {
     // Simple pattern: JWT-looking base64url segments with a JSON-looking header.
-    let re = Regex::new(r"eyJ[A-Za-z0-9_-]*(?:\.|%2[eE])[A-Za-z0-9_-]+(?:\.|%2[eE])[A-Za-z0-9_-]*")
-        .unwrap();
-    re.find_iter(text)
+    static JWT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"eyJ[A-Za-z0-9_-]*(?:\.|%2[eE])[A-Za-z0-9_-]+(?:\.|%2[eE])[A-Za-z0-9_-]*")
+            .unwrap()
+    });
+    JWT.find_iter(text)
         .filter(|m| jwt_body_match_has_token_context(text, m))
         .map(|m| normalize_jwt_token_candidate(m.as_str()))
         .filter(|token| looks_like_jwt(token))
@@ -1998,11 +2022,19 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
         ),
     ];
 
+    // Compiling these for every record was most of the time a capture spent
+    // in the scanner.
+    static COMPILED: LazyLock<Vec<Option<Regex>>> = LazyLock::new(|| {
+        PATTERNS
+            .iter()
+            .map(|&(pattern, _, _)| Regex::new(pattern).ok())
+            .collect()
+    });
     let mut target_repetitions = None;
-    for &(pattern, label, ref severity) in PATTERNS {
-        if let Ok(re) = Regex::new(pattern) {
+    for (&(_, label, ref severity), re) in PATTERNS.iter().zip(COMPILED.iter()) {
+        if let Some(re) = re {
             if label == "Password" {
-                if let Some(span) = password_response_match(body, script, &re) {
+                if let Some(span) = password_response_match(body, script, re) {
                     let mut finding = make_finding(
                         record,
                         severity.clone(),
@@ -2137,8 +2169,10 @@ fn check_internal_ip_disclosure(
     body: &str,
     findings: &mut Vec<ScannerFinding>,
 ) {
-    let re = Regex::new(r"\b(?:10\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)|172\.(?:1[6-9]|2\d|3[01])\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)|192\.168\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d))\b").unwrap();
-    for m in re.find_iter(body) {
+    static INTERNAL_IP: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\b(?:10\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)|172\.(?:1[6-9]|2\d|3[01])\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d)|192\.168\.(?:25[0-5]|2[0-4]\d|1?\d?\d)\.(?:25[0-5]|2[0-4]\d|1?\d?\d))\b").unwrap()
+    });
+    for m in INTERNAL_IP.find_iter(body) {
         if is_embedded_in_base64(body, &m) || !internal_ip_match_has_network_context(body, &m) {
             continue;
         }
@@ -2281,9 +2315,11 @@ fn password_response_match(
     // Discover keys independently: a rejected or malformed earlier literal
     // must not consume a later key. Only quoted candidates are supplemented;
     // the unquoted signature and its filtering remain on the legacy path.
-    let heads = Regex::new(r#"(?i)(?:\b|[_-])(?:password|passwd|pwd)\b\s*["']?\s*[:=]\s*["']"#)
-        .expect("valid password key pattern");
-    for head in heads.find_iter(body) {
+    static HEADS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?i)(?:\b|[_-])(?:password|passwd|pwd)\b\s*["']?\s*[:=]\s*["']"#)
+            .expect("valid password key pattern")
+    });
+    for head in HEADS.find_iter(body) {
         if legacy_match
             .as_ref()
             .is_some_and(|span| head.start() >= span.start)
@@ -3875,10 +3911,11 @@ fn check_info_disclosure(record: &TransactionRecord, findings: &mut Vec<ScannerF
 
     // Source map references
     if javascript_or_css_response(record, response) {
-        let sourcemap_re =
+        static SOURCE_MAP: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"(?m)(?://[#@]|/\*[#@])\s*sourceMappingURL\s*=\s*[^\s*]+\.map\s*(?:\*/)?")
-                .unwrap();
-        if let Some(m) = sourcemap_re.find(body) {
+                .unwrap()
+        });
+        if let Some(m) = SOURCE_MAP.find(body) {
             findings.push(make_finding(
                 record,
                 Severity::Low,
@@ -3904,8 +3941,9 @@ fn check_info_disclosure(record: &TransactionRecord, findings: &mut Vec<ScannerF
 
     // HTML comments with sensitive keywords
     if response_can_contain_html_comments(record, response) {
-        let comment_re = Regex::new(r"<!--[\s\S]{0,500}?-->").unwrap();
-        for m in comment_re.find_iter(body) {
+        static COMMENT: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"<!--[\s\S]{0,500}?-->").unwrap());
+        for m in COMMENT.find_iter(body) {
             let comment = m.as_str().to_ascii_lowercase();
             if let Some(keyword) = sensitive_html_comment_keyword(&comment) {
                 findings.push(make_finding(
@@ -4060,8 +4098,9 @@ fn wsdl_definition_response_detected(body_lower: &str) -> bool {
 
 fn structured_email_disclosure(body: &str) -> Option<String> {
     let json = serde_json::from_str::<serde_json::Value>(body).ok()?;
-    let email_re = Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}").unwrap();
-    find_structured_email(&json, &mut Vec::new(), &email_re)
+    static EMAIL: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}").unwrap());
+    find_structured_email(&json, &mut Vec::new(), &EMAIL)
 }
 
 fn find_structured_email(
@@ -4392,7 +4431,10 @@ fn check_auth_issues(record: &TransactionRecord, findings: &mut Vec<ScannerFindi
     }
 
     // Credentials in URL (userinfo component)
-    if let Ok(cred_re) = Regex::new(r"https?://[^@/\s]+:[^@/\s]+@") {
+    static CREDENTIALS_IN_URL: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"https?://[^@/\s]+:[^@/\s]+@").unwrap());
+    {
+        let cred_re = &*CREDENTIALS_IN_URL;
         // Check request path / referer for credentials
         if cred_re.is_match(&record.path) {
             findings.push(make_finding(
