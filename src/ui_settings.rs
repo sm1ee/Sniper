@@ -415,6 +415,9 @@ pub struct AppUiSettingsSnapshot {
     /// list keeps these while no session is in them. A group not listed
     /// comes after, by name, and lasts while a session carries its name.
     pub session_group_order: Vec<String>,
+    /// The group that Default, the folder of the sessions in no group, was
+    /// left under. Empty is no group: Default is the first folder.
+    pub session_default_after: String,
     /// The width a person dragged the session list to.
     pub session_sidebar_width: Option<u16>,
     /// The sessions kept at the top of the list, by id, in the order pinned.
@@ -467,6 +470,7 @@ impl Default for AppUiSettingsSnapshot {
             session_sections_collapsed: Vec::new(),
             session_order: Vec::new(),
             session_group_order: Vec::new(),
+            session_default_after: String::new(),
             session_sidebar_width: None,
             session_pinned: Vec::new(),
             session_sort: "manual".to_string(),
@@ -556,6 +560,9 @@ impl AppUiSettingsSnapshot {
             .map(str::to_owned)
             .collect();
         sanitized.session_group_order = sanitize_group_names(self.session_group_order);
+        sanitized.session_default_after = sanitize_group_names(vec![self.session_default_after])
+            .pop()
+            .unwrap_or_default();
         sanitized.session_order = sanitize_session_ids(self.session_order);
         sanitized.session_sidebar_width = self
             .session_sidebar_width
@@ -1721,6 +1728,7 @@ mod tests {
         snapshot.session_sidebar_hidden = true;
         snapshot.session_groups_collapsed = vec![" acme ".into(), "acme".into(), "a\nb".into()];
         snapshot.session_group_order = vec!["beta".into(), "acme".into(), "beta".into()];
+        snapshot.session_default_after = " beta ".to_string();
         let dragged = uuid::Uuid::new_v4().to_string();
         snapshot.session_order = vec![dragged.clone(), "not an id".into(), dragged.clone()];
         snapshot.session_sidebar_width = Some(9_999);
@@ -1785,6 +1793,7 @@ mod tests {
         assert!(persisted.session_sidebar_hidden);
         assert_eq!(persisted.session_groups_collapsed, ["acme"]);
         assert_eq!(persisted.session_group_order, ["beta", "acme"]);
+        assert_eq!(persisted.session_default_after, "beta");
         assert_eq!(persisted.session_order, [dragged]);
         assert_eq!(persisted.session_sidebar_width, Some(480));
         assert_eq!(persisted.session_pinned, [pinned]);
@@ -1799,9 +1808,14 @@ mod tests {
         assert_eq!(unknown.session_sort, "manual");
         unknown.session_sort = "by moon phase".to_string();
         unknown.session_sidebar_width = Some(12);
+        // Default begins as the first folder, and a name no group can carry
+        // leaves it there.
+        assert_eq!(unknown.session_default_after, "");
+        unknown.session_default_after = "a\nb".to_string();
         let unknown = unknown.sanitized();
         assert_eq!(unknown.session_sort, "manual");
         assert_eq!(unknown.session_sidebar_width, Some(160));
+        assert_eq!(unknown.session_default_after, "");
         assert_eq!(persisted.websocket_stack_height, Some(345));
         assert_eq!(persisted.ws_replay_left_width, Some(555));
         assert_eq!(persisted.ws_replay_frame_detail_height, Some(222));

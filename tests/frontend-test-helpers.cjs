@@ -47,6 +47,10 @@ function loadFunctions(names, globals = {}) {
       "sessionFeedMenuItems", "sessionMakerMark", "sessionGroupMenuItems"];
     names = [...new Set([...names, ...feed.filter(name => !(name in globals))])];
   }
+  // Whatever draws or moves a folder asks where Default is among the groups.
+  if (names.some(name => ["renderSessionSidebar", "dropSidebarGroup", "renameSessionGroup"].includes(name))) {
+    names = [...new Set([...names, ...["sessionFolderOrder", "sessionSidebarLayout"].filter(name => !(name in globals))])];
+  }
   // Whatever places a session in the list asks which order the list is in.
   if (names.some(name => ["sessionSidebarLayout", "sidebarDropTarget", "dropSidebarSession"].includes(name))) {
     names = [...new Set([...names, "sessionSortOrder"])];

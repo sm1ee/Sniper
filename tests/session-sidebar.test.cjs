@@ -448,8 +448,35 @@ test("a group dropped beside another changes place among the groups", () => {
   assert.deepEqual([...f.state.sessionGroupOrder], ["core", "acme", "beta"]);
   f.context.dropSidebarGroup("core", { group: "beta", after: true });
   assert.deepEqual([...f.state.sessionGroupOrder], ["acme", "beta", "core"]);
+  assert.equal(f.state.sessionDefaultAfter, "", "Default is still first");
   assert.equal(f.renders.length, 2);
   assert.equal(f.saves(), 2);
+});
+
+// Default is a folder among the groups. It is no group, so it is null where a
+// group is its name, and what is kept is the group it comes after.
+test("a group dropped above Default is above it, and Default is moved as a group is", () => {
+  const f = dropFixture([session("l", "01"), session("a1", "02", { group: "acme" }), session("b1", "03", { group: "beta" })]);
+  // Drawn Default, acme, beta.
+  f.context.dropSidebarGroup("beta", { group: null, after: false });
+  assert.deepEqual([...f.state.sessionGroupOrder], ["beta", "acme"]);
+  assert.equal(f.state.sessionDefaultAfter, "beta");
+  // Default itself, dropped under the last group, then back above the first.
+  f.context.dropSidebarGroup(null, { group: "acme", after: true });
+  assert.deepEqual([...f.state.sessionGroupOrder], ["beta", "acme"]);
+  assert.equal(f.state.sessionDefaultAfter, "acme");
+  f.context.dropSidebarGroup(null, { group: "beta", after: false });
+  assert.equal(f.state.sessionDefaultAfter, "");
+  // A group moved from below Default to above it leaves Default under both.
+  f.state.sessionDefaultAfter = "beta";
+  f.context.dropSidebarGroup("acme", { group: "beta", after: false });
+  assert.deepEqual([...f.state.sessionGroupOrder], ["acme", "beta"]);
+  assert.equal(f.state.sessionDefaultAfter, "beta");
+  // The group Default was under, moved below it: Default is under the one before.
+  f.context.dropSidebarGroup("beta", { group: null, after: true });
+  assert.deepEqual([...f.state.sessionGroupOrder], ["acme", "beta"]);
+  assert.equal(f.state.sessionDefaultAfter, "acme");
+  assert.equal(f.saves(), 5);
 });
 
 // A fake of the two things the target reads from an element: the nearest
@@ -499,8 +526,22 @@ test("where a drag may land depends on what is dragged", () => {
   context.sidebarDrag = { group: "acme" };
   assert.deepEqual(at(dragElement({ session: "b", group: "beta", height: 40 }), 30), { element: "group", group: "beta", after: true });
   assert.equal(at(dragElement({ session: "b", group: "acme" }), 5), null);
-  assert.equal(at(dragElement({ session: "b" }), 5), null, "a group has no place among the sessions in none");
+  // Default is a folder among the groups: a group lands beside it, from its
+  // name or from a session in it.
+  assert.deepEqual(at(dragElement({ inDefault: true, height: 40 }), 5), { element: "default", group: null, after: false });
+  assert.deepEqual(at(dragElement({ session: "b", inDefault: true, height: 40 }), 30), { element: "default", group: null, after: true });
+  assert.equal(at(dragElement(), 5), null, "a folder has no place on the space under the list");
   assert.equal(at(dragElement({ session: "p", pinned: true }), 5), null, "nor among the pinned");
+  // Default is dragged as a group is, and lands beside one.
+  context.sidebarDrag = { group: null };
+  assert.deepEqual(at(dragElement({ session: "b", group: "beta", height: 40 }), 30), { element: "group", group: "beta", after: true });
+  assert.equal(at(dragElement({ session: "b", inDefault: true }), 5), null, "not onto itself");
+  assert.equal(at(dragElement({ session: "p", pinned: true }), 5), null);
+  // The drag starts on a row, on a group, or on Default, which carries no
+  // name; the drop goes by which of the two kinds it was.
+  assert.match(appSource, /const item = event\.target\.closest\?\.\("li\[data-drag-session\], li\[data-drag-group\], li\[data-drop-default\]"\);/);
+  assert.match(appSource, /sidebarDrag = item\.dataset\.dragSession \? \{ session: item\.dataset\.dragSession \} : \{ group: item\.dataset\.dragGroup \?\? null \};/);
+  assert.match(appSource, /if \(drag\.session\) dropSidebarSession\(drag\.session, target\)\.catch\(handleWorkspaceActionError\);\n\s*else dropSidebarGroup\(drag\.group, target\);/);
 });
 
 test("renaming a group asks the server once and carries over what was saved for the old name", async () => {
@@ -530,6 +571,22 @@ test("renaming a group asks the server once and carries over what was saved for 
   await context.renameSessionGroup("gamma", null);
   assert.deepEqual([...state.sessionGroupOrder], []);
   assert.equal(requests.length, 2, "nothing more was asked");
+});
+
+test("Default stays under a group that is renamed, and under the one before a group that ends", async () => {
+  // Drawn acme, beta, Default, core.
+  const state = { sessionGroupsCollapsed: [], sessionGroupOrder: ["acme", "beta", "core"], sessionDefaultAfter: "beta", sessions: [] };
+  const context = loadFunctions(["renameSessionGroup"], {
+    state, loadSessions: async () => {}, scheduleUiSettingsSave() {},
+  });
+  await context.renameSessionGroup("beta", "lab");
+  assert.equal(state.sessionDefaultAfter, "lab");
+  await context.renameSessionGroup("core", null);
+  assert.equal(state.sessionDefaultAfter, "lab", "a group under Default ends and Default stays");
+  await context.renameSessionGroup("lab", null);
+  assert.equal(state.sessionDefaultAfter, "acme");
+  await context.renameSessionGroup("acme", null);
+  assert.equal(state.sessionDefaultAfter, "", "with no group above it Default is first");
 });
 
 
@@ -851,14 +908,18 @@ test("the list has a fixed top where a session and a group are made, each a row 
   assert.match(appSource, /els\.sessionSidebarNewGroupButton\.addEventListener\("click", \(\) => openSidebarGroupName\(\{ create: true \}\)\);/);
 });
 
-test("sessions in no group are listed under Default, which is always there and the first folder of Sessions", () => {
+// A folder of Sessions by what its name carries: a group's name, or null for
+// Default.
+const folderNames = html => [...html.matchAll(/data-(?:section="default"|group="([^"]+)") aria-expanded/g)].map(match => match[1] ?? null);
+
+test("sessions in no group are listed under Default, which is always there and the first folder of Sessions until it is moved", () => {
   const f = fixture({ sessions: [session("loose", "01"), session("a1", "05", { group: "acme" })], activeId: "loose" });
   f.context.renderSessionSidebar();
   let html = f.els.sessionSidebarList.innerHTML;
-  // Sessions is the section every folder is in.
-  assert.match(html, /^<li class="session-sidebar-group session-sidebar-section"><div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" data-section="sessions" aria-expanded="true"><span class="session-sidebar-group-name">Sessions<\/span><\/button><\/div><ul class="session-sidebar-folders"><li class="session-sidebar-group session-sidebar-default" data-drop-default><div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" data-section="default" aria-expanded="true"><span class="session-sidebar-group-name">Default<\/span><\/button><button class="session-sidebar-group-add" type="button" data-add-to-group="" aria-label="New session in Default" title="New session in Default">\+<\/button><\/div><ul class="session-sidebar-group-list"><li draggable="true" data-drag-session="loose">/);
+  // Sessions is the section every folder is in. Default is dragged as a group is.
+  assert.match(html, /^<li class="session-sidebar-group session-sidebar-section"><div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" data-section="sessions" aria-expanded="true"><span class="session-sidebar-group-name">Sessions<\/span><\/button><\/div><ul class="session-sidebar-folders"><li class="session-sidebar-group session-sidebar-default" draggable="true" data-drop-default><div class="session-sidebar-group-head"><button class="session-sidebar-group-toggle" type="button" data-section="default" aria-expanded="true"><span class="session-sidebar-group-name">Default<\/span><\/button><button class="session-sidebar-group-add" type="button" data-add-to-group="" aria-label="New session in Default" title="New session in Default">\+<\/button><\/div><ul class="session-sidebar-group-list"><li draggable="true" data-drag-session="loose">/);
   assert.deepEqual(rows(html), ["loose", "a1"]);
-  assert.doesNotMatch(html, /session-sidebar-default" draggable/, "Default keeps its place: it is not dragged");
+  assert.deepEqual(folderNames(html), [null, "acme"]);
   // With every session in a group, Default is still where a new one goes.
   f.state.sessions = [session("a1", "05", { group: "acme" })];
   f.context.renderSessionSidebar();
@@ -866,6 +927,30 @@ test("sessions in no group are listed under Default, which is always there and t
   assert.deepEqual(sectionHeaders(html), [["sessions", "true", "Sessions"], ["default", "true", "Default"]]);
   assert.ok(html.indexOf('data-section="default"') < html.indexOf('data-group="acme"'));
   assert.match(html, /<\/ul><\/li><\/ul><\/li>$/, "the folders close inside Sessions");
+});
+
+test("Default is drawn under the group it was left under, and the place is saved", () => {
+  const f = fixture({
+    sessions: [session("loose", "01"), session("a1", "05", { group: "acme" }), session("b1", "06", { group: "beta" })], activeId: "loose",
+  });
+  f.state.sessionGroupOrder = ["beta", "acme"];
+  f.state.sessionDefaultAfter = "beta";
+  f.context.renderSessionSidebar();
+  let html = f.els.sessionSidebarList.innerHTML;
+  assert.deepEqual(folderNames(html), ["beta", null, "acme"]);
+  assert.deepEqual(rows(html), ["b1", "loose", "a1"]);
+  // Under the last group Default is the last folder.
+  f.state.sessionDefaultAfter = "acme";
+  f.context.renderSessionSidebar();
+  assert.deepEqual(folderNames(f.els.sessionSidebarList.innerHTML), ["beta", "acme", null]);
+  // A group that is no longer there leaves Default first, as it began.
+  f.state.sessionDefaultAfter = "gone";
+  f.context.renderSessionSidebar();
+  html = f.els.sessionSidebarList.innerHTML;
+  assert.deepEqual(folderNames(html), [null, "beta", "acme"]);
+  assert.deepEqual(rows(html), ["loose", "b1", "a1"]);
+  assert.match(appSource, /state\.sessionDefaultAfter = typeof snapshot\?\.session_default_after === "string" \? snapshot\.session_default_after : "";/);
+  assert.match(appSource, /session_group_order: state\.sessionGroupOrder,\n\s*session_default_after: state\.sessionDefaultAfter,/);
 });
 
 test("Pinned, Sessions and Default fold as a group does, and the choice is saved", () => {

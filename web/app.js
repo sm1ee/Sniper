@@ -510,6 +510,9 @@ const state = {
   // list keeps a group named here while no session is in it.
   sessionOrder: [],
   sessionGroupOrder: [],
+  // The group Default was left under, by name. "" is no group: Default is
+  // the first folder.
+  sessionDefaultAfter: "",
   // The sessions kept at the top of the list, by id, in the order pinned.
   sessionPinned: [],
   // How the list orders the sessions of a group; see `sessionSortOrder`.
@@ -2129,12 +2132,12 @@ function bindEvents() {
   });
   // Dragging is wired on the list, which outlives the rows.
   els.sessionSidebarList.addEventListener("dragstart", (event) => {
-    const item = event.target.closest?.("li[data-drag-session], li[data-drag-group]");
+    const item = event.target.closest?.("li[data-drag-session], li[data-drag-group], li[data-drop-default]");
     if (!item) return;
-    sidebarDrag = item.dataset.dragSession ? { session: item.dataset.dragSession } : { group: item.dataset.dragGroup };
+    sidebarDrag = item.dataset.dragSession ? { session: item.dataset.dragSession } : { group: item.dataset.dragGroup ?? null };
     event.dataTransfer.effectAllowed = "move";
     // A type of its own: text/plain would make every text field take the drop.
-    event.dataTransfer.setData("application/x-sniper-session", item.dataset.dragSession || item.dataset.dragGroup);
+    event.dataTransfer.setData("application/x-sniper-session", item.dataset.dragSession || item.dataset.dragGroup || "Default");
     // After the browser has taken the drag image from the row as it is.
     setTimeout(() => { if (sidebarDrag) item.classList.add("dragging"); }, 0);
   });
@@ -2154,8 +2157,8 @@ function bindEvents() {
     if (target) event.preventDefault();
     endSidebarDrag();
     if (!target || !drag) return;
-    if (drag.group) dropSidebarGroup(drag.group, target);
-    else dropSidebarSession(drag.session, target).catch(handleWorkspaceActionError);
+    if (drag.session) dropSidebarSession(drag.session, target).catch(handleWorkspaceActionError);
+    else dropSidebarGroup(drag.group, target);
   });
   els.sessionSidebarList.addEventListener("dragend", endSidebarDrag);
   els.sessionSidebarList.addEventListener("keydown", (event) => {
@@ -10700,7 +10703,8 @@ let sidebarSessionCreating = false;
 let sidebarCreateGroup = null;
 // What the group name field is for; see `openSidebarGroupName`.
 let sidebarGroupEdit = null;
-// What is dragged in the session list: { session: id } or { group: name }.
+// What is dragged in the session list: { session: id }, or a folder as
+// { group: name }, where Default, which is no group, is null.
 let sidebarDrag = null;
 // The element marked as where the drop would land.
 let sidebarDropMark = null;
@@ -10731,10 +10735,10 @@ function renderSessionSidebar() {
     .map((session) => sessionSidebarRow(session, session.id === activeId, editing)).join("");
   // The list has two sections, each under a name that folds. Pinned is
   // there when anything is pinned. Sessions holds all the others
-  // in folders: Default, the sessions in no group, which is always there and
-  // first, then each group. A + beside a folder makes a session in it. The
-  // sections and Default are the list's own: no group has their name, and
-  // they keep their place.
+  // in folders: Default, the sessions in no group, which is always there, and
+  // each group. A + beside a folder makes a session in it. The sections and
+  // Default are the list's own: no group has their name. The sections keep
+  // their place, and Default is dragged among the groups as they are.
   const layout = sessionSidebarLayout();
   const foldedGroups = new Set(state.sessionGroupsCollapsed);
   const foldedSections = new Set(state.sessionSectionsCollapsed);
@@ -10747,13 +10751,16 @@ function renderSessionSidebar() {
     + `${group === null ? "" : `<button class="session-sidebar-group-add" type="button" data-add-to-group="${group}" aria-label="New session in ${label}" title="New session in ${label}">+</button>`}</div>`
     + `${open ? body : ""}</li>`;
   const listed = (sessions) => `<ul class="session-sidebar-group-list">${rows(sessions)}</ul>`;
-  const folders = block(' session-sidebar-default" data-drop-default', 'data-section="default"', "Default",
-    !foldedSections.has("default"), "", listed(layout.loose))
-    + layout.groups.map(([name, sessions]) => {
-      const group = escapeHtml(name);
-      return block(`" draggable="true" data-drag-group="${group}"`, `data-group="${group}"`, group,
-        !foldedGroups.has(name), group, listed(sessions));
-    }).join("");
+  const grouped = new Map(layout.groups);
+  const folders = sessionFolderOrder(layout.groups).map((name) => {
+    if (name === null) {
+      return block(' session-sidebar-default" draggable="true" data-drop-default', 'data-section="default"', "Default",
+        !foldedSections.has("default"), "", listed(layout.loose));
+    }
+    const group = escapeHtml(name);
+    return block(`" draggable="true" data-drag-group="${group}"`, `data-group="${group}"`, group,
+      !foldedGroups.has(name), group, listed(grouped.get(name)));
+  }).join("");
   const markup = (layout.pinned.length
     ? block(' session-sidebar-section session-sidebar-pinned" data-drop-pinned', 'data-section="pinned"', "Pinned",
       !foldedSections.has("pinned"), null, listed(layout.pinned)) : "")
@@ -10886,6 +10893,15 @@ function sessionSidebarLayout() {
   };
 }
 
+// The folders of Sessions in the order they are drawn: each group by its name,
+// and null for Default, which is no group. Default is first until a person
+// drags it, or a group above it; then it follows the group it was left under.
+function sessionFolderOrder(groups = sessionSidebarLayout().groups) {
+  const folders = groups.map(([name]) => name);
+  folders.splice(folders.indexOf(state.sessionDefaultAfter) + 1, 0, null);
+  return folders;
+}
+
 // `ids` with `moved` put before or after `target`, or last when `target` is
 // not among them.
 function reorderedIds(ids, moved, target, after) {
@@ -10897,8 +10913,9 @@ function reorderedIds(ids, moved, target, after) {
 
 // Where the pointer is, for what is dragged. A session lands beside another
 // session, in a group by its name, or on the list itself, which is no group.
-// Among the pinned it lands beside one of them, or on their block. A group
-// lands beside another group. Null where a drop means nothing.
+// Among the pinned it lands beside one of them, or on their block. A folder
+// lands beside another folder: a group, or Default. Null where a drop means
+// nothing.
 function sidebarDropTarget(event) {
   if (!sidebarDrag) return null;
   const row = event.target.closest?.("li[data-drag-session]");
@@ -10908,9 +10925,11 @@ function sidebarDropTarget(event) {
     const box = element.getBoundingClientRect();
     return event.clientY > box.top + box.height / 2;
   };
-  if (sidebarDrag.group) {
-    if (!groupItem || groupItem.dataset.dragGroup === sidebarDrag.group) return null;
-    return { element: groupItem, group: groupItem.dataset.dragGroup, after: lowerHalf(groupItem) };
+  if (!sidebarDrag.session) {
+    const folder = groupItem || event.target.closest?.("li[data-drop-default]");
+    const group = groupItem ? groupItem.dataset.dragGroup : null;
+    if (!folder || group === sidebarDrag.group) return null;
+    return { element: folder, group, after: lowerHalf(folder) };
   }
   if (row?.dataset.dragSession === sidebarDrag.session) return null;
   if (pinnedItem) {
@@ -10977,9 +10996,13 @@ async function dropSidebarSession(id, target) {
   else renderSessionSidebar();
 }
 
+// A folder dropped beside another takes the place next to it. `name` and
+// `target.group` are a group's name, or null for Default. What is kept is
+// the order of the groups, and the group Default comes after.
 function dropSidebarGroup(name, target) {
-  const names = sessionSidebarLayout().groups.map(([group]) => group);
-  state.sessionGroupOrder = reorderedIds(names, name, target.group, target.after);
+  const folders = reorderedIds(sessionFolderOrder(), name, target.group, target.after);
+  state.sessionGroupOrder = folders.filter((folder) => folder !== null);
+  state.sessionDefaultAfter = folders[folders.indexOf(null) - 1] || "";
   renderSessionSidebar();
   scheduleUiSettingsSave();
 }
@@ -10998,6 +11021,10 @@ async function renameSessionGroup(from, to) {
   }
   // What was saved for the old name goes to the new one.
   const renamed = (names) => [...new Set((names || []).flatMap((name) => (name !== from ? [name] : to ? [to] : [])))];
+  // Default stays under the folder it was under, or under the one before a
+  // folder that ended.
+  const folders = renamed(sessionFolderOrder());
+  state.sessionDefaultAfter = folders[folders.indexOf(null) - 1] || "";
   state.sessionGroupsCollapsed = renamed(state.sessionGroupsCollapsed);
   state.sessionGroupOrder = renamed(state.sessionGroupOrder);
   scheduleUiSettingsSave();
@@ -27105,6 +27132,7 @@ function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
   state.sessionSectionsCollapsed = strings(snapshot?.session_sections_collapsed);
   state.sessionOrder = strings(snapshot?.session_order);
   state.sessionGroupOrder = strings(snapshot?.session_group_order);
+  state.sessionDefaultAfter = typeof snapshot?.session_default_after === "string" ? snapshot.session_default_after : "";
   state.sessionPinned = strings(snapshot?.session_pinned);
   state.sessionSort = typeof snapshot?.session_sort === "string" ? snapshot.session_sort : "manual";
   els.replayTabStrip?.classList?.toggle("wrap", state.replayTabsWrap);
@@ -27203,6 +27231,7 @@ function snapshotUiSettings() {
     session_sections_collapsed: state.sessionSectionsCollapsed,
     session_order: state.sessionOrder,
     session_group_order: state.sessionGroupOrder,
+    session_default_after: state.sessionDefaultAfter,
     session_pinned: state.sessionPinned,
     session_sort: state.sessionSort,
     websocket_stack_height: state.websocketStackHeight > 0 ? state.websocketStackHeight : null,

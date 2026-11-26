@@ -710,9 +710,10 @@ listener of Sniper's gets 508, for any client.
 - **A group is renamed in one write** (`POST /api/session-groups/rename`):
   every session of it takes the new name, or none, which ends the group.
 - **The order is the UI's.** A person drags a session beside another, onto a
-  group's name or onto the list, and a group beside another. Which group a
-  session is in goes to the registry; the order of sessions and of groups is
-  kept in the UI settings (`session_order`, `session_group_order`). A session
+  group's name or onto the list, and a folder beside another: a group, or
+  Default. Which group a session is in goes to the registry; the order of
+  sessions and of folders is kept in the UI settings (`session_order`,
+  `session_group_order`, `session_default_after`). A session
   that was never dragged is ahead of the dragged ones, newest first, so a new
   session shows at the top.
 - **sniper-cli** has `session group set|clear|rename|list` and
@@ -755,13 +756,15 @@ else. The registry and sniper-cli know none of it.
   edge, quiet until the pointer is on one.
 - **The list has two sections**, each under a name that folds. Pinned is
   there when anything is pinned. Sessions holds all the others
-  in folders: Default, the sessions in no group, which is always there and
-  first, then a folder for each group, open or shut. The two sections and
+  in folders: Default, the sessions in no group, which is always there, and
+  a folder for each group, open or shut. Default is the first folder until
+  it is dragged, or a group is dragged above it; then it comes after the
+  group it was left under (`session_default_after`). The two sections and
   Default are the list's own (`session_sections_collapsed` says which are
-  folded): no group has their name, they are not dragged, and "Default"
-  typed as a group's name means no group. A session's menu says "Move to
-  Default" for the way out of a group, and the table of all sessions names
-  Default too.
+  folded): no group has their name, the sections are not dragged, and
+  "Default" typed as a group's name means no group. A session's menu says
+  "Move to Default" for the way out of a group, and the table of all
+  sessions names Default too.
 - **A pin shows beside a row under the pointer**, in the place of its mark.
   A click pins the session, or lets a pinned one go. It is beside the row,
   not in it, so the click does not show the session. The row's menu does
