@@ -6141,28 +6141,26 @@ async function reloadSessionWorkspace({ cleanupBeforeReset = true } = {}) {
   }
   await loadTransactions(false);
   if (!isCurrent()) return false;
-  await loadIntercepts(false);
+  // Each of these reads its own part of the session, keeps its own owner and
+  // renders its own panel. Read one after another they were most of a
+  // switch's wait; together they take as long as the slowest. All of them
+  // finish before a failure is reported, so one panel's error does not leave
+  // the others showing the previous session.
+  const results = await Promise.allSettled([
+    loadIntercepts(false),
+    loadResponseIntercepts(false),
+    loadInterceptRules(),
+    loadWebsockets(false),
+    loadEventLog(),
+    loadMatchReplaceRules(),
+    loadSequences(),
+    loadTargetSiteMap(true),
+    state.activeTool === "proxy" && state.activeProxyTab === "oast" ? loadOastCallbacks() : null,
+    refreshScannerQuickToggle(),
+  ]);
   if (!isCurrent()) return false;
-  await loadResponseIntercepts(false);
-  if (!isCurrent()) return false;
-  await loadInterceptRules();
-  if (!isCurrent()) return false;
-  await loadWebsockets(false);
-  if (!isCurrent()) return false;
-  await loadEventLog();
-  if (!isCurrent()) return false;
-  await loadMatchReplaceRules();
-  if (!isCurrent()) return false;
-  await loadSequences();
-  if (!isCurrent()) return false;
-  await loadTargetSiteMap(true);
-  if (!isCurrent()) return false;
-  if (state.activeTool === "proxy" && state.activeProxyTab === "oast") {
-    await loadOastCallbacks();
-    if (!isCurrent()) return false;
-  }
-  await refreshScannerQuickToggle();
-  if (!isCurrent()) return false;
+  const failure = results.find((result) => result.status === "rejected");
+  if (failure) throw failure.reason;
   connectEvents();
   renderToolPanels();
 }
