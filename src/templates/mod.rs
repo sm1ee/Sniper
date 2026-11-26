@@ -45,9 +45,13 @@ const MAX_EVIDENCE_CHARS: usize = 120;
 /// Whether passive templates judge this record: a response to an HTTP
 /// request whose host is in a scope the operator has set. An empty include
 /// list means everything to the rest of Sniper; for templates nobody chose
-/// to point anywhere, it means nothing. Media is never a template's target.
+/// to point anywhere, it means nothing. Media is never a template's target,
+/// and neither is an answer Sniper wrote itself, which names the request's URL.
 pub fn passive_applies(record: &TransactionRecord, include: &[String], exclude: &[String]) -> bool {
-    if !matches!(record.kind, TrafficKind::Http) || include.is_empty() || record.response.is_none()
+    if !matches!(record.kind, TrafficKind::Http)
+        || include.is_empty()
+        || record.response.is_none()
+        || crate::scanner::response_is_snipers_own(record)
     {
         return false;
     }

@@ -738,7 +738,7 @@ fn is_base64_char(b: u8) -> bool {
 /// it is the target's. One record in twenty of thirteen sessions of real use
 /// was such an answer, read as a server with an internal address, a key and no
 /// cache policy.
-fn response_is_snipers_own(record: &TransactionRecord) -> bool {
+pub(crate) fn response_is_snipers_own(record: &TransactionRecord) -> bool {
     let Some(response) = &record.response else {
         return false;
     };
@@ -8001,6 +8001,23 @@ mod tests {
         assert!(own(vec!["Rule (response): synthetic".to_string()])
             .iter()
             .any(|title| title.starts_with("Internal IP address")));
+    }
+
+    // A passive template judges an answer, and this one is not the target's:
+    // a key in the URL that the line names would be a key the server leaked.
+    #[test]
+    fn a_passive_template_does_not_judge_an_answer_sniper_wrote() {
+        let message = "Upstream request failed: connection refused";
+        let mut record = make_record(
+            vec![],
+            vec![("content-type", "text/plain; charset=utf-8")],
+            message,
+            502,
+        );
+        let scope = ["example.com".to_string()];
+        assert!(crate::templates::passive_applies(&record, &scope, &[]));
+        record.notes = vec![message.to_string()];
+        assert!(!crate::templates::passive_applies(&record, &scope, &[]));
     }
 
     // What the request itself carries is still read when Sniper answered.
