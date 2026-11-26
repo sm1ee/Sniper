@@ -573,12 +573,23 @@ pub(crate) async fn bind_announced(
     Ok((listener, announced))
 }
 
+/// Whether the first bind already asks for `SO_REUSEADDR`.
+///
+/// Linux needs it there. It refuses a bind beside a listener that is up
+/// whatever the option says, so the option lets nothing in. And it counts a
+/// closed listener's last connections against a new bind unless both sides had
+/// the option: those connections inherit it from the listener that accepted
+/// them. A listener bound without it left its port taken for a minute after it
+/// closed, and asking for the option only on the second try did not help.
+const REUSE_ON_THE_FIRST_BIND: bool = cfg!(target_os = "linux");
+
 /// Binds a listener that nothing else answers on.
 ///
 /// `SO_REUSEADDR` lets a loopback bind succeed on macOS beside another
 /// program's listener on every interface, and it then takes that program's
-/// loopback traffic. So the bind is made without the option, and an address
-/// something already answers on is refused. Without the option a port also
+/// loopback traffic. So the bind is made without the option, except on Linux
+/// (`REUSE_ON_THE_FIRST_BIND`), and an address something already answers on
+/// is refused. Without the option a port also
 /// stays taken while its last connections wait out their close. Only then,
 /// with nothing answering, is the option used, so a port that was closed opens
 /// again at once.
@@ -591,7 +602,7 @@ pub(crate) async fn bind_exclusive(addr: SocketAddr) -> std::io::Result<TcpListe
     if answers(addr).await {
         return Err(taken());
     }
-    match bind(addr, false) {
+    match bind(addr, REUSE_ON_THE_FIRST_BIND) {
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
             if answers(addr).await {
                 return Err(taken());

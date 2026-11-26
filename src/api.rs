@@ -7230,6 +7230,16 @@ struct LaunchTarget {
     opened: Option<u64>,
 }
 
+/// The answer to a browser asked for the session the proxy listener records
+/// into while that listener is down.
+fn proxy_down_response() -> Response {
+    (
+        StatusCode::CONFLICT,
+        "the proxy is not listening, so a browser opened now would have nowhere to send its traffic",
+    )
+        .into_response()
+}
+
 async fn browser_launch_target(
     state: &AppState,
     session_id: Option<Uuid>,
@@ -7240,11 +7250,7 @@ async fn browser_launch_target(
     let session = session_id.filter(|id| *id != state.sessions.active_session_id());
     let Some(session) = session else {
         if !state.is_proxy_online() {
-            return Err((
-                StatusCode::CONFLICT,
-                "the proxy is not listening, so a browser opened now would have nowhere to send its traffic",
-            )
-                .into_response());
+            return Err(proxy_down_response());
         }
         return Ok(LaunchTarget {
             proxy_addr: main_proxy_addr,
@@ -7387,6 +7393,14 @@ async fn launch_browser(
         agent: payload.agent,
     };
     let preferred = preferred_browser(&state).await;
+    // Said first: it is so whatever browsers this machine has, and a machine
+    // with none answered "not installed" for a listener that was down.
+    let for_listener = payload
+        .session_id
+        .map_or(true, |id| id == state.sessions.active_session_id());
+    if for_listener && !state.is_proxy_online() {
+        return proxy_down_response();
+    }
     // Asked before the session's port is opened. A launch refused for what it
     // asks would otherwise leave the session with a number it keeps for good.
     {
