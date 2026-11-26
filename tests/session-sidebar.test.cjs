@@ -830,7 +830,7 @@ test("the list's menu button shows that a sort is on, so a drag that keeps no pl
 });
 
 // ── the tidied list: a fixed top, and every session under a section ──
-const indexHtml = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
+const indexHtml = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8").replace(/\r\n/g, "\n");
 const sectionHeaders = html => [...html.matchAll(
   /class="session-sidebar-group-toggle" type="button" data-section="([a-z]+)" aria-expanded="(true|false)"><span class="session-sidebar-group-name">([^<]+)<\/span><\/button>/g,
 )].map(match => match.slice(1));
@@ -845,7 +845,7 @@ test("the list has a fixed top where a session and a group are made, each a row 
   // title is not that word.
   const header = sidebar.match(/<header class="session-sidebar-header">([^]*?)<\/header>/)[1];
   assert.match(header, /^\s*<span class="session-sidebar-title">List<\/span>\s*<span class="session-sidebar-actions">[^]*<\/span>\s*$/);
-  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
   assert.match(css, /^\.session-sidebar-header \{[^}]*justify-content: space-between;/m);
   assert.match(css, /^\.session-sidebar-title \{/m);
   assert.match(appSource, /els\.sessionSidebarNewGroupButton\.addEventListener\("click", \(\) => openSidebarGroupName\(\{ create: true \}\)\);/);
@@ -924,7 +924,7 @@ test("which sections are folded is read from the settings and written back", () 
 });
 
 test("the top rows and the section names are styled as the list's own", () => {
-  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
   assert.match(css, /^\.session-sidebar-top \{[^}]*border-bottom: 1px solid var\(--line\);/m);
   assert.match(css, /^\.session-sidebar-action \{[^}]*display: flex;[^}]*width: 100%;/m);
   assert.doesNotMatch(css, /session-sidebar-pinned-list/, "one list under every name");
@@ -964,7 +964,7 @@ test("a row begins with what the session is doing: a job running, one that ended
 });
 
 test("the mark is in the column of a group's caret, and the rows run the list's width", () => {
-  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
   const rule = selector => css.match(new RegExp(`^${selector.replace(/[.:[\]="]/g, "\\$&")} \\{[^}]*\\}`, "m"))?.[0] || "";
   assert.match(rule(".session-sidebar-group-list"), /padding: 0;/, "no indent: the mark's place is the indent");
   // The place is as wide as a folder's icon, which is in the same column.
@@ -1005,7 +1005,7 @@ test("a row shows that a browser Sniper opened is sending to the session, before
     { id: "b", name: "Session b", running: [], held: 0, active: false },
   ]);
   assert.doesNotMatch(rowsNow().a, /session-sidebar-browser/);
-  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
   assert.match(css, /^\.session-sidebar-browser \{[^}]*mask: url\("data:image\/svg\+xml,[^}]*background: var\(--text-dim\);/m);
 });
 
@@ -1043,7 +1043,7 @@ test("a row shows the port a session relays TCP from, and its tooltip where to",
   ]);
   assert.match(rowsNow().a, /<span class="session-sidebar-tcp" title="UDP :9000 → &#60;b&#62;:1">udp:9000<\/span>/);
   assert.doesNotMatch(rowsNow().b, /session-sidebar-tcp/);
-  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
   assert.match(css, /^\.session-sidebar-tcp \{[^}]*color: var\(--text-dim\);[^}]*font-size: var\(--font-xs\);[^}]*font-variant-numeric: tabular-nums;/m);
   assert.match(css, /^\.session-sidebar-tcp\.failed \{\s*color: var\(--danger\);/m);
 });
@@ -1061,7 +1061,7 @@ test("a row has a pin beside it that shows under the pointer, and says whether t
   f.state.sessionRename = { id: "a", draft: "x", place: "sidebar" };
   f.context.renderSessionSidebar();
   assert.equal(f.els.sessionSidebarList.innerHTML.match(/class="session-sidebar-pin"/g).length, 1);
-  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
   assert.match(css, /^\.session-sidebar-pin \{[^}]*position: absolute;[^}]*opacity: 0;/m);
   assert.match(css, /^\.session-sidebar-list li:hover > \.session-sidebar-pin,\n\.session-sidebar-pin:focus-visible \{\s*opacity: 1;/m);
   // Under the pointer the pin takes the place of the mark.

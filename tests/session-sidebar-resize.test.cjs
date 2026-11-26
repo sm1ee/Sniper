@@ -6,8 +6,8 @@ const path = require("node:path");
 const test = require("node:test");
 const { appSource, loadFunctions } = require("./frontend-test-helpers.cjs");
 
-const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
-const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8").replace(/\r\n/g, "\n");
+const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
 
 function fixture(width = 208) {
   const state = { sessionSidebarWidth: null };

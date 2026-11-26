@@ -7,8 +7,8 @@ const path = require("node:path");
 const test = require("node:test");
 const { loadFunctions } = require("./frontend-test-helpers.cjs");
 
-const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8");
-const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8");
+const html = fs.readFileSync(path.join(__dirname, "../web/index.html"), "utf8").replace(/\r\n/g, "\n");
+const css = fs.readFileSync(path.join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
 
 function element(dataset = {}) {
   const classes = new Set(), attributes = {};
