@@ -834,7 +834,7 @@ fn library_lookup(
     let index = service_map_body_row_index(inner, &key).ok()?;
     let record = &inner.entries[index];
     let response = record.response.as_ref()?;
-    if BodySource::from_text_record(record).is_err() {
+    if !BodySource::text_record_is_readable(record) {
         caches.rows.insert(row_key, Vec::new());
         return Some(Ok(Vec::new()));
     }

@@ -131,6 +131,23 @@ pub(crate) struct BodySource {
     content_decoded: bool,
 }
 
+const TEXT_RECORD_TYPES: &[&str] = &[
+    "text/html",
+    "application/xhtml+xml",
+    "application/javascript",
+    "text/javascript",
+    "application/ecmascript",
+    "text/ecmascript",
+    "application/x-javascript",
+    "application/json",
+    "application/problem+json",
+    "application/hal+json",
+    "application/vnd.api+json",
+    "text/plain",
+    "application/xml",
+    "text/xml",
+];
+
 impl BodySource {
     pub(crate) fn from_record(record: &TransactionRecord) -> Result<Self, &'static str> {
         Self::from_record_for_types(
@@ -148,31 +165,15 @@ impl BodySource {
         )
     }
 
-    /// Pages and scripts, and the error, root and API-document responses whose
-    /// text can name the servers behind them.
-    pub(crate) fn from_text_record(record: &TransactionRecord) -> Result<Self, &'static str> {
-        Self::from_record_for_types(
-            record,
-            &[
-                "text/html",
-                "application/xhtml+xml",
-                "application/javascript",
-                "text/javascript",
-                "application/ecmascript",
-                "text/ecmascript",
-                "application/x-javascript",
-                "application/json",
-                "application/problem+json",
-                "application/hal+json",
-                "application/vnd.api+json",
-                "text/plain",
-                "application/xml",
-                "text/xml",
-            ],
-            // Scanned for ASCII signatures only, so a page stored as base64
-            // because it is not UTF-8 (an EUC-KR page) is read too.
-            true,
-        )
+    /// Whether a record is a page or a script, or an error, root or
+    /// API-document response, whose text can name the servers behind it. It
+    /// is scanned for ASCII signatures only, so a page stored as base64
+    /// because it is not UTF-8 (an EUC-KR page) is read too. The caller holds
+    /// the record's map row, and a row exists only where the request projects,
+    /// so the record is not projected again: doing so was a fifth of a map's
+    /// build.
+    pub(crate) fn text_record_is_readable(record: &TransactionRecord) -> bool {
+        Self::check_record_for_types(record, TEXT_RECORD_TYPES, true).is_ok()
     }
 
     pub(crate) fn from_html_record(record: &TransactionRecord) -> Result<Self, &'static str> {
@@ -188,6 +189,25 @@ impl BodySource {
         content_types: &[&str],
         any_encoding: bool,
     ) -> Result<Self, &'static str> {
+        Self::check_record_for_types(record, content_types, any_encoding)?;
+        let response = record.response.as_ref().ok_or("response_unavailable")?;
+        let row = project_record(record, String::new()).ok_or("unsupported_metadata")?;
+        Ok(Self {
+            origin: row.origin,
+            sequence: record.sequence,
+            started_at: record.started_at,
+            body_size: response.body_size,
+            decoded_body_size: response.decoded_body_size,
+            capture_preview_truncated: response.preview_truncated,
+            content_decoded: response.content_decoded,
+        })
+    }
+
+    fn check_record_for_types(
+        record: &TransactionRecord,
+        content_types: &[&str],
+        any_encoding: bool,
+    ) -> Result<(), &'static str> {
         let response = record.response.as_ref().ok_or("response_unavailable")?;
         // An encoding hidden beyond the metadata cap must not be assumed absent.
         // One long value hides nothing: every name is still read below, and a
@@ -234,16 +254,7 @@ impl BodySource {
         {
             return Err("unsupported_content_encoding");
         }
-        let row = project_record(record, String::new()).ok_or("unsupported_metadata")?;
-        Ok(Self {
-            origin: row.origin,
-            sequence: record.sequence,
-            started_at: record.started_at,
-            body_size: response.body_size,
-            decoded_body_size: response.decoded_body_size,
-            capture_preview_truncated: response.preview_truncated,
-            content_decoded: response.content_decoded,
-        })
+        Ok(())
     }
 
     pub(crate) fn expected_preview_bytes(&self) -> Option<usize> {
