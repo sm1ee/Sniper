@@ -15915,7 +15915,7 @@ function renderIntercepts() {
               <td class="iq-col-method">${escapeHtml(item.method)}</td>
               <td class="iq-col-host text-truncate">${escapeHtml(displayHost(item.host, item.scheme))}</td>
               <td class="iq-col-path text-truncate">${escapeHtml(item.path || "/")}</td>
-              <td class="iq-col-time">${escapeHtml(formatTimestamp(item.started_at))}</td>
+              <td class="iq-col-time" title="${escapeHtml(formatTimestamp(item.started_at))}">${escapeHtml(formatHeldTime(item.started_at))}</td>
             </tr>
           `;
         })
@@ -23004,7 +23004,7 @@ function renderResponseIntercepts() {
               <td class="iq-col-method">${escapeHtml(item.method)}</td>
               <td class="iq-col-host text-truncate">${escapeHtml(displayHost(item.host, item.scheme))}</td>
               <td class="iq-col-path text-truncate">${escapeHtml(item.path || "/")}</td>
-              <td class="iq-col-time">${escapeHtml(formatTimestamp(item.started_at))}</td>
+              <td class="iq-col-time" title="${escapeHtml(formatTimestamp(item.started_at))}">${escapeHtml(formatHeldTime(item.started_at))}</td>
             </tr>
           `;
         })
@@ -31065,6 +31065,14 @@ function formatTimestamp(value) {
     return "-";
   }
   return HISTORY_TIME_FORMATTER.format(date);
+}
+
+// When Intercept took hold of a message, as its queue says it: the time of
+// day. A hold is minutes old, so the day is only in the cell's tooltip.
+function formatHeldTime(value) {
+  const date = new Date(value ?? NaN);
+  if (!Number.isFinite(date.getTime())) return "-";
+  return date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
 }
 
 function formatSize(bytes) {

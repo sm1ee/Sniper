@@ -68,6 +68,10 @@ function loadFunctions(names, globals = {}) {
   // The lists read on a timer write their rows through one function.
   const rowWriters = ["renderFindings", "renderFindingsVirtual", "renderOastCallbacks", "renderIntercepts", "renderResponseIntercepts"];
   if (names.some(name => rowWriters.includes(name)) && !("writeRows" in globals)) names = [...new Set([...names, "writeRows"])];
+  // The two Intercept queues say when each message was held.
+  if (names.some(name => ["renderIntercepts", "renderResponseIntercepts"].includes(name)) && !("formatHeldTime" in globals)) {
+    names = [...new Set([...names, "formatHeldTime"])];
+  }
   for (const name of names) {
     assert.match(name, /^[A-Za-z_$][\w$]*$/);
     const match = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, "m"));

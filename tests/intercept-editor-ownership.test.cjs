@@ -12,7 +12,7 @@ function fixture(mode) {
     'interceptMeta', 'forwardInterceptButton', 'dropInterceptButton', 'forwardResponseInterceptButton',
     'dropResponseInterceptButton', 'interceptRequestCM', 'interceptResponseCM', 'interceptSearchInput']) els[name] = element();
   els.interceptSearchMeta = null;
-  Object.assign(context, { escapeHtml: String, formatTimestamp: String });
+  Object.assign(context, { escapeHtml: String, formatTimestamp: String, formatHeldTime: String });
   for (const name of ['renderIntercepts', 'renderResponseIntercepts', 'writeRows', 'displayHost', 'extractHostPort', 'defaultSummaryPortForScheme', 'getVisibleRequestInterceptSummaries',
     'getInterceptDraftRecovery', 'captureInterceptDraftRecoveryOwners', 'handleInterceptDraftReadFailure', 'takeInterceptDraftRecovery',
     'selectInterceptQueueItem', 'getInterceptDetailRead', 'updateInterceptDetailFeedback', 'retrySelectedInterceptDetail', 'updateInterceptQueueSelectionStatus', 'scrollSelectedInterceptRowIntoView',

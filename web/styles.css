@@ -7553,8 +7553,10 @@ button.utility-button.replay-tab-add {
 .mini-table.intercept-queue-table {
   font-size: var(--font-xs);
   /* Keep identity columns readable in both queues; narrower panes scroll
-     inside their existing table shell instead of crushing every column. */
-  min-width: 520px;
+     inside their existing table shell instead of crushing every column.
+     472px is the queue's box beside the session list in a window 1280 wide,
+     so that window shows every column with no scroll. */
+  min-width: 472px;
 }
 
 .intercept-queue-table td,
@@ -7564,7 +7566,7 @@ button.utility-button.replay-tab-add {
   text-overflow: ellipsis;
 }
 
-.iq-col-method { width: 96px; }
+.iq-col-method { width: 80px; }
 .iq-col-status { width: 70px; }
 /* Six table cells across the replace rules and both intercept queues carry
    .text-truncate, and it was never defined — so a long value in a
@@ -7579,10 +7581,12 @@ button.utility-button.replay-tab-add {
 }
 
 /* Share only the space left after Method, Status and Time, rather than
-   overcommitting 80% of the table before those fixed columns are counted. */
+   overcommitting 80% of the table before those fixed columns are counted.
+   Time is the time of day, with the day in its tooltip: a hold is minutes
+   old, and the width a date took is Host's and Path's. */
 .iq-col-host { width: auto; max-width: 0; }
 .iq-col-path { width: auto; max-width: 0; }
-.iq-col-time { width: 120px; max-width: 120px; }
+.iq-col-time { width: 88px; max-width: 88px; }
 
 .intercept-rules-header {
   border-top: 1px solid var(--line);
