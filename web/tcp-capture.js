@@ -246,6 +246,8 @@
     let editing = null, listenerSort = { key: "local_port", direction: "asc" }, shownListeners = [];
     // A content search: the ids it found, or null when no search is on.
     let search = null, searchRequest = 0, searchError = "", lastSearchKey = "";
+    // The search in flight, so that the "change" and "search" one Enter fires ask once.
+    let searching = "";
     let liveOnly = false, sort = { key: "index", direction: "desc" }, shown = [], indexById = new Map();
     const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
     const text = (id, value) => { if (el(id).textContent !== value) el(id).textContent = value; };
@@ -487,8 +489,13 @@
             ? { kind: "delimiter", delimiter: [...parseHex(delimiterInput || "0a", { limitLabel: "Delimiter is limited to 16 KiB.", emptyHint: "" })] } : SPLITS[split]);
       } catch (failure) { error = failure.message; }
       const totalParts = parts.length;
-      const renderedParts = totalParts > MAX_RENDERED_PARTS ? parts.slice(0, MAX_RENDERED_PARTS) : parts;
-      const partsNote = totalParts > MAX_RENDERED_PARTS ? "Showing first " + MAX_RENDERED_PARTS + " of " + totalParts + " messages" : "";
+      // A live connection grows at its end, which is what is being watched, so
+      // its newest are the ones drawn. One that has ended is read from its start.
+      const newest = LIVE.has(detail.status);
+      const renderedParts = totalParts <= MAX_RENDERED_PARTS ? parts
+        : newest ? parts.slice(-MAX_RENDERED_PARTS) : parts.slice(0, MAX_RENDERED_PARTS);
+      const partsNote = totalParts > MAX_RENDERED_PARTS
+        ? "Showing " + (newest ? "last " : "first ") + MAX_RENDERED_PARTS + " of " + totalParts + " messages" : "";
       surface.replaceChildren();
       surface.textContent = !error && !renderedParts.length ? "No bytes captured" : "";
       for (const part of renderedParts) surface.append(chunkBlock(part));
@@ -590,7 +597,7 @@
       interceptController?.reset();
       replayController.reset();
       epoch++; selection++; reading = null; writing = false; actionError = null; selectedId = null; detail = null; records = []; status = null; listKey = ""; editing = null;
-      search = null; searchRequest++; searchError = ""; lastSearchKey = ""; el("tcpSearch").value = "";
+      search = null; searchRequest++; searchError = ""; lastSearchKey = ""; searching = ""; el("tcpSearch").value = "";
       renderStatus(); renderList(); renderDetail(); text("tcpHistoryError", "");
     }
     function sortListenersBy(key) {
@@ -640,11 +647,14 @@
       const value = el("tcpSearch").value, kind = el("tcpSearchKind").value || "text";
       const key = kind + "\0" + value;
       if (!value) {
-        search = null; searchError = ""; lastSearchKey = ""; searchRequest++;
+        search = null; searchError = ""; lastSearchKey = ""; searching = ""; searchRequest++;
         listKey = ""; text("tcpHistoryError", ""); renderStatus(); renderList(); return;
       }
+      if (key === searching) return;
+      // Leaving the field with the same text is not a new search. Enter is:
+      // traffic has arrived since, or the first try failed.
       if (!force && key === lastSearchKey && (search || searchError)) return;
-      lastSearchKey = key;
+      lastSearchKey = key; searching = key;
       const token = ++searchRequest;
       const stamp = snapshot();
       try {
@@ -659,11 +669,13 @@
           text("tcpHistoryError", searchError);
         }
         return;
+      } finally {
+        if (token === searchRequest) searching = "";
       }
       listKey = ""; renderStatus(); renderList();
     }
     el("tcpSearch").addEventListener("change", () => void runSearch());
-    el("tcpSearch").addEventListener("search", () => void runSearch());
+    el("tcpSearch").addEventListener("search", () => void runSearch(true));
     el("tcpSearchKind").addEventListener("change", () => { if (el("tcpSearch").value) void runSearch(true); });
     function saveRaw(direction) {
       if (!detail) return;

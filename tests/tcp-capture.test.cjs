@@ -555,6 +555,34 @@ test("search asks the server, lists only matching connections, and says when it 
   assert.equal(f.requests.length, count, "clearing the search asks nothing");
   assert.equal(f.get("tcpHistoryRows").children.length, 2);
 });
+// Enter fires both "change" and "search". The same term must be asked again,
+// because traffic has arrived since, or the first try failed. A new term must
+// be asked once and not twice.
+test("Enter on the same search term asks again, and a new term is asked once", async () => {
+  const f = fixture();
+  await pollStatus(f, status, [{id:"a", target:"example.com:1", status:"closed"}, {id:"b", target:"example.com:2", status:"closed"}]);
+  const enter = () => { f.get("tcpSearch").listeners.change(); f.get("tcpSearch").listeners.search(); };
+  const searches = () => f.requests.filter(request => request.path.startsWith("/api/tcp/search")).length;
+  f.get("tcpSearch").value = "PING"; f.get("tcpSearchKind").value = "text";
+  enter();
+  assert.equal(searches(), 1, "one request for a new term");
+  f.requests.at(-1).resolve({ids:["b"], truncated:false}); await tick(); await tick();
+  assert.match(f.get("tcpHistoryStatus").textContent, /1 match/);
+  enter();
+  assert.equal(searches(), 2, "the same term is searched again");
+  f.requests.at(-1).resolve({ids:["a", "b"], truncated:false}); await tick(); await tick();
+  assert.match(f.get("tcpHistoryStatus").textContent, /2 matches/);
+  // A search that failed can be tried again without editing the text.
+  enter();
+  f.requests.at(-1).resolve("nope", 500); await tick(); await tick();
+  enter();
+  assert.equal(searches(), 4);
+  // Leaving the field with the same text is not a new search.
+  f.requests.at(-1).resolve({ids:["a"], truncated:false}); await tick(); await tick();
+  f.get("tcpSearch").listeners.change();
+  assert.equal(searches(), 4);
+});
+
 test("the stream's ⋯ menu saves one direction's bytes and copies the stream as hex", async () => {
   const saved = [], copied = [];
   const f = fixture({download: url => saved.push(url), copy: text => copied.push(text)});
@@ -613,6 +641,30 @@ test("a stream splits into length-prefixed messages, big or little endian, with 
   const wide = {chunks:[piece(0,"client_to_server",0,[0,0,0,1,0x7a])]};
   assert.deepEqual(tcp.splitMessages(wide, "both", {kind:"length", size:4, littleEndian:false}).map(part => [...part.bytes]), [[0,0,0,1,0x7a]]);
 });
+// More messages than are drawn: a live connection keeps its newest, which is
+// what is being watched, and one that has ended is read from its start.
+test("a stream with more messages than are drawn keeps the newest while it is live", async () => {
+  const lines = Array.from({length: 2005}, (_, index) => "m" + index + "\n").join("");
+  const draw = async recordStatus => {
+    const f = fixture(); f.get("tcpDirection").value = "both"; f.get("tcpSplit").value = "lines";
+    const selected = f.controller.select("x");
+    f.requests[0].resolve({id:"x", target:"example.com:1", status:recordStatus, durable:recordStatus === "closed",
+      client_bytes:lines.length, server_bytes:0, chunks:[piece(0,"client_to_server",0,lines)]});
+    await selected;
+    const blocks = f.get("tcpStreamBytes").children;
+    return {count: blocks.length, first: blocks[0].children[1].textContent, meta: f.get("tcpStreamMeta").textContent};
+  };
+  const live = await draw("open");
+  assert.equal(live.count, 2000);
+  // Five messages of three bytes each are left out at the start.
+  assert.match(live.first, /^0000000f /);
+  assert.match(live.meta, /Showing last 2000 of 2005 messages/);
+  const ended = await draw("closed");
+  assert.equal(ended.count, 2000);
+  assert.match(ended.first, /^00000000 /);
+  assert.match(ended.meta, /Showing first 2000 of 2005 messages/);
+});
+
 test("Split by in the detail view redraws the stream as messages", async () => {
   const f = fixture(); f.get("tcpDirection").value = "both";
   const selected = f.controller.select("x");
