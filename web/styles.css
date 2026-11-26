@@ -1009,7 +1009,7 @@ code {
 .modal-close:hover,
 .secondary-action:hover {
   border-color: var(--line-strong);
-  background: rgba(255, 255, 255, 0.06);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
   /* A wash of the text colour, so a light theme shows it too: white on white
      did not. */
   background: color-mix(in srgb, var(--text) 9%, transparent);
@@ -1060,7 +1060,7 @@ summary {
 .view-tab:hover,
 .replay-view-tab:hover {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.04);
+  background: color-mix(in srgb, var(--text) 5%, transparent);
   background: color-mix(in srgb, var(--text) 7%, transparent);
 }
 
@@ -2215,7 +2215,7 @@ summary {
 }
 
 .tools-output-list .value:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: color-mix(in srgb, var(--text) 5%, transparent);
 }
 
 .tools-output-list .value:focus-within {
@@ -2307,12 +2307,11 @@ summary {
   background: none;
   cursor: pointer;
   opacity: 0.32;
-  transition: opacity 0.15s, border-color 0.15s, transform 0.1s;
+  transition: opacity 0.15s, border-color 0.15s;
 }
 
 .color-dot-btn:hover {
   opacity: 0.7;
-  transform: scale(1.2);
 }
 
 .color-dot-btn.active {
@@ -2443,6 +2442,13 @@ summary {
 
 .browser-menu-name {
   text-transform: capitalize;
+}
+
+/* Beside a browser built for an agent to drive. */
+.browser-menu-agent {
+  margin-left: 4px;
+  color: var(--text-dim);
+  font-size: var(--font-2xs);
 }
 
 .browser-menu-open:disabled {
@@ -2964,11 +2970,10 @@ input.switch-input:focus-visible {
 
 .history-row {
   cursor: pointer;
-  transition: background 140ms ease;
 }
 
 .history-row:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: color-mix(in srgb, var(--text) 4%, transparent);
 }
 
 .history-row.selected {
@@ -3622,7 +3627,7 @@ body.pane-resizing-y {
 
 .pane-close:hover {
   border-color: var(--line-strong);
-  background: rgba(255, 255, 255, 0.06);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
   color: var(--text);
 }
 
@@ -4911,7 +4916,7 @@ body.pane-resizing-y {
 }
 .ws-swap-btn:hover {
   opacity: 1;
-  background: rgba(255, 255, 255, 0.08);
+  background: color-mix(in srgb, var(--text) 9%, transparent);
 }
 
 .websocket-workbench.ws-swapped .websocket-handshake-column { order: 3; }
@@ -5068,7 +5073,7 @@ body.pane-resizing-y {
   flex-shrink: 0;
 }
 .frame-detail-close:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: color-mix(in srgb, var(--text) 9%, transparent);
   color: var(--text);
 }
 
@@ -5887,7 +5892,7 @@ button.utility-button.replay-tab-add {
 }
 
 .session-table .history-row:hover td {
-  background: rgba(255, 255, 255, 0.03);
+  background: color-mix(in srgb, var(--text) 4%, transparent);
 }
 
 .session-table .history-row.selected td {
@@ -6058,7 +6063,7 @@ button.utility-button.replay-tab-add {
 .session-path-open-btn:hover {
   border-color: var(--text-dim);
   color: var(--text);
-  background: rgba(255, 255, 255, 0.04);
+  background: color-mix(in srgb, var(--text) 5%, transparent);
 }
 
 /* ── Findings (Passive Scanner) ── */
@@ -6216,7 +6221,7 @@ button.utility-button.replay-tab-add {
 }
 
 .scanner-rule-item:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: color-mix(in srgb, var(--text) 5%, transparent);
 }
 
 .scanner-rule-item label {
@@ -6402,7 +6407,7 @@ button.utility-button.replay-tab-add {
   font-size: var(--font-2xs);
 }
 .findings-table .history-row { cursor: pointer; }
-.findings-table .history-row:hover td { background: rgba(255, 255, 255, 0.03); }
+.findings-table .history-row:hover td { background: color-mix(in srgb, var(--text) 4%, transparent); }
 .findings-table .history-row.selected {
   outline-color: var(--findings-selected-border);
 }
@@ -6742,7 +6747,7 @@ button.utility-button.replay-tab-add {
 }
 
 .session-context-menu .context-menu-item:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
 }
 
 /* The session list's own menu: what it is sorted by, under a label that
@@ -7340,7 +7345,7 @@ button.utility-button.replay-tab-add {
 .sub-tab,
 .view-tab,
 .replay-view-tab {
-  transition: transform 0.08s, background 0.08s, border-color 0.15s, color 0.15s;
+  transition: opacity 0.08s, background 0.08s, border-color 0.15s, color 0.15s;
 }
 
 .primary-action:active,
@@ -7352,7 +7357,8 @@ button.utility-button.replay-tab-add {
 .sub-tab:active,
 .view-tab:active,
 .replay-view-tab:active {
-  transform: scale(0.92);
+  /* A press dims the control. It shrank to 92% before, tabs included. */
+  opacity: 0.8;
 }
 
 .mini-toggle {
@@ -8421,11 +8427,11 @@ button.utility-button.replay-tab-add {
   border: 2px solid transparent;
   border-radius: 50%;
   cursor: pointer;
-  transition: transform 0.1s, border-color 0.1s;
+  transition: border-color 0.1s;
 }
 
 .color-dot:hover {
-  transform: scale(1.2);
+  border-color: var(--text-soft);
 }
 
 .color-dot.active {
@@ -8743,7 +8749,7 @@ button.utility-button.replay-tab-add {
 }
 
 .ws-setup-row:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: color-mix(in srgb, var(--text) 4%, transparent);
 }
 
 .ws-setup-row.sent {
@@ -9978,7 +9984,7 @@ button.utility-button.replay-tab-add {
 .recon-table th[data-sort="evidence"] { width: 110px; }
 .recon-table th[data-sort="sources"] { width: 125px; }
 .recon-table tbody tr[data-endpoint-key], .recon-table tbody tr[data-template-id] { cursor: pointer; }
-.recon-table tbody tr:hover td { background: rgba(255, 255, 255, 0.03); }
+.recon-table tbody tr:hover td { background: color-mix(in srgb, var(--text) 4%, transparent); }
 .recon-table td { vertical-align: top; white-space: normal; overflow-wrap: anywhere; }
 .recon-table thead th { position: sticky; top: 0; z-index: 1; background: var(--panel-elevated); }
 /* A sticky header cell stacks on its own, so the next one would cover a
@@ -10138,7 +10144,7 @@ button.utility-button.replay-tab-add {
 .templates-match-mark { text-align: center; }
 /* A scan's card is the way to its results. */
 .templates-job { cursor: pointer; }
-.templates-job:hover { background: rgba(255, 255, 255, 0.03); }
+.templates-job:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
 .templates-job.recon-selected { background: var(--point-soft); }
 .templates-exchange {
   margin: 0 0 4px; padding: 10px; border: 1px solid var(--line); border-radius: 5px;

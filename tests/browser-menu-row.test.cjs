@@ -67,5 +67,10 @@ test("what an installed browser still lacks is said on hover, not in a paragraph
 
 test("a browser built for an agent is marked, a plain CDP one is not", () => {
   assert.match(browserMenuRowHtml({ browser: "ego", installed: true, driver: "ego-cli" }), /browser-menu-agent/);
+  // The mark is the word, in the menu's own quiet text, and not a sparkle.
+  assert.match(browserMenuRowHtml({ browser: "ego", installed: true, driver: "ego-cli" }),
+    /<span class="browser-menu-agent" title="Built for AI agents">AI<\/span>/);
+  const css = require("node:fs").readFileSync(require("node:path").join(__dirname, "../web/styles.css"), "utf8").replace(/\r\n/g, "\n");
+  assert.match(css, /^\.browser-menu-agent \{[^}]*color: var\(--text-dim\);[^}]*font-size: var\(--font-2xs\);/m);
   assert.doesNotMatch(browserMenuRowHtml({ browser: "chrome", installed: true, driver: "cdp" }), /browser-menu-agent/);
 });

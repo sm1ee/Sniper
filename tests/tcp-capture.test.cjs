@@ -274,6 +274,27 @@ test("a listener that is on in a session nothing reaches says so, and is not sho
   assert.equal(fed.get("tcpListenerRows").children[0].children[3].className, "tcp-listener-error");
 });
 
+// The status is read again every second. A listener's row that has not
+// changed stays the same element: making a new one each time took the
+// keyboard's focus from its switch.
+test("a poll that brings nothing new leaves the listener rows as they are", async () => {
+  const f = fixture();
+  await pollStatus(f, runningStatus);
+  const row = f.get("tcpListenerRows").children[0], toggle = row.children[0].children[0];
+  await pollStatus(f, {...runningStatus, history_count:1});
+  assert.equal(f.get("tcpListenerRows").children[0], row);
+  assert.equal(f.get("tcpListenerRows").children[0].children[0].children[0], toggle);
+  // What the row shows did change: it is drawn again.
+  await pollStatus(f, {...runningStatus, listeners:[listener("l1", 9000, {running:false, error:"Local port 9000 is already in use. Choose another Local port or stop the listener using it."})]});
+  assert.notEqual(f.get("tcpListenerRows").children[0], row);
+  assert.match(listenerRows(f)[0][2], /already in use/);
+  // So is one whose switch must stop taking presses while a change is sent.
+  const stable = f.get("tcpListenerRows").children[0];
+  f.get("tcpListenerRows").listeners.click({target:{closest:selector=>selector==="[data-listener-toggle]"?stable.children[0].children[0]:null}});
+  assert.notEqual(f.get("tcpListenerRows").children[0], stable);
+  assert.equal(f.get("tcpListenerRows").children[0].children[0].children[0].disabled, true);
+});
+
 test("a listener change that went through tells the app, which reads where each session receives", async () => {
   let told = 0;
   const f = fixture({changed: () => { told++; }}), pending = f.controller.refresh();

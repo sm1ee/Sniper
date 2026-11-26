@@ -56,6 +56,9 @@ function loadFunctions(names, globals = {}) {
   if (names.some(name => rawBodyCallers.includes(name))) {
     names = [...new Set([...names, "binaryBodyText", "binaryBodyBase64"])];
   }
+  // The lists read on a timer write their rows through one function.
+  const rowWriters = ["renderFindings", "renderFindingsVirtual", "renderOastCallbacks", "renderIntercepts", "renderResponseIntercepts"];
+  if (names.some(name => rowWriters.includes(name)) && !("writeRows" in globals)) names = [...new Set([...names, "writeRows"])];
   for (const name of names) {
     assert.match(name, /^[A-Za-z_$][\w$]*$/);
     const match = appSource.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^\\}`, "m"));

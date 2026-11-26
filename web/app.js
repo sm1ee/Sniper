@@ -6056,6 +6056,10 @@ function resetSessionScopedUiState() {
   state.sequencePastRuns = [];
   clearCompareState();
   renderHistory();
+  // An empty list that may hold more asks for more at once. The session on
+  // screen is still the one being left, so that read was a page of its rows,
+  // thrown away. The reload that follows reads the session being shown.
+  clearHistoryBackfill();
   renderEmptyDetail();
   renderWebsocketSessions();
   hideFrameDetail();
@@ -11938,7 +11942,15 @@ function refreshHistoryFindings() {
     }
   }
   state._historyFindings = marks;
-  renderHistoryVirtual();
+  // The findings are read again every second and are mostly the same ones.
+  // The rows are drawn again only when what marks them changed: each read
+  // rewrote every visible row, whether History was on screen or not.
+  const drawn = JSON.stringify([Boolean(state.httpShowFindings), color,
+    findingsData.map((finding) => [finding.id, finding.record_id, finding.severity, finding.title])]);
+  if (drawn !== state._historyFindingsDrawn) {
+    state._historyFindingsDrawn = drawn;
+    renderHistoryVirtual();
+  }
   // The server gathers tinted rows into the colour filter, so a filtered list
   // is read again once the findings or how they are drawn change.
   const filterSignature = `${Boolean(state.httpShowFindings)}:${color}:${findingsData.length}:${findingsData[0]?.id || ""}`;
@@ -12148,7 +12160,7 @@ function renderFindings() {
     const message = findingsData.length
       ? "No findings match your filters."
       : "No findings yet. Browse with the proxy to start scanning.";
-    els.findingsBody.innerHTML = `<tr class="empty-row"><td colspan="6">${message}</td></tr>`;
+    writeRows(els.findingsBody, `<tr class="empty-row"><td colspan="6">${message}</td></tr>`);
     return;
   }
 
@@ -12177,6 +12189,17 @@ function getFindingsRowHeight(options = {}) {
   // A font change invalidates old spacers before selection can set scrollTop.
   if (options.refreshLayout && measuredFindingsRowHeight !== previous) renderFindingsVirtual();
   return measuredFindingsRowHeight || FINDINGS_ROW_HEIGHT;
+}
+
+// Writes a list's rows only when they differ from what was written last.
+// Findings, Intercept and OAST are read again every second or so, and writing
+// the same rows again made new elements each time: the row under the pointer
+// lost its hover, and one with the keyboard's focus lost that.
+function writeRows(body, markup) {
+  if (body._rows === markup) return false;
+  body.innerHTML = markup;
+  body._rows = markup;
+  return true;
 }
 
 function renderFindingsVirtual() {
@@ -12218,10 +12241,10 @@ function renderFindingsVirtual() {
       </tr>`);
     }
 
-    els.findingsBody.innerHTML =
+    writeRows(els.findingsBody,
       (topPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${topPadding}px;padding:0;border:none"></td></tr>` : "") +
       rows.join("") +
-      (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : "");
+      (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : ""));
 
     if (attempt === 0 && getFindingsRowHeight() !== rowHeight) continue;
     if (shell.scrollTop !== scrollTop) shell.scrollTop = scrollTop;
@@ -13293,7 +13316,7 @@ function oastStatusLine(status, runtime) {
 
 function renderOastCallbacks() {
   if (!els.oastTableBody) return;
-  els.oastTableBody.innerHTML = state.oastCallbacks.length
+  writeRows(els.oastTableBody, state.oastCallbacks.length
     ? state.oastCallbacks.map((cb) => {
         const selected = cb.id === state.selectedOastId ? "selected" : "";
         return `<tr class="history-row ${selected}" data-oast-id="${cb.id}">
@@ -13303,7 +13326,7 @@ function renderOastCallbacks() {
           <td>${escapeHtml(cb.correlation_id)}</td>
         </tr>`;
       }).join("")
-    : '<tr class="empty-row"><td colspan="4">No callbacks yet.</td></tr>';
+    : '<tr class="empty-row"><td colspan="4">No callbacks yet.</td></tr>');
 }
 
 function updateOastBadge() {
@@ -15788,7 +15811,8 @@ function renderIntercepts() {
   reconcileRequestInterceptSelection(filteredIntercepts);
   getInterceptDraftRecovery("request");
   const feedback = updateInterceptDetailFeedback("request");
-  els.interceptTableBody.innerHTML = filteredIntercepts.length
+  // A row's listeners are added with the row, so only when it is written.
+  if (writeRows(els.interceptTableBody, filteredIntercepts.length
     ? filteredIntercepts
         .map((item) => {
           const selected = item.id === state.selectedInterceptId ? "selected" : "";
@@ -15806,23 +15830,23 @@ function renderIntercepts() {
         <tr class="empty-row">
           <td colspan="4">No held requests.</td>
         </tr>
-      `;
-
-  Array.from(els.interceptTableBody.querySelectorAll(".history-row")).forEach((row) => {
-    row.addEventListener("click", () => {
-      selectInterceptQueueItem("request", row.dataset.id).catch((error) => console.error(error));
+      `)) {
+    Array.from(els.interceptTableBody.querySelectorAll(".history-row")).forEach((row) => {
+      row.addEventListener("click", () => {
+        selectInterceptQueueItem("request", row.dataset.id).catch((error) => console.error(error));
+      });
+      row.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        const id = row.dataset.id;
+        if (!id) return;
+        // Select first, so the menu acts on what the operator sees highlighted.
+        if (state.selectedInterceptId !== id) {
+          selectInterceptQueueItem("request", id).catch((error) => console.error(error));
+        }
+        openInterceptContextMenu(event.clientX, event.clientY, id);
+      });
     });
-    row.addEventListener("contextmenu", (event) => {
-      event.preventDefault();
-      const id = row.dataset.id;
-      if (!id) return;
-      // Select first, so the menu acts on what the operator sees highlighted.
-      if (state.selectedInterceptId !== id) {
-        selectInterceptQueueItem("request", id).catch((error) => console.error(error));
-      }
-      openInterceptContextMenu(event.clientX, event.clientY, id);
-    });
-  });
+  }
   updateInterceptQueueSelectionStatus("request", filteredIntercepts);
 
   if (!state.selectedInterceptRecord) {
@@ -22492,7 +22516,7 @@ function browserMenuRowHtml(entry) {
   // own driver. The driver, not a list of names, decides, so a new AI browser
   // is marked without touching this.
   const agentMark = entry.driver && entry.driver !== "cdp"
-    ? ` <span class="browser-menu-agent" title="Built for AI agents" aria-label="AI browser">✨</span>`
+    ? ` <span class="browser-menu-agent" title="Built for AI agents">AI</span>`
     : "";
   const install = installUrl
     ? `<a class="browser-menu-install" href="${escapeHtml(installUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Install ${escapeHtml(entry.browser)}">Install &#8599;</a>`
@@ -22876,7 +22900,7 @@ function renderResponseIntercepts() {
   reconcileResponseInterceptSelection(filteredResponseIntercepts);
   getInterceptDraftRecovery("response");
   const feedback = updateInterceptDetailFeedback("response");
-  els.responseInterceptTableBody.innerHTML = filteredResponseIntercepts.length
+  if (writeRows(els.responseInterceptTableBody, filteredResponseIntercepts.length
     ? filteredResponseIntercepts
         .map((item) => {
           const selected = item.id === state.selectedResponseInterceptId ? "selected" : "";
@@ -22895,13 +22919,13 @@ function renderResponseIntercepts() {
         <tr class="empty-row">
           <td colspan="5">No held responses.</td>
         </tr>
-      `;
-
-  Array.from(els.responseInterceptTableBody.querySelectorAll(".history-row")).forEach((row) => {
-    row.addEventListener("click", () => {
-      selectInterceptQueueItem("response", row.dataset.id).catch((error) => console.error(error));
+      `)) {
+    Array.from(els.responseInterceptTableBody.querySelectorAll(".history-row")).forEach((row) => {
+      row.addEventListener("click", () => {
+        selectInterceptQueueItem("response", row.dataset.id).catch((error) => console.error(error));
+      });
     });
-  });
+  }
   updateInterceptQueueSelectionStatus("response", filteredResponseIntercepts);
 
   if (!state.selectedResponseInterceptRecord) {

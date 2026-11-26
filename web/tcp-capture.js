@@ -244,6 +244,8 @@
     let reading = null, writing = false, mode = "hex", listKey = "", actionError = null, streamView = null;
     // The listener being edited: null, "new", or a listener's id.
     let editing = null, listenerSort = { key: "local_port", direction: "asc" }, shownListeners = [];
+    // What the listener rows were last drawn from.
+    let listenersDrawn = "";
     // A content search: the ids it found, or null when no search is on.
     let search = null, searchRequest = 0, searchError = "", lastSearchKey = "";
     // The search in flight, so that the "change" and "search" one Enter fires ask once.
@@ -313,6 +315,12 @@
         return (typeof x === "number" && typeof y === "number" ? x - y : collator.compare(String(x), String(y))) * factor;
       });
       const body = el("tcpListenerRows");
+      // The status is read again every second. Rows that would come out the
+      // same are left alone: a new row each time took the keyboard's focus
+      // from the switch it was on.
+      const drawn = JSON.stringify([shownListeners, unavailable, editing, receiving()]);
+      if (drawn === listenersDrawn) return;
+      listenersDrawn = drawn;
       body.replaceChildren();
       for (const listener of shownListeners) {
         const row = document.createElement("tr"), selected = listener.id === editing;
