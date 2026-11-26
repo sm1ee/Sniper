@@ -1193,6 +1193,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    // A program pointed straight at the proxy port, as if a server were
+    // there, asks it for the same thing every few seconds. Each refusal was a
+    // row in the history, without end.
+    #[tokio::test]
+    async fn a_refusal_that_repeats_is_listed_once() {
+        let _work = crate::proxy::GLOBAL_PROXY_WORK_TEST_LOCK.lock().await;
+        let dir = scratch("loop-once");
+        let state = state_in(&dir);
+        let main = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let main_addr = main.local_addr().unwrap();
+        state.set_active_proxy_addr(main_addr).await;
+        let main_task = tokio::spawn(crate::proxy::serve_proxy(main, state.clone()));
+
+        // Each is answered. A request is the same one whatever its query.
+        for path in [
+            "/models",
+            "/props",
+            "/models",
+            "/models?t=1",
+            "/props",
+            "/models?t=2",
+        ] {
+            let status = get_through(main_addr, main_addr, path).await;
+            assert!(status.contains("508"), "{path}: {status}");
+        }
+        // A tunnel to the listener is refused the same way, and listed once.
+        for _ in 0..3 {
+            let mut stream = TcpStream::connect(main_addr).await.unwrap();
+            stream
+                .write_all(
+                    format!("CONNECT {main_addr} HTTP/1.1\r\nHost: {main_addr}\r\n\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                match stream.read_u8().await {
+                    Ok(byte) => head.push(byte),
+                    Err(_) => break,
+                }
+            }
+            assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 508"));
+        }
+
+        let session = state.session().await;
+        let mut listed: Vec<_> = session
+            .store
+            .snapshot(None)
+            .await
+            .into_iter()
+            .map(|record| (record.method, record.path, record.notes))
+            .collect();
+        listed.sort();
+        let rows: Vec<_> = listed
+            .iter()
+            .map(|(method, path, _)| (method.as_str(), path.as_str()))
+            .collect();
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[1..], [("GET", "/models"), ("GET", "/props")]);
+        assert_eq!(rows[0].0, "CONNECT");
+        // The row says why there is one, where a person would look for more.
+        for (_, path, notes) in &listed {
+            assert!(
+                notes
+                    .iter()
+                    .any(|note| note.ends_with("Repeats of it are not listed.")),
+                "{path}: {notes:?}"
+            );
+        }
+
+        // A request that is wrong in itself is the operator's own, and each
+        // one stays in the history.
+        for _ in 0..2 {
+            let mut stream = TcpStream::connect(main_addr).await.unwrap();
+            stream
+                .write_all(b"GET /no-host HTTP/1.1\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await.unwrap();
+            assert!(String::from_utf8_lossy(&response).contains("400 Bad Request"));
+        }
+        let wrong = session
+            .store
+            .snapshot(None)
+            .await
+            .into_iter()
+            .filter(|record| record.path == "/no-host")
+            .count();
+        assert_eq!(wrong, 2);
+
+        main_task.abort();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn an_upstream_proxy_that_is_a_session_port_is_not_saved() {
         let dir = scratch("upstream-save");

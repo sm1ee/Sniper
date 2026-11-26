@@ -1491,7 +1491,7 @@ async fn handle_connect(
         .build();
     if let Ok(uri) = &tunnel {
         if remote_client_reaches_guarded(&state, peer_addr.ip(), uri).await {
-            return record_connect_rejection(
+            return refuse_connect_once(
                 &state,
                 &session,
                 request.uri(),
@@ -1507,7 +1507,7 @@ async fn handle_connect(
         // A tunnel to one of Sniper's own proxy listeners, the main one or a
         // session's port, comes back in as a local client.
         if let Some(proxy_addr) = own_proxy_listener_for(&state, &session, uri).await {
-            return record_connect_rejection(
+            return refuse_connect_once(
                 &state,
                 &session,
                 request.uri(),
@@ -1762,12 +1762,11 @@ async fn handle_forwardable_request(
         }
     };
     if remote_client_reaches_guarded(&state, peer_addr.ip(), &absolute_uri).await {
-        return record_http_rejection(
+        return refuse_http_once(
             &state,
             &session,
             RejectedRequestIdentity::from_absolute_uri(&parts.method, &absolute_uri),
             &parts.headers,
-            &[],
             Some(parts.version),
             started_at,
             started,
@@ -1778,12 +1777,11 @@ async fn handle_forwardable_request(
         .await;
     }
     if let Some(proxy_addr) = own_proxy_listener_for(&state, &session, &absolute_uri).await {
-        return record_http_rejection(
+        return refuse_http_once(
             &state,
             &session,
             RejectedRequestIdentity::from_absolute_uri(&parts.method, &absolute_uri),
             &parts.headers,
-            &[],
             Some(parts.version),
             started_at,
             started,
@@ -2633,6 +2631,117 @@ impl RejectedRequestIdentity {
     }
 }
 
+/// The refusals of Sniper's own making that this run has listed in a session's
+/// history: a request for what another machine may not reach, and one that
+/// would loop. A client asks for the same thing again and again with nobody
+/// at it. A program pointed straight at the proxy port, as if a server were
+/// there, polls it every few seconds, and each refusal as a row filled the
+/// history without end. Such a refusal is listed once, and what repeats it is
+/// answered and not listed. A request that is wrong in itself is the
+/// operator's own and is listed each time. Not saved: a restart lists each
+/// once more.
+#[derive(Default)]
+pub struct ListedRefusals(std::sync::Mutex<std::collections::HashSet<(String, String, String)>>);
+
+impl ListedRefusals {
+    /// How many distinct refusals a run lists. Past it none is: a client that
+    /// asks for a new path each time must not fill the history either.
+    const LIMIT: usize = 256;
+
+    /// True the first time this refusal is seen, which is when it is listed.
+    /// A request is the same one whatever its query.
+    fn first(&self, method: &str, host: &str, path: &str) -> bool {
+        let path = path.split(['?', '#']).next().unwrap_or_default();
+        let mut listed = self.0.lock().expect("listed refusals lock poisoned");
+        listed.len() < Self::LIMIT
+            && listed.insert((
+                method.to_string(),
+                host.to_ascii_lowercase(),
+                path.to_string(),
+            ))
+    }
+}
+
+/// What the one row of a refusal says after its reason, so that a person who
+/// sees the client still asking knows where the other rows are.
+const REPEATS_NOT_LISTED: &str = "Repeats of it are not listed.";
+
+/// Refuses a request on Sniper's own account, and lists it the first time
+/// only: see `ListedRefusals`.
+#[allow(clippy::too_many_arguments)]
+async fn refuse_http_once(
+    state: &Arc<AppState>,
+    session: &Arc<SessionContext>,
+    identity: RejectedRequestIdentity,
+    request_headers: &HeaderMap,
+    request_http_version: Option<Version>,
+    started_at: chrono::DateTime<Utc>,
+    started: Instant,
+    status: StatusCode,
+    message: String,
+    context: &'static str,
+) -> Response<Body> {
+    if !session
+        .listed_refusals
+        .first(&identity.method, &identity.host, &identity.path)
+    {
+        return synthetic_error_response_for_method(status, &message, state, &identity.method).0;
+    }
+    let note = format!("Proxy rejected request: {message} {REPEATS_NOT_LISTED}");
+    record_noted_http_rejection(
+        state,
+        session,
+        identity,
+        request_headers,
+        &[],
+        request_http_version,
+        started_at,
+        started,
+        status,
+        message,
+        note,
+        context,
+    )
+    .await
+}
+
+/// `refuse_http_once`, for a tunnel.
+#[allow(clippy::too_many_arguments)]
+async fn refuse_connect_once(
+    state: &Arc<AppState>,
+    session: &Arc<SessionContext>,
+    uri: &Uri,
+    request_headers: &HeaderMap,
+    started_at: chrono::DateTime<Utc>,
+    started: Instant,
+    status: StatusCode,
+    message: String,
+    request_http_version: Version,
+) -> Response<Body> {
+    let target = uri
+        .authority()
+        .map(|authority| authority.to_string())
+        .unwrap_or_else(|| uri.path().trim().to_string());
+    if !session.listed_refusals.first("CONNECT", &target, "") {
+        return synthetic_error_response(status, &message, state).0;
+    }
+    let note = format!("Proxy rejected CONNECT: {message} {REPEATS_NOT_LISTED}");
+    record_noted_connect_rejection(
+        state,
+        session,
+        uri,
+        request_headers,
+        started_at,
+        started,
+        status,
+        message,
+        note,
+        request_http_version,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn record_http_rejection(
     state: &Arc<AppState>,
     session: &Arc<SessionContext>,
@@ -2644,6 +2753,40 @@ async fn record_http_rejection(
     started: Instant,
     status: StatusCode,
     message: String,
+    context: &'static str,
+) -> Response<Body> {
+    let note = format!("Proxy rejected request: {message}");
+    record_noted_http_rejection(
+        state,
+        session,
+        identity,
+        request_headers,
+        request_body,
+        request_http_version,
+        started_at,
+        started,
+        status,
+        message,
+        note,
+        context,
+    )
+    .await
+}
+
+/// `message` is what the client reads; `note` is what the row says.
+#[allow(clippy::too_many_arguments)]
+async fn record_noted_http_rejection(
+    state: &Arc<AppState>,
+    session: &Arc<SessionContext>,
+    identity: RejectedRequestIdentity,
+    request_headers: &HeaderMap,
+    request_body: &[u8],
+    request_http_version: Option<Version>,
+    started_at: chrono::DateTime<Utc>,
+    started: Instant,
+    status: StatusCode,
+    message: String,
+    note: String,
     context: &'static str,
 ) -> Response<Body> {
     let request_capture = MessageRecord::from_headers_and_body(
@@ -2664,7 +2807,7 @@ async fn record_http_rejection(
             started.elapsed().as_millis() as u64,
             request_capture,
             Some(response_capture),
-            vec![format!("Proxy rejected request: {message}")],
+            vec![note],
             None,
             None,
         ),
@@ -2687,6 +2830,36 @@ async fn record_connect_rejection(
     message: String,
     request_http_version: Version,
 ) -> Response<Body> {
+    let note = format!("Proxy rejected CONNECT: {message}");
+    record_noted_connect_rejection(
+        state,
+        session,
+        uri,
+        request_headers,
+        started_at,
+        started,
+        status,
+        message,
+        note,
+        request_http_version,
+    )
+    .await
+}
+
+/// `message` is what the client reads; `note` is what the row says.
+#[allow(clippy::too_many_arguments)]
+async fn record_noted_connect_rejection(
+    state: &Arc<AppState>,
+    session: &Arc<SessionContext>,
+    uri: &Uri,
+    request_headers: &HeaderMap,
+    started_at: chrono::DateTime<Utc>,
+    started: Instant,
+    status: StatusCode,
+    message: String,
+    note: String,
+    request_http_version: Version,
+) -> Response<Body> {
     let target = uri
         .authority()
         .map(|authority| authority.to_string())
@@ -2702,7 +2875,7 @@ async fn record_connect_rejection(
             Some(status.as_u16()),
             started.elapsed().as_millis() as u64,
             request_capture,
-            vec![format!("Proxy rejected CONNECT: {message}")],
+            vec![note],
         )
         .with_response(response_capture),
         Some(request_http_version),

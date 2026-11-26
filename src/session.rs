@@ -705,6 +705,8 @@ pub struct SessionContext {
     storage_dir: PathBuf,
     max_entries: usize,
     pub store: Arc<TransactionStore>,
+    /// The refusals this run has listed in `store`; see `ListedRefusals`.
+    pub listed_refusals: crate::proxy::ListedRefusals,
     pub runtime: Arc<RuntimeSettings>,
     pub intercepts: Arc<InterceptQueue>,
     pub response_intercepts: Arc<ResponseInterceptQueue>,
@@ -857,6 +859,7 @@ impl SessionContext {
             storage_dir,
             max_entries,
             store,
+            listed_refusals: Default::default(),
             runtime,
             intercepts: Arc::new(InterceptQueue::new()),
             response_intercepts: Arc::new(ResponseInterceptQueue::new()),
