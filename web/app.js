@@ -517,6 +517,8 @@ const state = {
   sessionPinned: [],
   // How the list orders the sessions of a group; see `sessionSortOrder`.
   sessionSort: "manual",
+  // What a row says under its session's name; see `sessionRowDetailChoices`.
+  sessionRowDetails: ["domains"],
   // What each session is doing, from /api/sessions/activity.
   sessionActivity: new Map(),
   // Sessions whose jobs ended while another session was open: id → job kinds.
@@ -2063,7 +2065,7 @@ function bindEvents() {
   els.sessionSortButton.addEventListener("click", (event) => {
     // The document closes this menu on any click that reaches it.
     event.stopPropagation();
-    showSessionSortMenu(els.sessionSortButton);
+    showSessionViewMenu(els.sessionSortButton);
   });
   els.sessionSidebarCreateName.addEventListener("keydown", (event) => {
     // Enter during IME composition picks a candidate; it does not create.
@@ -10804,7 +10806,7 @@ function sessionSidebarRow(session, active, editing) {
   const running = activity?.running?.length ? `Running: ${jobs(activity.running)}` : "";
   const finished = !running && state.sessionsFinished.has(session.id)
     ? `${jobs(state.sessionsFinished.get(session.id))} finished` : "";
-  const identity = sessionIdentity(session.overview);
+  const detail = sessionRowDetail(session);
   // Which port feeds the session, if any: the list is where that is read.
   const feed = sessionFeed(session.id);
   const port = feed.kind !== "none" && feed.port ? `:${feed.port}` : "";
@@ -10820,7 +10822,7 @@ function sessionSidebarRow(session, active, editing) {
   const relays = activity?.tcp || [];
   const relay = relays.find((listener) => listener.running) || relays[0];
   const relayLines = relays.map((listener) => `${listener.udp ? "UDP" : "TCP"} :${listener.port} → ${listener.target}${listener.running ? "" : ", not running"}`);
-  const label = [session.name, session.created_by && `made by ${session.created_by}`, port && `proxy ${port}`,
+  const label = [session.name, session.created_by && `made by ${session.created_by}`, ...detail.spoken, port && `proxy ${port}`,
     ...relayLines, browser && "browser open", heldLabel, running, finished].filter(Boolean).join(", ");
   const pinned = (state.sessionPinned || []).includes(session.id);
   // One mark before the name says what the session is doing. What needs a
@@ -10832,7 +10834,7 @@ function sessionSidebarRow(session, active, editing) {
     + `${active ? ' aria-current="true"' : ""} tabindex="${active ? 0 : -1}" aria-label="${escapeHtml(label)}">`
     + `<span class="session-sidebar-status${status ? ` ${status}` : ""}"${status ? ` title="${escapeHtml(statusTitle)}"` : ""}></span>`
     + `<span class="session-sidebar-text"><span class="session-sidebar-name">${sessionMakerMark(session)}${name}</span>`
-    + `${identity ? `<span class="session-sidebar-identity">${escapeHtml(identity)}</span>` : ""}</span>`
+    + `${detail.text ? `<span class="session-sidebar-identity" title="${escapeHtml(detail.title)}">${escapeHtml(detail.text)}</span>` : ""}</span>`
     + `${relay ? `<span class="session-sidebar-tcp${relays.some((listener) => !listener.running) ? " failed" : ""}" title="${escapeHtml(relayLines.join("\n"))}">`
       + `${relay.udp ? "udp" : "tcp"}:${relay.port}${relays.length > 1 ? `+${relays.length - 1}` : ""}</span>` : ""}`
     + `${browser ? `<span class="session-sidebar-browser" title="${browser}"></span>` : ""}`
@@ -10844,6 +10846,43 @@ function sessionSidebarRow(session, active, editing) {
     // the keyboard.
     + `<button class="session-sidebar-pin" type="button" data-pin="${escapeHtml(session.id)}" tabindex="-1" aria-pressed="${pinned}"`
     + ` aria-label="${pinned ? "Unpin" : "Pin"} ${name}" title="${pinned ? "Unpin" : "Pin"}"></button></li>`;
+}
+
+// What a row can say under its session's name, in the order the list's menu
+// offers them: the name kept in the settings, then the menu's word for it.
+function sessionRowDetailChoices() {
+  return [["domains", "Domains"], ["captured", "Last capture"], ["created", "Created"], ["requests", "Requests"]];
+}
+
+// The day of a time as the list says it: "Nov 26", with the year when it is
+// not this one. "" for no time.
+function sessionDay(value, now = new Date()) {
+  const date = new Date(value ?? NaN);
+  if (!Number.isFinite(date.getTime())) return "";
+  return date.toLocaleDateString("en-US", date.getFullYear() === now.getFullYear()
+    ? { month: "short", day: "numeric" } : { month: "short", day: "numeric", year: "numeric" });
+}
+
+// What a row says under its name: the facts the list's menu chose. The days
+// and the count are short and come first, so a long list of domains is what
+// gives way. `title` names each fact, and `spoken` is for the row's label.
+// The days and the count are as of the last read of the session list.
+function sessionRowDetail(session) {
+  const shown = new Set(state.sessionRowDetails || ["domains"]);
+  const created = shown.has("created") ? sessionDay(session.created_at) : "";
+  const captured = shown.has("captured") ? sessionDay(session.overview?.last_captured_at) : "";
+  const count = Number(session.request_count) || 0;
+  const requests = shown.has("requests") ? `${count.toLocaleString("en-US")} ${count === 1 ? "request" : "requests"}` : "";
+  const domains = shown.has("domains") ? sessionIdentity(session.overview) : "";
+  // Both days read as the span the session was used over. The same day is
+  // said once.
+  const days = created && captured && created !== captured ? `${created} – ${captured}` : created || captured;
+  const named = [created && `Created ${created}`, captured && `Last capture ${captured}`, requests].filter(Boolean);
+  return {
+    text: [days, requests, domains].filter(Boolean).join(" · "),
+    title: [...named, domains].filter(Boolean).join(" · "),
+    spoken: named.map((fact) => fact[0].toLowerCase() + fact.slice(1)),
+  };
 }
 
 // The order a sort gives two sessions, by the name saved for it, or null
@@ -11077,17 +11116,35 @@ function setSessionSort(sort) {
   scheduleUiSettingsSave();
 }
 
-// The order the list is in, under the sort button above it.
-function showSessionSortMenu(anchor) {
+// Shows a fact under each session's name, or stops showing it. What is kept
+// is in the menu's order, and only what the menu offers.
+function toggleSessionRowDetail(key) {
+  const shown = new Set(state.sessionRowDetails);
+  if (!shown.delete(key)) shown.add(key);
+  state.sessionRowDetails = sessionRowDetailChoices().map(([name]) => name).filter((name) => shown.has(name));
+  renderSessionSidebar();
+  scheduleUiSettingsSave();
+}
+
+// The list's view options, under the button above it: the order its sessions
+// are in, and what each row says under its name.
+function showSessionViewMenu(anchor) {
   closeSessionContextMenu();
   const sorts = [["manual", "Manual order"], ["recent", "Last capture"], ["created", "Created"], ["name", "Name"], ["agent", "Agent"]];
-  const current = sorts.some(([key]) => key === state.sessionSort) ? state.sessionSort : "manual";
   const menu = document.createElement("div");
   menu.className = "context-menu session-context-menu";
   menu.setAttribute("role", "menu");
-  menu.innerHTML = '<div class="context-menu-section"><span class="context-menu-label">Sort by</span></div>'
-    + sorts.map(([key, label]) => `<button class="context-menu-item" role="menuitemradio" aria-checked="${key === current}" data-sort="${key}">${label}`
-      + `${key === current ? '<span class="context-menu-shortcut" aria-hidden="true">✓</span>' : ""}</button>`).join("");
+  const section = (label) => `<div class="context-menu-section"><span class="context-menu-label">${label}</span></div>`;
+  const item = (role, kind, key, label, on) => `<button class="context-menu-item" role="${role}" aria-checked="${on}" data-${kind}="${key}">${label}`
+    + `${on ? '<span class="context-menu-shortcut" aria-hidden="true">✓</span>' : ""}</button>`;
+  const draw = () => {
+    const current = sorts.some(([key]) => key === state.sessionSort) ? state.sessionSort : "manual";
+    menu.innerHTML = section("Sort by")
+      + sorts.map(([key, label]) => item("menuitemradio", "sort", key, label, key === current)).join("")
+      + section("Show")
+      + sessionRowDetailChoices().map(([key, label]) => item("menuitemcheckbox", "show", key, label, state.sessionRowDetails.includes(key))).join("");
+  };
+  draw();
   document.body.appendChild(menu);
   const at = anchor.getBoundingClientRect();
   const size = menu.getBoundingClientRect();
@@ -11095,8 +11152,18 @@ function showSessionSortMenu(anchor) {
   menu.style.top = `${at.bottom + 4}px`;
   sessionContextMenuEl = menu;
   menu.addEventListener("click", (event) => {
-    const sort = event.target.closest("[data-sort]")?.dataset.sort;
-    if (sort) setSessionSort(sort);
+    const choice = event.target.closest("[data-sort], [data-show]")?.dataset;
+    if (choice?.show) {
+      // More than one can be shown, so the menu stays open: the click does
+      // not reach the document, which closes it. The item is drawn again
+      // with its mark, and keeps the focus a keyboard gave it.
+      event.stopPropagation();
+      toggleSessionRowDetail(choice.show);
+      draw();
+      menu.querySelector(`[data-show="${choice.show}"]`)?.focus();
+      return;
+    }
+    if (choice?.sort) setSessionSort(choice.sort);
     closeSessionContextMenu();
   });
 }
@@ -27135,6 +27202,7 @@ function applyUiSettingsSnapshot(snapshot, { mergeFilterDraft = false } = {}) {
   state.sessionDefaultAfter = typeof snapshot?.session_default_after === "string" ? snapshot.session_default_after : "";
   state.sessionPinned = strings(snapshot?.session_pinned);
   state.sessionSort = typeof snapshot?.session_sort === "string" ? snapshot.session_sort : "manual";
+  state.sessionRowDetails = Array.isArray(snapshot?.session_row_details) ? strings(snapshot.session_row_details) : ["domains"];
   els.replayTabStrip?.classList?.toggle("wrap", state.replayTabsWrap);
   if (els.replayTabsWrapInput) els.replayTabsWrapInput.checked = state.replayTabsWrap;
   state.websocketStackHeight = sanitizeWebsocketStackHeight(snapshot?.websocket_stack_height);
@@ -27234,6 +27302,7 @@ function snapshotUiSettings() {
     session_default_after: state.sessionDefaultAfter,
     session_pinned: state.sessionPinned,
     session_sort: state.sessionSort,
+    session_row_details: state.sessionRowDetails,
     websocket_stack_height: state.websocketStackHeight > 0 ? state.websocketStackHeight : null,
     ws_replay_left_width: state.wsReplayLeftWidth > 0 ? state.wsReplayLeftWidth : null,
     ws_replay_frame_detail_height: state.wsReplayFrameDetailHeight > 0 ? state.wsReplayFrameDetailHeight : null,

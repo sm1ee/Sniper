@@ -37,9 +37,9 @@ test("the top strip has no Session tab, and a gear above the session list opens 
   assert.doesNotMatch(tabs, /data-tool="dashboard"/);
   const header = html.match(/<header class="session-sidebar-header">([^]*?)<\/header>/)[1];
   assert.match(header, /<button class="utility-button icon-button" id="sessionPageButton" type="button" aria-label="Manage sessions" title="Manage sessions" aria-pressed="false" aria-controls="dashboardShell">/);
-  // Above the list: how it is sorted, then the gear. Making a session
-  // or a group is a row of its own above.
-  assert.match(header, /<button class="utility-button icon-button" id="sessionSortButton" type="button" aria-label="Sort sessions" title="Sort sessions" aria-haspopup="menu">/);
+  // Above the list: how it is sorted and what a row shows, then the gear.
+  // Making a session or a group is a row of its own above.
+  assert.match(header, /<button class="utility-button icon-button" id="sessionSortButton" type="button" aria-label="View options" title="View options" aria-haspopup="menu">/);
   assert.ok(header.indexOf('id="sessionSortButton"') < header.indexOf('id="sessionPageButton"'));
   assert.doesNotMatch(header, /sessionSidebarNewButton|>\+</);
   // The two stay quiet until the pointer is on one.

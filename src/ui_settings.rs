@@ -47,6 +47,9 @@ const ACTIVE_TOOL_OPTIONS: &[&str] = &[
 ];
 /// The orders the session list offers. "manual" is the dragged one.
 const SESSION_SORT_OPTIONS: &[&str] = &["manual", "recent", "created", "name", "agent"];
+/// What a row of the session list can say under its name, in the order the
+/// list's menu offers them.
+const SESSION_ROW_DETAIL_OPTIONS: &[&str] = &["domains", "captured", "created", "requests"];
 const ACTIVE_PROXY_TAB_OPTIONS: &[&str] = &[
     "intercept",
     "http-history",
@@ -425,6 +428,10 @@ pub struct AppUiSettingsSnapshot {
     /// How the list orders the sessions of each group. "manual" is the order
     /// they were dragged into.
     pub session_sort: String,
+    /// What a row of the list says under its session's name, in the order
+    /// the list's menu offers them. A file from before the choice has the
+    /// domains, which is what a row showed then; an empty list shows nothing.
+    pub session_row_details: Vec<String>,
     pub websocket_stack_height: Option<u16>,
     pub ws_replay_left_width: Option<u16>,
     pub ws_replay_frame_detail_height: Option<u16>,
@@ -474,6 +481,7 @@ impl Default for AppUiSettingsSnapshot {
             session_sidebar_width: None,
             session_pinned: Vec::new(),
             session_sort: "manual".to_string(),
+            session_row_details: vec!["domains".to_string()],
             websocket_stack_height: None,
             ws_replay_left_width: None,
             ws_replay_frame_detail_height: None,
@@ -570,6 +578,11 @@ impl AppUiSettingsSnapshot {
             .map(|width| width.clamp(160, 480));
         sanitized.session_pinned = sanitize_session_ids(self.session_pinned);
         sanitized.session_sort = sanitize_option(self.session_sort, "manual", SESSION_SORT_OPTIONS);
+        sanitized.session_row_details = SESSION_ROW_DETAIL_OPTIONS
+            .iter()
+            .filter(|option| self.session_row_details.iter().any(|name| name == *option))
+            .map(|option| option.to_string())
+            .collect();
         sanitized.websocket_stack_height = self
             .websocket_stack_height
             .filter(|height| *height > 0)
@@ -1735,6 +1748,12 @@ mod tests {
         let pinned = uuid::Uuid::new_v4().to_string();
         snapshot.session_pinned = vec![pinned.clone(), "not an id".into(), pinned.clone()];
         snapshot.session_sort = "agent".to_string();
+        snapshot.session_row_details = vec![
+            "requests".into(),
+            "by moon phase".into(),
+            "domains".into(),
+            "requests".into(),
+        ];
         snapshot.session_sections_collapsed = vec![
             "default".into(),
             "acme".into(),
@@ -1798,6 +1817,8 @@ mod tests {
         assert_eq!(persisted.session_sidebar_width, Some(480));
         assert_eq!(persisted.session_pinned, [pinned]);
         assert_eq!(persisted.session_sort, "agent");
+        // What a row shows: only what the menu offers, each once, in its order.
+        assert_eq!(persisted.session_row_details, ["domains", "requests"]);
         // Only the list's own sections, each once: a group folds by name.
         assert_eq!(
             persisted.session_sections_collapsed,
@@ -1808,6 +1829,10 @@ mod tests {
         assert_eq!(unknown.session_sort, "manual");
         unknown.session_sort = "by moon phase".to_string();
         unknown.session_sidebar_width = Some(12);
+        // A row begins with the domains under its name, as it had before
+        // there was a choice, and showing nothing is a choice that is kept.
+        assert_eq!(unknown.session_row_details, ["domains"]);
+        unknown.session_row_details = Vec::new();
         // Default begins as the first folder, and a name no group can carry
         // leaves it there.
         assert_eq!(unknown.session_default_after, "");
@@ -1816,6 +1841,7 @@ mod tests {
         assert_eq!(unknown.session_sort, "manual");
         assert_eq!(unknown.session_sidebar_width, Some(160));
         assert_eq!(unknown.session_default_after, "");
+        assert!(unknown.session_row_details.is_empty());
         assert_eq!(persisted.websocket_stack_height, Some(345));
         assert_eq!(persisted.ws_replay_left_width, Some(555));
         assert_eq!(persisted.ws_replay_frame_detail_height, Some(222));

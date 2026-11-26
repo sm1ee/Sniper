@@ -752,8 +752,8 @@ else. The registry and sniper-cli know none of it.
 
 - **A fixed top** holds what is made in the list, each a row with its name:
   New session and New group. A row gives its place to the name field. Below
-  it is the list's name, "List", with the sort and the gear at the trailing
-  edge, quiet until the pointer is on one.
+  it is the list's name, "List", with the view options and the gear at the
+  trailing edge, quiet until the pointer is on one.
 - **The list has two sections**, each under a name that folds. Pinned is
   there when anything is pinned. Sessions holds all the others
   in folders: Default, the sessions in no group, which is always there, and
@@ -790,6 +790,15 @@ else. The registry and sniper-cli know none of it.
   person's own first and each agent's together. The pinned and the groups
   keep the order they were put in. While a sort is on, the menu's button is
   tinted, a drop changes the group only, and the dragged order waits.
+- **What a row says under its name** is chosen in the same menu, under
+  "Show" (`session_row_details`): the domains, the day of the last capture,
+  the day the session was made, and how many requests it holds. Any of
+  them, or none, which leaves a row of one line. The days and the count come
+  first, so a long list of domains is what gives way, and both days read as
+  the span the session was used over ("Mar 2 – Mar 9"). The line's tooltip
+  names each one. A day of another year says the year. The days and the
+  count are as of the last read of the session list, as the sort by last
+  capture is.
 - **The list keeps a group** that was made by name or dragged there
   (`session_group_order`), also while no session is in it. "Ungroup", or
   "Delete group" when it is empty, ends it. A group that only sniper-cli

@@ -6750,13 +6750,14 @@ button.utility-button.replay-tab-add {
   background: color-mix(in srgb, var(--text) 7%, transparent);
 }
 
-/* The session list's own menu: what it is sorted by, under a label that
-   lines up with the items, and a mark at the end of the order in use. */
+/* The session list's own menu: what it is sorted by and what a row shows,
+   each under a label that lines up with the items, and a mark at the end of
+   what is in use. */
 .session-context-menu .context-menu-section {
   padding: 6px 14px 0;
 }
 
-.session-context-menu .context-menu-item[role="menuitemradio"] {
+.session-context-menu .context-menu-item[aria-checked] {
   display: flex;
   justify-content: space-between;
   gap: 24px;

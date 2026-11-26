@@ -252,6 +252,48 @@ test("a group folds and unfolds, and the choice is saved", () => {
   assert.equal(saves, 2);
 });
 
+// The line under a session's name is what the list's menu chose. The days and
+// the count are short and come first, so a long list of domains gives way.
+test("a row shows under its name what the list's menu chose", () => {
+  // Noon, so the day is the same wherever the test runs.
+  const year = new Date().getFullYear();
+  const overview = { scope: ["*.example.com"], scope_count: 1, last_captured_at: `${year}-03-09T12:00:00Z` };
+  const f = fixture({
+    sessions: [session("a", "01", { overview, created_at: `${year}-03-02T12:00:00Z`, request_count: 1204 })], activeId: "a",
+  });
+  const line = (details) => {
+    if (details) f.state.sessionRowDetails = details;
+    f.context.renderSessionSidebar();
+    return f.els.sessionSidebarList.innerHTML.match(/<span class="session-sidebar-identity" title="([^"]*)">([^<]*)<\/span>/)?.slice(1) ?? null;
+  };
+  // A list that never chose shows the domains, as it did before there was a choice.
+  assert.deepEqual(line(), ["*.example.com", "*.example.com"]);
+  assert.deepEqual(line(["domains", "created"]), ["Created Mar 2 · *.example.com", "Mar 2 · *.example.com"]);
+  assert.deepEqual(line(["captured"]), ["Last capture Mar 9", "Mar 9"]);
+  // Both days read as the span the session was used over.
+  assert.deepEqual(line(["domains", "captured", "created", "requests"]),
+    ["Created Mar 2 · Last capture Mar 9 · 1,204 requests · *.example.com", "Mar 2 – Mar 9 · 1,204 requests · *.example.com"]);
+  assert.match(f.els.sessionSidebarList.innerHTML, /aria-label="Session a, created Mar 2, last capture Mar 9, 1,204 requests"/);
+  // The same day is said once, and a session that never captured has only the day it was made.
+  f.state.sessions[0].overview.last_captured_at = `${year}-03-02T12:30:00Z`;
+  assert.deepEqual(line(["captured", "created"]), ["Created Mar 2 · Last capture Mar 2", "Mar 2"]);
+  f.state.sessions[0].overview.last_captured_at = null;
+  assert.deepEqual(line(["captured", "created"]), ["Created Mar 2", "Mar 2"]);
+  assert.equal(line(["captured"]), null, "a fact the session does not have leaves no line");
+  f.state.sessions[0].request_count = 1;
+  assert.deepEqual(line(["requests"]), ["1 request", "1 request"]);
+  assert.equal(line([]), null, "nothing chosen is a row of one line");
+});
+
+test("a day of another year says the year", () => {
+  const { sessionDay } = loadFunctions(["sessionDay"], {});
+  const now = new Date("2026-11-26T12:00:00Z");
+  assert.equal(sessionDay("2026-03-02T12:00:00Z", now), "Mar 2");
+  assert.equal(sessionDay("2025-03-02T12:00:00Z", now), "Mar 2, 2025");
+  assert.equal(sessionDay(null, now), "");
+  assert.equal(sessionDay("not a date", now), "");
+});
+
 // The same name a Replay tab carries for who opened it, so the same glyph.
 test("a row names who made the session, and one the person made names nobody", () => {
   const f = fixture({ sessions: [session("a", "01", { created_by: "Claude" }), session("b", "02")], activeId: "a" });
@@ -721,32 +763,36 @@ test("a drop in a sorted list changes the group and leaves the dragged order alo
 });
 
 function sortFixture(sort = "manual") {
-  const state = { sessionSort: sort };
+  const state = { sessionSort: sort, sessionRowDetails: ["domains"] };
   const calls = [];
+  const focused = [];
   const menu = { listeners: {}, style: {}, className: "", innerHTML: "", attributes: {},
     setAttribute(name, value) { this.attributes[name] = value; },
     getBoundingClientRect: () => ({ width: 180, height: 200 }),
+    querySelector: selector => ({ focus: () => focused.push(selector) }),
     addEventListener(type, handler) { this.listeners[type] = handler; } };
-  const context = loadFunctions(["showSessionSortMenu", "setSessionSort"], {
+  const context = loadFunctions(["showSessionViewMenu", "setSessionSort", "toggleSessionRowDetail"], {
     state, sessionContextMenuEl: null, closeSessionContextMenu: () => calls.push("closed"),
     document: { createElement: () => menu, body: { appendChild() {} } }, window: { innerWidth: 1200 },
     renderSessionSidebar: () => calls.push("render"), scheduleUiSettingsSave: () => calls.push("save"),
   });
   const anchor = { getBoundingClientRect: () => ({ left: 120, bottom: 32 }) };
-  const choose = dataset => menu.listeners.click({ target: { closest: () => ({ dataset }) } });
-  return { state, calls, menu, context, anchor, choose };
+  const choose = dataset => menu.listeners.click({ target: { closest: () => ({ dataset }) }, stopPropagation: () => calls.push("held") });
+  return { state, calls, menu, context, anchor, choose, focused };
 }
 
-test("the sort menu names the orders and marks the one in use", () => {
+// The checks of a menu section: [key, label, aria-checked, marked].
+const menuItems = (html, role, key) => [...html.matchAll(new RegExp(
+  `<button class="context-menu-item" role="${role}" aria-checked="(true|false)" data-${key}="([a-z]+)">([^<]+)(<span class="context-menu-shortcut" aria-hidden="true">✓</span>)?</button>`, "g",
+))].map(match => [match[2], match[3], match[1], Boolean(match[4])]);
+
+test("the list's menu names the orders and marks the one in use", () => {
   const f = sortFixture("name");
-  f.context.showSessionSortMenu(f.anchor);
+  f.context.showSessionViewMenu(f.anchor);
   assert.equal(f.menu.attributes.role, "menu");
   assert.match(f.menu.innerHTML, /^<div class="context-menu-section"><span class="context-menu-label">Sort by<\/span><\/div>/);
-  const items = [...f.menu.innerHTML.matchAll(/<button class="context-menu-item" role="menuitemradio" aria-checked="(true|false)" data-sort="([a-z]+)">([^<]+)(<span class="context-menu-shortcut" aria-hidden="true">✓<\/span>)?<\/button>/g)]
-    .map(match => [match[2], match[3], match[1], Boolean(match[4])]);
-  assert.deepEqual(items, [["manual", "Manual order", "false", false], ["recent", "Last capture", "false", false],
+  assert.deepEqual(menuItems(f.menu.innerHTML, "menuitemradio", "sort"), [["manual", "Manual order", "false", false], ["recent", "Last capture", "false", false],
     ["created", "Created", "false", false], ["name", "Name", "true", true], ["agent", "Agent", "false", false]]);
-  assert.match(f.menu.innerHTML, /data-sort="agent">Agent<\/button>$/, "the orders, and nothing else");
   assert.equal(f.menu.style.left, "120px");
   assert.equal(f.menu.style.top, "36px");
   assert.equal(f.context.sessionContextMenuEl, f.menu, "it closes as a session's menu does");
@@ -754,11 +800,41 @@ test("the sort menu names the orders and marks the one in use", () => {
 
 test("choosing an order sorts the list and saves the choice", () => {
   const f = sortFixture();
-  f.context.showSessionSortMenu(f.anchor);
+  f.context.showSessionViewMenu(f.anchor);
   f.calls.length = 0;
   f.choose({ sort: "agent" });
   assert.equal(f.state.sessionSort, "agent");
   assert.deepEqual(f.calls, ["render", "save", "closed"]);
+});
+
+// Under the orders, what a row says under its name: any of them, or none.
+test("the list's menu offers what a row shows under its name, and marks what it shows now", () => {
+  const f = sortFixture();
+  f.state.sessionRowDetails = ["domains", "created"];
+  f.context.showSessionViewMenu(f.anchor);
+  const show = f.menu.innerHTML.slice(f.menu.innerHTML.indexOf('data-sort="agent"'));
+  assert.match(show, /^data-sort="agent">Agent<\/button><div class="context-menu-section"><span class="context-menu-label">Show<\/span><\/div><button /);
+  assert.deepEqual(menuItems(f.menu.innerHTML, "menuitemcheckbox", "show"), [["domains", "Domains", "true", true],
+    ["captured", "Last capture", "false", false], ["created", "Created", "true", true], ["requests", "Requests", "false", false]]);
+  assert.match(f.menu.innerHTML, /data-show="requests">Requests<\/button>$/, "the orders, what is shown, and nothing else");
+});
+
+test("choosing what a row shows keeps the menu open, so more than one can be chosen", () => {
+  const f = sortFixture();
+  f.context.showSessionViewMenu(f.anchor);
+  f.calls.length = 0;
+  f.choose({ show: "captured" });
+  // Kept in the menu's order, whatever order they were chosen in.
+  assert.deepEqual([...f.state.sessionRowDetails], ["domains", "captured"]);
+  assert.deepEqual(f.calls, ["held", "render", "save"], "the click does not reach the document, which closes the menu");
+  assert.deepEqual(menuItems(f.menu.innerHTML, "menuitemcheckbox", "show").map(([key, , checked]) => [key, checked]),
+    [["domains", "true"], ["captured", "true"], ["created", "false"], ["requests", "false"]]);
+  assert.deepEqual(f.focused, ['[data-show="captured"]'], "the item chosen from the keyboard keeps the focus");
+  f.choose({ show: "domains" });
+  f.choose({ show: "captured" });
+  assert.deepEqual([...f.state.sessionRowDetails], [], "none is a choice too");
+  f.choose({ show: "by moon phase" });
+  assert.deepEqual([...f.state.sessionRowDetails], [], "a name the menu does not offer is not kept");
 });
 
 test("a group made by name is the list's to keep, and nothing is asked of the server", async () => {
@@ -872,7 +948,9 @@ test("a click on a group's + asks for a session in that group, and on its name f
 test("what is pinned and how the list is sorted are read from the settings and written back", () => {
   assert.match(appSource, /state\.sessionPinned = strings\(snapshot\?\.session_pinned\);/);
   assert.match(appSource, /state\.sessionSort = typeof snapshot\?\.session_sort === "string" \? snapshot\.session_sort : "manual";/);
-  assert.match(appSource, /session_pinned: state\.sessionPinned,\n\s*session_sort: state\.sessionSort,/);
+  assert.match(appSource, /session_pinned: state\.sessionPinned,\n\s*session_sort: state\.sessionSort,\n\s*session_row_details: state\.sessionRowDetails,/);
+  // A settings file from before the choice shows the domains, as the list did.
+  assert.match(appSource, /state\.sessionRowDetails = Array\.isArray\(snapshot\?\.session_row_details\) \? strings\(snapshot\.session_row_details\) : \["domains"\];/);
 });
 
 test("the list's menu button shows that a sort is on, so a drag that keeps no place is no surprise", () => {

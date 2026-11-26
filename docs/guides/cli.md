@@ -99,8 +99,9 @@ sniper-cli session port close --id <session-uuid> --yes
   nothing the CLI sets. For the CLI a group is the sessions that carry its
   name, so the last one out ends it. The list also keeps a group that was
   made or dragged there while no session is in it.
-- The order of sessions and of groups, the pinned sessions, the list's sort
-  and its width are kept for the UI and are nothing the CLI reads.
+- The order of sessions and of groups, the pinned sessions, the list's sort,
+  what a row shows under its name and the list's width are kept for the UI
+  and are nothing the CLI reads.
 
 ```bash
 sniper-cli session create --name 'agent-a' --no-activate --group 'example.com' --yes
