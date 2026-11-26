@@ -269,7 +269,11 @@ impl TrafficOverview {
     /// site map leaves them out. A mark is a colour or the operator's note, not
     /// a note Sniper adds itself.
     pub fn from_records<'a>(records: impl IntoIterator<Item = &'a TransactionRecord>) -> Self {
-        let mut hosts: HashMap<&str, usize> = HashMap::new();
+        // The session list asks for this for every loaded session, and parsing
+        // each record's host for its port was nearly all of that list's time.
+        // A session has few distinct hosts: count them as captured, then drop
+        // the default port once per host.
+        let mut captured: HashMap<(&str, &str), usize> = HashMap::new();
         let mut overview = Self::default();
         for record in records {
             overview.last_captured_at = overview.last_captured_at.max(Some(record.started_at));
@@ -277,9 +281,16 @@ impl TrafficOverview {
                 overview.marked_requests += 1;
             }
             if record.method != "CONNECT" && !record.host.is_empty() {
-                let host = crate::store::host_without_default_port(&record.host, &record.scheme);
-                *hosts.entry(host).or_default() += 1;
+                *captured
+                    .entry((record.host.as_str(), record.scheme.as_str()))
+                    .or_default() += 1;
             }
+        }
+        let mut hosts: HashMap<&str, usize> = HashMap::new();
+        for ((host, scheme), requests) in captured {
+            *hosts
+                .entry(crate::store::host_without_default_port(host, scheme))
+                .or_default() += requests;
         }
         let mut ranked: Vec<_> = hosts.into_iter().collect();
         ranked
