@@ -27,7 +27,12 @@ which forwards it to whatever host the client asked for.
   instance over its loopback HTTP API.
 
 The desktop app and the CLI use the same local API, so they see the same records
-at the same time. The core writes the records to a session directory on disk.
+at the same time. The core keeps several sessions side by side, each with its
+own records, scope and state. The proxy listener records into one of them, and
+any other session can have a proxy port of its own
+(`sniper-cli session port open`), so an agent and an operator can each capture
+into a session at the same time. The core writes each session to its own
+directory on disk.
 [docs/architecture.md](../architecture.md) explains why the boundaries fall
 where they do.
 
