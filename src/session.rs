@@ -4658,7 +4658,7 @@ fn start_websocket_journal_writer(
                         let result = file
                             .write_all(&line)
                             .and_then(|()| file.flush())
-                            .and_then(|()| file.sync_data());
+                            .and_then(|()| crate::platform::sync_journal(&file));
                         let failed = result.is_err();
                         if let Err(error) = &result {
                             warn!(?error, path = %journal_path.display(), "failed to append websocket journal entry");

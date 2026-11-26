@@ -16,6 +16,29 @@ pub fn default_data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".sniper"))
 }
 
+/// Makes an appended journal line durable, in order. On Apple systems
+/// `File::sync_data` is `F_FULLFSYNC`, which waits until the drive has emptied
+/// its whole cache: about 8 ms on an Apple SSD, once for every captured request
+/// and its response while each capture waits for the one before it. That was
+/// most of what the proxy added to a request. `F_BARRIERFSYNC` hands the write
+/// to the drive and orders it before every later one, as Apple advises for
+/// write-ahead logs: a crash of the app or of the system leaves the journal
+/// whole, and a power cut can lose its last lines but never one before them.
+/// A full sync written later, as every snapshot is, flushes them too.
+pub fn sync_journal(file: &fs::File) -> io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: fcntl on an open descriptor, with no pointer argument.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) } != -1 {
+            return Ok(());
+        }
+        // A file system without barriers, such as some network volumes, still
+        // gets a full sync.
+    }
+    file.sync_data()
+}
+
 pub fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(not(windows))]
     {
