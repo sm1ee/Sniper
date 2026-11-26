@@ -25,7 +25,7 @@
 </p>
 
 <p align="center">
-  <img src="web/architecture.svg" width="800" alt="How Sniper fits together: browser traffic, an operator and an AI agent each reach the same Sniper core — through the MITM proxy, the desktop app and sniper-cli — and the core writes captured sessions to disk" />
+  <img src="web/architecture.svg" width="800" alt="How Sniper fits together: browsers, an operator and AI agents each reach the same Sniper core — through the MITM proxy, which has a port for each session, the desktop app and sniper-cli — and the core records into several sessions side by side and writes each one to disk" />
 </p>
 
 ---
