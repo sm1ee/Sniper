@@ -2391,6 +2391,17 @@ function bindEvents() {
         paneCtx.style.top = `${Math.min(e.clientY, window.innerHeight - mh - 8)}px`;
       });
     });
+    // The Findings detail shows a record's request and response too, and had
+    // the webview's own menu. It gets this one, for the record the finding is
+    // about: the Jump button holds its id once the detail has loaded.
+    [els.findingsReqCM, els.findingsResCM].forEach((view) => {
+      view?.addEventListener("contextmenu", (e) => {
+        const recordId = els.findingsDetailJump?.dataset.recordId;
+        if (!recordId) return;
+        e.preventDefault();
+        paneMenuOpen(e, createTransactionRecordMenuTarget(recordId, currentSessionId()));
+      });
+    });
     document.addEventListener("click", () => {
       paneCtx.classList.add("hidden");
       paneContextMenuTarget = null;
