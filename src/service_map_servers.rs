@@ -1647,8 +1647,38 @@ fn detect_body_matches(body: &str, indexes: impl IntoIterator<Item = usize>) -> 
     found
 }
 
+// The scanner and the known-vulnerability check each read every captured
+// body, one right after the other, and the combined search is most of what
+// either spends on it: the second takes the first's answer. Bodies are rarely
+// repeated otherwise, so a small table that starts over is enough.
+static BODIES_SEEN: LazyLock<Mutex<HashMap<(u64, usize), Vec<Detection>>>> =
+    LazyLock::new(Default::default);
+const BODIES_SEEN_CAP: usize = 256;
+
 /// What a page or an error response's body says about its servers.
 pub(crate) fn detect_body(body: &str) -> Vec<Detection> {
+    let mut hasher = DefaultHasher::new();
+    body.hash(&mut hasher);
+    let key = (hasher.finish(), body.len());
+    if let Some(found) = BODIES_SEEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+    {
+        return found.clone();
+    }
+    let found = detect_body_uncached(body);
+    let mut seen = BODIES_SEEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if seen.len() >= BODIES_SEEN_CAP {
+        seen.clear();
+    }
+    seen.insert(key, found.clone());
+    found
+}
+
+fn detect_body_uncached(body: &str) -> Vec<Detection> {
     if body.is_ascii() {
         detect_body_matches(body, BODIES.set.matches(body))
     } else {
@@ -2733,7 +2763,7 @@ mod tests {
             let measure = |selected: bool| {
                 let started = std::time::Instant::now();
                 let found = if selected {
-                    detect_body(std::hint::black_box(&body))
+                    detect_body_uncached(std::hint::black_box(&body))
                 } else {
                     detect_body_matches(std::hint::black_box(&body), BODIES.set.matches(&body))
                 };
