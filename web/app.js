@@ -28655,9 +28655,8 @@ function validateRawHttpBodyFraming(headers, bodyLength, acceptedBodyLengths = [
     && String(header.value || "").split(",").some((value) => value.trim().toLowerCase() === "chunked"))) {
     throw new Error("Raw HTTP input with Transfer-Encoding: chunked is not supported");
   }
-  if (headers.some((header) => headerNameEquals(header, "transfer-encoding"))) {
-    throw new Error("Raw HTTP input with Transfer-Encoding is not supported");
-  }
+  // Any other coding is sent as written: a request-smuggling test is made of
+  // values such as "xchunked" that one server reads as chunked and another not.
 
   let contentLength = null;
   for (const header of headers.filter((item) => headerNameEquals(item, "content-length"))) {

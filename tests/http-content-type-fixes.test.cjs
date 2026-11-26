@@ -93,14 +93,20 @@ test("prettyFormat inspects MIME essence rather than Content-Type parameters", (
   assert.match(formatted, /\{\n  "a": 1\n\}/);
 });
 
-test("validateRawHttpBodyFraming rejects any Transfer-Encoding header", () => {
+// Sniper cannot frame a chunked body it was given whole, so that one is
+// refused. Any other coding is what the tester wrote and is sent: a
+// request-smuggling test is made of values a server may or may not read as
+// chunked.
+test("validateRawHttpBodyFraming refuses chunked and sends any other Transfer-Encoding", () => {
   const c = loadHelpers();
-  assert.throws(
-    () => c.validateRawHttpBodyFraming([{ name: "Transfer-Encoding", value: "gzip" }], 4),
-    /Transfer-Encoding is not supported/,
-  );
   assert.throws(
     () => c.validateRawHttpBodyFraming([{ name: "Transfer-Encoding", value: "chunked" }], 4),
     /Transfer-Encoding: chunked is not supported/,
   );
+  for (const coding of ["xchunked", "identity", "gzip", "chunked-false"]) {
+    assert.doesNotThrow(() => c.validateRawHttpBodyFraming([
+      { name: "Content-Length", value: "4" },
+      { name: "Transfer-Encoding", value: coding },
+    ], 4), coding);
+  }
 });

@@ -1648,12 +1648,8 @@ fn validate_editable_body_framing(
             "Transfer-Encoding: chunked is not supported for editable messages".to_string(),
         );
     }
-    if headers
-        .iter()
-        .any(|header| header.name.eq_ignore_ascii_case("transfer-encoding"))
-    {
-        return Err("Transfer-Encoding is not supported for editable messages".to_string());
-    }
+    // Any other coding is sent as written. A tester writes `xchunked` or
+    // `identity` on purpose, to see which of two servers reads it as chunked.
 
     let mut content_length: Option<usize> = None;
     for header in headers
@@ -12742,6 +12738,23 @@ mod tests {
         assert!(validate_editable_request(&request)
             .unwrap_err()
             .contains("Transfer-Encoding: chunked"));
+
+        // Only `chunked` is refused, because Sniper cannot frame it. Any other
+        // value is what the tester wrote, and request-smuggling tests are made
+        // of values a server may or may not read as chunked.
+        for coding in ["xchunked", "identity", "gzip", "chunked-false"] {
+            request.headers = vec![
+                HeaderRecord {
+                    name: "Content-Length".to_string(),
+                    value: "4".to_string(),
+                },
+                HeaderRecord {
+                    name: "Transfer-Encoding".to_string(),
+                    value: coding.to_string(),
+                },
+            ];
+            assert_eq!(validate_editable_request(&request), Ok(()), "{coding}");
+        }
     }
 
     #[test]
