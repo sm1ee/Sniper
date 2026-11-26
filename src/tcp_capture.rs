@@ -1411,6 +1411,8 @@ pub struct TcpCapture {
     /// Running listeners by id. Starting and stopping happen under this lock.
     running: Mutex<BTreeMap<Uuid, Running>>,
     errors: std::sync::Mutex<BTreeMap<Uuid, String>>,
+    /// The listeners' own live connections, which is what their limit is
+    /// compared with. Tunnels through the HTTP proxy and replays are not here.
     active_count: AtomicUsize,
     unrecorded: AtomicU64,
     /// The session's settings, for its upstream proxy; absent in unit tests.
@@ -2772,7 +2774,6 @@ impl TcpCapture {
             return tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
         };
         let id = record.id;
-        self.active_count.fetch_add(1, Ordering::Relaxed);
         let (done_tx, done_rx) = watch::channel(false);
         self.tunnel_done.lock().unwrap().insert(id, done_rx);
         let finished = TunnelFinishGuard(self.clone(), id, done_tx);
@@ -2896,7 +2897,6 @@ impl TcpCapture {
             history.records.insert(id, record.clone());
             closed
         };
-        self.active_count.fetch_add(1, Ordering::Relaxed);
         let (done_tx, done_rx) = watch::channel(false);
         self.tunnel_done.lock().unwrap().insert(id, done_rx);
         let finished = TunnelFinishGuard(self.clone(), id, done_tx);
@@ -3331,7 +3331,6 @@ impl Drop for CloseOnDrop {
 struct TunnelFinishGuard(Arc<TcpCapture>, Uuid, watch::Sender<bool>);
 impl Drop for TunnelFinishGuard {
     fn drop(&mut self) {
-        self.0.active_count.fetch_sub(1, Ordering::Relaxed);
         self.0.tunnel_done.lock().unwrap().remove(&self.1);
         let _ = self.2.send(true);
     }
@@ -3342,20 +3341,12 @@ impl Drop for TunnelFinishGuard {
 async fn client_starts_tls(client: &TcpStream, upstream: &TcpStream) -> bool {
     let first = async {
         let mut head = [0u8; 3];
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        let mut peeked = false;
+        // Set once a record header has begun. A client that has sent nothing
+        // is waited for: a pool opens its connections ahead of time and starts
+        // TLS later, and with both ends silent there is nothing to relay yet.
+        let mut deadline = None;
         loop {
-            if peeked {
-                if tokio::time::Instant::now() >= deadline {
-                    return false;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            peeked = true;
-            let read = match tokio::time::timeout_at(deadline, client.peek(&mut head)).await {
-                Ok(Ok(read)) => read,
-                _ => return false,
-            };
+            let read = client.peek(&mut head).await.unwrap_or(0);
             if read == 0 || head[0] != 0x16 {
                 return false;
             }
@@ -3365,6 +3356,13 @@ async fn client_starts_tls(client: &TcpStream, upstream: &TcpStream) -> bool {
             if read >= 3 {
                 return head[2] <= 0x04;
             }
+            // The rest of the record header is still on its way.
+            let deadline = *deadline
+                .get_or_insert_with(|| tokio::time::Instant::now() + Duration::from_secs(2));
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     };
     let upstream_speaks = async {
@@ -6286,6 +6284,40 @@ mod tests {
         );
         assert_eq!(record.status, "closed");
     }
+    // The status compares the active count with what the listeners admit, so
+    // only their own connections are in it. A replay or a tunnel through the
+    // HTTP proxy took a place there, and thirty-two of them read as "new
+    // ones wait" beside a listener with no client at all.
+    #[tokio::test]
+    async fn a_replay_in_flight_takes_no_place_among_the_listeners_connections() {
+        let silent = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = silent.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = silent.accept().await {
+                held.push(socket);
+            }
+        });
+        let capture = temporary();
+        let replaying = capture.clone();
+        let replay = tokio::spawn(async move {
+            let mut request = replay_of(port, &[b"one"]);
+            request.wait_ms = 400;
+            replaying.replay(request).await
+        });
+        for _ in 0..100 {
+            if capture.connection_count() == Some(1) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(capture.connection_count(), Some(1));
+
+        assert_eq!(capture.status().await.active_count, 0);
+        replay.await.unwrap().unwrap();
+        assert_eq!(capture.status().await.active_count, 0);
+    }
+
     #[tokio::test]
     async fn replays_are_checked_before_anything_is_sent() {
         let capture = temporary();
@@ -7187,6 +7219,43 @@ mod tests {
         assert!(!routes_through(&proxy, "0.0.0.0"));
         assert!(!routes_through(&proxy, "::"));
         assert!(routes_through(&proxy, "example.com"));
+    }
+
+    // A client can connect first and start TLS later, as a pool that opens its
+    // connections ahead of time does. The wait is for the rest of a record
+    // header that has begun, not for the first byte.
+    #[tokio::test]
+    async fn a_client_that_starts_tls_late_is_still_a_tls_client() {
+        use tokio::io::AsyncWriteExt as _;
+        async fn pair() -> (TcpStream, TcpStream) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let near = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (far, _) = listener.accept().await.unwrap();
+            (near, far)
+        }
+        let (mut client, accepted) = pair().await;
+        let (upstream, _target) = pair().await;
+        let late = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(2300)).await;
+            client
+                .write_all(&[0x16, 0x03, 0x01, 0x00, 0x05])
+                .await
+                .unwrap();
+            client
+        });
+
+        assert!(client_starts_tls(&accepted, &upstream).await);
+        drop(late.await.unwrap());
+
+        // A header that begins and does not go on is still given up on.
+        let (mut client, accepted) = pair().await;
+        let (upstream, _target) = pair().await;
+        client.write_all(&[0x16]).await.unwrap();
+        let started = tokio::time::Instant::now();
+        assert!(!client_starts_tls(&accepted, &upstream).await);
+        assert!(started.elapsed() >= Duration::from_secs(2));
     }
 
     #[test]
