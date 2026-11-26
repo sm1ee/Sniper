@@ -64,6 +64,25 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 const MAX_MAX_REQUESTS: usize = 50_000;
 const OAST_UNAVAILABLE: &str =
     "they need an Interactsh server to hear their callbacks; set one up in Capture ▸ OAST.";
+
+/// The job's notice for templates that wait for a callback and were left out
+/// for want of a server. One is common, and is said in the singular.
+fn left_out_for_oast(count: usize) -> String {
+    if count == 1 {
+        "1 template was not sent: it needs an Interactsh server to hear its callbacks; set one up in Capture ▸ OAST.".to_string()
+    } else {
+        format!("{count} templates were not sent: {OAST_UNAVAILABLE}")
+    }
+}
+
+/// The job's notice for templates the library could not give back.
+fn left_out_unread(count: usize) -> String {
+    if count == 1 {
+        "1 template could not be read from the library and was not sent.".to_string()
+    } else {
+        format!("{count} templates could not be read from the library and were not sent.")
+    }
+}
 /// How long an answer waits for its request's callback, as Nuclei's
 /// eviction; and how many wait at once, the oldest giving way.
 const OAST_WAIT: Duration = Duration::from_secs(60);
@@ -844,14 +863,10 @@ async fn launch(
         job.warn(warning);
     }
     if unreadable > 0 {
-        job.warn(format!(
-            "{unreadable} templates could not be read from the library and were not sent."
-        ));
+        job.warn(left_out_unread(unreadable));
     }
     if oast_unavailable > 0 {
-        job.warn(format!(
-            "{oast_unavailable} templates were not sent: {OAST_UNAVAILABLE}"
-        ));
+        job.warn(left_out_for_oast(oast_unavailable));
     }
     {
         let mut snapshot = session.template_scans.snapshot.lock().unwrap();
@@ -4221,5 +4236,27 @@ mod tests {
         );
         assert!(parse_risks(&["Intrusive".into(), "method:put".into()]).is_ok());
         assert!(parse_risks(&["anything".into()]).is_err());
+    }
+
+    // A scan often leaves out one template, and the notice said "1 templates
+    // were not sent: they need".
+    #[test]
+    fn a_notice_about_one_template_left_out_is_in_the_singular() {
+        assert_eq!(
+            left_out_for_oast(1),
+            "1 template was not sent: it needs an Interactsh server to hear its callbacks; set one up in Capture ▸ OAST."
+        );
+        assert_eq!(
+            left_out_for_oast(3),
+            "3 templates were not sent: they need an Interactsh server to hear their callbacks; set one up in Capture ▸ OAST."
+        );
+        assert_eq!(
+            left_out_unread(1),
+            "1 template could not be read from the library and was not sent."
+        );
+        assert_eq!(
+            left_out_unread(2),
+            "2 templates could not be read from the library and were not sent."
+        );
     }
 }
