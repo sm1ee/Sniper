@@ -1632,11 +1632,13 @@ fn parse_cookie_expires(raw: &str) -> Option<DateTime<Utc>> {
         .or_else(|| trimmed.strip_suffix(" gmt"))
         .or_else(|| trimmed.strip_suffix(" utc"))?
         .trim_end();
+    // The two-digit year first: `%Y` takes two digits as well, and reads "30"
+    // as the year 30. A four-digit year does not fit `%y`, so it falls through.
     for fmt in [
-        "%a, %d-%b-%Y %H:%M:%S",
-        "%A, %d-%b-%Y %H:%M:%S",
         "%a, %d-%b-%y %H:%M:%S",
         "%A, %d-%b-%y %H:%M:%S",
+        "%a, %d-%b-%Y %H:%M:%S",
+        "%A, %d-%b-%Y %H:%M:%S",
         "%a, %d %b %Y %H:%M:%S",
     ] {
         if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(without_tz, fmt) {
@@ -3859,10 +3861,17 @@ fn javascript_or_css_response(
     response: &crate::model::MessageRecord,
 ) -> bool {
     let essence = response_mime_essence(response);
-    if !essence.is_empty() {
-        return essence.contains("javascript")
-            || essence.contains("ecmascript")
-            || essence == "text/css";
+    if essence.contains("javascript") || essence.contains("ecmascript") || essence == "text/css" {
+        return true;
+    }
+    // A type that says what the body is settles it: an HTML error page at a
+    // `.js` path is not a script. A type that says nothing leaves the name,
+    // which is how object storage serves scripts and how History labels them.
+    if !matches!(
+        essence.as_str(),
+        "" | "application/octet-stream" | "binary/octet-stream" | "text/plain"
+    ) {
+        return false;
     }
     let clean_path = record
         .path
@@ -10288,6 +10297,58 @@ mod tests {
         // Netscape hyphenated deletion date emitted by PHP / IIS / Java servlets.
         assert!(set_cookie_is_deletion(
             "PHPSESSID=deleted; expires=Thu, 01-Jan-1970 00:00:01 GMT; path=/",
+            captured_at,
+        ));
+    }
+
+    // Object storage serves scripts as application/octet-stream, and History
+    // calls such a file a script by its name. The scanner must too. A type that
+    // says what the body is still wins: an HTML error page at a `.js` path is
+    // not a script.
+    #[test]
+    fn a_script_served_with_a_generic_type_is_still_a_script() {
+        let script = |content_type: &str, path: &str| {
+            let headers = if content_type.is_empty() {
+                vec![]
+            } else {
+                vec![("content-type", content_type)]
+            };
+            let mut record = make_record(vec![], headers, "x", 200);
+            record.path = path.to_string();
+            // The builder's own type would stand in for a header that is absent.
+            let mut response = record.response.clone().unwrap();
+            response.content_type = (!content_type.is_empty()).then(|| content_type.to_string());
+            javascript_or_css_response(&record, &response)
+        };
+        for generic in [
+            "",
+            "application/octet-stream",
+            "binary/octet-stream",
+            "text/plain; charset=utf-8",
+        ] {
+            assert!(script(generic, "/static/app.js?v=3"), "{generic:?}");
+            assert!(script(generic, "/static/site.css"), "{generic:?}");
+            assert!(!script(generic, "/static/readme.txt"), "{generic:?}");
+        }
+        assert!(script("text/javascript", "/bundle"));
+        assert!(!script("text/html; charset=utf-8", "/static/app.js"));
+        assert!(!script("application/json", "/static/app.js"));
+    }
+
+    // A two-digit year is this century's: "01-Jan-30" is 2030, not the year 30,
+    // which would read as a cookie being deleted.
+    #[test]
+    fn a_two_digit_year_in_a_cookie_expiry_is_not_long_past() {
+        let captured_at = DateTime::parse_from_rfc3339("2026-01-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(!set_cookie_is_deletion(
+            "session=abc; Expires=Tue, 01-Jan-30 00:00:00 GMT; Path=/",
+            captured_at,
+        ));
+        // And one that is past in this century still deletes.
+        assert!(set_cookie_is_deletion(
+            "session=abc; Expires=Wed, 01-Jan-20 00:00:00 GMT; Path=/",
             captured_at,
         ));
     }
