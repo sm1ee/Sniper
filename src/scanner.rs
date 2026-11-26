@@ -1982,7 +1982,7 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
         // ── Sensitive file paths ──
         (
             r"(?i)/\.(?:env|git|svn|htpasswd|htaccess|DS_Store|aws/credentials|npmrc|dockerenv)\b",
-            "Sensitive file path exposed",
+            "Sensitive file path",
             Severity::Medium,
         ),
         // ── Credit card patterns (basic) ──
@@ -1998,6 +1998,7 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
         ),
     ];
 
+    let mut target_repetitions = None;
     for &(pattern, label, ref severity) in PATTERNS {
         if let Ok(re) = Regex::new(pattern) {
             if label == "Password" {
@@ -2070,8 +2071,15 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
                 if label == "Replicate API Token" && !replicate_token_has_boundaries(body, &m) {
                     continue;
                 }
-                if label == "Sensitive file path exposed"
-                    && sensitive_file_path_match_is_template(body, &m)
+                // A 404 that names the path it could not find repeats `/.svn`.
+                if label == "Sensitive file path"
+                    && (sensitive_file_path_match_is_template(body, &m)
+                        || target_repetitions
+                            .get_or_insert_with(|| {
+                                request_target_repetitions(record, &body.to_ascii_lowercase())
+                            })
+                            .iter()
+                            .any(|range| range.start <= m.start() && m.end() <= range.end))
                 {
                     continue;
                 }
@@ -2258,6 +2266,7 @@ fn password_response_match(
         let m = captures.get(0)?;
         if !password_candidate_looks_like_secret(&captures, script)
             || is_embedded_in_base64(body, &m)
+            || password_key_names_a_package(body, m.start())
         {
             return None;
         }
@@ -2280,6 +2289,9 @@ fn password_response_match(
             .is_some_and(|span| head.start() >= span.start)
         {
             break;
+        }
+        if password_key_names_a_package(body, head.start()) {
+            continue;
         }
         let Some(end) = password_quoted_end(body, head.end() - 1) else {
             continue;
@@ -2366,6 +2378,11 @@ fn password_value_looks_like_secret(value: &str, quoted: bool, script: bool) -> 
         || lower.contains("password")
         || lower.contains("passwd")
     {
+        return false;
+    }
+    // Composer's `conflict` map gives each package the versions it rules out:
+    // `"derhansen/fe_change_pwd": "<2.0.5|>=3,<3.0.3"`.
+    if is_version_constraint(value) {
         return false;
     }
     // A script's word is an identifier or a message key, not a password.
@@ -2944,7 +2961,9 @@ fn check_error_messages(record: &TransactionRecord, findings: &mut Vec<ScannerFi
         return;
     }
 
-    let body_lower = body.to_ascii_lowercase();
+    // An error page that names the URL it could not serve repeats the words in
+    // it: `/error_mysql` is the client's word, not the server's.
+    let body_lower = without_request_target(record, body.to_ascii_lowercase());
 
     static ERROR_PATTERNS: &[(&str, &str, Severity)] = &[
         // ── SQL / Database ──
@@ -3002,7 +3021,7 @@ fn check_error_messages(record: &TransactionRecord, findings: &mut Vec<ScannerFi
         ("jdbc error", "JDBC error disclosure", Severity::Medium),
         ("ole db provider", "OLE DB error", Severity::Medium),
         // ── Generic errors ──
-        ("syntax error", "Syntax error in response", Severity::Low),
+        ("syntax error", "Syntax error", Severity::Low),
         ("stack trace", "Stack trace disclosure", Severity::Medium),
         (
             "internal server error",
@@ -4578,6 +4597,104 @@ fn percent_decode(value: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// What a response can repeat of the request's own target. A 404 page names
+/// the URL it could not serve, in its text or in a breadcrumb's JSON
+/// (`\/error_mysql`), and the rules read it as the server's words: the path
+/// `/error_mysql` became a MySQL error and `/.svn/entries` an exposed file.
+/// Lower-cased, as sent and decoded, with JSON's escaped slashes and HTML's
+/// escaped ampersands.
+fn request_target_forms(record: &TransactionRecord) -> Vec<String> {
+    let target = record.path.split('#').next().unwrap_or(&record.path);
+    let path = target.split('?').next().unwrap_or(target);
+    let mut forms = Vec::new();
+    for value in [target, path] {
+        for form in [value.to_string(), percent_decode(value)] {
+            let form = form.to_ascii_lowercase();
+            forms.push(form.replace('/', "\\/"));
+            forms.push(form.replace('&', "&amp;"));
+            forms.push(form);
+        }
+    }
+    // `/` or `/a` is all over a page; a target that short cannot tell a
+    // repetition from the page's own words.
+    forms.retain(|form| form.len() >= 5);
+    forms.sort_unstable();
+    forms.dedup();
+    forms
+}
+
+/// The byte ranges of `text_lower` that repeat the request's target.
+fn request_target_repetitions(
+    record: &TransactionRecord,
+    text_lower: &str,
+) -> Vec<std::ops::Range<usize>> {
+    request_target_forms(record)
+        .iter()
+        .flat_map(|form| {
+            text_lower
+                .match_indices(form.as_str())
+                .map(|(start, found)| start..start + found.len())
+        })
+        .collect()
+}
+
+/// `text_lower` with each repetition of the request's target blanked byte for
+/// byte, so that an offset into it still indexes the original text.
+fn without_request_target(record: &TransactionRecord, text_lower: String) -> String {
+    let repetitions = request_target_repetitions(record, &text_lower);
+    if repetitions.is_empty() {
+        return text_lower;
+    }
+    let mut bytes = text_lower.into_bytes();
+    for range in repetitions {
+        bytes[range].fill(b' ');
+    }
+    // Each range matched a whole string, so it starts and ends on a character
+    // boundary and blanking it leaves the text valid.
+    String::from_utf8(bytes)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
+}
+
+/// A package manager's version constraint: `<2.0.5|>=3,<3.0.3`, `^1.2`,
+/// `<=2.1.3.0-beta`, `1.0.0|2.0.0`. The comparison or the alternative is what
+/// tells it from a dotted value.
+fn is_version_constraint(value: &str) -> bool {
+    if !value.contains(['<', '>', '=', '^', '~', '|']) {
+        return false;
+    }
+    let clauses: Vec<&str> = value
+        .split(['|', ',', ' '])
+        .filter(|clause| !clause.is_empty())
+        .collect();
+    !clauses.is_empty()
+        && clauses.iter().all(|clause| {
+            let version = clause.trim_start_matches(['<', '>', '=', '!', '^', '~']);
+            let version = version.strip_prefix('v').unwrap_or(version);
+            let (number, suffix) = version.split_once(['-', '@']).unwrap_or((version, ""));
+            !number.is_empty()
+                && number.split('.').all(|part| {
+                    part == "*"
+                        || part == "x"
+                        || (!part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+                })
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.')
+        })
+}
+
+/// `"derhansen/fe_change_pwd"` is a Composer package whose name ends in `pwd`.
+/// A key with a slash before the word names a package or a path, not a field.
+fn password_key_names_a_package(body: &str, word_start: usize) -> bool {
+    body.as_bytes()[..word_start]
+        .iter()
+        .rev()
+        .take_while(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/' | b'@')
+        })
+        .any(|byte| *byte == b'/')
 }
 
 fn session_token_parameter_in_url(record: &TransactionRecord) -> Option<String> {
@@ -8745,6 +8862,132 @@ mod tests {
                 .any(|finding| finding.title.contains("Sensitive file path")),
             "direct .env references should still be reported"
         );
+    }
+
+    // A 404 page names the URL it could not find: in its text, and in a
+    // breadcrumb's JSON with escaped slashes.
+    fn not_found_page(path: &str) -> String {
+        format!(
+            r#"<p>The requested URL {path} was not found on this server.</p><script type="application/ld+json">{{"@id":"https:\/\/news.example.com{}#breadcrumblist","name":"404 - Page Not Found"}}</script>"#,
+            path.replace('/', "\\/")
+        )
+    }
+
+    #[test]
+    fn rules_do_not_read_the_url_a_not_found_page_repeats() {
+        for path in [
+            "/error_mysql",
+            "/database.sqlite",
+            "/.svn/entries",
+            "/.DS_Store",
+        ] {
+            let mut record = make_record(
+                vec![],
+                vec![("content-type", "text/html")],
+                &not_found_page(path),
+                404,
+            );
+            record.path = path.into();
+            let titles = scan_transaction(&record, &ScannerConfig::default())
+                .into_iter()
+                .filter(|finding| {
+                    finding.category == "error" || finding.title.starts_with("Sensitive file path")
+                })
+                .map(|finding| finding.title)
+                .collect::<Vec<_>>();
+            assert!(titles.is_empty(), "{path}: {titles:?}");
+        }
+    }
+
+    #[test]
+    fn what_a_not_found_page_says_besides_the_url_is_still_read() {
+        let body = format!(
+            r#"{}<p>Warning: mysql_connect(): Access denied for user 'app'@'localhost'</p><a href="/.git/config">config</a>"#,
+            not_found_page("/error_mysql")
+        );
+        let mut record = make_record(vec![], vec![("content-type", "text/html")], &body, 500);
+        record.path = "/error_mysql".into();
+        let titles = scan_transaction(&record, &ScannerConfig::default())
+            .into_iter()
+            .map(|finding| finding.title)
+            .collect::<Vec<_>>();
+        for title in [
+            "MySQL error disclosure in error response",
+            "Sensitive file path detected in response",
+        ] {
+            assert!(titles.iter().any(|found| found == title), "{titles:?}");
+        }
+    }
+
+    #[test]
+    fn titles_name_the_issue_once() {
+        let record = make_record(
+            vec![],
+            vec![],
+            "Syntax error near 'x' in the SQL query",
+            500,
+        );
+        assert_eq!(
+            findings_for_rule(&record, "error")[0].title,
+            "Syntax error in error response"
+        );
+        let record = make_record(
+            vec![],
+            vec![("content-type", "text/html")],
+            r#"<a href="/.env">environment file</a>"#,
+            200,
+        );
+        assert!(findings_for_rule(&record, "disclosure")
+            .iter()
+            .any(|finding| finding.title == "Sensitive file path detected in response"));
+    }
+
+    // Composer's `conflict` map names packages and the versions it rules out:
+    // `fe_change_pwd` is a package, `<2.0.5|>=3,<3.0.3` its versions.
+    #[test]
+    fn composer_version_constraints_are_not_passwords() {
+        let titles = |body: &str| -> Vec<String> {
+            let record = make_record(
+                vec![],
+                vec![("content-type", "application/json")],
+                body,
+                200,
+            );
+            findings_for_rule(&record, "disclosure")
+                .into_iter()
+                .map(|finding| finding.title)
+                .collect()
+        };
+        let installed = r#"{"packages":[{"name":"roave/security-advisories","conflict":{"derhansen/fe_change_pwd":"<2.0.5|>=3,<3.0.3","derhansen/sf_event_mgt":"<4.3.1|>=5,<5.1.1|>=7,<7.4","dcat/laravel-admin":"<=2.1.3.0-beta"}}]}"#;
+        assert_eq!(titles(installed), Vec::<String>::new());
+        // A package named by its key alone, whatever version it pins.
+        assert_eq!(
+            titles(r#"{"replace":{"acme/reset_pwd":"self.version"}}"#),
+            Vec::<String>::new()
+        );
+        // A field whose name ends in `pwd` is still read.
+        let real = concat!(r#"{"db_pwd":"Tr0ub"#, r#"4dor9Horse"}"#);
+        assert_eq!(titles(real), ["Password detected in response"]);
+
+        for value in [
+            "<2.0.5|>=3,<3.0.3",
+            "<=2.1.3.0-beta",
+            "^1.2.3",
+            ">=7,<7.0.3|>=8,<9.5.2",
+            "1.0.0|2.0.0",
+            "<2020.09.14-dev",
+        ] {
+            assert!(is_version_constraint(value), "{value}");
+        }
+        for value in [
+            "Tr0ub4dor9Horse",
+            "<Passw0rd>",
+            "2.0.5",
+            "pa$$|word99",
+            "s3cr3t=value",
+        ] {
+            assert!(!is_version_constraint(value), "{value}");
+        }
     }
 
     #[test]
