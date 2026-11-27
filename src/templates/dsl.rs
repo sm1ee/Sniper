@@ -531,6 +531,7 @@ impl Expr {
             tokens,
             position: 0,
             allow,
+            depth: 0,
         };
         let node = parser.ternary()?;
         // A token left over is usually an operator Sniper does not evaluate
@@ -575,13 +576,29 @@ fn collect_variables<'n>(node: &'n Node, found: &mut Vec<&'n str>) {
     }
 }
 
+const MAX_DEPTH: usize = 64;
+
 struct Parser {
     tokens: Vec<Token>,
     position: usize,
     allow: Allow,
+    depth: usize,
 }
 
 impl Parser {
+    fn with_depth<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, CompileError>,
+    ) -> Result<T, CompileError> {
+        if self.depth >= MAX_DEPTH {
+            return Err(CompileError::new("dsl:depth"));
+        }
+        self.depth += 1;
+        let result = f(self);
+        self.depth -= 1;
+        result
+    }
+
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.position)
     }
@@ -608,14 +625,16 @@ impl Parser {
         if !self.eat("?") {
             return Ok(condition);
         }
-        let then = self.ternary()?;
-        self.expect(":")?;
-        let otherwise = self.ternary()?;
-        Ok(Node::Ternary(
-            Box::new(condition),
-            Box::new(then),
-            Box::new(otherwise),
-        ))
+        self.with_depth(|parser| {
+            let then = parser.ternary()?;
+            parser.expect(":")?;
+            let otherwise = parser.ternary()?;
+            Ok(Node::Ternary(
+                Box::new(condition),
+                Box::new(then),
+                Box::new(otherwise),
+            ))
+        })
     }
 
     fn or(&mut self) -> Result<Node, CompileError> {
@@ -708,7 +727,7 @@ impl Parser {
     fn power(&mut self) -> Result<Node, CompileError> {
         let base = self.unary()?;
         if self.eat("**") {
-            let exponent = self.power()?;
+            let exponent = self.with_depth(|parser| parser.power())?;
             return Ok(Node::Arith(Arith::Pow, Box::new(base), Box::new(exponent)));
         }
         Ok(base)
@@ -716,10 +735,14 @@ impl Parser {
 
     fn unary(&mut self) -> Result<Node, CompileError> {
         if self.eat("!") {
-            return Ok(Node::Not(Box::new(self.unary()?)));
+            return Ok(Node::Not(Box::new(
+                self.with_depth(|parser| parser.unary())?,
+            )));
         }
         if self.eat("-") {
-            return Ok(Node::Neg(Box::new(self.unary()?)));
+            return Ok(Node::Neg(Box::new(
+                self.with_depth(|parser| parser.unary())?,
+            )));
         }
         self.primary()
     }
@@ -736,17 +759,17 @@ impl Parser {
                 .map(|number| Node::Lit(Val::Num(number)))
                 .map_err(|_| CompileError::new("dsl:number")),
             Token::Str(text) => Ok(Node::Lit(Val::Str(Cow::Owned(text)))),
-            Token::Op("(") => {
-                let inner = self.ternary()?;
-                self.expect(")")?;
+            Token::Op("(") => self.with_depth(|parser| {
+                let inner = parser.ternary()?;
+                parser.expect(")")?;
                 Ok(inner)
-            }
+            }),
             Token::Op(operator) => Err(CompileError::new(format!("dsl:operator:{operator}"))),
             Token::Ident(name) => match name.as_str() {
                 "true" => Ok(Node::Lit(Val::Bool(true))),
                 "false" => Ok(Node::Lit(Val::Bool(false))),
                 "in" | "nil" => Err(CompileError::new(format!("dsl:operator:{name}"))),
-                _ if self.eat("(") => self.call(&name),
+                _ if self.eat("(") => self.with_depth(|parser| parser.call(&name)),
                 _ => Ok(Node::Var(name)),
             },
         }
@@ -1444,7 +1467,17 @@ fn query_unescape(text: &str) -> Option<String> {
 /// as explicit ASCII classes, a version pattern like `([\w.]+)` stops at the
 /// same character Nuclei's does.
 pub fn go_regex(pattern: &str) -> Result<Regex, CompileError> {
-    regex::RegexBuilder::new(&go_pattern(pattern))
+    go_regex_with_case(pattern, false)
+}
+
+pub fn go_regex_with_case(pattern: &str, case_insensitive: bool) -> Result<Regex, CompileError> {
+    let mut translated = go_pattern(pattern);
+    if case_insensitive {
+        // Embed the flag in the pattern text so `Regex::as_str()` carries it
+        // into `PassiveSet`'s `RegexSet` prefilter too.
+        translated.insert_str(0, "(?i)");
+    }
+    regex::RegexBuilder::new(&translated)
         .size_limit(2 * 1024 * 1024)
         .build()
         .map_err(|_| CompileError::new("regex:invalid"))
@@ -2036,5 +2069,28 @@ mod tests {
         let text = Interp::compile(probe, Allow::default()).unwrap();
         assert_eq!(text.literal(), Some(probe));
         assert_eq!(text.render(&vars()).unwrap(), probe);
+    }
+
+    #[test]
+    fn deeply_nested_dsl_expressions_fail_instead_of_overflowing_stack() {
+        let nested_parens = format!("{}true{}", "(".repeat(200), ")".repeat(200));
+        assert_eq!(
+            Expr::compile(&nested_parens, Allow::default())
+                .unwrap_err()
+                .0,
+            "dsl:depth"
+        );
+        let nested_not = format!("{}true", "!".repeat(200));
+        assert_eq!(
+            Expr::compile(&nested_not, Allow::default()).unwrap_err().0,
+            "dsl:depth"
+        );
+    }
+
+    #[test]
+    fn go_regex_with_case_embeds_case_insensitive_flag() {
+        let re = go_regex_with_case("ServerToken_[a-z]+", true).unwrap();
+        assert!(re.as_str().starts_with("(?i)"));
+        assert!(re.is_match("servertoken_ABC"));
     }
 }

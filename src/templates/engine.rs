@@ -319,7 +319,7 @@ fn compile_matcher(
                     if pattern.contains("{{") {
                         return Err(reason("regex:marker"));
                     }
-                    dsl::go_regex(pattern).map(Arc::new)
+                    dsl::go_regex_with_case(pattern, case_insensitive).map(Arc::new)
                 })
                 .collect::<Result<_, _>>()?,
         ),
@@ -1667,5 +1667,32 @@ mod tests {
             checked > 100,
             "the generated responses should match often: {checked}"
         );
+    }
+
+    #[test]
+    fn regex_matcher_honors_case_insensitive_flag_in_direct_and_prefiltered_scans() {
+        let template = Arc::new(compiled(
+            r#"
+id: regex-ci-check
+info:
+  name: Regex CI Check
+  severity: low
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}"
+    matchers:
+      - type: regex
+        part: body
+        case-insensitive: true
+        regex:
+          - "SecretBanner_[0-9]+"
+"#,
+        ));
+        let set = PassiveSet::new(vec![Arc::clone(&template)]);
+        let response = view(200, &[], "found secretbanner_42 here");
+        let hits = set.scan(&response);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0.info.id, "regex-ci-check");
     }
 }

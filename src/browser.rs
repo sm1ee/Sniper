@@ -935,6 +935,7 @@ enum Started {
     New {
         pid: u32,
         exited: mpsc::Receiver<Exit>,
+        own_port: Option<u16>,
     },
     /// An already-running browser took the request.
     Reused(Owner),
@@ -960,15 +961,6 @@ async fn launch_at(
         None => profiles_root.join(kind.name()),
     };
     let server_name = driver.server_name(ctx.proxy_addr.port(), &profile);
-    let own_port = driver.own_port();
-    let args = build_args(
-        &profile,
-        &proxy,
-        &spki,
-        own_port,
-        &driver.launch_args(request.agent, server_name.as_deref(), own_port),
-        &url,
-    );
 
     let prepared = {
         let (root, profile) = (profiles_root.clone(), profile.clone());
@@ -1016,6 +1008,16 @@ async fn launch_at(
                              this browser; wait a moment and try again"
                         )));
                     };
+                    // Do not allocate a fresh `own_port` for a handoff: the running
+                    // browser already owns its port and ignores launch switches.
+                    let args = build_args(
+                        &profile,
+                        &proxy,
+                        &spki,
+                        None,
+                        &driver.launch_args(request.agent, server_name.as_deref(), None),
+                        &url,
+                    );
                     // No log: the running browser has that file open, and opening it
                     // again to truncate would wipe what it has printed so far.
                     let child = spawn_browser(exe, &args, &profile, false)?;
@@ -1062,6 +1064,15 @@ async fn launch_at(
                         _ => {}
                     }
                 }
+                let own_port = driver.own_port();
+                let args = build_args(
+                    &profile,
+                    &proxy,
+                    &spki,
+                    own_port,
+                    &driver.launch_args(request.agent, server_name.as_deref(), own_port),
+                    &url,
+                );
                 let child = match spawn_browser(exe, &args, &profile, true) {
                     Ok(child) => child,
                     Err(error) => {
@@ -1098,21 +1109,29 @@ async fn launch_at(
                     live.remove(&profile);
                     warnings.push(format!("could not watch the browser process: {error}"));
                 }
-                Started::New { pid, exited }
+                Started::New {
+                    pid,
+                    exited,
+                    own_port,
+                }
             }
         }
     };
 
     let mut reused_has_port = false;
-    let (mut pid, mut reused, mut exited) = match started {
-        Started::New { pid, exited } => {
+    let (mut pid, mut reused, mut exited, own_port) = match started {
+        Started::New {
+            pid,
+            exited,
+            own_port,
+        } => {
             info!(
                 browser = kind.name(),
                 pid,
                 fresh = request.fresh,
                 "opened Sniper browser"
             );
-            (pid, false, Some(exited))
+            (pid, false, Some(exited), own_port)
         }
         Started::Reused(owner) => {
             info!(
@@ -1121,7 +1140,7 @@ async fn launch_at(
                 "opened another window in the running Sniper browser"
             );
             reused_has_port = owner.devtools_port;
-            (owner.pid, true, None)
+            (owner.pid, true, None, None)
         }
     };
 
@@ -1174,9 +1193,19 @@ async fn launch_at(
     } else {
         driver.control(port, server_name.as_deref())
     };
-    let ports: Vec<u16> = own_port.into_iter().chain(port).collect();
-    if !ended && !ports.is_empty() {
-        remember_driver_ports(&profile, ports);
+    if !ended {
+        if reused {
+            // Preserve the ports already guarded for the running browser; only
+            // merge a newly read driver port if this reuse asked for one.
+            if let Some(port) = port {
+                merge_driver_ports(&profile, vec![port]);
+            }
+        } else {
+            let ports: Vec<u16> = own_port.into_iter().chain(port).collect();
+            if !ports.is_empty() {
+                remember_driver_ports(&profile, ports);
+            }
+        }
     }
     let hint = if ended {
         Some("the browser ended at once, so there is nothing to drive; see warnings".to_string())
@@ -1558,29 +1587,62 @@ fn watch_browser(
                 success,
                 output: read_log_tail(&profile),
             });
-            // A throwaway profile is deleted below, and that must not happen under a
-            // browser that is still using it. Persistent profiles need no wait: the
-            // next launch finds the successor through the profile's lock, and an open
-            // in the instant before it takes the lock is recognised as a handoff.
             // A handover is a clean exit after a while. A browser that failed, or
             // that never got going, has no successor to wait for.
-            if fresh && cfg!(unix) && success && started.elapsed() >= HANDOVER_MIN_LIFETIME {
-                wait_out_successor(&profile, &exe, HANDOVER_WAIT);
-            }
-            {
-                let mut live = live_profiles()
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if live.get(&profile).is_some_and(|owner| owner.pid == pid) {
-                    live.remove(&profile);
-                    let _ = fs::remove_file(profile.join(OWNER_FILE));
-                    forget_driver_ports(&profile);
-                }
-            }
             if fresh {
+                // A throwaway profile is deleted below, and that must not happen
+                // under a browser that is still using it.
+                if cfg!(unix) && success && started.elapsed() >= HANDOVER_MIN_LIFETIME {
+                    wait_out_successor(&profile, &exe, HANDOVER_WAIT);
+                }
+                {
+                    let mut live = live_profiles()
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if live.get(&profile).is_some_and(|owner| owner.pid == pid) {
+                        live.remove(&profile);
+                        let _ = fs::remove_file(profile.join(OWNER_FILE));
+                        forget_driver_ports(&profile);
+                    }
+                }
                 // A throwaway profile holds whatever the session logged into;
                 // leaving it behind would make "fresh" mean "unlisted".
                 remove_profile_with_retry(&profile);
+            } else {
+                // Release `live` immediately so a prompt relaunch does not treat
+                // the exited pid as still running, while checking whether a
+                // self-relaunched successor took over the persistent profile.
+                let removed = {
+                    let mut live = live_profiles()
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if live.get(&profile).is_some_and(|owner| owner.pid == pid) {
+                        live.remove(&profile)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(mut owner) = removed {
+                    let successor =
+                        if cfg!(unix) && success && started.elapsed() >= HANDOVER_MIN_LIFETIME {
+                            wait_for_successor_pid(&profile, &exe, HANDOVER_WAIT)
+                        } else {
+                            None
+                        };
+                    let live = live_profiles()
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if !live.contains_key(&profile) {
+                        if let Some(successor_pid) = successor {
+                            owner.pid = successor_pid;
+                            owner.started = None;
+                            let _ = write_owner(&profile, &owner);
+                        } else if read_owner(&profile).is_none_or(|on_disk| on_disk.pid == pid) {
+                            let _ = fs::remove_file(profile.join(OWNER_FILE));
+                            forget_driver_ports(&profile);
+                        }
+                    }
+                }
             }
         })
         .map(|_| ())
@@ -1783,16 +1845,27 @@ fn process_args(_pid: u32) -> Option<String> {
     None
 }
 
+/// Waits briefly for a self-relaunched browser to take the profile's lock,
+/// returning its pid if one appears before `appear_within`.
+fn wait_for_successor_pid(profile: &Path, exe: &Path, appear_within: Duration) -> Option<u32> {
+    let deadline = std::time::Instant::now() + appear_within;
+    loop {
+        if let Some(holder) = lock_holder(profile, exe) {
+            return Some(holder);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(HANDOVER_POLL);
+    }
+}
+
 /// Blocks until no browser holds the profile. A browser that relaunches itself
 /// ends the process we waited on, and its successor takes the lock a moment later,
 /// so the first wait is for that successor to appear at all.
 fn wait_out_successor(profile: &Path, exe: &Path, appear_within: Duration) {
-    let deadline = std::time::Instant::now() + appear_within;
-    while lock_holder(profile, exe).is_none() {
-        if std::time::Instant::now() >= deadline {
-            return;
-        }
-        std::thread::sleep(HANDOVER_POLL);
+    if wait_for_successor_pid(profile, exe, appear_within).is_none() {
+        return;
     }
     while lock_holder(profile, exe).is_some() {
         std::thread::sleep(Duration::from_secs(1));
@@ -2092,6 +2165,18 @@ pub(crate) fn remember_driver_ports(profile: &Path, ports: Vec<u16>) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(profile.to_path_buf(), ports);
+}
+
+fn merge_driver_ports(profile: &Path, ports: Vec<u16>) {
+    let mut map = driver_ports_by_profile()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = map.entry(profile.to_path_buf()).or_default();
+    for port in ports {
+        if !entry.contains(&port) {
+            entry.push(port);
+        }
+    }
 }
 
 pub(crate) fn forget_driver_ports(profile: &Path) {

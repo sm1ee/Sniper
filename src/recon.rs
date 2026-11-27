@@ -1018,6 +1018,15 @@ async fn read_body(mut response: reqwest::Response) -> Result<String, &'static s
             return Err(error.warning());
         }
     }
+    if !bodyless_status
+        && response
+            .content_length()
+            .is_some_and(|len| len > RECON_DECODED_STAGE_LIMIT as u64)
+    {
+        return Err(
+            "Response body exceeded the 16 MiB recon limit; static extraction was skipped.",
+        );
+    }
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
@@ -1030,6 +1039,11 @@ async fn read_body(mut response: reqwest::Response) -> Result<String, &'static s
             if let Err(error) = &codings {
                 return Err(error.warning());
             }
+        }
+        if bytes.len().saturating_add(chunk.len()) > RECON_DECODED_STAGE_LIMIT {
+            return Err(
+                "Response body exceeded the 16 MiB recon limit; static extraction was skipped.",
+            );
         }
         bytes.extend_from_slice(&chunk);
     }

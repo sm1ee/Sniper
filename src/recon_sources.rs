@@ -21,6 +21,7 @@ use serde_json::Value;
 use url::Url;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
+const MAX_PROVIDER_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct Discovery {
@@ -60,6 +61,7 @@ enum FetchError {
     Http(u16),
     Transport,
     InvalidText,
+    TooLarge,
 }
 
 impl std::fmt::Display for FetchError {
@@ -69,6 +71,7 @@ impl std::fmt::Display for FetchError {
             Self::Http(status) => write!(f, "Provider returned HTTP {status}"),
             Self::Transport => f.write_str("Provider request failed or timed out"),
             Self::InvalidText => f.write_str("Provider returned invalid UTF-8"),
+            Self::TooLarge => f.write_str("Provider response exceeded the 16 MiB limit"),
         }
     }
 }
@@ -139,6 +142,12 @@ async fn fetch_text_with_progress(
         if !status.is_success() {
             return Err(FetchError::Http(status.as_u16()));
         }
+        if response
+            .content_length()
+            .is_some_and(|len| len > MAX_PROVIDER_RESPONSE_BYTES as u64)
+        {
+            return Err(FetchError::TooLarge);
+        }
         let mut bytes = Vec::new();
         // Keep cancellation responsive while reading the complete response,
         // including bodies streamed without a Content-Length header.
@@ -150,6 +159,9 @@ async fn fetch_text_with_progress(
             let Some(chunk) = chunk else {
                 break;
             };
+            if bytes.len().saturating_add(chunk.len()) > MAX_PROVIDER_RESPONSE_BYTES {
+                return Err(FetchError::TooLarge);
+            }
             bytes.extend_from_slice(&chunk);
         }
         return String::from_utf8(bytes).map_err(|_| FetchError::InvalidText);

@@ -6,7 +6,7 @@ use std::sync::{
 use std::time::Duration;
 
 use aes::cipher::{AsyncStreamCipher, KeyIvInit};
-use aes::Aes256;
+use aes::{Aes128, Aes192, Aes256};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use cfb_mode::Decryptor as CfbDecryptor;
@@ -1032,20 +1032,6 @@ fn decrypt_interactsh_entry(entry: &str, aes_key: &[u8]) -> Option<OastCallback>
     // IV is first 16 bytes, rest is ciphertext
     let (iv_bytes, ciphertext) = encrypted.split_at(16);
 
-    // Ensure AES key is correct length (256-bit = 32 bytes)
-    if aes_key.len() != 32 {
-        // Interactsh sometimes returns shorter keys; pad or truncate
-        debug!(
-            key_len = aes_key.len(),
-            "Interactsh: unexpected AES key length"
-        );
-        // Try to use as-is if 16 or 24 bytes by padding to 32
-        let mut padded = [0u8; 32];
-        let copy_len = aes_key.len().min(32);
-        padded[..copy_len].copy_from_slice(&aes_key[..copy_len]);
-        return decrypt_interactsh_entry_with_key(iv_bytes, ciphertext, &padded);
-    }
-
     decrypt_interactsh_entry_with_key(iv_bytes, ciphertext, aes_key)
 }
 
@@ -1056,15 +1042,44 @@ fn decrypt_interactsh_entry_with_key(
 ) -> Option<OastCallback> {
     let mut plaintext = ciphertext.to_vec();
 
-    let decryptor: CfbDecryptor<Aes256> = match CfbDecryptor::<Aes256>::new_from_slices(key, iv) {
-        Ok(d) => d,
-        Err(e) => {
-            debug!(error = %e, "Interactsh: AES-CFB init failed");
+    // Interactsh servers may negotiate 128-, 192-, or 256-bit AES keys;
+    // padding a shorter key into AES-256 produces a different key schedule.
+    match key.len() {
+        16 => {
+            let decryptor = match CfbDecryptor::<Aes128>::new_from_slices(key, iv) {
+                Ok(d) => d,
+                Err(e) => {
+                    debug!(error = %e, "Interactsh: AES-128-CFB init failed");
+                    return None;
+                }
+            };
+            decryptor.decrypt(&mut plaintext);
+        }
+        24 => {
+            let decryptor = match CfbDecryptor::<Aes192>::new_from_slices(key, iv) {
+                Ok(d) => d,
+                Err(e) => {
+                    debug!(error = %e, "Interactsh: AES-192-CFB init failed");
+                    return None;
+                }
+            };
+            decryptor.decrypt(&mut plaintext);
+        }
+        32 => {
+            let decryptor = match CfbDecryptor::<Aes256>::new_from_slices(key, iv) {
+                Ok(d) => d,
+                Err(e) => {
+                    debug!(error = %e, "Interactsh: AES-256-CFB init failed");
+                    return None;
+                }
+            };
+            decryptor.decrypt(&mut plaintext);
+        }
+        other => {
+            debug!(key_len = other, "Interactsh: unsupported AES key length");
             return None;
         }
-    };
-
-    decryptor.decrypt(&mut plaintext);
+    }
 
     let json_str = match String::from_utf8(plaintext) {
         Ok(s) => s,
@@ -2592,5 +2607,46 @@ mod tests {
 
         assert!(store.get_registration_info().await.is_none());
         assert!(generate_payload(&store).await.is_none());
+    }
+
+    #[test]
+    fn decrypt_interactsh_entry_supports_aes_128_192_and_256_keys() {
+        use aes::cipher::AsyncStreamCipher;
+        use cfb_mode::Encryptor as CfbEncryptor;
+
+        let iv = [0x11u8; 16];
+        let payload = br#"{"protocol":"http","unique-id":"uid123","full-id":"uid123.oast.example.test","remote-address":"127.0.0.1","raw-request":"GET / HTTP/1.1"}"#;
+
+        let mut ct128 = payload.to_vec();
+        let key128 = [0x22u8; 16];
+        CfbEncryptor::<Aes128>::new_from_slices(&key128, &iv)
+            .unwrap()
+            .encrypt(&mut ct128);
+        let mut blob128 = iv.to_vec();
+        blob128.extend_from_slice(&ct128);
+        let cb128 = decrypt_interactsh_entry(&BASE64.encode(&blob128), &key128).unwrap();
+        assert_eq!(cb128.correlation_id, "uid123");
+
+        let mut ct192 = payload.to_vec();
+        let key192 = [0x33u8; 24];
+        CfbEncryptor::<Aes192>::new_from_slices(&key192, &iv)
+            .unwrap()
+            .encrypt(&mut ct192);
+        let mut blob192 = iv.to_vec();
+        blob192.extend_from_slice(&ct192);
+        let cb192 = decrypt_interactsh_entry(&BASE64.encode(&blob192), &key192).unwrap();
+        assert_eq!(cb192.correlation_id, "uid123");
+
+        let mut ct256 = payload.to_vec();
+        let key256 = [0x44u8; 32];
+        CfbEncryptor::<Aes256>::new_from_slices(&key256, &iv)
+            .unwrap()
+            .encrypt(&mut ct256);
+        let mut blob256 = iv.to_vec();
+        blob256.extend_from_slice(&ct256);
+        let cb256 = decrypt_interactsh_entry(&BASE64.encode(&blob256), &key256).unwrap();
+        assert_eq!(cb256.correlation_id, "uid123");
+
+        assert!(decrypt_interactsh_entry(&BASE64.encode(&blob256), &[0x55u8; 10]).is_none());
     }
 }

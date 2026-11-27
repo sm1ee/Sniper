@@ -218,6 +218,9 @@ impl InterceptQueue {
         let (sender, receiver) = oneshot::channel();
         {
             let mut queue = self.queue.lock().await;
+            // Prune disconnected clients before enforcing the queue cap so
+            // cancelled callers cannot evict live requests.
+            queue.retain(|entry| !entry.responder.is_closed());
             queue.push_back(PendingIntercept {
                 record: record.clone(),
                 responder: sender,
@@ -240,23 +243,22 @@ impl InterceptQueue {
     }
 
     pub async fn list(&self) -> Vec<InterceptSummary> {
-        self.queue
-            .lock()
-            .await
-            .iter()
-            .map(|entry| entry.record.summary())
-            .collect()
+        let mut queue = self.queue.lock().await;
+        queue.retain(|entry| !entry.responder.is_closed());
+        queue.iter().map(|entry| entry.record.summary()).collect()
     }
 
     /// How many requests `list` shows.
     pub async fn held(&self) -> usize {
-        self.queue.lock().await.len()
+        let mut queue = self.queue.lock().await;
+        queue.retain(|entry| !entry.responder.is_closed());
+        queue.len()
     }
 
     pub async fn get(&self, id: Uuid) -> Option<InterceptRecord> {
-        self.queue
-            .lock()
-            .await
+        let mut queue = self.queue.lock().await;
+        queue.retain(|entry| !entry.responder.is_closed());
+        queue
             .iter()
             .find(|entry| entry.record.id == id)
             .map(|entry| entry.record.clone())
@@ -280,6 +282,7 @@ impl InterceptQueue {
 
     pub async fn forward_all(&self) -> usize {
         let mut queue = self.queue.lock().await;
+        queue.retain(|entry| !entry.responder.is_closed());
         let count = queue.len();
         while let Some(pending) = queue.pop_front() {
             let _ = pending.responder.send(InterceptResolution::Forward {
@@ -292,6 +295,7 @@ impl InterceptQueue {
 
     pub async fn drop_all(&self) -> usize {
         let mut queue = self.queue.lock().await;
+        queue.retain(|entry| !entry.responder.is_closed());
         let count = queue.len();
         while let Some(pending) = queue.pop_front() {
             let _ = pending
@@ -411,6 +415,7 @@ impl ResponseInterceptQueue {
         let (sender, receiver) = oneshot::channel();
         {
             let mut queue = self.queue.lock().await;
+            queue.retain(|entry| !entry.responder.is_closed());
             queue.push_back(PendingResponseIntercept {
                 record,
                 responder: sender,
@@ -431,23 +436,22 @@ impl ResponseInterceptQueue {
     }
 
     pub async fn list(&self) -> Vec<ResponseInterceptSummary> {
-        self.queue
-            .lock()
-            .await
-            .iter()
-            .map(|entry| entry.record.summary())
-            .collect()
+        let mut queue = self.queue.lock().await;
+        queue.retain(|entry| !entry.responder.is_closed());
+        queue.iter().map(|entry| entry.record.summary()).collect()
     }
 
     /// How many responses `list` shows.
     pub async fn held(&self) -> usize {
-        self.queue.lock().await.len()
+        let mut queue = self.queue.lock().await;
+        queue.retain(|entry| !entry.responder.is_closed());
+        queue.len()
     }
 
     pub async fn get(&self, id: Uuid) -> Option<ResponseInterceptRecord> {
-        self.queue
-            .lock()
-            .await
+        let mut queue = self.queue.lock().await;
+        queue.retain(|entry| !entry.responder.is_closed());
+        queue
             .iter()
             .find(|entry| entry.record.id == id)
             .map(|entry| entry.record.clone())
@@ -471,6 +475,7 @@ impl ResponseInterceptQueue {
 
     pub async fn forward_all(&self) -> usize {
         let mut queue = self.queue.lock().await;
+        queue.retain(|entry| !entry.responder.is_closed());
         let count = queue.len();
         while let Some(pending) = queue.pop_front() {
             let _ = pending
@@ -485,6 +490,7 @@ impl ResponseInterceptQueue {
 
     pub async fn drop_all(&self) -> usize {
         let mut queue = self.queue.lock().await;
+        queue.retain(|entry| !entry.responder.is_closed());
         let count = queue.len();
         while let Some(pending) = queue.pop_front() {
             let _ = pending.responder.send(ResponseInterceptResolution::Drop);
@@ -906,5 +912,57 @@ mod tests {
                 panic!("expected pending response intercept to be dropped")
             }
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_intercept_entries_are_pruned_on_read_and_enqueue() {
+        let req_queue = Arc::new(InterceptQueue::new());
+        let req_record = InterceptRecord {
+            id: Uuid::new_v4(),
+            started_at: Utc::now(),
+            peer_addr: "127.0.0.1:1".into(),
+            request: request(),
+            is_websocket: false,
+        };
+        let cancelled = tokio::spawn({
+            let queue = Arc::clone(&req_queue);
+            async move { queue.enqueue(req_record).await }
+        });
+        for _ in 0..10 {
+            if req_queue.held().await == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        cancelled.abort();
+        let _ = cancelled.await;
+        assert_eq!(req_queue.held().await, 0);
+        assert!(req_queue.list().await.is_empty());
+
+        let res_queue = Arc::new(ResponseInterceptQueue::new());
+        let res_record = ResponseInterceptRecord {
+            id: Uuid::new_v4(),
+            started_at: Utc::now(),
+            scheme: "https".to_string(),
+            host: "example.com".to_string(),
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            status: 200,
+            response: response(),
+        };
+        let cancelled_res = tokio::spawn({
+            let queue = Arc::clone(&res_queue);
+            async move { queue.enqueue(res_record).await }
+        });
+        for _ in 0..10 {
+            if res_queue.held().await == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        cancelled_res.abort();
+        let _ = cancelled_res.await;
+        assert_eq!(res_queue.held().await, 0);
+        assert!(res_queue.list().await.is_empty());
     }
 }

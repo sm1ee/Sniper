@@ -13,6 +13,8 @@ use super::dsl::CompileError;
 use super::engine::reason;
 
 const MAX_QUERY: usize = 4096;
+/// Maximum nesting depth accepted from untrusted template expressions.
+const MAX_DEPTH: usize = 64;
 /// Outputs one query may give; the rest are dropped.
 const MAX_OUTPUTS: usize = 1000;
 
@@ -26,7 +28,11 @@ impl Query {
             return Err(reason("jq:too_long"));
         }
         let tokens = tokenize(source)?;
-        let mut parser = Parser { tokens, at: 0 };
+        let mut parser = Parser {
+            tokens,
+            at: 0,
+            depth: 0,
+        };
         let expr = parser.pipe()?;
         if parser.at != parser.tokens.len() {
             return Err(reason("jq:syntax"));
@@ -204,9 +210,23 @@ enum Ordered {
 struct Parser {
     tokens: Vec<Token>,
     at: usize,
+    depth: usize,
 }
 
 impl Parser {
+    fn with_depth<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, CompileError>,
+    ) -> Result<T, CompileError> {
+        if self.depth >= MAX_DEPTH {
+            return Err(reason("jq:depth"));
+        }
+        self.depth += 1;
+        let result = f(self);
+        self.depth -= 1;
+        result
+    }
+
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.at)
     }
@@ -238,7 +258,8 @@ impl Parser {
     fn pipe(&mut self) -> Result<Expr, CompileError> {
         let left = self.comma()?;
         if self.eat("|") {
-            return Ok(Expr::Pipe(Box::new(left), Box::new(self.pipe()?)));
+            let right = self.with_depth(|parser| parser.pipe())?;
+            return Ok(Expr::Pipe(Box::new(left), Box::new(right)));
         }
         Ok(left)
     }
@@ -254,10 +275,8 @@ impl Parser {
     fn alternative(&mut self) -> Result<Expr, CompileError> {
         let left = self.or()?;
         if self.eat("//") {
-            return Ok(Expr::Alternative(
-                Box::new(left),
-                Box::new(self.alternative()?),
-            ));
+            let right = self.with_depth(|parser| parser.alternative())?;
+            return Ok(Expr::Alternative(Box::new(left), Box::new(right)));
         }
         Ok(left)
     }
@@ -349,7 +368,7 @@ impl Parser {
         if self.eat("]") {
             return Ok(Expr::Iterate(Box::new(base)));
         }
-        let key = self.pipe()?;
+        let key = self.with_depth(|parser| parser.pipe())?;
         self.expect("]")?;
         Ok(Expr::Index(Box::new(base), Box::new(key)))
     }
@@ -381,11 +400,11 @@ impl Parser {
                     .map(Value::Number)
                     .ok_or_else(|| reason("jq:number"))?,
             ),
-            Token::Op("(") => {
-                let inner = self.pipe()?;
-                self.expect(")")?;
-                inner
-            }
+            Token::Op("(") => self.with_depth(|parser| {
+                let inner = parser.pipe()?;
+                parser.expect(")")?;
+                Ok(inner)
+            })?,
             Token::Op("-") => match self.peek().cloned() {
                 Some(Token::Num(number)) => {
                     self.at += 1;
@@ -405,7 +424,7 @@ impl Parser {
     fn call(&mut self, name: &str) -> Result<Expr, CompileError> {
         let with_argument = |parser: &mut Self| -> Result<Box<Expr>, CompileError> {
             parser.expect("(")?;
-            let argument = parser.pipe()?;
+            let argument = parser.with_depth(|p| p.pipe())?;
             parser.expect(")")?;
             Ok(Box::new(argument))
         };
@@ -777,5 +796,13 @@ mod tests {
         ] {
             assert!(Query::compile(query).is_err(), "{query}");
         }
+    }
+
+    #[test]
+    fn deeply_nested_jq_queries_fail_instead_of_overflowing_stack() {
+        let nested_parens = format!("{}.{}", "(".repeat(200), ")".repeat(200));
+        assert_eq!(Query::compile(&nested_parens).unwrap_err().0, "jq:depth");
+        let nested_pipes = (0..200).map(|_| ".").collect::<Vec<_>>().join(" | ");
+        assert_eq!(Query::compile(&nested_pipes).unwrap_err().0, "jq:depth");
     }
 }
