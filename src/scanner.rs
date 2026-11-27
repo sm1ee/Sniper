@@ -4569,6 +4569,28 @@ fn check_source_code_disclosure(record: &TransactionRecord, findings: &mut Vec<S
     if essence == "application/json" || essence.ends_with("+json") {
         return;
     }
+    // Documentation quotes code too: a plugin's README or changelog shows how
+    // to call it. Rescanning a real session, every PHP source finding that was
+    // not a script's own text came from one.
+    let file = record
+        .path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if essence.contains("markdown")
+        || [".md", ".markdown", ".rst"]
+            .iter()
+            .any(|ext| file.ends_with(ext))
+        || ["readme", "changelog", "changes", "upgrade", "license"]
+            .iter()
+            .any(|name| file.starts_with(name))
+    {
+        return;
+    }
     let body = &response.body_preview;
     if body.is_empty() {
         return;
@@ -9659,6 +9681,38 @@ mod tests {
                 "{body}: {titles:?}"
             );
         }
+    }
+
+    #[test]
+    fn documentation_that_quotes_code_is_not_source_disclosure() {
+        for path in [
+            "/wp-content/plugins/members/readme.md",
+            "/wp-content/plugins/slider/readme.txt",
+            "/docs/CHANGELOG",
+        ] {
+            let titles = scan_titles(
+                path,
+                "text/plain",
+                "## Usage\n\n<?php echo do_shortcode('[x]'); ?>\n",
+                200,
+            );
+            assert!(
+                !titles.iter().any(|title| title.contains("source code")),
+                "{path}: {titles:?}"
+            );
+        }
+        let titles = scan_titles(
+            "/config.php.bak",
+            "text/plain",
+            "<?php\n$password = 'x';\n",
+            200,
+        );
+        assert!(
+            titles
+                .iter()
+                .any(|title| title == "PHP source code in response"),
+            "{titles:?}"
+        );
     }
 
     #[test]
