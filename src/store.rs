@@ -814,6 +814,10 @@ struct LibraryBudget {
 /// The libraries a script or page row declares when read before (`Ok`); or,
 /// within the budget, how to read them (`Err`); None when the row declares
 /// nothing to read, or must wait for a later map.
+/// Below this many pending bodies one thread reads them faster than starting
+/// the others.
+const PARALLEL_LIBRARY_READS_MIN: usize = 64;
+
 /// Below this many records one thread builds their summaries faster than
 /// starting the others.
 const PARALLEL_SUMMARY_MIN_RECORDS: usize = 4096;
@@ -1808,11 +1812,64 @@ impl TransactionStore {
             return;
         }
         let mut file = self.transactions_file();
-        for (row_index, item) in pending {
-            if let Some(found) = self.read_library(&mut file, item) {
+        let (rows, items): (Vec<_>, Vec<_>) = pending.into_iter().unzip();
+        for (row_index, found) in rows.into_iter().zip(self.read_libraries(&mut file, items)) {
+            if let Some(found) = found {
                 merge_libraries(&mut snapshot.rows[row_index].libraries, found);
             }
         }
+    }
+
+    /// The libraries of each pending body, in order. Reading and searching
+    /// the bodies is most of a map's first build after a session opens, and
+    /// each body stands alone: a large batch is read on every core, each
+    /// worker with its own handle on the file.
+    fn read_libraries(
+        &self,
+        file: &mut Option<fs::File>,
+        items: Vec<PendingLibrary>,
+    ) -> Vec<Option<Vec<crate::service_map_libraries::Detection>>> {
+        let threads = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1);
+        if threads < 2 || items.len() < PARALLEL_LIBRARY_READS_MIN {
+            return items
+                .into_iter()
+                .map(|item| self.read_library(file, item))
+                .collect();
+        }
+        let per_worker = items.len().div_ceil(threads);
+        let mut items = items.into_iter();
+        let mut chunks = Vec::with_capacity(threads);
+        loop {
+            let chunk: Vec<_> = items.by_ref().take(per_worker).collect();
+            if chunk.is_empty() {
+                break;
+            }
+            chunks.push(chunk);
+        }
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = chunks
+                .into_iter()
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        let mut file = self.transactions_file();
+                        chunk
+                            .into_iter()
+                            .map(|item| self.read_library(&mut file, item))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })
+                .collect()
+        })
     }
 
     /// Scans a copied or retained body without the store lock. A retained row
@@ -2121,8 +2178,14 @@ impl TransactionStore {
             next = from;
         }
         let mut file = self.transactions_file();
-        for (item, page, origin, evidence, mut found) in pending {
-            if let Some(more) = self.read_library(&mut file, item) {
+        let (items, rows): (Vec<_>, Vec<_>) = pending
+            .into_iter()
+            .map(|(item, page, origin, evidence, found)| (item, (page, origin, evidence, found)))
+            .unzip();
+        for ((page, origin, evidence, mut found), more) in
+            rows.into_iter().zip(self.read_libraries(&mut file, items))
+        {
+            if let Some(more) = more {
                 merge_libraries(&mut found, more);
             }
             builder.add_libraries(page, origin, found, evidence);
