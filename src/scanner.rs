@@ -2182,7 +2182,7 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
 /// and `appsettings.json` hold them: `Server=db;User ID=sa;Password=…`. The
 /// URI forms (`mysql://user:pass@host`) are the patterns above.
 static CONNECTION_STRING_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b(?:data source|server|address|addr|network address|host)\s*=\s*[^;"'<>\r\n]{1,200};[^"'<>\r\n]{0,300}?\b(?:password|pwd)\s*=\s*([^;"'<>\s]{3,})"#)
+    Regex::new(r#"(?i)\b(?:data source|server|address|addr|network address|host)\s*=\s*[^;"'<>\r\n]{1,200};[^"'<>\r\n]{0,300}?\b(?P<key>password|pwd)\s*=\s*(?P<value>[^;"'<>\s]{3,})"#)
         .unwrap()
 });
 
@@ -2192,8 +2192,15 @@ fn connection_string_password_match(body: &str) -> Option<(std::ops::Range<usize
     CONNECTION_STRING_PASSWORD
         .captures_iter(body)
         .find(|captures| {
-            let value = captures[1].trim_matches(['"', '\'']);
-            !secret_candidate_is_masked(value) && !secret_candidate_is_placeholder(value)
+            // A key of a connection string is nothing's property. In a script
+            // `t.host=e.host,…;…t.password=e.password` is a run of assignments.
+            let of_an_object = |at: usize| body[..at].ends_with('.');
+            let whole = captures.get(0).expect("whole match");
+            let value = captures["value"].trim_matches(['"', '\'']);
+            !of_an_object(whole.start())
+                && !of_an_object(captures.name("key").expect("password key").start())
+                && !secret_candidate_is_masked(value)
+                && !secret_candidate_is_placeholder(value)
         })
         .map(|captures| {
             let whole = captures.get(0).expect("whole match");
@@ -9851,6 +9858,38 @@ mod tests {
                 "{path}: {titles:?}"
             );
         }
+    }
+
+    // A URL parser sets one object's parts from another's, and minified that
+    // is `t.host=e.host,…;…t.password=e.password`: assignments, with a `;`
+    // between them as a connection string has. Every such finding in thirteen
+    // sessions of real use, seventeen of them, was this code.
+    #[test]
+    fn assignments_in_a_script_are_not_a_connection_string() {
+        let parser = concat!(
+            "t.username=e.username,t.password=e.password,t.host=e.host,t.port=e.port,",
+            "t.path=c(e.path),t.path.length--,l=ke;continue}break;case 9:",
+            "if(q(t)&&(n===a||n===b))l=Ae;else{if(n!==a){t.username=e.username,",
+            "t.password=e.password,t.host=e.host,t.port=e.port,l=ke;continue}l=xe}break;"
+        );
+        for content_type in ["text/javascript", "application/javascript"] {
+            let titles = scan_titles("/static/vendor.js", content_type, parser, 200);
+            assert!(
+                !titles
+                    .iter()
+                    .any(|title| title.starts_with("Connection string")),
+                "{content_type}: {titles:?}"
+            );
+        }
+        // A string that a script holds is still one.
+        let config = r#"const db={connectionString:"Server=db01;Database=app;User ID=sa;Password=Pr0d-Passw0rd!"};"#;
+        let titles = scan_titles("/config.js", "text/javascript", config, 200);
+        assert!(
+            titles
+                .iter()
+                .any(|title| title == "Connection string with password detected in response"),
+            "{titles:?}"
+        );
     }
 
     #[test]
