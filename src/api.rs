@@ -6139,8 +6139,8 @@ async fn get_target_service_map_impl(
         }
         if all_rows {
             let store = &worker_session.store;
-            if let Some(bytes) = store.cached_service_map(&cache_key, fresh) {
-                return Ok((bytes, None, permit));
+            if let Some((bytes, tag)) = store.cached_service_map_with_etag(&cache_key, fresh) {
+                return Ok((bytes, tag, None, permit));
             }
             let started = std::time::Instant::now();
             let token = store.service_map_history_token();
@@ -6169,8 +6169,14 @@ async fn get_target_service_map_impl(
             let bytes = bytes::Bytes::from(
                 serde_json::to_vec(&map).map_err(|_| ServiceMapReadError::BuildFailed)?,
             );
-            store.store_service_map(cache_key, token, started.elapsed(), complete, bytes.clone());
-            return Ok((bytes, None, permit));
+            let tag = store.store_service_map(
+                cache_key,
+                token,
+                started.elapsed(),
+                complete,
+                bytes.clone(),
+            );
+            return Ok((bytes, tag, None, permit));
         }
         let (snapshot, epoch) = worker_session
             .store
@@ -6194,11 +6200,14 @@ async fn get_target_service_map_impl(
         if let Some(index) = &known {
             crate::vulndata::annotate(&mut map.origins, index);
         }
-        let bytes = serde_json::to_vec(&map).map_err(|_| ServiceMapReadError::BuildFailed)?;
-        Ok::<_, ServiceMapReadError>((bytes::Bytes::from(bytes), Some(epoch), permit))
+        let bytes = bytes::Bytes::from(
+            serde_json::to_vec(&map).map_err(|_| ServiceMapReadError::BuildFailed)?,
+        );
+        let tag = crate::store::service_map_etag(&bytes);
+        Ok::<_, ServiceMapReadError>((bytes, tag, Some(epoch), permit))
     })
     .await;
-    let (bytes, epoch, _permit) = match result {
+    let (bytes, tag, epoch, _permit) = match result {
         Ok(Ok(result)) => result,
         Ok(Err(error)) => return error.into_response(),
         Err(_) => return ServiceMapReadError::BuildFailed.into_response(),
@@ -6234,29 +6243,31 @@ async fn get_target_service_map_impl(
     // The Map asks again every five seconds and is mostly answered from the
     // cache: a tag of the bytes lets it skip downloading and parsing the same
     // map again.
-    let tag = service_map_etag(&bytes);
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == tag))
     {
-        return (StatusCode::NOT_MODIFIED, [(header::ETAG, tag)]).into_response();
+        return (
+            StatusCode::NOT_MODIFIED,
+            [
+                (header::ETAG, tag),
+                (header::CACHE_CONTROL, "no-store".to_string()),
+                (header::VARY, TECHNOLOGY_CATALOG_HEADER.to_string()),
+            ],
+        )
+            .into_response();
     }
     (
         [
             (header::CONTENT_TYPE, "application/json".to_string()),
             (header::ETAG, tag),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+            (header::VARY, TECHNOLOGY_CATALOG_HEADER.to_string()),
         ],
         bytes,
     )
         .into_response()
-}
-
-fn service_map_etag(bytes: &[u8]) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::hash::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    format!("\"map-{:016x}-{:x}\"", hasher.finish(), bytes.len())
 }
 
 async fn get_target_service_map_evidence(

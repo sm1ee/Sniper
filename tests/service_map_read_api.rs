@@ -2240,3 +2240,89 @@ async fn service_map_openapi_describes_an_origins_api_without_its_values() {
     drop(state);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn service_map_etag_304_carries_no_store_and_vary_catalog_headers() {
+    const SELECTOR: &str = "x-sniper-technology-catalog-version";
+    let dir = std::env::temp_dir().join(format!("sniper-map-etag-headers-{}", Uuid::new_v4()));
+    let state = Arc::new(
+        AppState::new(AppConfig {
+            data_dir: dir.clone(),
+            proxy_addr: "127.0.0.1:0".parse().unwrap(),
+            ui_addr: "127.0.0.1:0".parse().unwrap(),
+            max_entries: 100,
+            max_transaction_entries: 100,
+            body_preview_bytes: 1024,
+        })
+        .unwrap(),
+    );
+    let session = state.session().await;
+    let session_id = session.id();
+    session.store.insert(row("/etag-check")).await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let app = sniper::api::router(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let url = format!("{api}/api/target/service-map?session_id={session_id}&all_rows=true");
+
+    let first = client.get(&url).header(SELECTOR, "2").send().await.unwrap();
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+    let etag = first
+        .headers()
+        .get(reqwest::header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        first
+            .headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
+    assert_eq!(
+        first
+            .headers()
+            .get(reqwest::header::VARY)
+            .and_then(|v| v.to_str().ok()),
+        Some(SELECTOR)
+    );
+
+    let second = client
+        .get(&url)
+        .header(SELECTOR, "2")
+        .header(reqwest::header::IF_NONE_MATCH, &etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), reqwest::StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        second
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok()),
+        Some(etag.as_str())
+    );
+    assert_eq!(
+        second
+            .headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
+    assert_eq!(
+        second
+            .headers()
+            .get(reqwest::header::VARY)
+            .and_then(|v| v.to_str().ok()),
+        Some(SELECTOR)
+    );
+
+    server.abort();
+    drop(session);
+    drop(state);
+    let _ = std::fs::remove_dir_all(dir);
+}

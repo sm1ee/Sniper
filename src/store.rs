@@ -948,6 +948,14 @@ struct CachedServiceMap {
     /// Every script and page body was read; otherwise rebuild for the rest.
     complete: bool,
     bytes: bytes::Bytes,
+    etag: String,
+}
+
+pub(crate) fn service_map_etag(bytes: &[u8]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    format!("\"map-{:016x}-{:x}\"", hasher.finish(), bytes.len())
 }
 
 fn merge_libraries(
@@ -2202,7 +2210,17 @@ impl TransactionStore {
     /// 1.2 seconds' poll, unless the caller asks for a fresh map. Retention at
     /// its limit removes a row with every capture, so a recent map is served
     /// whatever changed, and shows rows removed since until the next.
+    #[cfg(test)]
     pub(crate) fn cached_service_map(&self, key: &str, fresh: bool) -> Option<bytes::Bytes> {
+        self.cached_service_map_with_etag(key, fresh)
+            .map(|(bytes, _)| bytes)
+    }
+
+    pub(crate) fn cached_service_map_with_etag(
+        &self,
+        key: &str,
+        fresh: bool,
+    ) -> Option<(bytes::Bytes, String)> {
         let token = self.service_map_history_token();
         let cache = self
             .service_map_result
@@ -2213,7 +2231,7 @@ impl TransactionStore {
         let recent = !fresh
             && cached.built.elapsed()
                 < (cached.cost * 4).max(std::time::Duration::from_millis(1_200));
-        (unchanged || recent).then(|| cached.bytes.clone())
+        (unchanged || recent).then(|| (cached.bytes.clone(), cached.etag.clone()))
     }
 
     pub(crate) fn store_service_map(
@@ -2223,7 +2241,8 @@ impl TransactionStore {
         cost: std::time::Duration,
         complete: bool,
         bytes: bytes::Bytes,
-    ) {
+    ) -> String {
+        let etag = service_map_etag(&bytes);
         *self
             .service_map_result
             .lock()
@@ -2234,7 +2253,9 @@ impl TransactionStore {
             cost,
             complete,
             bytes,
+            etag: etag.clone(),
         });
+        etag
     }
 
     /// What a whole-history map was built from: an update or removal changes

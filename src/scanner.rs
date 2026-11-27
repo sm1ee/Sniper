@@ -742,16 +742,29 @@ fn response_is_snipers_own(record: &TransactionRecord) -> bool {
     let Some(response) = &record.response else {
         return false;
     };
-    !response.headers.is_empty()
-        && response.headers.iter().all(|header| {
+    let has_plain_text = response.headers.iter().any(|header| {
+        header.name.eq_ignore_ascii_case("content-type")
+            && header.value == "text/plain; charset=utf-8"
+    });
+    if !has_plain_text
+        || !response.headers.iter().all(|header| {
             (header.name.eq_ignore_ascii_case("content-type")
                 && header.value == "text/plain; charset=utf-8")
                 || header.name.eq_ignore_ascii_case("content-length")
         })
-        && record
-            .notes
-            .iter()
-            .any(|note| note.contains(response.body_preview.trim()))
+    {
+        return false;
+    }
+    let body = response.body_preview.trim();
+    if body.is_empty() {
+        return false;
+    }
+    record.notes.iter().any(|note| {
+        (note.starts_with("Upstream request failed")
+            || note.starts_with("Proxy rejected ")
+            || note.starts_with("Request dropped"))
+            && note.contains(body)
+    })
 }
 
 /// Run all passive scan rules against a transaction record, respecting config.
@@ -2046,15 +2059,15 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
     });
     let mut target_repetitions = None;
     // A connection string's password is reported with the string it opens.
-    let connection = connection_string_password_match(body);
+    // Scripts assign `.host` and `.password` properties in minified bundles.
+    let connection = (!script)
+        .then(|| connection_string_password_match(body))
+        .flatten();
     for (&(_, label, ref severity), re) in PATTERNS.iter().zip(COMPILED.iter()) {
         if let Some(re) = re {
             if label == "Password" {
-                if let Some(span) = password_response_match(body, script, re).filter(|span| {
-                    !connection.as_ref().is_some_and(|(range, _)| {
-                        range.start <= span.start && span.end <= range.end
-                    })
-                }) {
+                let excluded = connection.as_ref().map(|(range, _)| range);
+                if let Some(span) = password_response_match(body, script, re, excluded) {
                     let mut finding = make_finding(
                         record,
                         severity.clone(),
@@ -2182,7 +2195,7 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
 /// and `appsettings.json` hold them: `Server=db;User ID=sa;Password=…`. The
 /// URI forms (`mysql://user:pass@host`) are the patterns above.
 static CONNECTION_STRING_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b(?:data source|server|address|addr|network address|host)\s*=\s*[^;"'<>\r\n]{1,200};[^"'<>\r\n]{0,300}?\b(?:password|pwd)\s*=\s*([^;"'<>\s]{3,})"#)
+    Regex::new(r#"(?i)\b(?:data source|server|address|addr|network address|host)\s*=\s*[^;"'<>\r\n]{1,200};(?:[^"'<>\r\n;]{1,120};){0,12}\s*(?:password|pwd)\s*=\s*([^;"'<>\s]{3,})"#)
         .unwrap()
 });
 
@@ -2192,6 +2205,13 @@ fn connection_string_password_match(body: &str) -> Option<(std::ops::Range<usize
     CONNECTION_STRING_PASSWORD
         .captures_iter(body)
         .find(|captures| {
+            let Some(whole) = captures.get(0) else {
+                return false;
+            };
+            // Reject member assignments like `this.host=a;password=b`.
+            if whole.start() > 0 && body.as_bytes()[whole.start() - 1] == b'.' {
+                return false;
+            }
             let value = captures[1].trim_matches(['"', '\'']);
             !secret_candidate_is_masked(value) && !secret_candidate_is_placeholder(value)
         })
@@ -2348,7 +2368,11 @@ fn password_response_match(
     body: &str,
     script: bool,
     legacy: &Regex,
+    excluded: Option<&std::ops::Range<usize>>,
 ) -> Option<std::ops::Range<usize>> {
+    let is_excluded = |start: usize, end: usize| {
+        excluded.is_some_and(|range| range.start <= start && end <= range.end)
+    };
     let legacy_match = legacy.captures_iter(body).find_map(|captures| {
         let m = captures.get(0)?;
         if !password_candidate_looks_like_secret(&captures, script)
@@ -2362,6 +2386,9 @@ fn password_response_match(
             .or(captures.get(2))
             .and_then(|value| password_quoted_end(body, value.start() - 1))
             .unwrap_or(m.end());
+        if is_excluded(m.start(), end) {
+            return None;
+        }
         Some(m.start()..end)
     });
 
@@ -2385,6 +2412,9 @@ fn password_response_match(
         let Some(end) = password_quoted_end(body, head.end() - 1) else {
             continue;
         };
+        if is_excluded(head.start(), end) {
+            continue;
+        }
         let value = &body[head.end()..end - 1];
         // Preserve the regex's four raw Unicode scalars, then the existing
         // heuristic's eight raw UTF-8 bytes. Do not decode any escape spelling.
@@ -4460,34 +4490,65 @@ fn contains_comment_keyword(comment: &str, keyword: &str) -> bool {
 /// host with its visitors' cookies. Browsers no longer run either plug-in, but
 /// other clients still honour the files.
 fn check_cross_domain_policy(record: &TransactionRecord, findings: &mut Vec<ScannerFinding>) {
-    static FLASH: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(
-            r#"(?is)<cross-domain-policy\b.*?<allow-access-from\b[^>]*\bdomain\s*=\s*["']\*["']"#,
-        )
-        .unwrap()
+    static FLASH_ALLOW: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?is)<allow-access-from\b[^>]*\bdomain\s*=\s*["']\*["']"#).unwrap()
     });
-    static SILVERLIGHT: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"(?is)<access-policy\b.*?<domain\b[^>]*\buri\s*=\s*["']\*["']"#).unwrap()
-    });
+    static SILVERLIGHT_ALLOW: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"(?is)<domain\b[^>]*\buri\s*=\s*["']\*["']"#).unwrap());
     let Some(response) = &record.response else {
         return;
     };
     if is_binary_body(response) || !(200..300).contains(&record.status.unwrap_or(0)) {
         return;
     }
+    let essence = response_mime_essence(response);
+    let path_lower = record
+        .path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let is_policy_path = path_lower.ends_with("/crossdomain.xml")
+        || path_lower == "crossdomain.xml"
+        || path_lower.ends_with("/clientaccesspolicy.xml")
+        || path_lower == "clientaccesspolicy.xml";
+    let is_policy_mime = essence.is_empty()
+        || essence == "application/xml"
+        || essence == "text/xml"
+        || essence == "text/plain"
+        || essence == "text/x-cross-domain-policy"
+        || essence.ends_with("+xml");
+    if !is_policy_path && !is_policy_mime {
+        return;
+    }
     let body = &response.body_preview;
-    for (pattern, title) in [
-        (&*FLASH, "Permissive Flash cross-domain policy"),
-        (&*SILVERLIGHT, "Permissive Silverlight cross-domain policy"),
+    for (root_tag, allow_re, title) in [
+        (
+            "cross-domain-policy",
+            &*FLASH_ALLOW,
+            "Permissive Flash cross-domain policy",
+        ),
+        (
+            "access-policy",
+            &*SILVERLIGHT_ALLOW,
+            "Permissive Silverlight cross-domain policy",
+        ),
     ] {
-        if let Some(m) = pattern.find(body) {
+        let hit = element_spans(body, &[root_tag])
+            .into_iter()
+            .find_map(|span| {
+                allow_re
+                    .find(&body[span.clone()])
+                    .map(|m| (span.start + m.start(), m.len()))
+            });
+        if let Some((start, len)) = hit {
             findings.push(make_finding(
                 record,
                 Severity::Low,
                 "misconfig",
                 title,
                 "The cross-domain policy admits every domain, so a plug-in on any site can read this host's responses with its visitors' cookies.",
-                truncate_evidence(evidence_window(body, m.end().saturating_sub(40), 40, 0, 0), 80),
+                truncate_evidence(evidence_window(body, start, len, 0, 20), 80),
             ));
         }
     }
@@ -4615,13 +4676,18 @@ fn check_source_code_disclosure(record: &TransactionRecord, findings: &mut Vec<S
         finding.location = Some(location_for_line(record, "response", line));
         findings.push(finding);
     };
+    let mut ignored_spans: Option<Vec<std::ops::Range<usize>>> = None;
     for (language, pattern) in SOURCE_CODE.iter() {
         // An editor in a page, such as a CMS's theme editor, holds the code
-        // it edits in a textarea.
-        let Some(m) = pattern
-            .find_iter(body)
-            .find(|m| !inside_element(body, m.start(), "textarea"))
-        else {
+        // it edits in a textarea; inline scripts and SSR JSON payloads carry
+        // code-like strings as client data.
+        let Some(m) = pattern.find_iter(body).find(|m| {
+            let spans =
+                ignored_spans.get_or_insert_with(|| element_spans(body, &["textarea", "script"]));
+            !spans
+                .iter()
+                .any(|span| span.start <= m.start() && m.start() < span.end)
+        }) else {
             continue;
         };
         push(
@@ -4695,15 +4761,68 @@ fn check_source_code_disclosure(record: &TransactionRecord, findings: &mut Vec<S
     }
 }
 
-/// Whether `index` is inside an open `<tag ...>` element of `body`.
-fn inside_element(body: &str, index: usize, tag: &str) -> bool {
-    let before = body[..index].to_ascii_lowercase();
-    let open = before.rfind(&format!("<{tag}"));
-    let close = before.rfind(&format!("</{tag}"));
-    match (open, close) {
-        (Some(open), Some(close)) => open > close,
-        (Some(_), None) => true,
-        _ => false,
+/// Returns byte ranges of `<tag ...>...</tag>` elements (or `<tag ...>` to EOF
+/// when unclosed) for any ASCII tag name in `tags`, respecting tag-name boundaries.
+fn element_spans(body: &str, tags: &[&str]) -> Vec<std::ops::Range<usize>> {
+    let bytes = body.as_bytes();
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let Some(rel) = bytes[i..].iter().position(|&b| b == b'<') else {
+            break;
+        };
+        let open = i + rel;
+        let Some(&tag) = tags
+            .iter()
+            .find(|tag| matches_tag_at(bytes, open + 1, tag.as_bytes()))
+        else {
+            i = open + 1;
+            continue;
+        };
+        // Find the matching `>` of the opening tag, skipping self-closing `<tag/>`.
+        let after_name = open + 1 + tag.len();
+        let Some(gt_rel) = bytes[after_name..].iter().position(|&b| b == b'>') else {
+            spans.push(open..bytes.len());
+            break;
+        };
+        let open_end = after_name + gt_rel;
+        if bytes[open_end.saturating_sub(1)] == b'/' {
+            i = open_end + 1;
+            continue;
+        }
+        let content_start = open_end + 1;
+        // Scan forward for the matching `</tag` close tag.
+        let mut search = content_start;
+        let mut close_end = bytes.len();
+        while search < bytes.len() {
+            let Some(close_rel) = bytes[search..].iter().position(|&b| b == b'<') else {
+                break;
+            };
+            let pos = search + close_rel;
+            if bytes.get(pos + 1) == Some(&b'/') && matches_tag_at(bytes, pos + 2, tag.as_bytes()) {
+                let after_close_name = pos + 2 + tag.len();
+                close_end = bytes[after_close_name..]
+                    .iter()
+                    .position(|&b| b == b'>')
+                    .map_or(bytes.len(), |r| after_close_name + r + 1);
+                break;
+            }
+            search = pos + 1;
+        }
+        spans.push(open..close_end);
+        i = close_end;
+    }
+    spans
+}
+
+fn matches_tag_at(bytes: &[u8], start: usize, tag: &[u8]) -> bool {
+    let end = start + tag.len();
+    if end > bytes.len() || !bytes[start..end].eq_ignore_ascii_case(tag) {
+        return false;
+    }
+    match bytes.get(end) {
+        None => true,
+        Some(&next) => next.is_ascii_whitespace() || next == b'>' || next == b'/',
     }
 }
 
@@ -4747,13 +4866,17 @@ fn check_exposed_data_files(record: &TransactionRecord, findings: &mut Vec<Scann
     let Some(response) = &record.response else {
         return;
     };
-    if is_binary_body(response) || response.body_preview.is_empty() {
+    if !(200..300).contains(&record.status.unwrap_or(0))
+        || is_binary_body(response)
+        || response.body_preview.is_empty()
+        || javascript_or_css_response(record, response)
+    {
         return;
     }
     let body = &response.body_preview;
     let head = &body[..previous_char_boundary(body, body.len().min(DATA_FILE_HEAD_BYTES))];
-    // A page about databases quotes a dump's header in its text; the dump is
-    // served as a file.
+    // A page about databases or storage quotes a dump's header or bucket XML
+    // in its text; the files and bucket listings themselves are served as data.
     if !is_html_page_response(response) {
         if let Some(m) = DATABASE_DUMP.find(head) {
             findings.push(make_finding(
@@ -4765,8 +4888,6 @@ fn check_exposed_data_files(record: &TransactionRecord, findings: &mut Vec<Scann
                 truncate_evidence(evidence_window(head, m.start(), m.len(), 0, 60), 100),
             ));
         }
-    }
-    if !is_html_page_response(response) {
         if let Some(m) = PASSWORD_HASH_LINE.find(head) {
             findings.push(make_finding(
                 record,
@@ -4787,16 +4908,16 @@ fn check_exposed_data_files(record: &TransactionRecord, findings: &mut Vec<Scann
                 truncate_evidence(evidence_prefix(head, 120), 120),
             ));
         }
-    }
-    if let Some(m) = BUCKET_LISTING.find(head) {
-        findings.push(make_finding(
-            record,
-            Severity::Medium,
-            "info",
-            "Storage bucket listing exposed",
-            "A storage bucket lists its objects to anyone who asks, so every file in it can be found and fetched.",
-            truncate_evidence(m.as_str(), 100),
-        ));
+        if let Some(m) = BUCKET_LISTING.find(head) {
+            findings.push(make_finding(
+                record,
+                Severity::Medium,
+                "info",
+                "Storage bucket listing exposed",
+                "A storage bucket lists its objects to anyone who asks, so every file in it can be found and fetched.",
+                truncate_evidence(m.as_str(), 100),
+            ));
+        }
     }
 }
 
@@ -4916,37 +5037,64 @@ fn check_password_form_transport(record: &TransactionRecord, findings: &mut Vec<
         return;
     }
     let body = &response.body_preview;
-    let Some(input) = PASSWORD_INPUT.find(body) else {
-        return;
-    };
-    if record.scheme == "http" {
-        findings.push(make_finding(
-            record,
-            Severity::Medium,
-            "auth",
-            "Password form served over HTTP",
-            "A page with a password field was served over HTTP. The password is sent in clear text and can be read by anyone on the network.",
-            truncate_evidence(input.as_str(), 120),
-        ));
-        return;
+    let bytes = body.as_bytes();
+    for input in PASSWORD_INPUT.find_iter(body) {
+        if record.scheme == "http" {
+            findings.push(make_finding(
+                record,
+                Severity::Medium,
+                "auth",
+                "Password form served over HTTP",
+                "A page with a password field was served over HTTP. The password is sent in clear text and can be read by anyone on the network.",
+                truncate_evidence(input.as_str(), 120),
+            ));
+            return;
+        }
+        let Some(form) = last_open_tag_before(bytes, input.start(), b"form") else {
+            continue;
+        };
+        if has_close_tag_between(bytes, form, input.start(), b"form") {
+            continue;
+        }
+        if let Some(action) = FORM_ACTION_HTTP.find(&body[form..input.start()]) {
+            findings.push(make_finding(
+                record,
+                Severity::Medium,
+                "auth",
+                "Password form submits over HTTP",
+                "An HTTPS page sends its password field to an http:// URL. The password leaves the browser in clear text.",
+                truncate_evidence(action.as_str(), 120),
+            ));
+            return;
+        }
     }
-    let before = body[..input.start()].to_ascii_lowercase();
-    let Some(form) = before.rfind("<form") else {
-        return;
-    };
-    if before[form..].contains("</form") {
-        return;
+}
+
+fn last_open_tag_before(bytes: &[u8], limit: usize, tag: &[u8]) -> Option<usize> {
+    let mut pos = limit;
+    while pos > 0 {
+        let lt = bytes[..pos].iter().rposition(|&b| b == b'<')?;
+        if matches_tag_at(bytes, lt + 1, tag) {
+            return Some(lt);
+        }
+        pos = lt;
     }
-    if let Some(action) = FORM_ACTION_HTTP.find(&body[form..input.start()]) {
-        findings.push(make_finding(
-            record,
-            Severity::Medium,
-            "auth",
-            "Password form submits over HTTP",
-            "An HTTPS page sends its password field to an http:// URL. The password leaves the browser in clear text.",
-            truncate_evidence(action.as_str(), 120),
-        ));
+    None
+}
+
+fn has_close_tag_between(bytes: &[u8], start: usize, end: usize, tag: &[u8]) -> bool {
+    let mut pos = start;
+    while pos < end {
+        let Some(rel) = bytes[pos..end].iter().position(|&b| b == b'<') else {
+            return false;
+        };
+        let lt = pos + rel;
+        if bytes.get(lt + 1) == Some(&b'/') && matches_tag_at(bytes, lt + 2, tag) {
+            return true;
+        }
+        pos = lt + 1;
     }
+    false
 }
 
 fn host_is_loopback(host: &str) -> bool {
@@ -10315,7 +10463,7 @@ mod tests {
     fn password_match_for_test(body: &str, script: bool, corrected: bool) -> Option<String> {
         let legacy = Regex::new(r#"(?i)(?:\b|[_-])(?:password|passwd|pwd)\b\s*["']?\s*[:=]\s*(?:"([^"]{4,})"|'([^']{4,})'|([^\s"'<>{}]{4,}))"#).unwrap();
         if corrected {
-            password_response_match(body, script, &legacy).map(|span| body[span].to_string())
+            password_response_match(body, script, &legacy, None).map(|span| body[span].to_string())
         } else {
             legacy.captures_iter(body).find_map(|captures| {
                 let m = captures.get(0)?;
@@ -12078,5 +12226,103 @@ mod tests {
             session_token_parameter_in_url(&matrix_and_query_leak).as_deref(),
             Some("access_token")
         );
+    }
+
+    #[test]
+    fn connection_string_skips_scripts_and_does_not_mask_later_passwords() {
+        let js_titles = scan_titles(
+            "/app.js",
+            "application/javascript",
+            "this.host=e;this.password=t.value;",
+            200,
+        );
+        assert!(
+            !js_titles
+                .iter()
+                .any(|title| title == "Connection string with password detected in response"),
+            "minified JS property assignment must not trigger connection string finding: {js_titles:?}"
+        );
+
+        let cfg_titles = scan_titles(
+            "/appsettings.json",
+            "application/json",
+            r#"{"conn":"Server=db.example.com;User ID=sa;Password=Pr0d-ConnPass99!","password":"Pr0d-LaterPass42!"}"#,
+            200,
+        );
+        assert!(
+            cfg_titles
+                .iter()
+                .any(|title| title == "Connection string with password detected in response"),
+            "missing connection string finding: {cfg_titles:?}"
+        );
+        assert!(
+            cfg_titles
+                .iter()
+                .any(|title| title == "Password detected in response"),
+            "later password should not be masked by connection string: {cfg_titles:?}"
+        );
+    }
+
+    #[test]
+    fn source_code_skips_inline_script_and_password_form_checks_all_forms() {
+        let ssr = make_record(
+            vec![],
+            vec![("content-type", "text/html; charset=utf-8")],
+            r#"<html><body><script id="__NEXT_DATA__" type="application/json">{"snippet":"<?php echo $x; ?>"}</script></body></html>"#,
+            200,
+        );
+        assert!(
+            findings_for_rule(&ssr, "info")
+                .iter()
+                .all(|f| !f.title.contains("source code in response")),
+            "SSR JSON inside <script> must not report server source disclosure"
+        );
+
+        let mut two_forms = make_record(
+            vec![],
+            vec![("content-type", "text/html; charset=utf-8")],
+            r#"<form action="https://example.com/safe"><input type="password" name="a"></form><form action="http://example.com/login"><form-group><input type="password" name="b"></form-group></form>"#,
+            200,
+        );
+        two_forms.scheme = "https".to_string();
+        let auth_findings = findings_for_rule(&two_forms, "auth");
+        assert!(
+            auth_findings
+                .iter()
+                .any(|f| f.title == "Password form submits over HTTP"),
+            "second form with <form-group> custom element must still be detected"
+        );
+    }
+
+    #[test]
+    fn empty_body_response_is_not_treated_as_snipers_own_and_bucket_crossdomain_check_mime() {
+        let mut empty_200 = make_record(
+            vec![],
+            vec![("content-type", "text/plain; charset=utf-8")],
+            "",
+            200,
+        );
+        empty_200.notes.push("Operator note".to_string());
+        assert!(!response_is_snipers_own(&empty_200));
+
+        let html_bucket = make_record(
+            vec![],
+            vec![("content-type", "text/html; charset=utf-8")],
+            r#"<pre><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></ListBucketResult></pre>"#,
+            200,
+        );
+        assert!(findings_for_rule(&html_bucket, "info")
+            .iter()
+            .all(|f| f.title != "Storage bucket listing exposed"));
+
+        let html_crossdomain = make_record(
+            vec![],
+            vec![("content-type", "text/html; charset=utf-8")],
+            r#"<cross-domain-policy></cross-domain-policy><allow-access-from domain="*"/>"#,
+            200,
+        );
+        assert!(findings_for_rule(&html_crossdomain, "misconfig")
+            .iter()
+            .all(|f| f.title != "Permissive Flash cross-domain policy"));
     }
 }
