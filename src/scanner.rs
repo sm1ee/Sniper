@@ -738,7 +738,7 @@ fn is_base64_char(b: u8) -> bool {
 /// it is the target's. One record in twenty of thirteen sessions of real use
 /// was such an answer, read as a server with an internal address, a key and no
 /// cache policy.
-fn response_is_snipers_own(record: &TransactionRecord) -> bool {
+pub(crate) fn response_is_snipers_own(record: &TransactionRecord) -> bool {
     let Some(response) = &record.response else {
         return false;
     };
@@ -2059,10 +2059,7 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
     });
     let mut target_repetitions = None;
     // A connection string's password is reported with the string it opens.
-    // Scripts assign `.host` and `.password` properties in minified bundles.
-    let connection = (!script)
-        .then(|| connection_string_password_match(body))
-        .flatten();
+    let connection = connection_string_password_match(body);
     for (&(_, label, ref severity), re) in PATTERNS.iter().zip(COMPILED.iter()) {
         if let Some(re) = re {
             if label == "Password" {
@@ -2195,7 +2192,7 @@ fn check_sensitive_data(record: &TransactionRecord, findings: &mut Vec<ScannerFi
 /// and `appsettings.json` hold them: `Server=db;User ID=sa;Password=…`. The
 /// URI forms (`mysql://user:pass@host`) are the patterns above.
 static CONNECTION_STRING_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b(?:data source|server|address|addr|network address|host)\s*=\s*[^;"'<>\r\n]{1,200};(?:[^"'<>\r\n;]{1,120};){0,12}\s*(?:password|pwd)\s*=\s*([^;"'<>\s]{3,})"#)
+    Regex::new(r#"(?i)\b(?:data source|server|address|addr|network address|host)\s*=\s*[^;"'<>\r\n]{1,200};(?:[^"'<>\r\n;]{1,120};){0,12}\s*(?P<key>password|pwd)\s*=\s*(?P<value>[^;"'<>\s]{3,})"#)
         .unwrap()
 });
 
@@ -2205,15 +2202,15 @@ fn connection_string_password_match(body: &str) -> Option<(std::ops::Range<usize
     CONNECTION_STRING_PASSWORD
         .captures_iter(body)
         .find(|captures| {
-            let Some(whole) = captures.get(0) else {
-                return false;
-            };
-            // Reject member assignments like `this.host=a;password=b`.
-            if whole.start() > 0 && body.as_bytes()[whole.start() - 1] == b'.' {
-                return false;
-            }
-            let value = captures[1].trim_matches(['"', '\'']);
-            !secret_candidate_is_masked(value) && !secret_candidate_is_placeholder(value)
+            // A key of a connection string is nothing's property. In a script
+            // `t.host=e.host,…;…t.password=e.password` is a run of assignments.
+            let of_an_object = |at: usize| body[..at].ends_with('.');
+            let whole = captures.get(0).expect("whole match");
+            let value = captures["value"].trim_matches(['"', '\'']);
+            !of_an_object(whole.start())
+                && !of_an_object(captures.name("key").expect("password key").start())
+                && !secret_candidate_is_masked(value)
+                && !secret_candidate_is_placeholder(value)
         })
         .map(|captures| {
             let whole = captures.get(0).expect("whole match");
@@ -8173,6 +8170,23 @@ mod tests {
             .any(|title| title.starts_with("Internal IP address")));
     }
 
+    // A passive template judges an answer, and this one is not the target's:
+    // a key in the URL that the line names would be a key the server leaked.
+    #[test]
+    fn a_passive_template_does_not_judge_an_answer_sniper_wrote() {
+        let message = "Upstream request failed: connection refused";
+        let mut record = make_record(
+            vec![],
+            vec![("content-type", "text/plain; charset=utf-8")],
+            message,
+            502,
+        );
+        let scope = ["example.com".to_string()];
+        assert!(crate::templates::passive_applies(&record, &scope, &[]));
+        record.notes = vec![message.to_string()];
+        assert!(!crate::templates::passive_applies(&record, &scope, &[]));
+    }
+
     // What the request itself carries is still read when Sniper answered.
     #[test]
     fn a_request_sniper_answered_itself_is_still_read() {
@@ -10036,6 +10050,38 @@ mod tests {
                 "{path}: {titles:?}"
             );
         }
+    }
+
+    // A URL parser sets one object's parts from another's, and minified that
+    // is `t.host=e.host,…;…t.password=e.password`: assignments, with a `;`
+    // between them as a connection string has. Every such finding in thirteen
+    // sessions of real use, seventeen of them, was this code.
+    #[test]
+    fn assignments_in_a_script_are_not_a_connection_string() {
+        let parser = concat!(
+            "t.username=e.username,t.password=e.password,t.host=e.host,t.port=e.port,",
+            "t.path=c(e.path),t.path.length--,l=ke;continue}break;case 9:",
+            "if(q(t)&&(n===a||n===b))l=Ae;else{if(n!==a){t.username=e.username,",
+            "t.password=e.password,t.host=e.host,t.port=e.port,l=ke;continue}l=xe}break;"
+        );
+        for content_type in ["text/javascript", "application/javascript"] {
+            let titles = scan_titles("/static/vendor.js", content_type, parser, 200);
+            assert!(
+                !titles
+                    .iter()
+                    .any(|title| title.starts_with("Connection string")),
+                "{content_type}: {titles:?}"
+            );
+        }
+        // A string that a script holds is still one.
+        let config = r#"const db={connectionString:"Server=db01;Database=app;User ID=sa;Password=Pr0d-Passw0rd!"};"#;
+        let titles = scan_titles("/config.js", "text/javascript", config, 200);
+        assert!(
+            titles
+                .iter()
+                .any(|title| title == "Connection string with password detected in response"),
+            "{titles:?}"
+        );
     }
 
     #[test]
