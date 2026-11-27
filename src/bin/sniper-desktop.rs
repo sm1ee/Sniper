@@ -1701,8 +1701,17 @@ mod tests {
         assert!(error.contains("active failed"));
     }
 
+    // These tests stop the proxy listener and bind its port again. On Linux a
+    // port another test just released is handed out at once, so a parallel
+    // test's ephemeral bind could take it and the rebind failed now and then
+    // in CI. One at a time, the port they free is still theirs.
+    static LISTENER_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn desktop_persist_blocks_on_tcp_failure_and_reopens_start_after_recovery() {
+        let _listeners = LISTENER_TESTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         use sniper::tcp_capture::ListenerChange::{Start, StopAll};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1791,6 +1800,9 @@ mod tests {
     // nothing brought it back.
     #[test]
     fn a_quit_stopped_by_a_failed_save_brings_the_proxy_listener_back() {
+        let _listeners = LISTENER_TESTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -1839,6 +1851,9 @@ mod tests {
 
     #[test]
     fn desktop_persist_aborts_proxy_task_before_returning_success() {
+        let _listeners = LISTENER_TESTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
