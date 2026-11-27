@@ -913,7 +913,7 @@ test('a card, the inspector and each endpoint name how requests authenticate', a
   f.controller.selectOrigin(api);
   const detail = f.els.detail.innerHTML;
   assert.ok(detail.indexOf('<h4>Authentication</h4>') < detail.indexOf('service-map-api-list'), 'it leads the APIs tab');
-  assert.match(detail, /<strong>Session cookie<\/strong> · <code>JSESSIONID<\/code><p class="service-map-muted">2 rows<\/p>[^]*?data-service-relation-evidence="evidence-session_cookie"/);
+  assert.match(detail, /<strong>Session cookie<\/strong> · <code>JSESSIONID<\/code><div class="service-map-evidence-list">[^]*?data-service-relation-evidence="evidence-session_cookie"[^]*?<span>2 rows<\/span><span>View source ›<\/span>/);
   assert.match(detail, /\/v1\/me<\/span><\/span><span class="service-map-api-auth" title="Bearer JWT, Session cookie"><svg[^]*?<\/svg>JWT · Cookie<\/span>/);
   assert.doesNotMatch(detail.split('/v1/public')[1].split('</button>')[0], /service-map-api-auth/, 'an endpoint whose rows named none has no tag');
 });

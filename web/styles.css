@@ -9789,6 +9789,18 @@ button.utility-button.replay-tab-add {
 .service-map-empty h3 { margin: 0; color: var(--text-soft); font-size: var(--font-lg); }
 .service-map-empty p { max-width: 300px; line-height: 1.6; margin: 0; }
 .service-map-empty-symbol { font-size: 40px; color: var(--point); }
+/* While the first map loads its two rings spread from the middle, in the
+   point colour of the empty state's symbol, so a slow build reads as work
+   in progress rather than as an empty map. */
+.service-map-loading { position: relative; display: inline-block; width: 44px; height: 44px; }
+.service-map-loading::before { content: ""; position: absolute; inset: 16px; border-radius: 50%; background: var(--point); }
+.service-map-loading span { position: absolute; inset: 0; border: 2px solid var(--point); border-radius: 50%; opacity: 0; animation: service-map-ripple 1.6s cubic-bezier(0.2, 0.6, 0.4, 1) infinite; }
+.service-map-loading span:nth-child(2) { animation-delay: 0.8s; }
+@keyframes service-map-ripple { from { transform: scale(0.3); opacity: 0.9; } to { transform: scale(1); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .service-map-loading span { animation: none; opacity: 0.7; }
+  .service-map-loading span:nth-child(2) { transform: scale(0.62); }
+}
 .service-map-error { color: var(--danger); line-height: 1.5; }
 .service-map-evidence-list { display: grid; gap: 6px; }
 .service-map-evidence-button { display: flex; justify-content: space-between; align-items: center; gap: 10px; width: 100%; padding: 10px; background: var(--panel-elevated); color: var(--text-soft); border: 1px solid var(--line); border-radius: 7px; text-align: left; cursor: pointer; }
