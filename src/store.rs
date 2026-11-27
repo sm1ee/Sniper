@@ -814,6 +814,42 @@ struct LibraryBudget {
 /// The libraries a script or page row declares when read before (`Ok`); or,
 /// within the budget, how to read them (`Err`); None when the row declares
 /// nothing to read, or must wait for a later map.
+/// Below this many records one thread builds their summaries faster than
+/// starting the others.
+const PARALLEL_SUMMARY_MIN_RECORDS: usize = 4096;
+
+/// Each record's summary, in order. A summary depends on its record alone,
+/// and building them was most of what opening a large session spent after
+/// parsing it, so a large history is summarized on every core.
+fn summarize_records(entries: &[TransactionRecord]) -> Vec<CachedSummary> {
+    let summarize = |records: &[TransactionRecord]| {
+        records
+            .iter()
+            .map(|record| CachedSummary::new(record.summary()))
+            .collect::<Vec<_>>()
+    };
+    let threads = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    if threads < 2 || entries.len() < PARALLEL_SUMMARY_MIN_RECORDS {
+        return summarize(entries);
+    }
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = entries
+            .chunks(entries.len().div_ceil(threads))
+            .map(|chunk| scope.spawn(move || summarize(chunk)))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
+}
+
 fn library_lookup(
     inner: &StoreInner,
     caches: &mut LibraryCaches,
@@ -1034,10 +1070,9 @@ impl StoreInner {
 
     fn from_oldest_first(mut entries: Vec<TransactionRecord>) -> Self {
         normalize_storage_sequences(&mut entries);
-        let mut summaries = Vec::with_capacity(entries.len());
+        let summaries = summarize_records(&entries);
         let mut by_id = HashMap::with_capacity(entries.len());
         for (index, record) in entries.iter().enumerate() {
-            summaries.push(CachedSummary::new(record.summary()));
             by_id.insert(record.id, index);
         }
         let body_generations = entries.iter().map(|_| Uuid::new_v4()).collect();

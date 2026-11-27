@@ -3584,8 +3584,11 @@ fn write_transactions_meta(
 fn read_transactions_meta(storage_dir: &Path) -> Option<Vec<(TransactionRecord, BodyLocator)>> {
     let source_len = fs::metadata(transactions_path(storage_dir)).ok()?.len();
     let bytes = fs::read(transactions_meta_path(storage_dir)).ok()?;
-    let mut lines = bytes.split(|byte| *byte == b'\n');
-    let header: TransactionsMetaHeader = serde_json::from_slice(lines.next()?).ok()?;
+    let (header, lines) = match bytes.iter().position(|byte| *byte == b'\n') {
+        Some(end) => (&bytes[..end], &bytes[end + 1..]),
+        None => (&bytes[..], &bytes[bytes.len()..]),
+    };
+    let header: TransactionsMetaHeader = serde_json::from_slice(header).ok()?;
     if header.source_len != source_len {
         warn!(
             expected = header.source_len,
@@ -3594,8 +3597,40 @@ fn read_transactions_meta(storage_dir: &Path) -> Option<Vec<(TransactionRecord, 
         );
         return None;
     }
+    // Parsing these lines was half of opening a large session, and each line
+    // stands alone: they are parsed on every core, in order, as the full file
+    // is. One unreadable line still rejects the whole file.
+    let threads = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    let chunks = if threads < 2 || lines.len() < PARALLEL_TRANSACTION_PARSE_MIN_BYTES {
+        vec![lines]
+    } else {
+        split_on_line_boundaries(lines, threads)
+    };
+    let parsed: Vec<Option<Vec<(TransactionRecord, BodyLocator)>>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| scope.spawn(move || parse_transaction_meta_lines(chunk)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().ok().flatten())
+            .collect()
+    });
     let mut records = Vec::with_capacity(header.records);
-    for line in lines {
+    for chunk in parsed {
+        records.extend(chunk?);
+    }
+    if records.len() != header.records {
+        return None;
+    }
+    Some(records)
+}
+
+fn parse_transaction_meta_lines(bytes: &[u8]) -> Option<Vec<(TransactionRecord, BodyLocator)>> {
+    let mut records = Vec::new();
+    for line in bytes.split(|byte| *byte == b'\n') {
         if trim_ascii_whitespace(line).is_empty() {
             continue;
         }
@@ -3607,9 +3642,6 @@ fn read_transactions_meta(storage_dir: &Path) -> Option<Vec<(TransactionRecord, 
                 len: parsed.len,
             },
         ));
-    }
-    if records.len() != header.records {
-        return None;
     }
     Some(records)
 }
