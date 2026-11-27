@@ -2946,7 +2946,7 @@
       cancelParameters();
       flowAbort?.abort();
       Object.assign(state, { flowOrigin: null, flow: null, flowLoading: false, flowError: "" });
-      Object.assign(state, { sessionId: getSessionId(), snapshot: null, order: [], selectedOrigin: null, selectedClient: null, selectedSite: null,
+      Object.assign(state, { sessionId: getSessionId(), snapshot: null, snapshotTag: null, order: [], selectedOrigin: null, selectedClient: null, selectedSite: null,
         inactiveSessionId: null, selectionInitialized: false, endpointIndex: null, endpointSelection: null, endpointMethod: "", endpointPath: "", productId: "", productVersion: "", pageAnchor: null, detailPageAnchor: null, expandedEndpointGroups: new Set(), loading: false, backgroundLoading: false, error: "", refreshPaused: false, page: 0, detailPage: 0, stale: false, anchorOrigin: null, modeNotice: "", zoomScale: 1 });
       render();
       scheduleAutomaticRefresh();
@@ -3211,6 +3211,7 @@
           && (snapshot === state.snapshot || JSON.stringify(snapshot) === JSON.stringify(state.snapshot))) {
           // Reusing serialized cache bytes must not rebuild the graph or disturb
           // an inspection, scroll position or focused input every five seconds.
+          state.snapshotTag = snapshotTag;
           state.loading = false;
           state.busyRetries = 0;
           renderStatus();
@@ -4760,6 +4761,7 @@
         abort?.abort();
         state.loading = false;
         state.snapshot = null;
+        state.snapshotTag = null;
         state.endpointIndex = null;
         closeApiDocs();
         cancelEvidence();

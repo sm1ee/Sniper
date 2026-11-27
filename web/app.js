@@ -1671,7 +1671,7 @@ function bindEvents() {
     updateReplaySearchPane("response", resText);
   });
 
-  // Search hit navigation: click counter to cycle through matches
+  // Search hit navigation: click counter or press Enter / Shift+Enter in search input to cycle matches
   initSearchHitNavigation(els.requestSearchMeta, () => els.requestView);
   initSearchHitNavigation(els.responseSearchMeta, () => els.responseView);
   // CM search navigation: click counter cycles through CM matches
@@ -1681,6 +1681,10 @@ function bindEvents() {
   initSearchHitNavigation(els.replayResponseSearchMeta, () => els.replayResponseView);
   initCMSearchNavigation(els.replayRequestSearchMeta, "replayReq");
   initReplayResponseCMSearchNavigation();
+  bindSearchInputMatchNav(els.requestSearchInput, () => getCMView("request"), () => els.requestView);
+  bindSearchInputMatchNav(els.responseSearchInput, () => getCMView("response"), () => els.responseView);
+  bindSearchInputMatchNav(els.replayRequestSearchInput, () => getCMView("replayReq"), () => els.replayRequestHighlight);
+  bindSearchInputMatchNav(els.replayResponseSearchInput, () => _replayResponseCMView, () => els.replayResponseView);
 
   els.websocketSearchInput.addEventListener("input", () => {
     state.websocketQuery = els.websocketSearchInput.value.trim();
@@ -3036,20 +3040,46 @@ function bindEvents() {
     }
 
     if (
+      !event.defaultPrevented &&
+      (event.metaKey || event.ctrlKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      event.key.toLowerCase() === "f"
+    ) {
+      const searchTarget = resolveActiveSearchInput(event.target);
+      if (searchTarget) {
+        event.preventDefault();
+        searchTarget.focus({ preventScroll: true });
+        searchTarget.select?.();
+        return;
+      }
+    }
+
+    if (
       (event.metaKey || event.ctrlKey) &&
       !event.altKey &&
       event.key === "Enter" &&
       state.activeTool === "proxy" &&
-      state.activeProxyTab === "intercept" &&
-      state.selectedInterceptRecord
+      state.activeProxyTab === "intercept"
     ) {
-      event.preventDefault();
-      if (event.shiftKey) {
-        dropSelectedIntercept().catch((error) => console.error(error));
-      } else {
-        forwardSelectedIntercept().catch((error) => console.error(error));
+      if (state.interceptQueueTab === "response" && state.selectedResponseInterceptRecord) {
+        event.preventDefault();
+        if (event.shiftKey) {
+          dropSelectedResponseIntercept().catch((error) => console.error(error));
+        } else {
+          forwardSelectedResponseIntercept().catch((error) => console.error(error));
+        }
+        return;
       }
-      return;
+      if (state.interceptQueueTab !== "response" && state.selectedInterceptRecord) {
+        event.preventDefault();
+        if (event.shiftKey) {
+          dropSelectedIntercept().catch((error) => console.error(error));
+        } else {
+          forwardSelectedIntercept().catch((error) => console.error(error));
+        }
+        return;
+      }
     }
 
     // Ctrl+Cmd+1~6 (Ctrl+Shift+1~6 on Windows/Linux): filter by colour tag.
@@ -3262,6 +3292,7 @@ function bindEvents() {
       event.key.toLowerCase() === "r" &&
       state.activeTool === "proxy" &&
       state.activeProxyTab === "intercept" &&
+      state.interceptQueueTab !== "response" &&
       state.selectedInterceptRecord
     ) {
       event.preventDefault();
@@ -6147,8 +6178,8 @@ async function reloadSessionWorkspace({ cleanupBeforeReset = true } = {}) {
   // finish before a failure is reported, so one panel's error does not leave
   // the others showing the previous session.
   const results = await Promise.allSettled([
-    loadIntercepts(false),
-    loadResponseIntercepts(false),
+    loadIntercepts(false, { autoSwitch: false }),
+    loadResponseIntercepts(false, { autoSwitch: false }),
     loadInterceptRules(),
     loadWebsockets(false),
     loadEventLog(),
@@ -6159,6 +6190,7 @@ async function reloadSessionWorkspace({ cleanupBeforeReset = true } = {}) {
     refreshScannerQuickToggle(),
   ]);
   if (!isCurrent()) return false;
+  if (typeof reconcileInterceptQueueTab === "function") reconcileInterceptQueueTab();
   const failure = results.find((result) => result.status === "rejected");
   if (failure) throw failure.reason;
   connectEvents();
@@ -7093,7 +7125,17 @@ function copyMenuTargetUrl(target) {
     .catch(() => { if (isCurrent()) showToast("Failed to copy", "error"); });
 }
 
-async function loadIntercepts(preserveSelection = true) {
+function reconcileInterceptQueueTab() {
+  const reqCount = getVisibleRequestInterceptSummaries().length;
+  const resCount = getVisibleResponseInterceptSummaries().length;
+  if (reqCount > 0 && resCount === 0 && state.interceptQueueTab === "response") {
+    switchInterceptQueueTab("request");
+  } else if (resCount > 0 && reqCount === 0 && state.interceptQueueTab === "request") {
+    switchInterceptQueueTab("response");
+  }
+}
+
+async function loadIntercepts(preserveSelection = true, { autoSwitch = true } = {}) {
   const sessionId = currentSessionId();
   const workspaceGeneration = workspaceStateGeneration;
   const draftOwners = captureInterceptDraftRecoveryOwners();
@@ -7131,7 +7173,7 @@ async function loadIntercepts(preserveSelection = true) {
   renderIntercepts();
   updateInterceptQueueBadges();
   // Auto-switch to Request Queue when requests arrive and Response Queue is empty
-  if (visibleIntercepts.length > 0 && getVisibleResponseInterceptSummaries().length === 0 && state.interceptQueueTab === "response") {
+  if (autoSwitch && visibleIntercepts.length > 0 && getVisibleResponseInterceptSummaries().length === 0 && state.interceptQueueTab === "response") {
     switchInterceptQueueTab("request");
   }
   if (state.selectedInterceptId) {
@@ -7191,10 +7233,12 @@ async function loadInterceptDetail(id, { explicit = false } = {}) {
 
 async function loadInterceptRules() {
   const sessionId = currentSessionId();
+  const workspaceGeneration = typeof workspaceStateGeneration !== "undefined" ? workspaceStateGeneration : null;
   const response = await fetch(sessionQueryPath("/api/intercept-rules", sessionId));
   await requireOkResponse(response, "Failed to load intercept rules.");
   const rules = jsonArray(await response.json());
-  if (sessionId !== currentSessionId()) {
+  if (sessionId !== currentSessionId()
+    || (workspaceGeneration !== null && workspaceGeneration !== workspaceStateGeneration)) {
     return;
   }
   state.interceptRules = rules;
@@ -8861,6 +8905,7 @@ async function loadTargetSiteMap(forceScopeSync = false, saveContext = null) {
 }
 
 async function pollAuxiliaryData() {
+  if (typeof document !== "undefined" && document.hidden) return;
   const tasks = [];
   if (state.activeTool === "proxy" && ["tcp-history", "proxy-settings"].includes(state.activeProxyTab)) tasks.push(tcpCaptureController?.refresh());
   const now = Date.now();
@@ -12316,13 +12361,17 @@ function renderFindingsVirtual() {
     const topPadding = startIdx * rowHeight;
     const bottomPadding = Math.max(0, (totalCount - endIdx) * rowHeight);
 
+    const hasQuery = typeof els.findingsBody.querySelectorAll === "function"
+      && typeof els.findingsBody.querySelector === "function";
     const rows = [];
     for (let i = startIdx; i < endIdx; i++) {
       const f = entries[i];
-      const selected = f.id === selectedFindingId ? " selected" : "";
+      const selected = !hasQuery && f.id === selectedFindingId ? " selected" : "";
       // HTTPS captured through CONNECT keeps the tunnel's ":443", which Replay
       // and scans store without, so leave the default port out as History does.
       // A finding saved before it kept a scheme counts its :443 as HTTPS's.
+      // Keep selection out of cached row markup when DOM queries are available
+      // so updateFindingsSelection() cannot desync writeRows()'s snapshot.
       rows.push(`<tr class="history-row${selected}" data-finding-id="${f.id}" data-record-id="${f.record_id}">
         <td class="findings-col-severity"><span class="severity-badge ${severityClass(f.severity)}">${severityLabel(f.severity)}</span></td>
         <td class="findings-col-category">${escapeHtml(f.category)}</td>
@@ -12337,6 +12386,14 @@ function renderFindingsVirtual() {
       (topPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${topPadding}px;padding:0;border:none"></td></tr>` : "") +
       rows.join("") +
       (bottomPadding > 0 ? `<tr class="virtual-spacer"><td colspan="6" style="height:${bottomPadding}px;padding:0;border:none"></td></tr>` : ""));
+    if (hasQuery) {
+      for (const row of els.findingsBody.querySelectorAll(".history-row.selected")) {
+        if (row.dataset.findingId !== selectedFindingId) row.classList.remove("selected");
+      }
+      if (selectedFindingId) {
+        els.findingsBody.querySelector(`tr[data-finding-id="${selectedFindingId}"]`)?.classList.add("selected");
+      }
+    }
 
     if (attempt === 0 && getFindingsRowHeight() !== rowHeight) continue;
     if (shell.scrollTop !== scrollTop) shell.scrollTop = scrollTop;
@@ -13350,13 +13407,15 @@ function findingsArrowNav(direction) {
 
 async function loadOastCallbacks() {
   const sessionId = currentSessionId();
+  const workspaceGeneration = typeof workspaceStateGeneration !== "undefined" ? workspaceStateGeneration : null;
   const [cbRes, statusRes] = await Promise.all([
     fetch(sessionQueryPath("/api/oast/callbacks", sessionId)),
     fetch(sessionQueryPath("/api/oast/status", sessionId)),
   ]);
   await requireOkResponse(cbRes, "Failed to load OAST callbacks.");
   const callbacks = jsonArray(await cbRes.json());
-  if (sessionId !== currentSessionId()) {
+  if (sessionId !== currentSessionId()
+    || (workspaceGeneration !== null && workspaceGeneration !== workspaceStateGeneration)) {
     return;
   }
   state.oastCallbacks = callbacks;
@@ -13370,7 +13429,8 @@ async function loadOastCallbacks() {
   try {
     await requireOkResponse(statusRes, "Failed to load OAST status.");
     const status = await statusRes.json() || {};
-    if (sessionId !== currentSessionId()) {
+    if (sessionId !== currentSessionId()
+      || (workspaceGeneration !== null && workspaceGeneration !== workspaceStateGeneration)) {
       return;
     }
     const el = document.getElementById("oastStatusText");
@@ -18156,7 +18216,7 @@ function parseReplayHttpVersionToken(token) {
 
 function renderEventLog() {
   els.eventLogStatus.textContent = `${state.eventLog.length} entr${state.eventLog.length === 1 ? "y" : "ies"}`;
-  els.eventLogTableBody.innerHTML = state.eventLog.length
+  const markup = state.eventLog.length
     ? state.eventLog
         .map((entry) => `
           <tr>
@@ -18173,6 +18233,10 @@ function renderEventLog() {
           <td colspan="5">No runtime events have been recorded yet.</td>
         </tr>
       `;
+  if (els.eventLogTableBody._rows !== markup) {
+    els.eventLogTableBody.innerHTML = markup;
+    els.eventLogTableBody._rows = markup;
+  }
 }
 
 function renderMatchReplaceRules() {
@@ -18735,12 +18799,42 @@ function fuzzerResultFilterValidation(view = fuzzerResultsWorkflowState()) {
 
 function visibleFuzzerResults() {
   const view = fuzzerResultsWorkflowState();
-  if (!fuzzerResultFilterValidation(view).valid) return [];
+  const rawResults = state.fuzzerAttackRecord?.results;
+  const rawLen = Array.isArray(rawResults) ? rawResults.length : 0;
+  const rawLast = rawLen > 0 ? rawResults[rawLen - 1] : null;
+  const invalidKey = view.invalidInputs ? JSON.stringify(view.invalidInputs) : "";
+  const cache = visibleFuzzerResults._cache;
+  if (
+    cache
+    && cache.record === state.fuzzerAttackRecord
+    && cache.results === rawResults
+    && cache.len === rawLen
+    && cache.last === rawLast
+    && cache.status === view.status
+    && cache.minBytes === view.minBytes
+    && cache.maxBytes === view.maxBytes
+    && cache.minMs === view.minMs
+    && cache.maxMs === view.maxMs
+    && cache.sort === view.sort
+    && cache.direction === view.direction
+    && cache.invalidKey === invalidKey
+  ) {
+    return cache.value;
+  }
+  if (!fuzzerResultFilterValidation(view).valid) {
+    visibleFuzzerResults._cache = {
+      record: state.fuzzerAttackRecord, results: rawResults, len: rawLen, last: rawLast,
+      status: view.status, minBytes: view.minBytes, maxBytes: view.maxBytes,
+      minMs: view.minMs, maxMs: view.maxMs, sort: view.sort, direction: view.direction,
+      invalidKey, value: [],
+    };
+    return [];
+  }
   const minBytes = fuzzerResultMetric(view.minBytes), maxBytes = fuzzerResultMetric(view.maxBytes);
   const minMs = fuzzerResultMetric(view.minMs), maxMs = fuzzerResultMetric(view.maxMs);
   const inRange = (value, min, max) => (min == null && max == null)
     || (value != null && (min == null || value >= min) && (max == null || value <= max));
-  const entries = jsonArray(state.fuzzerAttackRecord?.results).map((result, sourceIndex) => ({ result, sourceIndex }));
+  const entries = jsonArray(rawResults).map((result, sourceIndex) => ({ result, sourceIndex }));
   const filtered = entries.filter(({ result }) => {
     const status = fuzzerResultMetric(result.status);
     if (view.status === "error" && status != null && status > 0) return false;
@@ -18764,6 +18858,12 @@ function visibleFuzzerResults() {
     const order = typeof left === "string" ? payloadCollator.compare(left, right) : left - right;
     return order * (view.direction === "desc" ? -1 : 1) || a.sourceIndex - b.sourceIndex;
   });
+  visibleFuzzerResults._cache = {
+    record: state.fuzzerAttackRecord, results: rawResults, len: rawLen, last: rawLast,
+    status: view.status, minBytes: view.minBytes, maxBytes: view.maxBytes,
+    minMs: view.minMs, maxMs: view.maxMs, sort: view.sort, direction: view.direction,
+    invalidKey, value: filtered,
+  };
   return filtered;
 }
 
@@ -21397,6 +21497,7 @@ function sequenceSessionPath(path, sessionId) {
 }
 
 async function loadSequences({ sessionId = currentSequenceSessionId() } = {}) {
+  const workspaceGeneration = typeof workspaceStateGeneration !== "undefined" ? workspaceStateGeneration : null;
   const [defsResp, runsResp] = await Promise.all([
     fetch(sequenceSessionPath("/api/sequences", sessionId)),
     fetch(sequenceSessionPath("/api/sequence-runs?limit=20", sessionId)),
@@ -21405,7 +21506,8 @@ async function loadSequences({ sessionId = currentSequenceSessionId() } = {}) {
   await requireOkResponse(runsResp, "Failed to load sequence runs.");
   const definitions = jsonArray(await defsResp.json());
   const pastRuns = jsonArray(await runsResp.json());
-  if (!isCurrentSequenceSession(sessionId)) {
+  if (!isCurrentSequenceSession(sessionId)
+    || (workspaceGeneration !== null && workspaceGeneration !== workspaceStateGeneration)) {
     return false;
   }
   state.sequenceDefinitions = definitions;
@@ -22814,7 +22916,7 @@ async function dropSelectedIntercept() {
 
 /* ─── Response Intercept ─── */
 
-async function loadResponseIntercepts(preserveSelection = true) {
+async function loadResponseIntercepts(preserveSelection = true, { autoSwitch = true } = {}) {
   const sessionId = currentSessionId();
   const workspaceGeneration = workspaceStateGeneration;
   const draftOwners = captureInterceptDraftRecoveryOwners();
@@ -22852,7 +22954,7 @@ async function loadResponseIntercepts(preserveSelection = true) {
   renderResponseIntercepts();
   updateInterceptQueueBadges();
   // Auto-switch to Response Queue when responses arrive and Request Queue is empty
-  if (visibleResponseIntercepts.length > 0 && getVisibleRequestInterceptSummaries().length === 0 && state.interceptQueueTab === "request") {
+  if (autoSwitch && visibleResponseIntercepts.length > 0 && getVisibleRequestInterceptSummaries().length === 0 && state.interceptQueueTab === "request") {
     switchInterceptQueueTab("response");
   }
   if (state.selectedResponseInterceptId) {
@@ -30215,6 +30317,88 @@ function initReplayResponseCMSearchNavigation() {
   });
 }
 
+function bindSearchInputMatchNav(input, getCodeView, getFallbackView) {
+  if (!input) return;
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (!input.value) return;
+    const cv = getCodeView?.();
+    if (cv) {
+      event.preventDefault();
+      if (event.shiftKey) cv.prevSearchMatch();
+      else cv.nextSearchMatch();
+      return;
+    }
+    const view = getFallbackView?.();
+    if (!view) return;
+    const marks = Array.from(view.querySelectorAll("mark.search-hit"));
+    if (!marks.length) return;
+    event.preventDefault();
+    const active = view.querySelector("mark.search-hit-active");
+    const currentIndex = active ? marks.indexOf(active) : -1;
+    if (active) active.classList.remove("search-hit-active");
+    const nextIndex = event.shiftKey
+      ? (currentIndex <= 0 ? marks.length - 1 : currentIndex - 1)
+      : (currentIndex + 1) % marks.length;
+    const target = marks[nextIndex];
+    target.classList.add("search-hit-active");
+    const container = target.closest(".code-view, .simple-code-view, .replay-highlight-editable, .replay-response-view") || view;
+    container.scrollTop = Math.max(target.offsetTop - container.offsetTop - 40, 0);
+  });
+}
+
+function resolveActiveSearchInput(target) {
+  const isVisibleInput = (el) => el && !el.disabled && el.getClientRects?.().length > 0;
+  const node = target instanceof Node ? target : document.activeElement;
+  if (node instanceof Node) {
+    if (els.requestView?.contains(node) || els.requestViewCM?.contains(node)) {
+      if (isVisibleInput(els.requestSearchInput)) return els.requestSearchInput;
+    }
+    if (els.responseView?.contains(node) || els.responseViewCM?.contains(node)) {
+      if (isVisibleInput(els.responseSearchInput)) return els.responseSearchInput;
+    }
+    if (els.replayRequestEditor?.contains(node) || els.replayRequestHighlight?.contains(node)
+      || document.getElementById("replayRequestCM")?.contains(node)) {
+      if (isVisibleInput(els.replayRequestSearchInput)) return els.replayRequestSearchInput;
+    }
+    if (els.replayResponseView?.contains(node) || document.getElementById("replayResponseCM")?.contains(node)) {
+      if (isVisibleInput(els.replayResponseSearchInput)) return els.replayResponseSearchInput;
+    }
+    const findingsReqPane = document.getElementById("findingsReqSearchInput")?.closest(".message-pane, .inspector-pane, .findings-detail-pane");
+    if (findingsReqPane?.contains(node)) {
+      const input = document.getElementById("findingsReqSearchInput");
+      if (isVisibleInput(input)) return input;
+    }
+    const findingsResPane = document.getElementById("findingsResSearchInput")?.closest(".message-pane, .inspector-pane, .findings-detail-pane");
+    if (findingsResPane?.contains(node)) {
+      const input = document.getElementById("findingsResSearchInput");
+      if (isVisibleInput(input)) return input;
+    }
+  }
+  const byTool = {
+    map: "serviceMapSearch",
+    recon: "reconSearch",
+    templates: "templatesSearch",
+    replay: "replayRequestSearchInput",
+  };
+  if (state.activeTool === "proxy") {
+    const byProxyTab = {
+      "http-history": "searchInput",
+      intercept: "interceptSearchInput",
+      "tcp-history": "tcpSearch",
+      "websockets-history": "websocketSearchInput",
+      findings: "findingsFilterSearch",
+    };
+    const id = byProxyTab[state.activeProxyTab];
+    const el = id ? document.getElementById(id) : null;
+    if (isVisibleInput(el)) return el;
+    return null;
+  }
+  const id = byTool[state.activeTool];
+  const el = id ? document.getElementById(id) : null;
+  return isVisibleInput(el) ? el : null;
+}
+
 function clamp(value, min, max) {
   // `min` wins when the bounds are inverted (max < min). Callers derive `max`
   // from measured element sizes, and a hidden ancestor measures 0 — the old
@@ -36717,6 +36901,21 @@ class SniperCodeView {
     const field = this.view.state.field(searchDecoField);
     if (!field.matchPositions.length) return -1;
     this._searchNavIndex = (this._searchNavIndex + 1) % field.matchPositions.length;
+    const pos = field.matchPositions[this._searchNavIndex];
+    this.view.dispatch({
+      effects: setSearchActiveIndex.of(this._searchNavIndex),
+      selection: { anchor: pos, head: field.matchEnds[this._searchNavIndex] },
+      scrollIntoView: true,
+    });
+    return this._searchNavIndex;
+  }
+
+  /** Navigate to previous search match (cyclic). Returns current index or -1. */
+  prevSearchMatch() {
+    const field = this.view.state.field(searchDecoField);
+    if (!field.matchPositions.length) return -1;
+    const len = field.matchPositions.length;
+    this._searchNavIndex = this._searchNavIndex <= 0 ? len - 1 : this._searchNavIndex - 1;
     const pos = field.matchPositions[this._searchNavIndex];
     this.view.dispatch({
       effects: setSearchActiveIndex.of(this._searchNavIndex),
