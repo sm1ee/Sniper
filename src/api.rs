@@ -6231,7 +6231,32 @@ async fn get_target_service_map_impl(
             return ServiceMapReadError::HistoryChanged.into_response();
         }
     }
-    ([(header::CONTENT_TYPE, "application/json")], bytes).into_response()
+    // The Map asks again every five seconds and is mostly answered from the
+    // cache: a tag of the bytes lets it skip downloading and parsing the same
+    // map again.
+    let tag = service_map_etag(&bytes);
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|candidate| candidate.trim() == tag))
+    {
+        return (StatusCode::NOT_MODIFIED, [(header::ETAG, tag)]).into_response();
+    }
+    (
+        [
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            (header::ETAG, tag),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+fn service_map_etag(bytes: &[u8]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    format!("\"map-{:016x}-{:x}\"", hasher.finish(), bytes.len())
 }
 
 async fn get_target_service_map_evidence(
@@ -19600,6 +19625,54 @@ mod tests {
             drop(state);
             let _ = std::fs::remove_dir_all(data_dir);
         }
+    }
+
+    #[tokio::test]
+    async fn service_map_api_answers_an_unchanged_map_with_not_modified() {
+        let (state, data_dir) = test_state("sniper-service-map-not-modified");
+        let metadata = state
+            .sessions
+            .create_session(Some("Tag fixture".into()))
+            .unwrap();
+        let read = |headers: HeaderMap| {
+            super::get_target_service_map(
+                State(state.clone()),
+                headers,
+                Query(super::ServiceMapQuery {
+                    session_id: Some(metadata.id),
+                    in_scope_only: false,
+                    max_records: None,
+                    origin: None,
+                    // The Map reads the whole history, which is what is cached.
+                    all_rows: true,
+                    ..Default::default()
+                }),
+            )
+        };
+        let first = read(HeaderMap::new()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let tag = first
+            .headers()
+            .get(axum::http::header::ETAG)
+            .expect("a map carries its tag")
+            .clone();
+        let mut headers = HeaderMap::new();
+        headers.insert(axum::http::header::IF_NONE_MATCH, tag.clone());
+        let again = read(headers).await;
+        assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(again.headers().get(axum::http::header::ETAG), Some(&tag));
+        let body = axum::body::to_bytes(again.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(body.is_empty());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::IF_NONE_MATCH,
+            "\"map-other\"".parse().unwrap(),
+        );
+        assert_eq!(read(headers).await.status(), StatusCode::OK);
+        drop(state);
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]

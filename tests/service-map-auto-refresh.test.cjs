@@ -264,3 +264,24 @@ test('document hiding during delayed JSON parsing fences the response and clears
   f.visibility(false); assert.equal(f.els.refresh.disabled, false); assert.equal(f.timers.size, 1);
   await f.advance(5000); assert.equal(f.maps().length, 3); f.controller.destroy();
 });
+
+test('an unchanged map answered 304 keeps the held snapshot without reading a body', async () => {
+  const f = fixture();
+  const tagged = (payload, tag) => ({ ok: true, status: 200, headers: { get: name => name.toLowerCase() === 'etag' ? tag : null }, json: async () => payload });
+  const pending = f.controller.refresh(); f.maps().at(-1).resolve(tagged(snapshot(), '"map-1"')); await pending;
+  const held = f.state.snapshot;
+  assert.ok(held);
+  assert.equal(f.maps().at(-1).options.headers['If-None-Match'], undefined);
+  await f.advance(5000);
+  const poll = f.maps().at(-1);
+  assert.notEqual(poll, f.maps()[0]);
+  assert.equal(poll.options.headers['If-None-Match'], '"map-1"');
+  assert.equal(poll.options.cache, 'no-store');
+  let bodyRead = false;
+  poll.resolve({ ok: false, status: 304, headers: { get: () => '"map-1"' }, json: async () => { bodyRead = true; return null; } });
+  await tick(); await tick();
+  assert.equal(bodyRead, false);
+  assert.equal(f.state.snapshot, held);
+  assert.equal(f.state.error, '');
+  f.controller.destroy();
+});

@@ -3185,12 +3185,18 @@
         // progressing body enrichment, whose completion is private to the cache
         // and is deliberately not inferred from snapshot.complete (display caps).
         const params = new URLSearchParams({ ...filterQuery, session_id: sessionId, in_scope_only: String(scopeOnly), all_rows: "true", ...(force || !state.snapshot || state.stale ? { fresh: "true" } : {}) });
-        const response = await request(`/api/target/service-map?${params}`, { signal: abort.signal, headers: { [TECHNOLOGY_CATALOG_HEADER]: String(TECHNOLOGY_CATALOG_VERSION) } });
-        if (!response.ok) {
+        // The map asks again every five seconds and is mostly answered with
+        // the bytes it already holds: the tag of those bytes lets the server
+        // say so, and the map skips downloading, parsing and comparing them.
+        const tagged = state.snapshot && state.snapshotTag ? { "If-None-Match": state.snapshotTag } : {};
+        const response = await request(`/api/target/service-map?${params}`, { signal: abort.signal, cache: "no-store", headers: { [TECHNOLOGY_CATALOG_HEADER]: String(TECHNOLOGY_CATALOG_VERSION), ...tagged } });
+        const unchanged = response.status === 304 && Boolean(state.snapshot);
+        if (!unchanged && !response.ok) {
           failure = mapFailure(response);
           throw new Error("Service map unavailable");
         }
-        const snapshot = normalizeSnapshot(await response.json(), sessionId);
+        const snapshot = unchanged ? state.snapshot : normalizeSnapshot(await response.json(), sessionId);
+        const snapshotTag = unchanged ? state.snapshotTag : response.headers?.get?.("etag") || null;
         if (!current()) return false;
         if (!force && !state.stale && historyVersion === state.historyVersion
           && typeof snapshot.snapshot.id === "string" && snapshot.snapshot.id
@@ -3202,7 +3208,7 @@
           && state.siteDisplaySignature === JSON.stringify(siteDisplay())
           && !(state.flowOrigin && !state.flow)
           && !(state.endpointSelection && state.parametersKey === null)
-          && JSON.stringify(snapshot) === JSON.stringify(state.snapshot)) {
+          && (snapshot === state.snapshot || JSON.stringify(snapshot) === JSON.stringify(state.snapshot))) {
           // Reusing serialized cache bytes must not rebuild the graph or disturb
           // an inspection, scroll position or focused input every five seconds.
           state.loading = false;
@@ -3222,6 +3228,7 @@
         if (state.linkDeclarationsSource && !htmlGeneratorSourceIsRetained(state.linkDeclarationsSource, snapshot)) cancelBodyReferences();
         if (state.htmlGeneratorsSource && !htmlGeneratorSourceIsRetained(state.htmlGeneratorsSource, snapshot)) cancelHtmlGenerators();
         state.snapshot = snapshot;
+        state.snapshotTag = snapshotTag;
         state.refreshPaused = false;
         if (state.flowOrigin) loadFlow();
         state.busyRetries = 0;
